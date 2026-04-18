@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subtitle Burner</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Subtitle Burner</h1>
+    <p class="sub">Drop a video, pick a style, get captions with word-by-word highlighting.</p>
+  </header>
+
+  <!-- Drop zone -->
+  <div id="drop" class="drop">
+    <input type="file" id="file" accept="video/*" hidden>
+    <div class="drop-inner">
+      <div class="icon">🎬</div>
+      <p><strong>Drag &amp; drop a video here</strong></p>
+      <p class="muted">or click to browse (mp4, mov, mkv, webm)</p>
+      <p id="filename" class="filename"></p>
+    </div>
+  </div>
+
+  <!-- Style panel -->
+  <section class="panel">
+    <h2>Style</h2>
+
+    <div class="row">
+      <label>Font</label>
+      <select id="font">
+        <option value="The Bold Font">The Bold Font</option>
+        <option value="Montserrat Black" selected>Montserrat Black</option>
+        <option value="Integral CF">Integral CF</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Font size</label>
+      <input type="range" id="size" min="32" max="140" value="72">
+      <span id="sizeVal" class="pill">72</span>
+    </div>
+
+    <div class="row">
+      <label>Color theme</label>
+      <div id="themes" class="themes">
+        <!-- populated by JS -->
+      </div>
+    </div>
+
+    <div class="row">
+      <label>Primary color</label>
+      <input type="color" id="primary" value="#FFFFFF">
+      <label class="inline">Highlight</label>
+      <input type="color" id="highlight" value="#FFD60A">
+    </div>
+
+    <div class="row">
+      <label>Outline</label>
+      <input type="color" id="outlineColor" value="#000000">
+      <label class="inline">Width</label>
+      <input type="range" id="outlineWidth" min="0" max="8" value="3">
+      <span id="owVal" class="pill">3</span>
+    </div>
+
+    <div class="row">
+      <label>Vertical position</label>
+      <input type="range" id="posY" min="10" max="95" value="85">
+      <span id="posVal" class="pill">85%</span>
+      <span class="muted">(10 = top, 95 = bottom)</span>
+    </div>
+
+    <div class="row">
+      <label><input type="checkbox" id="allCaps" checked> ALL CAPS</label>
+      <label class="inline"><input type="checkbox" id="shadow" checked> Drop shadow</label>
+    </div>
+
+    <div class="row">
+      <label>Words per group</label>
+      <input type="range" id="group" min="1" max="5" value="3">
+      <span id="groupVal" class="pill">3</span>
+    </div>
+  </section>
+
+  <button id="go" class="go" disabled>Generate Captions</button>
+
+  <!-- Progress -->
+  <div id="progress" class="progress hidden">
+    <div class="bar"><div id="barFill" class="fill"></div></div>
+    <p id="statusText" class="muted">Starting…</p>
+  </div>
+
+  <!-- Result -->
+  <div id="result" class="result hidden">
+    <h2>Done!</h2>
+    <video id="player" controls></video>
+    <a id="dl" class="dl" href="#" download>⬇ Download video</a>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
