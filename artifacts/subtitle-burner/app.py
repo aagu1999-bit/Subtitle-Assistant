@@ -388,6 +388,17 @@ def render():
     if not words:
         return jsonify({"error": "No words provided"}), 400
 
+    # Validate word objects — each must have word (str), start (num), end (num)
+    for i, w in enumerate(words):
+        if not isinstance(w, dict):
+            return jsonify({"error": f"Word at index {i} is not an object"}), 400
+        if not isinstance(w.get("word"), str) or not w["word"].strip():
+            return jsonify({"error": f"Word at index {i} missing valid 'word' field"}), 400
+        if not isinstance(w.get("start"), (int, float)):
+            return jsonify({"error": f"Word at index {i} missing numeric 'start' field"}), 400
+        if not isinstance(w.get("end"), (int, float)):
+            return jsonify({"error": f"Word at index {i} missing numeric 'end' field"}), 400
+
     video_path = find_video_path(job_id)
     if not video_path:
         return jsonify({"error": "Original video not found on server"}), 404

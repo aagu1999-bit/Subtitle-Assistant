@@ -118,9 +118,12 @@
     </div>
   </section>
 
-  <!-- Emoji Rules panel -->
-  <section class="panel">
-    <h2>Emoji Rules</h2>
+  <!-- Emoji Rules panel (collapsible) -->
+  <details class="panel emoji-panel">
+    <summary class="emoji-panel-toggle">
+      <span>Emoji Rules</span>
+      <span class="emoji-panel-caret">▸</span>
+    </summary>
     <p class="muted panel-desc">Match keywords to emojis — matched groups get the emoji burned in alongside the subtitle.</p>
 
     <div id="emojiPresets" class="emoji-presets"></div>
@@ -128,7 +131,7 @@
     <div id="emojiRulesList"></div>
 
     <button id="addRuleBtn" class="add-rule-btn">+ Add rule</button>
-  </section>
+  </details>
 
   <!-- Transcribe button -->
   <button id="go" class="go" disabled>Transcribe Video</button>
