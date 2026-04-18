@@ -8,7 +8,7 @@ import uuid
 import subprocess
 import threading
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
@@ -213,12 +213,19 @@ def build_audio_filter_chain(audio: dict) -> str | None:
     return ",".join(filters) if filters else None
 
 
-def apply_audio_enhancements(video_path: Path, output_path: Path, af: str):
-    """Run FFmpeg with the given audio filter chain, copying the video stream."""
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", str(video_path),
+def apply_audio_enhancements(video_path: Path, output_path: Path, af: str, duration: int | None = None):
+    """Run FFmpeg with the given audio filter chain, outputting only the audio stream.
+
+    Args:
+        video_path: Source video file.
+        output_path: Destination audio file (AAC).
+        af: FFmpeg audio filter string built by build_audio_filter_chain().
+        duration: If set, limit output to this many seconds (useful for previews).
+    """
+    cmd = ["ffmpeg", "-y", "-i", str(video_path)]
+    if duration is not None:
+        cmd += ["-t", str(duration)]
+    cmd += [
         "-vn",
         "-af", af,
         "-c:a", "aac",
@@ -463,6 +470,43 @@ def download(filename):
 @app.route("/preview/<path:filename>")
 def preview(filename):
     return send_from_directory(OUTPUT_DIR, filename)
+
+
+@app.route("/preview-audio", methods=["POST"])
+def preview_audio():
+    import json
+    if "video" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["video"]
+    if f.filename == "" or not allowed_file(f.filename):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    audio_opts = json.loads(request.form.get("audio", "{}"))
+    af = build_audio_filter_chain(audio_opts)
+    if not af:
+        return jsonify({"error": "No audio enhancements selected"}), 400
+
+    tmp_id = uuid.uuid4().hex
+    ext = f.filename.rsplit(".", 1)[1].lower()
+    video_path = UPLOAD_DIR / f"prev_{tmp_id}.{ext}"
+    audio_path = UPLOAD_DIR / f"prev_{tmp_id}.aac"
+
+    try:
+        f.save(str(video_path))
+        try:
+            apply_audio_enhancements(video_path, audio_path, af, duration=30)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)[:500]}), 500
+
+        data = audio_path.read_bytes()
+        return Response(data, mimetype="audio/aac")
+    finally:
+        for p in [video_path, audio_path]:
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

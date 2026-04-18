@@ -111,6 +111,36 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 .go:disabled { opacity: .4; cursor: not-allowed; }
 .render-btn { margin-top: 16px; }
 
+.preview-audio-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 8px 18px;
+  font-size: .9rem;
+  font-weight: 600;
+  color: #e8eaed;
+  background: #232833;
+  border: 1px solid #3c4252;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.preview-audio-btn:hover:not(:disabled) { background: #2d3340; border-color: #ffd60a; }
+.preview-audio-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+#audioPreviewArea {
+  margin-top: 12px;
+  padding: 12px;
+  background: #1a1e27;
+  border-radius: 8px;
+  border: 1px solid #2d3340;
+}
+#audioPreviewArea audio {
+  width: 100%;
+  display: block;
+}
+
 .hidden { display: none !important; }
 
 /* ---- Progress ---- */

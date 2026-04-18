@@ -37,10 +37,29 @@ const editor = $("editor"), wordChips = $("wordChips"), wordCount = $("wordCount
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
 const emojiRulesList = $("emojiRulesList"), addRuleBtn = $("addRuleBtn");
 const emojiPresetsDiv = $("emojiPresets");
+const previewWrap = $("audioPreviewWrap"), previewBtn = $("previewAudio");
+const audioPreviewArea = $("audioPreviewArea"), audioPlayer = $("audioPlayer");
+const audioPreviewStatus = $("audioPreviewStatus");
 
 let currentFile = null;
 let currentJobId = null;
 let currentWords = []; // original words from transcription [{word, start, end}]
+let audioBlobUrl = null;
+
+// ---- Audio toggle visibility ----
+const audioCheckboxes = ["noiseReduction", "loudnessNorm", "voiceClarity"].map($);
+
+function updateAudioPreviewVisibility() {
+  const anyOn = audioCheckboxes.some(cb => cb.checked);
+  if (anyOn && currentFile) {
+    previewWrap.classList.remove("hidden");
+  } else {
+    previewWrap.classList.add("hidden");
+    audioPreviewArea.classList.add("hidden");
+  }
+}
+
+audioCheckboxes.forEach(cb => cb.addEventListener("change", updateAudioPreviewVisibility));
 
 // ---- Themes ----
 const themesDiv = $("themes");
@@ -80,6 +99,8 @@ function handleFile(f) {
   currentFile = f;
   fn.textContent = f.name + "  (" + (f.size / 1048576).toFixed(1) + " MB)";
   go.disabled = false;
+  audioPreviewArea.classList.add("hidden");
+  updateAudioPreviewVisibility();
 }
 
 // ---- Helpers: collect style / audio ----
@@ -105,6 +126,43 @@ function getAudio() {
     voice_clarity:   $("voiceClarity").checked,
   };
 }
+
+// ---- Preview Audio ----
+previewBtn.onclick = async () => {
+  if (!currentFile) return;
+  const audio = getAudio();
+
+  previewBtn.disabled = true;
+  previewBtn.textContent = "Processing…";
+  audioPreviewArea.classList.add("hidden");
+  audioPreviewStatus.textContent = "";
+
+  const fd = new FormData();
+  fd.append("video", currentFile);
+  fd.append("audio", JSON.stringify(audio));
+
+  try {
+    const res = await fetch("/preview-audio", { method: "POST", body: fd });
+    if (!res.ok) {
+      const err = await res.json();
+      audioPreviewStatus.textContent = "Error: " + (err.error || "Unknown error");
+      audioPreviewArea.classList.remove("hidden");
+      return;
+    }
+    const blob = await res.blob();
+    if (audioBlobUrl) { URL.revokeObjectURL(audioBlobUrl); }
+    audioBlobUrl = URL.createObjectURL(blob);
+    audioPlayer.src = audioBlobUrl;
+    audioPreviewStatus.textContent = "First 30 seconds of enhanced audio";
+    audioPreviewArea.classList.remove("hidden");
+  } catch (e) {
+    audioPreviewStatus.textContent = "Request failed: " + e.message;
+    audioPreviewArea.classList.remove("hidden");
+  } finally {
+    previewBtn.disabled = false;
+    previewBtn.innerHTML = "&#9654; Preview Audio";
+  }
+};
 
 // ---- Emoji rules ----
 function addEmojiRule(keyword = "", emoji = "") {
