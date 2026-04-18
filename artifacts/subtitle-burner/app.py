@@ -188,7 +188,9 @@ def get_video_dimensions(video_path: Path):
         str(video_path),
     ]
     out = subprocess.check_output(cmd).decode().strip()
-    w, h = out.split(",")
+    first_line = next((ln for ln in out.splitlines() if ln.strip()), "")
+    parts = first_line.split(",")
+    w, h = parts[0], parts[1]
     return int(w), int(h)
 
 

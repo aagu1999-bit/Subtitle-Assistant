@@ -231,20 +231,29 @@ async function pollTranscription(jobId) {
 }
 
 // ---- Word chip editor ----
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = (sec % 60).toFixed(1).padStart(4, "0");
+  return `${m}:${s}`;
+}
+
 function showEditor(words) {
   wordChips.innerHTML = "";
   words.forEach((w, i) => {
-    wordChips.appendChild(makeChip(w.word, i));
+    wordChips.appendChild(makeChip(w.word, i, w.start));
   });
   updateWordCount();
   editor.classList.remove("hidden");
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function makeChip(word, originalIndex) {
+function makeChip(word, originalIndex, startSec) {
   const chip = document.createElement("div");
   chip.className = "word-chip";
   chip.dataset.origIdx = originalIndex;
+
+  const inner = document.createElement("div");
+  inner.className = "word-chip-inner";
 
   const span = document.createElement("span");
   span.contentEditable = "true";
@@ -263,13 +272,20 @@ function makeChip(word, originalIndex) {
     sel.addRange(range);
   });
 
+  const timeLabel = document.createElement("span");
+  timeLabel.className = "word-chip-time";
+  timeLabel.textContent = startSec != null ? fmtTime(startSec) : "";
+
+  inner.appendChild(span);
+  inner.appendChild(timeLabel);
+
   const del = document.createElement("button");
   del.className = "word-chip-del";
   del.textContent = "×";
   del.title = "Remove word";
   del.onclick = () => { chip.remove(); updateWordCount(); };
 
-  chip.appendChild(span);
+  chip.appendChild(inner);
   chip.appendChild(del);
   return chip;
 }

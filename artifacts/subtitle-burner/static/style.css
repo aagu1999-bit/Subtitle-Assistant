@@ -312,10 +312,16 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   background: #232833;
   border: 1px solid #2a2f3a;
   border-radius: 20px;
-  padding: 5px 6px 5px 12px;
+  padding: 4px 6px 4px 12px;
   transition: border-color .15s;
 }
 .word-chip:focus-within { border-color: #ffd60a; }
+.word-chip-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
 .word-chip span[contenteditable] {
   color: #e8eaed;
   font-size: .9rem;
@@ -323,8 +329,17 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   min-width: 18px;
   cursor: text;
   white-space: nowrap;
+  line-height: 1.2;
 }
 .word-chip span[contenteditable]:focus { color: #ffd60a; }
+.word-chip-time {
+  font-size: .65rem;
+  color: #636870;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  letter-spacing: .01em;
+}
 .word-chip-del {
   background: none;
   border: none;
