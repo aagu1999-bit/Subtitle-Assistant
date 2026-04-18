@@ -1,0 +1,84 @@
+[Script Info]
+Title: Generated Captions
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Integral CF,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,3,1,5,20,20,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:00.14,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}BE{\c&H00FFFFFF} WHO YOU
+Dialogue: 0,0:00:00.14,0:00:00.32,Default,,0,0,0,,{\pos(540,1632)}BE {\c&H000AD6FF}WHO{\c&H00FFFFFF} YOU
+Dialogue: 0,0:00:00.32,0:00:00.46,Default,,0,0,0,,{\pos(540,1632)}BE WHO {\c&H000AD6FF}YOU{\c&H00FFFFFF}
+Dialogue: 0,0:00:00.46,0:00:00.64,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}ARE,{\c&H00FFFFFF} BE, BE
+Dialogue: 0,0:00:00.78,0:00:00.90,Default,,0,0,0,,{\pos(540,1632)}ARE, {\c&H000AD6FF}BE,{\c&H00FFFFFF} BE
+Dialogue: 0,0:00:01.04,0:00:01.14,Default,,0,0,0,,{\pos(540,1632)}ARE, BE, {\c&H000AD6FF}BE{\c&H00FFFFFF}
+Dialogue: 0,0:00:01.14,0:00:01.48,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}PRESENT.{\c&H00FFFFFF} THAT'S A
+Dialogue: 0,0:00:01.90,0:00:02.14,Default,,0,0,0,,{\pos(540,1632)}PRESENT. {\c&H000AD6FF}THAT'S{\c&H00FFFFFF} A
+Dialogue: 0,0:00:02.14,0:00:02.18,Default,,0,0,0,,{\pos(540,1632)}PRESENT. THAT'S {\c&H000AD6FF}A{\c&H00FFFFFF}
+Dialogue: 0,0:00:02.18,0:00:02.36,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}DOLLAR{\c&H00FFFFFF} OFF, DIFFERENT
+Dialogue: 0,0:00:02.36,0:00:02.76,Default,,0,0,0,,{\pos(540,1632)}DOLLAR {\c&H000AD6FF}OFF,{\c&H00FFFFFF} DIFFERENT
+Dialogue: 0,0:00:03.10,0:00:03.10,Default,,0,0,0,,{\pos(540,1632)}DOLLAR OFF, {\c&H000AD6FF}DIFFERENT{\c&H00FFFFFF}
+Dialogue: 0,0:00:03.10,0:00:03.16,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}FROM{\c&H00FFFFFF} THE ACTION.
+Dialogue: 0,0:00:03.16,0:00:03.28,Default,,0,0,0,,{\pos(540,1632)}FROM {\c&H000AD6FF}THE{\c&H00FFFFFF} ACTION.
+Dialogue: 0,0:00:03.28,0:00:03.54,Default,,0,0,0,,{\pos(540,1632)}FROM THE {\c&H000AD6FF}ACTION.{\c&H00FFFFFF}
+Dialogue: 0,0:00:03.96,0:00:04.12,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}BROUGHT{\c&H00FFFFFF} FROM IRVINGTON,
+Dialogue: 0,0:00:04.12,0:00:04.30,Default,,0,0,0,,{\pos(540,1632)}BROUGHT {\c&H000AD6FF}FROM{\c&H00FFFFFF} IRVINGTON,
+Dialogue: 0,0:00:04.30,0:00:04.64,Default,,0,0,0,,{\pos(540,1632)}BROUGHT FROM {\c&H000AD6FF}IRVINGTON,{\c&H00FFFFFF}
+Dialogue: 0,0:00:04.84,0:00:04.94,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}I{\c&H00FFFFFF} DON'T GOT
+Dialogue: 0,0:00:04.94,0:00:05.02,Default,,0,0,0,,{\pos(540,1632)}I {\c&H000AD6FF}DON'T{\c&H00FFFFFF} GOT
+Dialogue: 0,0:00:05.02,0:00:05.12,Default,,0,0,0,,{\pos(540,1632)}I DON'T {\c&H000AD6FF}GOT{\c&H00FFFFFF}
+Dialogue: 0,0:00:05.12,0:00:05.52,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}AN{\c&H00FFFFFF} IRVINGTON ACCENT.
+Dialogue: 0,0:00:05.52,0:00:05.82,Default,,0,0,0,,{\pos(540,1632)}AN {\c&H000AD6FF}IRVINGTON{\c&H00FFFFFF} ACCENT.
+Dialogue: 0,0:00:05.82,0:00:06.08,Default,,0,0,0,,{\pos(540,1632)}AN IRVINGTON {\c&H000AD6FF}ACCENT.{\c&H00FFFFFF}
+Dialogue: 0,0:00:07.26,0:00:07.62,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}EXTRA{\c&H00FFFFFF} PRESSURE, ENTRANCE.
+Dialogue: 0,0:00:07.62,0:00:07.98,Default,,0,0,0,,{\pos(540,1632)}EXTRA {\c&H000AD6FF}PRESSURE,{\c&H00FFFFFF} ENTRANCE.
+Dialogue: 0,0:00:08.36,0:00:08.98,Default,,0,0,0,,{\pos(540,1632)}EXTRA PRESSURE, {\c&H000AD6FF}ENTRANCE.{\c&H00FFFFFF}
+Dialogue: 0,0:00:09.64,0:00:09.72,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}ALL{\c&H00FFFFFF} RIGHT. AND
+Dialogue: 0,0:00:09.72,0:00:10.00,Default,,0,0,0,,{\pos(540,1632)}ALL {\c&H000AD6FF}RIGHT.{\c&H00FFFFFF} AND
+Dialogue: 0,0:00:11.18,0:00:11.54,Default,,0,0,0,,{\pos(540,1632)}ALL RIGHT. {\c&H000AD6FF}AND{\c&H00FFFFFF}
+Dialogue: 0,0:00:11.54,0:00:11.90,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}IF{\c&H00FFFFFF} YOU STUTTER,
+Dialogue: 0,0:00:11.90,0:00:12.04,Default,,0,0,0,,{\pos(540,1632)}IF {\c&H000AD6FF}YOU{\c&H00FFFFFF} STUTTER,
+Dialogue: 0,0:00:12.04,0:00:12.38,Default,,0,0,0,,{\pos(540,1632)}IF YOU {\c&H000AD6FF}STUTTER,{\c&H00FFFFFF}
+Dialogue: 0,0:00:12.52,0:00:12.60,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}WE{\c&H00FFFFFF} NOT CUTTING
+Dialogue: 0,0:00:12.60,0:00:12.80,Default,,0,0,0,,{\pos(540,1632)}WE {\c&H000AD6FF}NOT{\c&H00FFFFFF} CUTTING
+Dialogue: 0,0:00:12.80,0:00:13.02,Default,,0,0,0,,{\pos(540,1632)}WE NOT {\c&H000AD6FF}CUTTING{\c&H00FFFFFF}
+Dialogue: 0,0:00:13.02,0:00:13.20,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}THAT{\c&H00FFFFFF} SHIT OUT.
+Dialogue: 0,0:00:13.20,0:00:13.34,Default,,0,0,0,,{\pos(540,1632)}THAT {\c&H000AD6FF}SHIT{\c&H00FFFFFF} OUT.
+Dialogue: 0,0:00:13.34,0:00:13.52,Default,,0,0,0,,{\pos(540,1632)}THAT SHIT {\c&H000AD6FF}OUT.{\c&H00FFFFFF}
+Dialogue: 0,0:00:15.52,0:00:15.88,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}THAT'S{\c&H00FFFFFF} WHAT HAPPENED.
+Dialogue: 0,0:00:15.88,0:00:15.94,Default,,0,0,0,,{\pos(540,1632)}THAT'S {\c&H000AD6FF}WHAT{\c&H00FFFFFF} HAPPENED.
+Dialogue: 0,0:00:15.94,0:00:16.14,Default,,0,0,0,,{\pos(540,1632)}THAT'S WHAT {\c&H000AD6FF}HAPPENED.{\c&H00FFFFFF}
+Dialogue: 0,0:00:16.82,0:00:17.18,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}WE{\c&H00FFFFFF} NOT CUTTING
+Dialogue: 0,0:00:17.18,0:00:17.40,Default,,0,0,0,,{\pos(540,1632)}WE {\c&H000AD6FF}NOT{\c&H00FFFFFF} CUTTING
+Dialogue: 0,0:00:17.40,0:00:17.62,Default,,0,0,0,,{\pos(540,1632)}WE NOT {\c&H000AD6FF}CUTTING{\c&H00FFFFFF}
+Dialogue: 0,0:00:17.62,0:00:17.86,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}THAT{\c&H00FFFFFF} OUT. YOU
+Dialogue: 0,0:00:17.86,0:00:18.04,Default,,0,0,0,,{\pos(540,1632)}THAT {\c&H000AD6FF}OUT.{\c&H00FFFFFF} YOU
+Dialogue: 0,0:00:18.06,0:00:18.22,Default,,0,0,0,,{\pos(540,1632)}THAT OUT. {\c&H000AD6FF}YOU{\c&H00FFFFFF}
+Dialogue: 0,0:00:18.22,0:00:18.32,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}SAID{\c&H00FFFFFF} WE NOT
+Dialogue: 0,0:00:18.32,0:00:18.46,Default,,0,0,0,,{\pos(540,1632)}SAID {\c&H000AD6FF}WE{\c&H00FFFFFF} NOT
+Dialogue: 0,0:00:18.46,0:00:18.58,Default,,0,0,0,,{\pos(540,1632)}SAID WE {\c&H000AD6FF}NOT{\c&H00FFFFFF}
+Dialogue: 0,0:00:18.58,0:00:18.82,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}ANYTHING{\c&H00FFFFFF} EVEN. ALL
+Dialogue: 0,0:00:18.82,0:00:19.06,Default,,0,0,0,,{\pos(540,1632)}ANYTHING {\c&H000AD6FF}EVEN.{\c&H00FFFFFF} ALL
+Dialogue: 0,0:00:20.14,0:00:20.46,Default,,0,0,0,,{\pos(540,1632)}ANYTHING EVEN. {\c&H000AD6FF}ALL{\c&H00FFFFFF}
+Dialogue: 0,0:00:20.46,0:00:20.60,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}RIGHT,{\c&H00FFFFFF} MAN. ALL
+Dialogue: 0,0:00:20.70,0:00:20.76,Default,,0,0,0,,{\pos(540,1632)}RIGHT, {\c&H000AD6FF}MAN.{\c&H00FFFFFF} ALL
+Dialogue: 0,0:00:21.36,0:00:21.42,Default,,0,0,0,,{\pos(540,1632)}RIGHT, MAN. {\c&H000AD6FF}ALL{\c&H00FFFFFF}
+Dialogue: 0,0:00:21.42,0:00:21.50,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}RIGHT,{\c&H00FFFFFF} I'M NOT
+Dialogue: 0,0:00:21.54,0:00:21.64,Default,,0,0,0,,{\pos(540,1632)}RIGHT, {\c&H000AD6FF}I'M{\c&H00FFFFFF} NOT
+Dialogue: 0,0:00:21.64,0:00:21.72,Default,,0,0,0,,{\pos(540,1632)}RIGHT, I'M {\c&H000AD6FF}NOT{\c&H00FFFFFF}
+Dialogue: 0,0:00:21.72,0:00:21.80,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}GOING{\c&H00FFFFFF} TO LET
+Dialogue: 0,0:00:21.80,0:00:21.80,Default,,0,0,0,,{\pos(540,1632)}GOING {\c&H000AD6FF}TO{\c&H00FFFFFF} LET
+Dialogue: 0,0:00:21.80,0:00:21.80,Default,,0,0,0,,{\pos(540,1632)}GOING TO {\c&H000AD6FF}LET{\c&H00FFFFFF}
+Dialogue: 0,0:00:21.80,0:00:21.90,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}THEM{\c&H00FFFFFF} GO, THEN.
+Dialogue: 0,0:00:21.90,0:00:22.06,Default,,0,0,0,,{\pos(540,1632)}THEM {\c&H000AD6FF}GO,{\c&H00FFFFFF} THEN.
+Dialogue: 0,0:00:22.18,0:00:22.20,Default,,0,0,0,,{\pos(540,1632)}THEM GO, {\c&H000AD6FF}THEN.{\c&H00FFFFFF}
+Dialogue: 0,0:00:22.30,0:00:22.40,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}WE'RE{\c&H00FFFFFF} GOING TO
+Dialogue: 0,0:00:22.40,0:00:22.44,Default,,0,0,0,,{\pos(540,1632)}WE'RE {\c&H000AD6FF}GOING{\c&H00FFFFFF} TO
+Dialogue: 0,0:00:22.44,0:00:22.52,Default,,0,0,0,,{\pos(540,1632)}WE'RE GOING {\c&H000AD6FF}TO{\c&H00FFFFFF}
+Dialogue: 0,0:00:22.52,0:00:22.66,Default,,0,0,0,,{\pos(540,1632)}{\c&H000AD6FF}START.{\c&H00FFFFFF}
