@@ -84,9 +84,16 @@ go.onclick = async () => {
     group_size:      parseInt(groupEl.value, 10),
   };
 
+  const audio = {
+    noise_reduction: $("noiseReduction").checked,
+    loudness_norm:   $("loudnessNorm").checked,
+    voice_clarity:   $("voiceClarity").checked,
+  };
+
   const fd = new FormData();
   fd.append("video", currentFile);
   fd.append("style", JSON.stringify(style));
+  fd.append("audio", JSON.stringify(audio));
 
   let job;
   try {

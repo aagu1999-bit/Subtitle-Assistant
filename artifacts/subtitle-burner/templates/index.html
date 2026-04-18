@@ -84,6 +84,42 @@
     </div>
   </section>
 
+  <!-- Audio Enhancement panel -->
+  <section class="panel">
+    <h2>Audio Enhancement</h2>
+    <p class="muted panel-desc">Optional — applied before subtitle rendering via FFmpeg audio filters.</p>
+
+    <div class="row toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" id="noiseReduction">
+        <span class="toggle-text">
+          <strong>Noise Reduction</strong>
+          <span class="muted">Reduces background hiss and hum</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="row toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" id="loudnessNorm">
+        <span class="toggle-text">
+          <strong>Loudness Normalization</strong>
+          <span class="muted">Balances volume to broadcast standards (EBU R128)</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="row toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" id="voiceClarity">
+        <span class="toggle-text">
+          <strong>Voice Clarity Boost</strong>
+          <span class="muted">Enhances speech presence in the 1–4 kHz range</span>
+        </span>
+      </label>
+    </div>
+  </section>
+
   <button id="go" class="go" disabled>Generate Captions</button>
 
   <!-- Progress -->

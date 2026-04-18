@@ -159,32 +159,90 @@ def get_video_dimensions(video_path: Path):
     return int(w), int(h)
 
 
-def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path):
-    """Burn the ASS file into the video using FFmpeg."""
+def build_audio_filter_chain(audio: dict) -> str | None:
+    """Build an FFmpeg audio filter string from the enhancement options.
+
+    Returns None when no enhancements are requested.
+    Supported keys (all bool):
+      noise_reduction  – afftdn spectral noise gate
+      loudness_norm    – EBU R128 loudness normalisation
+      voice_clarity    – parametric EQ boost for the 1–4 kHz voice range
+    """
+    filters = []
+    if audio.get("noise_reduction"):
+        filters.append("afftdn=nf=-25")
+    if audio.get("voice_clarity"):
+        filters.append("equalizer=f=2500:width_type=o:width=2:g=4")
+    if audio.get("loudness_norm"):
+        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+    return ",".join(filters) if filters else None
+
+
+def apply_audio_enhancements(video_path: Path, output_path: Path, af: str):
+    """Run FFmpeg with the given audio filter chain, copying the video stream."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-vn",
+        "-af", af,
+        "-c:a", "aac",
+        "-b:a", "192k",
+        str(output_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg audio enhancement failed: {proc.stderr[-2000:]}")
+
+
+def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path, audio_path: Path | None = None):
+    """Burn the ASS file into the video using FFmpeg.
+
+    If *audio_path* is supplied, it replaces the audio stream from *video_path*
+    with the already-processed audio from that file.
+    """
     fonts_arg = str(FONT_DIR).replace("\\", "/").replace(":", r"\:")
     ass_arg = str(ass_path).replace("\\", "/").replace(":", r"\:")
 
     vf = f"subtitles='{ass_arg}':fontsdir='{fonts_arg}'"
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", str(video_path),
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
-        "-c:a", "copy",
-        str(output_path),
-    ]
+    if audio_path:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "copy",
+            str(output_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "copy",
+            str(output_path),
+        ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"FFmpeg failed: {proc.stderr[-2000:]}")
 
 
 # ---- Background worker ----
-def process_job(job_id: str, video_path: Path, style: dict):
+def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
     try:
+        audio = audio or {}
+
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 10
         words = transcribe(video_path)
@@ -193,17 +251,25 @@ def process_job(job_id: str, video_path: Path, style: dict):
             raise RuntimeError("No speech detected in the video.")
 
         jobs[job_id]["status"] = "building subtitles"
-        jobs[job_id]["progress"] = 60
+        jobs[job_id]["progress"] = 55
         w, h = get_video_dimensions(video_path)
         ass_content = build_ass(words, style, w, h)
 
         ass_path = UPLOAD_DIR / f"{job_id}.ass"
         ass_path.write_text(ass_content, encoding="utf-8")
 
+        af = build_audio_filter_chain(audio)
+        enhanced_audio_path = None
+        if af:
+            jobs[job_id]["status"] = "enhancing audio"
+            jobs[job_id]["progress"] = 68
+            enhanced_audio_path = UPLOAD_DIR / f"{job_id}_audio.aac"
+            apply_audio_enhancements(video_path, enhanced_audio_path, af)
+
         jobs[job_id]["status"] = "rendering video"
-        jobs[job_id]["progress"] = 75
+        jobs[job_id]["progress"] = 80
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
-        burn_subtitles(video_path, ass_path, output_path)
+        burn_subtitles(video_path, ass_path, output_path, audio_path=enhanced_audio_path)
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
@@ -234,9 +300,10 @@ def upload():
 
     import json
     style = json.loads(request.form.get("style", "{}"))
+    audio = json.loads(request.form.get("audio", "{}"))
 
     jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None}
-    t = threading.Thread(target=process_job, args=(job_id, video_path, style))
+    t = threading.Thread(target=process_job, args=(job_id, video_path, style, audio))
     t.daemon = True
     t.start()
 
