@@ -45,6 +45,8 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   border-radius: 14px;
   border: 1px solid #232833;
 }
+.panel-desc { margin: -8px 0 16px; }
+
 .row {
   display: flex;
   align-items: center;
@@ -90,6 +92,7 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 .theme:hover { background: #2d3340; }
 .theme.active { border-color: #ffd60a; }
 
+/* ---- Buttons ---- */
 .go {
   display: block;
   width: 100%;
@@ -106,9 +109,11 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 }
 .go:hover:not(:disabled) { transform: translateY(-1px); }
 .go:disabled { opacity: .4; cursor: not-allowed; }
+.render-btn { margin-top: 16px; }
 
 .hidden { display: none !important; }
 
+/* ---- Progress ---- */
 .progress { margin-top: 24px; }
 .bar {
   width: 100%;
@@ -124,12 +129,19 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   transition: width .3s;
 }
 
+/* ---- Result ---- */
 .result { margin-top: 24px; text-align: center; }
 .result video {
   width: 100%;
   border-radius: 12px;
   background: #000;
   margin: 12px 0;
+}
+.result-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 .dl {
   display: inline-block;
@@ -140,9 +152,20 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   font-weight: 700;
   border-radius: 10px;
 }
+.re-edit-btn {
+  padding: 12px 24px;
+  background: #232833;
+  color: #e8eaed;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: background .1s;
+}
+.re-edit-btn:hover { background: #2d3340; }
 
-.panel-desc { margin: -8px 0 16px; }
-
+/* ---- Audio panel ---- */
 .toggle-row { align-items: flex-start; margin-bottom: 12px; }
 .toggle-label {
   display: flex;
@@ -167,3 +190,117 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 }
 .toggle-text strong { color: #e8eaed; font-weight: 600; }
 .toggle-text .muted { font-size: .82rem; }
+
+/* ---- Emoji rules ---- */
+.emoji-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.emoji-preset {
+  padding: 5px 11px;
+  background: #232833;
+  border: 1px solid #2a2f3a;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: .88rem;
+  transition: all .1s;
+  color: #e8eaed;
+}
+.emoji-preset:hover { background: #2d3340; border-color: #ffd60a; }
+
+.emoji-rule-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.emoji-input {
+  background: #0d0f14;
+  color: #e8eaed;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: .9rem;
+  outline: none;
+  transition: border-color .15s;
+}
+.emoji-input:focus { border-color: #ffd60a; }
+.emoji-input.keyword { flex: 1; }
+.emoji-input.emoji-field { width: 72px; text-align: center; font-size: 1.2rem; }
+
+.emoji-remove-btn {
+  background: none;
+  border: none;
+  color: #9aa0a6;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 4px 6px;
+  line-height: 1;
+  border-radius: 6px;
+  transition: color .1s;
+}
+.emoji-remove-btn:hover { color: #ff375f; }
+
+.add-rule-btn {
+  background: #232833;
+  border: 1px solid #2a2f3a;
+  color: #c8cdd3;
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: .9rem;
+  margin-top: 4px;
+  transition: all .1s;
+}
+.add-rule-btn:hover { background: #2d3340; border-color: #ffd60a; color: #e8eaed; }
+
+/* ---- Subtitle editor ---- */
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.editor-header h2 { margin: 0; }
+
+.word-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 0 4px;
+  min-height: 48px;
+}
+.word-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #232833;
+  border: 1px solid #2a2f3a;
+  border-radius: 20px;
+  padding: 5px 6px 5px 12px;
+  transition: border-color .15s;
+}
+.word-chip:focus-within { border-color: #ffd60a; }
+.word-chip span[contenteditable] {
+  color: #e8eaed;
+  font-size: .9rem;
+  outline: none;
+  min-width: 18px;
+  cursor: text;
+  white-space: nowrap;
+}
+.word-chip span[contenteditable]:focus { color: #ffd60a; }
+.word-chip-del {
+  background: none;
+  border: none;
+  color: #666e7a;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0 3px;
+  line-height: 1;
+  border-radius: 50%;
+  transition: color .1s, background .1s;
+}
+.word-chip-del:hover { color: #ff375f; background: #2d0f14; }

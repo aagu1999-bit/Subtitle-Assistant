@@ -3,6 +3,7 @@ Subtitle Burner - A Flask web app that adds word-by-word highlighted
 captions to videos using Whisper for transcription and FFmpeg for rendering.
 """
 import os
+import re
 import uuid
 import subprocess
 import threading
@@ -24,11 +25,20 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 ALLOWED_EXT = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
 
 # ---- Job tracking (in-memory; fine for single-user Replit) ----
-jobs = {}  # job_id -> {"status": "...", "progress": int, "output": str, "error": str}
+jobs = {}  # job_id -> {status, progress, output, error, words, video_ext}
 
 
 def allowed_file(name: str) -> bool:
     return "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
+def find_video_path(job_id: str) -> Path | None:
+    """Find the uploaded video file for a job by trying all allowed extensions."""
+    for ext in ALLOWED_EXT:
+        candidate = UPLOAD_DIR / f"{job_id}.{ext}"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # ---- Whisper transcription with word-level timestamps ----
@@ -80,7 +90,7 @@ def group_words(words, group_size=3):
     return [words[i : i + group_size] for i in range(0, len(words), group_size)]
 
 
-def build_ass(words, style: dict, video_w: int, video_h: int) -> str:
+def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None) -> str:
     font = style.get("font_name", "Montserrat Black")
     font_size = int(style.get("font_size", 72))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
@@ -94,6 +104,14 @@ def build_ass(words, style: dict, video_w: int, video_h: int) -> str:
 
     pos_x = video_w // 2
     pos_y = int(video_h * (pos_y_pct / 100.0))
+
+    # Normalise emoji rule keys to lowercase alpha-only for robust matching
+    normalised_emoji: dict[str, str] = {}
+    if emoji_rules:
+        for k, v in emoji_rules.items():
+            clean_key = re.sub(r"[^a-z]", "", k.lower().strip())
+            if clean_key:
+                normalised_emoji[clean_key] = v
 
     header = f"""[Script Info]
 Title: Generated Captions
@@ -121,6 +139,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not group:
             continue
 
+        # Check for an emoji match within this group (first match wins)
+        group_emoji = ""
+        if normalised_emoji:
+            for w in group:
+                word_key = re.sub(r"[^a-z]", "", w["word"].lower())
+                if word_key and word_key in normalised_emoji:
+                    group_emoji = normalised_emoji[word_key]
+                    break
+
         for idx, active in enumerate(group):
             pieces = []
             for j, w in enumerate(group):
@@ -130,7 +157,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     pieces.append(f"{{\\c{highlight}}}{word_text}{{\\c{primary}}}")
                 else:
                     pieces.append(word_text)
+
             text = " ".join(pieces)
+
+            # Append the group emoji to every dialogue line so it's visible
+            # for the full group duration, not just one word's moment.
+            if group_emoji:
+                text = text + " " + group_emoji
 
             start_ts = ass_timestamp(active["start"])
             end_ts = ass_timestamp(active["end"])
@@ -238,22 +271,31 @@ def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path, audio_pa
         raise RuntimeError(f"FFmpeg failed: {proc.stderr[-2000:]}")
 
 
-# ---- Background worker ----
-def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
+# ---- Background workers ----
+
+def transcribe_job(job_id: str, video_path: Path):
+    """Transcribe only — stores words and sets status to awaiting_edit."""
     try:
-        audio = audio or {}
-
         jobs[job_id]["status"] = "transcribing"
-        jobs[job_id]["progress"] = 10
+        jobs[job_id]["progress"] = 30
         words = transcribe(video_path)
-
         if not words:
             raise RuntimeError("No speech detected in the video.")
+        jobs[job_id]["words"] = words
+        jobs[job_id]["status"] = "awaiting_edit"
+        jobs[job_id]["progress"] = 100
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
 
+
+def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: dict, emoji_rules: dict):
+    """Build ASS, optionally enhance audio, then burn subtitles."""
+    try:
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
         w, h = get_video_dimensions(video_path)
-        ass_content = build_ass(words, style, w, h)
+        ass_content = build_ass(words, style, w, h, emoji_rules=emoji_rules)
 
         ass_path = UPLOAD_DIR / f"{job_id}.ass"
         ass_path.write_text(ass_content, encoding="utf-8")
@@ -279,14 +321,96 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
         jobs[job_id]["error"] = str(e)
 
 
+def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
+    """Legacy single-phase worker used by the /upload route."""
+    audio = audio or {}
+    try:
+        jobs[job_id]["status"] = "transcribing"
+        jobs[job_id]["progress"] = 10
+        words = transcribe(video_path)
+
+        if not words:
+            raise RuntimeError("No speech detected in the video.")
+
+        render_job(job_id, video_path, words, style, audio, {})
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+
+
 # ---- Routes ----
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
+@app.route("/transcribe-only", methods=["POST"])
+def transcribe_only():
+    """Phase 1: upload video and transcribe. Returns job_id; poll /status for words."""
+    if "video" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["video"]
+    if f.filename == "" or not allowed_file(f.filename):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    job_id = uuid.uuid4().hex
+    ext = f.filename.rsplit(".", 1)[1].lower()
+    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    f.save(str(video_path))
+
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "output": None,
+        "error": None,
+        "words": None,
+    }
+    t = threading.Thread(target=transcribe_job, args=(job_id, video_path))
+    t.daemon = True
+    t.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/render", methods=["POST"])
+def render():
+    """Phase 2: take edited words + style + emoji rules, burn video."""
+    data = request.get_json(force=True)
+    job_id = data.get("job_id")
+    words = data.get("words", [])
+    style = data.get("style", {})
+    audio = data.get("audio", {})
+    emoji_rules = data.get("emoji_rules", {})
+
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+
+    if not words:
+        return jsonify({"error": "No words provided"}), 400
+
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Original video not found on server"}), 404
+
+    # Reset job state for the render phase (keep words for potential re-renders)
+    jobs[job_id]["status"] = "queued"
+    jobs[job_id]["progress"] = 0
+    jobs[job_id]["output"] = None
+    jobs[job_id]["error"] = None
+
+    t = threading.Thread(
+        target=render_job,
+        args=(job_id, video_path, words, style, audio, emoji_rules),
+    )
+    t.daemon = True
+    t.start()
+
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
+    """Legacy single-phase upload (kept for compatibility)."""
     if "video" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["video"]
@@ -302,7 +426,7 @@ def upload():
     style = json.loads(request.form.get("style", "{}"))
     audio = json.loads(request.form.get("audio", "{}"))
 
-    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None}
+    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None}
     t = threading.Thread(target=process_job, args=(job_id, video_path, style, audio))
     t.daemon = True
     t.start()

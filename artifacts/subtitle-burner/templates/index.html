@@ -10,7 +10,7 @@
 <div class="wrap">
   <header>
     <h1>Subtitle Burner</h1>
-    <p class="sub">Drop a video, pick a style, get captions with word-by-word highlighting.</p>
+    <p class="sub">Drop a video, transcribe it, edit the words, then burn captions.</p>
   </header>
 
   <!-- Drop zone -->
@@ -45,9 +45,7 @@
 
     <div class="row">
       <label>Color theme</label>
-      <div id="themes" class="themes">
-        <!-- populated by JS -->
-      </div>
+      <div id="themes" class="themes"><!-- populated by JS --></div>
     </div>
 
     <div class="row">
@@ -120,19 +118,48 @@
     </div>
   </section>
 
-  <button id="go" class="go" disabled>Generate Captions</button>
+  <!-- Emoji Rules panel -->
+  <section class="panel">
+    <h2>Emoji Rules</h2>
+    <p class="muted panel-desc">Match keywords to emojis — matched groups get the emoji burned in alongside the subtitle.</p>
 
-  <!-- Progress -->
+    <div id="emojiPresets" class="emoji-presets"></div>
+
+    <div id="emojiRulesList"></div>
+
+    <button id="addRuleBtn" class="add-rule-btn">+ Add rule</button>
+  </section>
+
+  <!-- Transcribe button -->
+  <button id="go" class="go" disabled>Transcribe Video</button>
+
+  <!-- Progress bar (used for both transcription and rendering) -->
   <div id="progress" class="progress hidden">
     <div class="bar"><div id="barFill" class="fill"></div></div>
     <p id="statusText" class="muted">Starting…</p>
+  </div>
+
+  <!-- Subtitle editor (shown after transcription) -->
+  <div id="editor" class="hidden">
+    <section class="panel">
+      <div class="editor-header">
+        <h2>Edit Transcript</h2>
+        <span id="wordCount" class="pill muted">0 words</span>
+      </div>
+      <p class="muted panel-desc">Click any word to edit it inline. Use × to remove a word.</p>
+      <div id="wordChips" class="word-chips"></div>
+    </section>
+    <button id="renderBtn" class="go render-btn">Render with Edits</button>
   </div>
 
   <!-- Result -->
   <div id="result" class="result hidden">
     <h2>Done!</h2>
     <video id="player" controls></video>
-    <a id="dl" class="dl" href="#" download>⬇ Download video</a>
+    <div class="result-actions">
+      <a id="dl" class="dl" href="#" download>⬇ Download video</a>
+      <button id="reEditBtn" class="re-edit-btn">Edit transcript again</button>
+    </div>
   </div>
 </div>
 
