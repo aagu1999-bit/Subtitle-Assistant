@@ -51,3 +51,7 @@ Thumbs.db
 # Subtitle burner rendered outputs (transient)
 artifacts/subtitle-burner/outputs/
 artifacts/subtitle-burner/uploads/
+
+# Attached video assets (binary, not tracked)
+attached_assets/*.mp4
+attached_assets/*.mov
