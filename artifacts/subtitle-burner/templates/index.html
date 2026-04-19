@@ -31,6 +31,7 @@
     <div class="row">
       <label>Font</label>
       <select id="font">
+        <option value="DM Sans">DM Sans</option>
         <option value="The Bold Font">The Bold Font</option>
         <option value="Montserrat Thin Black" selected>Montserrat Black</option>
         <option value="Integral CF">Integral CF</option>
@@ -87,6 +88,11 @@
     <h2>Audio Enhancement</h2>
     <p class="muted panel-desc">Optional — applied before subtitle rendering via FFmpeg audio filters.</p>
 
+    <div class="row audio-preset-row">
+      <button id="instagramPreset" class="audio-preset-btn">✨ Instagram Pro</button>
+      <span class="muted" style="font-size:.82rem">Enables all filters for polished social audio</span>
+    </div>
+
     <div class="row toggle-row">
       <label class="toggle-label">
         <input type="checkbox" id="noiseReduction">
@@ -102,7 +108,7 @@
         <input type="checkbox" id="loudnessNorm">
         <span class="toggle-text">
           <strong>Loudness Normalization</strong>
-          <span class="muted">Balances volume to broadcast standards (EBU R128)</span>
+          <span class="muted">Balances volume to −14 LUFS (Instagram standard)</span>
         </span>
       </label>
     </div>
@@ -111,18 +117,10 @@
       <label class="toggle-label">
         <input type="checkbox" id="voiceClarity">
         <span class="toggle-text">
-          <strong>Voice Clarity Boost</strong>
-          <span class="muted">Enhances speech presence in the 1–4 kHz range</span>
+          <strong>Voice Clarity</strong>
+          <span class="muted">Gentle presence boost + de-esser for smooth, professional vocals</span>
         </span>
       </label>
-    </div>
-
-    <div id="audioPreviewWrap" class="hidden">
-      <button id="previewAudio" class="preview-audio-btn">&#9654; Preview Audio</button>
-      <div id="audioPreviewArea" class="hidden">
-        <audio id="audioPlayer" controls></audio>
-        <p id="audioPreviewStatus" class="muted"></p>
-      </div>
     </div>
   </section>
 
@@ -152,14 +150,47 @@
 
   <!-- Subtitle editor (shown after transcription) -->
   <div id="editor" class="hidden">
+
+    <!-- Source Video Player -->
+    <section class="panel source-video-section">
+      <div class="editor-header">
+        <h2>Source Video</h2>
+        <span class="muted" style="font-size:.82rem">Click a phrase below to jump</span>
+      </div>
+      <video id="sourcePlayer" controls playsinline></video>
+    </section>
+
+    <!-- Phrase Timeline -->
     <section class="panel">
       <div class="editor-header">
-        <h2>Edit Transcript</h2>
+        <h2>Phrase Timeline</h2>
+        <span class="muted" style="font-size:.82rem">Click any row to seek</span>
+      </div>
+      <div id="phraseList" class="phrase-list"></div>
+    </section>
+
+    <!-- Audio Preview (available after transcription, uses server-side file) -->
+    <div id="audioPreviewWrap" class="panel hidden">
+      <div class="editor-header" style="margin-bottom:12px">
+        <h2 style="margin:0">Preview Audio Enhancement</h2>
+        <button id="previewAudio" class="preview-audio-btn">&#9654; Preview first 30 s</button>
+      </div>
+      <div id="audioPreviewArea" class="hidden">
+        <audio id="audioPlayer" controls></audio>
+        <p id="audioPreviewStatus" class="muted"></p>
+      </div>
+    </div>
+
+    <!-- Word Chips Editor -->
+    <section class="panel">
+      <div class="editor-header">
+        <h2>Edit Words</h2>
         <span id="wordCount" class="pill muted">0 words</span>
       </div>
       <p class="muted panel-desc">Click any word to edit it inline. Use × to remove a word.</p>
       <div id="wordChips" class="word-chips"></div>
     </section>
+
     <button id="renderBtn" class="go render-btn">Render with Edits</button>
   </div>
 

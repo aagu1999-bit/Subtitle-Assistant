@@ -4,6 +4,7 @@ captions to videos using Whisper for transcription and FFmpeg for rendering.
 """
 import os
 import re
+import time
 import uuid
 import subprocess
 import threading
@@ -24,12 +25,116 @@ FONT_DIR.mkdir(exist_ok=True)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 ALLOWED_EXT = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
 
+# How long (seconds) to keep finished output MP4s before deleting them.
+# Override via the OUTPUT_TTL_SECONDS environment variable.
+try:
+    OUTPUT_TTL_SECONDS = max(60, int(os.environ.get("OUTPUT_TTL_SECONDS", 3600)))
+except (ValueError, TypeError):
+    OUTPUT_TTL_SECONDS = 3600
+
+# How long (seconds) before an abandoned upload (awaiting_edit / queued /
+# transcribing with no follow-up render) is removed from disk and memory.
+# Defaults to the same value as OUTPUT_TTL_SECONDS.
+try:
+    UPLOAD_TTL_SECONDS = max(60, int(os.environ.get("UPLOAD_TTL_SECONDS", OUTPUT_TTL_SECONDS)))
+except (ValueError, TypeError):
+    UPLOAD_TTL_SECONDS = OUTPUT_TTL_SECONDS
+
+# How often the cleanup loop wakes up (seconds).
+_CLEANUP_INTERVAL = 300  # 5 minutes
+
+# Statuses treated as "job still in progress / waiting for user action"
+_PENDING_STATUSES = {"queued", "transcribing", "awaiting_edit", "building subtitles", "enhancing audio", "rendering video"}
+
 # ---- Job tracking (in-memory; fine for single-user Replit) ----
-jobs = {}  # job_id -> {status, progress, output, error, words, video_ext}
+jobs = {}  # job_id -> {status, progress, output, error, words, completed_at}
 
 
 def allowed_file(name: str) -> bool:
     return "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
+# ---- File / job cleanup helpers ----
+
+def _safe_unlink(path: Path) -> None:
+    """Delete a file if it exists, ignoring errors."""
+    try:
+        if path and path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _cleanup_temp_files(video_path: Path, ass_path: Path | None, audio_path: Path | None) -> None:
+    """Remove all temporary files produced during a job once it has finished."""
+    _safe_unlink(video_path)
+    _safe_unlink(ass_path)
+    _safe_unlink(audio_path)
+
+
+def _cleanup_loop() -> None:
+    """Background thread: delete old output MP4s and prune the jobs dict."""
+    while True:
+        time.sleep(_CLEANUP_INTERVAL)
+        now = time.time()
+        output_cutoff = now - OUTPUT_TTL_SECONDS
+        upload_cutoff = now - UPLOAD_TTL_SECONDS
+
+        # 1. Remove expired output files.
+        for mp4 in list(OUTPUT_DIR.glob("*.mp4")):
+            try:
+                if mp4.stat().st_mtime < output_cutoff:
+                    mp4.unlink()
+            except OSError:
+                pass
+
+        # 2. Prune completed/errored job entries past the output TTL.
+        stale_done = [
+            jid for jid, job in list(jobs.items())
+            if job.get("status") in ("done", "error")
+            and job.get("completed_at", 0) < output_cutoff
+        ]
+        for jid in stale_done:
+            jobs.pop(jid, None)
+
+        # 3. Prune abandoned jobs (user uploaded but never triggered render)
+        #    that are older than the upload TTL.
+        stale_pending = [
+            jid for jid, job in list(jobs.items())
+            if job.get("status") in _PENDING_STATUSES
+            and job.get("created_at", 0) < upload_cutoff
+        ]
+        for jid in stale_pending:
+            # Best-effort: delete any upload file that may still be on disk.
+            video_path = find_video_path(jid)
+            if video_path:
+                _safe_unlink(video_path)
+            # Also clean up any leftover .ass or _audio.aac for this job.
+            _safe_unlink(UPLOAD_DIR / f"{jid}.ass")
+            _safe_unlink(UPLOAD_DIR / f"{jid}_audio.aac")
+            jobs.pop(jid, None)
+
+        # 4. Remove orphaned upload files (no matching job entry — e.g. after
+        #    a server restart) that are older than the upload TTL.
+        active_ids = set(jobs.keys())
+        for f in list(UPLOAD_DIR.glob("*")):
+            if not f.is_file():
+                continue
+            try:
+                if f.stat().st_mtime < upload_cutoff:
+                    stem = f.stem
+                    base_id = stem.removesuffix("_audio")
+                    if base_id.startswith("prev_"):
+                        _safe_unlink(f)
+                    elif base_id not in active_ids:
+                        _safe_unlink(f)
+            except OSError:
+                pass
+
+
+# Start the cleanup thread once at import time.
+_cleanup_thread = threading.Thread(target=_cleanup_loop, daemon=True)
+_cleanup_thread.start()
 
 
 def find_video_path(job_id: str) -> Path | None:
@@ -240,16 +345,20 @@ def build_audio_filter_chain(audio: dict) -> str | None:
     Returns None when no enhancements are requested.
     Supported keys (all bool):
       noise_reduction  – afftdn spectral noise gate
-      loudness_norm    – EBU R128 loudness normalisation
-      voice_clarity    – parametric EQ boost for the 1–4 kHz voice range
+      loudness_norm    – EBU R128 loudness normalisation (-14 LUFS, Instagram target)
+      voice_clarity    – gentle presence EQ + de-esser for smooth, professional vocals
     """
     filters = []
     if audio.get("noise_reduction"):
         filters.append("afftdn=nf=-25")
     if audio.get("voice_clarity"):
-        filters.append("equalizer=f=2500:width_type=o:width=2:g=4")
+        # Gentle 2 kHz presence boost (wide Q, low gain) + 8 kHz de-esser cut
+        # to keep vocals clear without harshness or sibilance
+        filters.append("equalizer=f=2000:width_type=o:width=4:g=2")
+        filters.append("equalizer=f=8000:width_type=o:width=2:g=-2")
     if audio.get("loudness_norm"):
-        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+        # -14 LUFS is the Instagram / social-media loudness target
+        filters.append("loudnorm=I=-14:TP=-1:LRA=7")
     return ",".join(filters) if filters else None
 
 
@@ -336,10 +445,15 @@ def transcribe_job(job_id: str, video_path: Path):
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+        jobs[job_id]["completed_at"] = time.time()
+        # No render will follow — clean up the uploaded video now.
+        _safe_unlink(video_path)
 
 
 def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: dict, emoji_rules: dict):
     """Build ASS, optionally enhance audio, then burn subtitles."""
+    ass_path: Path | None = None
+    enhanced_audio_path: Path | None = None
     try:
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
@@ -350,7 +464,6 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         ass_path.write_text(ass_content, encoding="utf-8")
 
         af = build_audio_filter_chain(audio)
-        enhanced_audio_path = None
         if af:
             jobs[job_id]["status"] = "enhancing audio"
             jobs[job_id]["progress"] = 68
@@ -365,9 +478,14 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["output"] = output_path.name
+        jobs[job_id]["completed_at"] = time.time()
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+        jobs[job_id]["completed_at"] = time.time()
+    finally:
+        # Temp files (upload, .ass, _audio.aac) are no longer needed.
+        _cleanup_temp_files(video_path, ass_path, enhanced_audio_path)
 
 
 def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
@@ -385,6 +503,9 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+        jobs[job_id]["completed_at"] = time.time()
+        # render_job handles its own cleanup; only clean up if we never reached it.
+        _safe_unlink(video_path)
 
 
 # ---- Routes ----
@@ -413,6 +534,7 @@ def transcribe_only():
         "output": None,
         "error": None,
         "words": None,
+        "created_at": time.time(),
     }
     t = threading.Thread(target=transcribe_job, args=(job_id, video_path))
     t.daemon = True
@@ -486,7 +608,7 @@ def upload():
     style = json.loads(request.form.get("style", "{}"))
     audio = json.loads(request.form.get("audio", "{}"))
 
-    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None}
+    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None, "created_at": time.time()}
     t = threading.Thread(target=process_job, args=(job_id, video_path, style, audio))
     t.daemon = True
     t.start()
@@ -512,41 +634,48 @@ def preview(filename):
     return send_from_directory(OUTPUT_DIR, filename)
 
 
+@app.route("/raw-upload/<job_id>")
+def raw_upload(job_id):
+    """Stream the original uploaded video so the editor can seek through it."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Video not found"}), 404
+    return send_from_directory(UPLOAD_DIR, video_path.name)
+
+
 @app.route("/preview-audio", methods=["POST"])
 def preview_audio():
-    import json
-    if "video" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    f = request.files["video"]
-    if f.filename == "" or not allowed_file(f.filename):
-        return jsonify({"error": "Invalid file type"}), 400
+    """Preview the first 30 s of enhanced audio.
 
-    audio_opts = json.loads(request.form.get("audio", "{}"))
+    Accepts JSON: { job_id: str, audio: { noise_reduction, voice_clarity, loudness_norm } }
+    Reuses the already-uploaded video file so the full video is never re-sent.
+    """
+    data = request.get_json(force=True)
+    job_id = data.get("job_id")
+    audio_opts = data.get("audio", {})
+
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Transcription not found — please transcribe the video first"}), 404
+
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Original video no longer available on this server"}), 404
+
     af = build_audio_filter_chain(audio_opts)
     if not af:
         return jsonify({"error": "No audio enhancements selected"}), 400
 
-    tmp_id = uuid.uuid4().hex
-    ext = f.filename.rsplit(".", 1)[1].lower()
-    video_path = UPLOAD_DIR / f"prev_{tmp_id}.{ext}"
-    audio_path = UPLOAD_DIR / f"prev_{tmp_id}.aac"
-
+    audio_path = UPLOAD_DIR / f"prev_{uuid.uuid4().hex}.aac"
     try:
-        f.save(str(video_path))
-        try:
-            apply_audio_enhancements(video_path, audio_path, af, duration=30)
-        except RuntimeError as exc:
-            return jsonify({"error": str(exc)[:500]}), 500
-
-        data = audio_path.read_bytes()
-        return Response(data, mimetype="audio/aac")
+        apply_audio_enhancements(video_path, audio_path, af, duration=30)
+        audio_data = audio_path.read_bytes()
+        return Response(audio_data, mimetype="audio/aac")
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)[:500]}), 500
     finally:
-        for p in [video_path, audio_path]:
-            try:
-                if p.exists():
-                    p.unlink()
-            except Exception:
-                pass
+        _safe_unlink(audio_path)
 
 
 if __name__ == "__main__":

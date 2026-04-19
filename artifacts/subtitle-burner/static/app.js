@@ -40,6 +40,8 @@ const emojiPresetsDiv = $("emojiPresets");
 const previewWrap = $("audioPreviewWrap"), previewBtn = $("previewAudio");
 const audioPreviewArea = $("audioPreviewArea"), audioPlayer = $("audioPlayer");
 const audioPreviewStatus = $("audioPreviewStatus");
+const sourcePlayer = $("sourcePlayer");
+const phraseListEl = $("phraseList");
 
 let currentFile = null;
 let currentJobId = null;
@@ -47,11 +49,12 @@ let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
 
 // ---- Audio toggle visibility ----
+// The audio preview panel lives inside the editor section (available after transcription).
 const audioCheckboxes = ["noiseReduction", "loudnessNorm", "voiceClarity"].map($);
 
 function updateAudioPreviewVisibility() {
   const anyOn = audioCheckboxes.some(cb => cb.checked);
-  if (anyOn && currentFile) {
+  if (anyOn && currentJobId) {
     previewWrap.classList.remove("hidden");
   } else {
     previewWrap.classList.add("hidden");
@@ -60,6 +63,14 @@ function updateAudioPreviewVisibility() {
 }
 
 audioCheckboxes.forEach(cb => cb.addEventListener("change", updateAudioPreviewVisibility));
+
+// ---- Instagram Pro preset ----
+$("instagramPreset").onclick = () => {
+  $("noiseReduction").checked = true;
+  $("loudnessNorm").checked = true;
+  $("voiceClarity").checked = true;
+  updateAudioPreviewVisibility();
+};
 
 // ---- Themes ----
 const themesDiv = $("themes");
@@ -81,7 +92,7 @@ THEMES.forEach((t, i) => {
 sizeEl.oninput  = () => sizeVal.textContent = sizeEl.value;
 owEl.oninput    = () => owVal.textContent = owEl.value;
 posEl.oninput   = () => posVal.textContent = posEl.value + "%";
-groupEl.oninput = () => groupVal.textContent = groupEl.value;
+groupEl.oninput = () => { groupVal.textContent = groupEl.value; renderPhraseList(currentWords); };
 
 // ---- Drag & drop ----
 drop.onclick = () => fileInput.click();
@@ -99,8 +110,6 @@ function handleFile(f) {
   currentFile = f;
   fn.textContent = f.name + "  (" + (f.size / 1048576).toFixed(1) + " MB)";
   go.disabled = false;
-  audioPreviewArea.classList.add("hidden");
-  updateAudioPreviewVisibility();
 }
 
 // ---- Helpers: collect style / audio ----
@@ -127,9 +136,9 @@ function getAudio() {
   };
 }
 
-// ---- Preview Audio ----
+// ---- Preview Audio (uses server-side job file — no re-upload) ----
 previewBtn.onclick = async () => {
-  if (!currentFile) return;
+  if (!currentJobId) return;
   const audio = getAudio();
 
   previewBtn.disabled = true;
@@ -137,12 +146,12 @@ previewBtn.onclick = async () => {
   audioPreviewArea.classList.add("hidden");
   audioPreviewStatus.textContent = "";
 
-  const fd = new FormData();
-  fd.append("video", currentFile);
-  fd.append("audio", JSON.stringify(audio));
-
   try {
-    const res = await fetch("/preview-audio", { method: "POST", body: fd });
+    const res = await fetch("/preview-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: currentJobId, audio }),
+    });
     if (!res.ok) {
       const err = await res.json();
       audioPreviewStatus.textContent = "Error: " + (err.error || "Unknown error");
@@ -160,7 +169,7 @@ previewBtn.onclick = async () => {
     audioPreviewArea.classList.remove("hidden");
   } finally {
     previewBtn.disabled = false;
-    previewBtn.innerHTML = "&#9654; Preview Audio";
+    previewBtn.innerHTML = "&#9654; Preview first 30 s";
   }
 };
 
@@ -212,7 +221,6 @@ EMOJI_PRESETS.forEach(p => {
   btn.textContent = `${p.emoji} ${p.keyword}`;
   btn.title = `Add rule: "${p.keyword}" → ${p.emoji}`;
   btn.onclick = () => {
-    // Don't add if already present
     const existing = Array.from(emojiRulesList.querySelectorAll(".keyword"))
       .map(el => el.value.trim().toLowerCase());
     if (!existing.includes(p.keyword)) {
@@ -288,6 +296,62 @@ async function pollTranscription(jobId) {
   setTimeout(() => pollTranscription(jobId), 2000);
 }
 
+// ---- Phrase timeline ----
+function renderPhraseList(words) {
+  phraseListEl.innerHTML = "";
+  if (!words || !words.length) return;
+
+  const groupSize = parseInt(groupEl.value, 10) || 3;
+  for (let i = 0; i < words.length; i += groupSize) {
+    const group = words.slice(i, i + groupSize);
+    if (!group.length) continue;
+
+    const row = document.createElement("div");
+    row.className = "phrase-row";
+    row.dataset.start = group[0].start;
+
+    const timeEl = document.createElement("span");
+    timeEl.className = "phrase-time";
+    timeEl.textContent = fmtTime(group[0].start);
+
+    const textEl = document.createElement("span");
+    textEl.className = "phrase-text";
+    textEl.textContent = group.map(w => w.word).join(" ");
+
+    row.appendChild(timeEl);
+    row.appendChild(textEl);
+
+    row.onclick = () => {
+      sourcePlayer.currentTime = parseFloat(row.dataset.start);
+      if (sourcePlayer.paused) sourcePlayer.play();
+      highlightPhraseRow(row);
+    };
+
+    phraseListEl.appendChild(row);
+  }
+}
+
+function highlightPhraseRow(target) {
+  phraseListEl.querySelectorAll(".phrase-row").forEach(r => r.classList.remove("active"));
+  if (target) target.classList.add("active");
+}
+
+// Sync phrase list highlight as the source video plays
+sourcePlayer.addEventListener("timeupdate", () => {
+  const t = sourcePlayer.currentTime;
+  const rows = Array.from(phraseListEl.querySelectorAll(".phrase-row"));
+  let activeRow = null;
+  for (let i = 0; i < rows.length; i++) {
+    const start = parseFloat(rows[i].dataset.start);
+    const nextStart = i < rows.length - 1 ? parseFloat(rows[i + 1].dataset.start) : Infinity;
+    if (t >= start && t < nextStart) { activeRow = rows[i]; break; }
+  }
+  if (activeRow && !activeRow.classList.contains("active")) {
+    highlightPhraseRow(activeRow);
+    activeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+});
+
 // ---- Word chip editor ----
 function fmtTime(sec) {
   const m = Math.floor(sec / 60);
@@ -301,6 +365,16 @@ function showEditor(words) {
     wordChips.appendChild(makeChip(w.word, i, w.start));
   });
   updateWordCount();
+
+  // Load the original uploaded video into the source player
+  sourcePlayer.src = "/raw-upload/" + currentJobId;
+
+  // Populate the phrase timeline
+  renderPhraseList(words);
+
+  // Show audio preview panel if any enhancement is enabled
+  updateAudioPreviewVisibility();
+
   editor.classList.remove("hidden");
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 }
