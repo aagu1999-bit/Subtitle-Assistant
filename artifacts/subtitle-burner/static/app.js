@@ -407,6 +407,15 @@ function makeChip(word, originalIndex, startSec) {
   const timeLabel = document.createElement("span");
   timeLabel.className = "word-chip-time";
   timeLabel.textContent = startSec != null ? fmtTime(startSec) : "";
+  if (startSec != null) {
+    timeLabel.title = "Jump to " + fmtTime(startSec);
+    timeLabel.addEventListener("click", e => {
+      e.stopPropagation();
+      sourcePlayer.currentTime = startSec;
+      if (sourcePlayer.paused) sourcePlayer.play();
+      sourcePlayer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
 
   inner.appendChild(span);
   inner.appendChild(timeLabel);

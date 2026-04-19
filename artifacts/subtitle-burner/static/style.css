@@ -451,10 +451,12 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   font-size: .65rem;
   color: #636870;
   line-height: 1;
-  pointer-events: none;
   user-select: none;
   letter-spacing: .01em;
+  cursor: pointer;
+  transition: color .15s;
 }
+.word-chip-time:hover { color: #ffd60a; }
 .word-chip-del {
   background: none;
   border: none;
