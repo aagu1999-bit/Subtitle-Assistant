@@ -90,8 +90,40 @@ def group_words(words, group_size=3):
     return [words[i : i + group_size] for i in range(0, len(words), group_size)]
 
 
+def _visible_len(ass_text: str) -> int:
+    """Character count of ASS text, ignoring inline override tags like {\\pos(...)}."""
+    return len(re.sub(r"\{[^}]*\}", "", ass_text))
+
+
+def _wrap_ass_text(text: str, max_chars: int) -> str:
+    """Split ASS-tagged subtitle text at word boundaries to fit max_chars per line.
+
+    Inline ASS tags (e.g. {\\cXXX}) are counted as zero-width so they don't
+    trigger early wrapping.  Lines are joined with \\N (hard newline in ASS).
+    """
+    if _visible_len(text) <= max_chars:
+        return text
+    parts = text.split(" ")
+    lines: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for part in parts:
+        plen = _visible_len(part)
+        gap = 1 if current else 0
+        if current and current_len + gap + plen > max_chars:
+            lines.append(current)
+            current = [part]
+            current_len = plen
+        else:
+            current.append(part)
+            current_len += gap + plen
+    if current:
+        lines.append(current)
+    return r"\N".join(" ".join(ln) for ln in lines)
+
+
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None) -> str:
-    font = style.get("font_name", "Montserrat Black")
+    font = style.get("font_name", "Montserrat Thin Black")
     font_size = int(style.get("font_size", 72))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
     highlight = hex_to_ass_color(style.get("highlight_color", "#FFD60A"))
@@ -104,6 +136,11 @@ def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict 
 
     pos_x = video_w // 2
     pos_y = int(video_h * (pos_y_pct / 100.0))
+
+    # Max visible chars per line so subtitles don't exceed the video frame.
+    # Montserrat Black is wide — estimate char width at ~0.65× font_size px.
+    # Allow 88 % of the video width as safe area.
+    max_chars_per_line = max(8, int((video_w * 0.88) / (font_size * 0.65)))
 
     # Normalise emoji rule keys to lowercase alpha-only for robust matching
     normalised_emoji: dict[str, str] = {}
@@ -164,6 +201,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # for the full group duration, not just one word's moment.
             if group_emoji:
                 text = text + " " + group_emoji
+
+            # Wrap to prevent overflow beyond the video frame width
+            text = _wrap_ass_text(text, max_chars_per_line)
 
             start_ts = ass_timestamp(active["start"])
             end_ts = ass_timestamp(active["end"])
