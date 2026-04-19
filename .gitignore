@@ -47,3 +47,7 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Subtitle burner rendered outputs (transient)
+artifacts/subtitle-burner/outputs/
+artifacts/subtitle-burner/uploads/
