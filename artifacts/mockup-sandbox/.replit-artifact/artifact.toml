@@ -1,8 +1,16 @@
 kind = "design"
-previewPath = "/__mockup"
+previewPath = "/"
 title = "Canvas"
 version = "1.0.0"
 id = "XegfDyZt7HqfW2Bb8Ghoy"
+
+[[services]]
+localPort = 5000
+name = "Start application"
+paths = ["/"]
+
+[services.development]
+run = "cd artifacts/subtitle-burner && python app.py"
 
 [[services]]
 localPort = 8081
