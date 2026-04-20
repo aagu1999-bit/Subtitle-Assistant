@@ -5,20 +5,20 @@ version = "1.0.0"
 id = "XegfDyZt7HqfW2Bb8Ghoy"
 
 [[services]]
-localPort = 5000
+localPort = 8081
 name = "Start application"
 paths = ["/"]
 
 [services.development]
-run = "cd artifacts/subtitle-burner && python app.py"
+run = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
 
 [[services]]
-localPort = 8081
+localPort = 8082
 name = "Component Preview Server"
 paths = ["/__mockup"]
 
 [services.env]
-PORT = "8081"
+PORT = "8082"
 BASE_PATH = "/__mockup"
 
 [services.development]

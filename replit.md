@@ -33,7 +33,7 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
 - Transcribes speech using faster-whisper (base model, CPU)
 - Generates ASS subtitle files with word-by-word highlighting
 - Burns captions into video using FFmpeg
-- Runs on port 5000 (local), served at `/` via external port 80 through path-based routing
+- Runs on port 8081 (local), served at `/` via external port 80 (no port suffix in URL)
 
 ### Structure
 ```
