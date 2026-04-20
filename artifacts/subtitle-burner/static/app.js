@@ -33,7 +33,7 @@ const groupEl = $("group"), groupVal = $("groupVal");
 const primaryEl = $("primary"), highlightEl = $("highlight"), outlineEl = $("outlineColor");
 const go = $("go"), progress = $("progress"), barFill = $("barFill"), statusText = $("statusText");
 const result = $("result"), player = $("player"), dl = $("dl");
-const editor = $("editor"), wordChips = $("wordChips"), wordCount = $("wordCount");
+const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
 const emojiRulesList = $("emojiRulesList"), addRuleBtn = $("addRuleBtn");
 const emojiPresetsDiv = $("emojiPresets");
@@ -296,7 +296,7 @@ async function pollTranscription(jobId) {
   setTimeout(() => pollTranscription(jobId), 2000);
 }
 
-// ---- Phrase timeline ----
+// ---- Phrase timeline / editable subtitle list ----
 function renderPhraseList(words) {
   phraseListEl.innerHTML = "";
   if (!words || !words.length) return;
@@ -309,26 +309,52 @@ function renderPhraseList(words) {
     const row = document.createElement("div");
     row.className = "phrase-row";
     row.dataset.start = group[0].start;
+    row.dataset.end   = group[group.length - 1].end;
 
+    // Timestamp label — click to seek
     const timeEl = document.createElement("span");
     timeEl.className = "phrase-time";
     timeEl.textContent = fmtTime(group[0].start);
-
-    const textEl = document.createElement("span");
-    textEl.className = "phrase-text";
-    textEl.textContent = group.map(w => w.word).join(" ");
-
-    row.appendChild(timeEl);
-    row.appendChild(textEl);
-
-    row.onclick = () => {
+    timeEl.title = "Seek to " + fmtTime(group[0].start);
+    timeEl.onclick = (e) => {
+      e.stopPropagation();
       sourcePlayer.currentTime = parseFloat(row.dataset.start);
       if (sourcePlayer.paused) sourcePlayer.play();
       highlightPhraseRow(row);
     };
 
+    // Editable text
+    const textEl = document.createElement("span");
+    textEl.className = "phrase-text";
+    textEl.contentEditable = "true";
+    textEl.spellcheck = false;
+    textEl.textContent = group.map(w => w.word).join(" ");
+    textEl.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
+    });
+
+    // Delete row button
+    const delBtn = document.createElement("button");
+    delBtn.className = "phrase-del";
+    delBtn.textContent = "×";
+    delBtn.title = "Remove this phrase";
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      row.remove();
+      updateRowCount();
+    };
+
+    row.appendChild(timeEl);
+    row.appendChild(textEl);
+    row.appendChild(delBtn);
+
     phraseListEl.appendChild(row);
   }
+}
+
+function updateRowCount() {
+  const n = phraseListEl.querySelectorAll(".phrase-row").length;
+  rowCount.textContent = n + " phrase" + (n !== 1 ? "s" : "");
 }
 
 function highlightPhraseRow(target) {
@@ -360,17 +386,12 @@ function fmtTime(sec) {
 }
 
 function showEditor(words) {
-  wordChips.innerHTML = "";
-  words.forEach((w, i) => {
-    wordChips.appendChild(makeChip(w.word, i, w.start));
-  });
-  updateWordCount();
-
   // Load the original uploaded video into the source player
   sourcePlayer.src = "/raw-upload/" + currentJobId;
 
-  // Populate the phrase timeline
+  // Populate the editable subtitle list
   renderPhraseList(words);
+  updateRowCount();
 
   // Show audio preview panel if any enhancement is enabled
   updateAudioPreviewVisibility();
@@ -379,77 +400,30 @@ function showEditor(words) {
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function makeChip(word, originalIndex, startSec) {
-  const chip = document.createElement("div");
-  chip.className = "word-chip";
-  chip.dataset.origIdx = originalIndex;
-
-  const inner = document.createElement("div");
-  inner.className = "word-chip-inner";
-
-  const span = document.createElement("span");
-  span.contentEditable = "true";
-  span.textContent = word;
-  span.spellcheck = false;
-
-  // Prevent newlines; select all on focus for easy replacement
-  span.addEventListener("keydown", e => {
-    if (e.key === "Enter") { e.preventDefault(); span.blur(); }
-  });
-  span.addEventListener("focus", () => {
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(span);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  });
-
-  const timeLabel = document.createElement("span");
-  timeLabel.className = "word-chip-time";
-  timeLabel.textContent = startSec != null ? fmtTime(startSec) : "";
-  if (startSec != null) {
-    timeLabel.title = "Jump to " + fmtTime(startSec);
-    timeLabel.addEventListener("click", e => {
-      e.stopPropagation();
-      sourcePlayer.currentTime = startSec;
-      if (sourcePlayer.paused) sourcePlayer.play();
-      sourcePlayer.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
-  }
-
-  inner.appendChild(span);
-  inner.appendChild(timeLabel);
-
-  const del = document.createElement("button");
-  del.className = "word-chip-del";
-  del.textContent = "×";
-  del.title = "Remove word";
-  del.onclick = () => { chip.remove(); updateWordCount(); };
-
-  chip.appendChild(inner);
-  chip.appendChild(del);
-  return chip;
-}
-
-function updateWordCount() {
-  const n = wordChips.querySelectorAll(".word-chip").length;
-  wordCount.textContent = n + " word" + (n !== 1 ? "s" : "");
-}
-
 // ---- Phase 2: Render ----
 renderBtn.onclick = async () => {
-  const chips = wordChips.querySelectorAll(".word-chip");
+  const rows = phraseListEl.querySelectorAll(".phrase-row");
   const editedWords = [];
-  chips.forEach(chip => {
-    const text = chip.querySelector("span").textContent.trim();
+  rows.forEach(row => {
+    const text = row.querySelector(".phrase-text").textContent.trim();
     if (!text) return;
-    const origIdx = parseInt(chip.dataset.origIdx, 10);
-    const orig = currentWords[origIdx] || { start: 0, end: 0 };
-    editedWords.push({ word: text, start: orig.start, end: orig.end });
+    const start = parseFloat(row.dataset.start);
+    const end   = parseFloat(row.dataset.end);
+    const words = text.split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    const duration = Math.max(0, end - start);
+    const wordDur  = words.length > 0 ? duration / words.length : 0;
+    words.forEach((word, i) => {
+      editedWords.push({
+        word,
+        start: start + i * wordDur,
+        end:   start + (i + 1) * wordDur,
+      });
+    });
   });
 
   if (!editedWords.length) {
-    alert("No words to render.");
+    alert("No subtitle phrases to render — please keep at least one row.");
     return;
   }
 

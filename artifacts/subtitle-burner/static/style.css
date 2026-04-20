@@ -319,6 +319,31 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 }
 .emoji-panel .add-rule-btn { margin-bottom: 16px; }
 
+/* ---- Two-column editor layout ---- */
+.editor-columns {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.editor-left {
+  flex: 0 0 54%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.editor-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.subtitle-panel {
+  display: flex;
+  flex-direction: column;
+}
+
 /* ---- Source video player ---- */
 .source-video-section video {
   width: 100%;
@@ -328,19 +353,18 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   display: block;
 }
 
-/* ---- Phrase timeline ---- */
+/* ---- Editable subtitle list ---- */
 .phrase-list {
-  max-height: 280px;
+  max-height: 420px;
   overflow-y: auto;
   border-radius: 8px;
   border: 1px solid #232833;
 }
 .phrase-row {
   display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 9px 14px;
-  cursor: pointer;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
   border-bottom: 1px solid #1c2030;
   transition: background .1s;
 }
@@ -352,20 +376,54 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   padding-left: 11px;
 }
 .phrase-time {
-  font-size: .78rem;
+  font-size: .75rem;
   color: #636870;
   font-variant-numeric: tabular-nums;
   min-width: 38px;
   flex-shrink: 0;
   font-family: ui-monospace, "Cascadia Code", monospace;
+  cursor: pointer;
+  transition: color .15s;
+  user-select: none;
 }
+.phrase-time:hover { color: #ffd60a; }
+.phrase-row.active .phrase-time { color: #ffd60a; }
 .phrase-text {
-  font-size: .9rem;
+  flex: 1;
+  font-size: .88rem;
   color: #c8cdd3;
-  line-height: 1.35;
+  line-height: 1.4;
+  outline: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background .1s, color .1s;
+  word-break: break-word;
+}
+.phrase-text:focus {
+  background: rgba(255, 214, 10, 0.07);
+  color: #e8eaed;
 }
 .phrase-row.active .phrase-text { color: #e8eaed; }
-.phrase-row.active .phrase-time { color: #ffd60a; }
+.phrase-del {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #4a5060;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 5px;
+  line-height: 1;
+  border-radius: 50%;
+  transition: color .1s, background .1s;
+}
+.phrase-del:hover { color: #ff375f; background: #2d0f14; }
+
+/* ---- Mobile: stack columns ---- */
+@media (max-width: 740px) {
+  .editor-columns { flex-direction: column; }
+  .editor-left, .editor-right { flex: unset; width: 100%; }
+  .phrase-list { max-height: 300px; }
+}
 
 /* ---- Instagram Pro preset button ---- */
 .audio-preset-row { margin-bottom: 16px; }

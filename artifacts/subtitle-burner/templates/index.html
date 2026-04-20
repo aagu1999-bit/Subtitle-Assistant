@@ -150,48 +150,46 @@
 
   <!-- Subtitle editor (shown after transcription) -->
   <div id="editor" class="hidden">
+    <div class="editor-columns">
 
-    <!-- Source Video Player -->
-    <section class="panel source-video-section">
-      <div class="editor-header">
-        <h2>Source Video</h2>
-        <span class="muted" style="font-size:.82rem">Click a phrase below to jump</span>
-      </div>
-      <video id="sourcePlayer" controls playsinline></video>
-    </section>
+      <!-- Left column: video + audio preview -->
+      <div class="editor-left">
+        <section class="panel source-video-section">
+          <div class="editor-header">
+            <h2>Source Video</h2>
+            <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
+          </div>
+          <video id="sourcePlayer" controls playsinline></video>
+        </section>
 
-    <!-- Phrase Timeline -->
-    <section class="panel">
-      <div class="editor-header">
-        <h2>Phrase Timeline</h2>
-        <span class="muted" style="font-size:.82rem">Click any row to seek</span>
+        <!-- Audio Preview -->
+        <div id="audioPreviewWrap" class="panel hidden">
+          <div class="editor-header" style="margin-bottom:12px">
+            <h2 style="margin:0">Preview Audio Enhancement</h2>
+            <button id="previewAudio" class="preview-audio-btn">&#9654; Preview first 30 s</button>
+          </div>
+          <div id="audioPreviewArea" class="hidden">
+            <audio id="audioPlayer" controls></audio>
+            <p id="audioPreviewStatus" class="muted"></p>
+          </div>
+        </div>
       </div>
-      <div id="phraseList" class="phrase-list"></div>
-    </section>
 
-    <!-- Audio Preview (available after transcription, uses server-side file) -->
-    <div id="audioPreviewWrap" class="panel hidden">
-      <div class="editor-header" style="margin-bottom:12px">
-        <h2 style="margin:0">Preview Audio Enhancement</h2>
-        <button id="previewAudio" class="preview-audio-btn">&#9654; Preview first 30 s</button>
+      <!-- Right column: editable subtitle list + render -->
+      <div class="editor-right">
+        <section class="panel subtitle-panel">
+          <div class="editor-header">
+            <h2>Subtitles</h2>
+            <span id="rowCount" class="pill muted">0 phrases</span>
+          </div>
+          <p class="muted panel-desc" style="margin-bottom:8px">Click the timestamp to seek · edit text inline · × removes a phrase</p>
+          <div id="phraseList" class="phrase-list"></div>
+        </section>
+
+        <button id="renderBtn" class="go render-btn">Render with Edits</button>
       </div>
-      <div id="audioPreviewArea" class="hidden">
-        <audio id="audioPlayer" controls></audio>
-        <p id="audioPreviewStatus" class="muted"></p>
-      </div>
+
     </div>
-
-    <!-- Word Chips Editor -->
-    <section class="panel">
-      <div class="editor-header">
-        <h2>Edit Words</h2>
-        <span id="wordCount" class="pill muted">0 words</span>
-      </div>
-      <p class="muted panel-desc">Click any word to edit it inline. Use × to remove a word.</p>
-      <div id="wordChips" class="word-chips"></div>
-    </section>
-
-    <button id="renderBtn" class="go render-btn">Render with Edits</button>
   </div>
 
   <!-- Result -->
