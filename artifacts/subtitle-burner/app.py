@@ -678,5 +678,18 @@ def preview_audio():
         _safe_unlink(audio_path)
 
 
+@app.route("/__replco/workspace_iframe.html")
+def replco_wrapper():
+    """Serve a pass-through wrapper so Replit's canvas preview can embed the app."""
+    return (
+        '<!DOCTYPE html><html style="height:100%;margin:0"><head>'
+        '<title>Subtitle Burner</title></head>'
+        '<body style="height:100%;margin:0;padding:0;overflow:hidden">'
+        '<iframe src="/" style="width:100%;height:100%;border:none;"'
+        ' allow="autoplay; camera; microphone; clipboard-write"></iframe>'
+        "</body></html>"
+    ), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
