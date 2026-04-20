@@ -43,10 +43,10 @@ const audioPreviewStatus = $("audioPreviewStatus");
 const sourcePlayer = $("sourcePlayer");
 const phraseListEl = $("phraseList");
 
-var currentFile = null;
-var currentJobId = null;
-var currentWords = []; // original words from transcription [{word, start, end}]
-var audioBlobUrl = null;
+let currentFile = null;
+let currentJobId = null;
+let currentWords = []; // original words from transcription [{word, start, end}]
+let audioBlobUrl = null;
 
 // ---- Audio toggle visibility ----
 // The audio preview panel lives inside the editor section (available after transcription).
