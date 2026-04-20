@@ -43,10 +43,10 @@ const audioPreviewStatus = $("audioPreviewStatus");
 const sourcePlayer = $("sourcePlayer");
 const phraseListEl = $("phraseList");
 
-let currentFile = null;
-let currentJobId = null;
-let currentWords = []; // original words from transcription [{word, start, end}]
-let audioBlobUrl = null;
+var currentFile = null;
+var currentJobId = null;
+var currentWords = []; // original words from transcription [{word, start, end}]
+var audioBlobUrl = null;
 
 // ---- Audio toggle visibility ----
 // The audio preview panel lives inside the editor section (available after transcription).
@@ -92,7 +92,7 @@ THEMES.forEach((t, i) => {
 sizeEl.oninput  = () => sizeVal.textContent = sizeEl.value;
 owEl.oninput    = () => owVal.textContent = owEl.value;
 posEl.oninput   = () => posVal.textContent = posEl.value + "%";
-groupEl.oninput = () => { groupVal.textContent = groupEl.value; renderPhraseList(currentWords); };
+groupEl.oninput = () => { groupVal.textContent = groupEl.value; renderPhraseList(currentWords); updateRowCount(); };
 
 // ---- Drag & drop ----
 drop.onclick = () => fileInput.click();
@@ -310,18 +310,13 @@ function renderPhraseList(words) {
     row.className = "phrase-row";
     row.dataset.start = group[0].start;
     row.dataset.end   = group[group.length - 1].end;
+    row.dataset.words = JSON.stringify(group.map(w => ({ s: w.start, e: w.end })));
 
-    // Timestamp label — click to seek
+    // Timestamp label
     const timeEl = document.createElement("span");
     timeEl.className = "phrase-time";
     timeEl.textContent = fmtTime(group[0].start);
     timeEl.title = "Seek to " + fmtTime(group[0].start);
-    timeEl.onclick = (e) => {
-      e.stopPropagation();
-      sourcePlayer.currentTime = parseFloat(row.dataset.start);
-      if (sourcePlayer.paused) sourcePlayer.play();
-      highlightPhraseRow(row);
-    };
 
     // Editable text
     const textEl = document.createElement("span");
@@ -342,6 +337,14 @@ function renderPhraseList(words) {
       e.stopPropagation();
       row.remove();
       updateRowCount();
+    };
+
+    // Row click → seek video; skip when clicking text (for editing) or delete button
+    row.onclick = (e) => {
+      if (textEl.contains(e.target) || delBtn.contains(e.target)) return;
+      sourcePlayer.currentTime = parseFloat(row.dataset.start);
+      if (sourcePlayer.paused) sourcePlayer.play();
+      highlightPhraseRow(row);
     };
 
     row.appendChild(timeEl);
@@ -407,19 +410,29 @@ renderBtn.onclick = async () => {
   rows.forEach(row => {
     const text = row.querySelector(".phrase-text").textContent.trim();
     if (!text) return;
-    const start = parseFloat(row.dataset.start);
-    const end   = parseFloat(row.dataset.end);
-    const words = text.split(/\s+/).filter(Boolean);
+    const start     = parseFloat(row.dataset.start);
+    const end       = parseFloat(row.dataset.end);
+    const origTimes = JSON.parse(row.dataset.words || "[]");
+    const words     = text.split(/\s+/).filter(Boolean);
     if (!words.length) return;
-    const duration = Math.max(0, end - start);
-    const wordDur  = words.length > 0 ? duration / words.length : 0;
-    words.forEach((word, i) => {
-      editedWords.push({
-        word,
-        start: start + i * wordDur,
-        end:   start + (i + 1) * wordDur,
+
+    if (words.length === origTimes.length) {
+      // Same word count — preserve original per-word timestamps 1:1
+      words.forEach((word, i) => {
+        editedWords.push({ word, start: origTimes[i].s, end: origTimes[i].e });
       });
-    });
+    } else {
+      // Different count — distribute evenly across the group's time span
+      const duration = Math.max(0, end - start);
+      const wordDur  = duration / words.length;
+      words.forEach((word, i) => {
+        editedWords.push({
+          word,
+          start: start + i * wordDur,
+          end:   start + (i + 1) * wordDur,
+        });
+      });
+    }
   });
 
   if (!editedWords.length) {
