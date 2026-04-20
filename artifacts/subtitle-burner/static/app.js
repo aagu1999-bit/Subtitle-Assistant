@@ -381,7 +381,6 @@ sourcePlayer.addEventListener("timeupdate", () => {
   }
 });
 
-// ---- Word chip editor ----
 function fmtTime(sec) {
   const m = Math.floor(sec / 60);
   const s = (sec % 60).toFixed(1).padStart(4, "0");
