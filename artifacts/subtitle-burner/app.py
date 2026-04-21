@@ -513,7 +513,7 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
     base_url = "https://auphonic.com/api"
 
     production_data: dict = {
-        "output_files": [{"format": "m4a"}],
+        "output_files": [{"format": "aac"}],
         "speech_isolation": bool(settings.get("speech_isolation", False)),
         "adaptive_leveler": bool(settings.get("adaptive_leveler", True)),
         "noise_hum_reduction": bool(settings.get("noise_hum_reduction", False)),
@@ -608,7 +608,7 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
     for out in output_files:
         fmt = out.get("format", "")
         name = out.get("filename", "")
-        if fmt == "m4a" or name.endswith(".m4a"):
+        if fmt == "aac" or name.endswith(".m4a") or name.endswith(".aac"):
             audio_url = out.get("download_url")
             break
     if not audio_url and output_files:
@@ -724,7 +724,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
 
             # Auphonic outputs M4A audio; FFmpeg merges it with the original
             # video when burning subtitles (via the audio_path argument).
-            enhanced_audio_path = UPLOAD_DIR / f"{job_id}_auphonic.m4a"
+            enhanced_audio_path = UPLOAD_DIR / f"{job_id}_auphonic.aac"
             enhance_with_auphonic(video_path, enhanced_audio_path, audio, status_callback=_set_status)
         else:
             af = build_audio_filter_chain(audio)
