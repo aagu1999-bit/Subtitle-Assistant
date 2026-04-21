@@ -8,6 +8,7 @@ import time
 import uuid
 import json
 import base64
+import sqlite3
 import subprocess
 import threading
 from pathlib import Path
@@ -54,6 +55,95 @@ _PENDING_STATUSES = {
 
 # ---- Job tracking (in-memory; fine for single-user Replit) ----
 jobs = {}  # job_id -> {status, progress, output, error, words, completed_at}
+
+# ---- SQLite persistence ----
+DB_PATH = BASE_DIR / "jobs.db"
+_db_lock = threading.Lock()
+
+
+def _db_init() -> None:
+    """Create the jobs table if it does not yet exist."""
+    with _db_lock:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id       TEXT PRIMARY KEY,
+                    status       TEXT,
+                    progress     INTEGER,
+                    output       TEXT,
+                    error        TEXT,
+                    words        TEXT,
+                    created_at   REAL,
+                    completed_at REAL
+                )
+            """)
+            conn.commit()
+
+
+def _db_save_job(job_id: str) -> None:
+    """Upsert the current in-memory state of *job_id* into SQLite."""
+    job = jobs.get(job_id)
+    if job is None:
+        return
+    words_json = json.dumps(job.get("words")) if job.get("words") is not None else None
+    with _db_lock:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO jobs
+                    (job_id, status, progress, output, error, words, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    job.get("status"),
+                    job.get("progress"),
+                    job.get("output"),
+                    job.get("error"),
+                    words_json,
+                    job.get("created_at"),
+                    job.get("completed_at"),
+                ),
+            )
+            conn.commit()
+
+
+def _db_delete_job(job_id: str) -> None:
+    """Remove a job record from SQLite."""
+    with _db_lock:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
+            conn.commit()
+
+
+def _load_jobs_from_db() -> None:
+    """Populate the in-memory jobs dict from persisted SQLite records."""
+    if not DB_PATH.exists():
+        return
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM jobs").fetchall()
+    for row in rows:
+        words = None
+        if row["words"]:
+            try:
+                words = json.loads(row["words"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        jobs[row["job_id"]] = {
+            "status": row["status"],
+            "progress": row["progress"],
+            "output": row["output"],
+            "error": row["error"],
+            "words": words,
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+        }
+
+
+# Initialise DB and reload persisted jobs before the cleanup thread starts.
+_db_init()
+_load_jobs_from_db()
 
 
 def allowed_file(name: str) -> bool:
@@ -102,6 +192,7 @@ def _cleanup_loop() -> None:
         ]
         for jid in stale_done:
             jobs.pop(jid, None)
+            _db_delete_job(jid)
 
         # 3. Prune abandoned jobs (user uploaded but never triggered render)
         #    that are older than the upload TTL.
@@ -119,6 +210,7 @@ def _cleanup_loop() -> None:
             _safe_unlink(UPLOAD_DIR / f"{jid}.ass")
             _safe_unlink(UPLOAD_DIR / f"{jid}_audio.aac")
             jobs.pop(jid, None)
+            _db_delete_job(jid)
 
         # 4. Remove orphaned upload files (no matching job entry — e.g. after
         #    a server restart) that are older than the upload TTL.
@@ -573,16 +665,19 @@ def transcribe_job(job_id: str, video_path: Path):
     try:
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 30
+        _db_save_job(job_id)
         words = transcribe(video_path)
         if not words:
             raise RuntimeError("No speech detected in the video.")
         jobs[job_id]["words"] = words
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
+        _db_save_job(job_id)
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
         # No render will follow — clean up the uploaded video now.
         _safe_unlink(video_path)
 
@@ -595,6 +690,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
     try:
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
+        _db_save_job(job_id)
         w, h = get_video_dimensions(video_path)
         ass_content = build_ass(words, style, w, h, emoji_rules=emoji_rules)
 
@@ -616,6 +712,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                     "processing audio": 68,
                     "downloading enhanced video": 78,
                 }.get(s, jobs[job_id]["progress"])
+                _db_save_job(job_id)
 
             auphonic_video_path = UPLOAD_DIR / f"{job_id}_auphonic.mp4"
             enhance_with_auphonic(video_path, auphonic_video_path, audio, status_callback=_set_status)
@@ -625,11 +722,13 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
             if af:
                 jobs[job_id]["status"] = "enhancing audio"
                 jobs[job_id]["progress"] = 68
+                _db_save_job(job_id)
                 enhanced_audio_path = UPLOAD_DIR / f"{job_id}_audio.aac"
                 apply_audio_enhancements(video_path, enhanced_audio_path, af)
 
         jobs[job_id]["status"] = "rendering video"
         jobs[job_id]["progress"] = 80
+        _db_save_job(job_id)
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
         burn_subtitles(source_video, ass_path, output_path, audio_path=enhanced_audio_path)
 
@@ -637,10 +736,12 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["progress"] = 100
         jobs[job_id]["output"] = output_path.name
         jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
     finally:
         # Temp files (upload, .ass, _audio.aac, _auphonic.mp4) are no longer needed.
         _cleanup_temp_files(video_path, ass_path, enhanced_audio_path)
@@ -653,6 +754,7 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
     try:
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 10
+        _db_save_job(job_id)
         words = transcribe(video_path)
 
         if not words:
@@ -663,6 +765,7 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
         # render_job handles its own cleanup; only clean up if we never reached it.
         _safe_unlink(video_path)
 
@@ -696,6 +799,7 @@ def transcribe_only():
         "words": None,
         "created_at": time.time(),
     }
+    _db_save_job(job_id)
     t = threading.Thread(target=transcribe_job, args=(job_id, video_path))
     t.daemon = True
     t.start()
@@ -739,6 +843,7 @@ def render():
     jobs[job_id]["progress"] = 0
     jobs[job_id]["output"] = None
     jobs[job_id]["error"] = None
+    _db_save_job(job_id)
 
     t = threading.Thread(
         target=render_job,
@@ -769,6 +874,7 @@ def upload():
     audio = json.loads(request.form.get("audio", "{}"))
 
     jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None, "created_at": time.time()}
+    _db_save_job(job_id)
     t = threading.Thread(target=process_job, args=(job_id, video_path, style, audio))
     t.daemon = True
     t.start()
