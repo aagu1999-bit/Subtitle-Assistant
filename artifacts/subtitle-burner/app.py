@@ -298,6 +298,25 @@ def _visible_len(ass_text: str) -> int:
     return len(re.sub(r"\{[^}]*\}", "", ass_text))
 
 
+def _clamp_line_width(line: str, font_size: int, video_w: int,
+                      char_factor: float = 0.76, safe_pct: float = 0.84) -> str:
+    """Return *line* with a \\fscx override that squishes it to fit the safe area.
+
+    Uses an empirical pixel-width estimate (char_factor × font_size per visible
+    character).  0.76 is conservative enough to cover wide fonts like Montserrat
+    Black in all-caps mode.  The scale is floored at 40 % to keep text legible.
+    """
+    raw_len = _visible_len(line)
+    if raw_len == 0:
+        return line
+    est_px = raw_len * font_size * char_factor
+    max_px = video_w * safe_pct
+    if est_px <= max_px:
+        return line
+    scale = max(40, int((max_px / est_px) * 100))
+    return f"{{\\fscx{scale}}}{line}"
+
+
 def _wrap_ass_text(text: str, max_chars: int) -> str:
     """Split ASS-tagged subtitle text at word boundaries to fit max_chars per line.
 
@@ -341,9 +360,12 @@ def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict 
     pos_y = int(video_h * (pos_y_pct / 100.0))
 
     # Max visible chars per line so subtitles don't exceed the video frame.
-    # Montserrat Black is wide — estimate char width at ~0.65× font_size px.
-    # Allow 88 % of the video width as safe area.
-    max_chars_per_line = max(8, int((video_w * 0.88) / (font_size * 0.65)))
+    # 0.76× font_size is conservative enough for wide fonts (Montserrat Black,
+    # all-caps) while still allowing reasonable line lengths for narrow fonts.
+    # Safe area is 84 % of video width (8 % margins each side).
+    _char_factor = 0.76
+    _safe_pct = 0.84
+    max_chars_per_line = max(6, int((video_w * _safe_pct) / (font_size * _char_factor)))
 
     # Normalise emoji rule keys to lowercase alpha-only for robust matching
     normalised_emoji: dict[str, str] = {}
@@ -405,8 +427,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if group_emoji:
                 text = text + " " + group_emoji
 
-            # Wrap to prevent overflow beyond the video frame width
+            # Wrap long lines, then clamp any remaining overflow with \fscx
             text = _wrap_ass_text(text, max_chars_per_line)
+            text = r"\N".join(
+                _clamp_line_width(ln, font_size, video_w, _char_factor, _safe_pct)
+                for ln in text.split(r"\N")
+            )
 
             start_ts = ass_timestamp(active["start"])
             end_ts = ass_timestamp(active["end"])
