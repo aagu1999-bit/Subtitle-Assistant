@@ -513,7 +513,7 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
     base_url = "https://auphonic.com/api"
 
     production_data: dict = {
-        "output_files": [{"format": "mp4"}],
+        "output_files": [{"format": "m4a"}],
         "speech_isolation": bool(settings.get("speech_isolation", False)),
         "adaptive_leveler": bool(settings.get("adaptive_leveler", True)),
         "noise_hum_reduction": bool(settings.get("noise_hum_reduction", False)),
@@ -601,23 +601,23 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
             raise RuntimeError(f"Auphonic processing failed: {msg}")
 
     if status_callback:
-        status_callback("downloading enhanced video")
+        status_callback("downloading enhanced audio")
 
     output_files = data.get("output_files", [])
-    mp4_url = None
+    audio_url = None
     for out in output_files:
         fmt = out.get("format", "")
         name = out.get("filename", "")
-        if fmt == "mp4" or name.endswith(".mp4"):
-            mp4_url = out.get("download_url")
+        if fmt == "m4a" or name.endswith(".m4a"):
+            audio_url = out.get("download_url")
             break
-    if not mp4_url and output_files:
-        mp4_url = output_files[0].get("download_url")
+    if not audio_url and output_files:
+        audio_url = output_files[0].get("download_url")
 
-    if not mp4_url:
+    if not audio_url:
         raise RuntimeError("Auphonic: no output file URL found in production result")
 
-    resp = requests.get(mp4_url, headers=headers, timeout=600, stream=True)
+    resp = requests.get(audio_url, headers=headers, timeout=600, stream=True)
     if resp.status_code != 200:
         raise RuntimeError(f"Auphonic download failed ({resp.status_code})")
 
@@ -697,7 +697,6 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
     """Build ASS, optionally enhance audio, then burn subtitles."""
     ass_path: Path | None = None
     enhanced_audio_path: Path | None = None
-    auphonic_video_path: Path | None = None
     try:
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
@@ -707,8 +706,6 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
 
         ass_path = UPLOAD_DIR / f"{job_id}.ass"
         ass_path.write_text(ass_content, encoding="utf-8")
-
-        source_video = video_path
 
         if audio.get("provider") == "auphonic":
             if not os.environ.get("AUPHONIC_API_KEY"):
@@ -721,13 +718,14 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 jobs[job_id]["progress"] = {
                     "uploading to Auphonic": 60,
                     "processing audio": 68,
-                    "downloading enhanced video": 78,
+                    "downloading enhanced audio": 78,
                 }.get(s, jobs[job_id]["progress"])
                 _db_save_job(job_id)
 
-            auphonic_video_path = UPLOAD_DIR / f"{job_id}_auphonic.mp4"
-            enhance_with_auphonic(video_path, auphonic_video_path, audio, status_callback=_set_status)
-            source_video = auphonic_video_path
+            # Auphonic outputs M4A audio; FFmpeg merges it with the original
+            # video when burning subtitles (via the audio_path argument).
+            enhanced_audio_path = UPLOAD_DIR / f"{job_id}_auphonic.m4a"
+            enhance_with_auphonic(video_path, enhanced_audio_path, audio, status_callback=_set_status)
         else:
             af = build_audio_filter_chain(audio)
             if af:
@@ -741,7 +739,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["progress"] = 80
         _db_save_job(job_id)
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
-        burn_subtitles(source_video, ass_path, output_path, audio_path=enhanced_audio_path)
+        burn_subtitles(video_path, ass_path, output_path, audio_path=enhanced_audio_path)
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
@@ -754,9 +752,8 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
     finally:
-        # Temp files (upload, .ass, _audio.aac, _auphonic.mp4) are no longer needed.
+        # Temp files (upload, .ass, _audio.aac, _auphonic.m4a) are no longer needed.
         _cleanup_temp_files(video_path, ass_path, enhanced_audio_path)
-        _safe_unlink(auphonic_video_path)
 
 
 def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
