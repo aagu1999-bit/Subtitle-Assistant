@@ -529,17 +529,14 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
     if status_callback:
         status_callback("uploading to Auphonic")
 
-    with open(video_path, "rb") as fh:
-        resp = requests.post(
-            f"{base_url}/productions.json",
-            headers=headers,
-            files={
-                "input_file": (video_path.name, fh, "video/mp4"),
-                "data": (None, json.dumps(production_data), "application/json"),
-            },
-            timeout=300,
-        )
-
+    # Step 1: create production with JSON settings
+    json_headers = {**headers, "Content-Type": "application/json"}
+    resp = requests.post(
+        f"{base_url}/productions.json",
+        headers=json_headers,
+        data=json.dumps(production_data),
+        timeout=60,
+    )
     if resp.status_code not in (200, 201):
         raise RuntimeError(
             f"Auphonic create production failed ({resp.status_code}): {resp.text[:500]}"
@@ -547,6 +544,20 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
 
     prod_uuid = resp.json()["data"]["uuid"]
 
+    # Step 2: upload the video file as the input
+    with open(video_path, "rb") as fh:
+        resp = requests.post(
+            f"{base_url}/production/{prod_uuid}/input-file.json",
+            headers=headers,
+            files={"input_file": (video_path.name, fh)},
+            timeout=300,
+        )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Auphonic file upload failed ({resp.status_code}): {resp.text[:500]}"
+        )
+
+    # Step 3: start processing
     resp = requests.post(
         f"{base_url}/production/{prod_uuid}/start.json",
         headers=headers,
