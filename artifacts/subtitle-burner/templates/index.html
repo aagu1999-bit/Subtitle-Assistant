@@ -86,42 +86,103 @@
   <!-- Audio Enhancement panel -->
   <section class="panel">
     <h2>Audio Enhancement</h2>
-    <p class="muted panel-desc">Optional — applied before subtitle rendering via FFmpeg audio filters.</p>
 
-    <div class="row audio-preset-row">
-      <button id="instagramPreset" class="audio-preset-btn">✨ Instagram Pro</button>
-      <span class="muted" style="font-size:.82rem">Enables all filters for polished social audio</span>
+    {% if auphonic_enabled %}
+    <!-- Engine tab switcher -->
+    <div class="audio-tabs" id="audioTabs">
+      <button class="audio-tab active" id="tabFfmpeg" data-tab="ffmpeg">FFmpeg</button>
+      <button class="audio-tab" id="tabAuphonic" data-tab="auphonic">⚡ Auphonic AI</button>
+    </div>
+    {% endif %}
+
+    <!-- FFmpeg tab content -->
+    <div id="ffmpegTabContent">
+      <p class="muted panel-desc">Optional — applied before subtitle rendering via FFmpeg audio filters.</p>
+
+      <div class="row audio-preset-row">
+        <button id="instagramPreset" class="audio-preset-btn">✨ Instagram Pro</button>
+        <span class="muted" style="font-size:.82rem">Enables all filters for polished social audio</span>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="noiseReduction">
+          <span class="toggle-text">
+            <strong>Noise Reduction</strong>
+            <span class="muted">Reduces background hiss and hum</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="loudnessNorm">
+          <span class="toggle-text">
+            <strong>Loudness Normalization</strong>
+            <span class="muted">Balances volume to −14 LUFS (Instagram standard)</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="voiceClarity">
+          <span class="toggle-text">
+            <strong>Voice Clarity</strong>
+            <span class="muted">Gentle presence boost + de-esser for smooth, professional vocals</span>
+          </span>
+        </label>
+      </div>
     </div>
 
-    <div class="row toggle-row">
-      <label class="toggle-label">
-        <input type="checkbox" id="noiseReduction">
-        <span class="toggle-text">
-          <strong>Noise Reduction</strong>
-          <span class="muted">Reduces background hiss and hum</span>
-        </span>
-      </label>
-    </div>
+    {% if auphonic_enabled %}
+    <!-- Auphonic tab content -->
+    <div id="auphonicTabContent" class="hidden">
+      <p class="muted panel-desc">AI audio enhancement for interviews, podcasts &amp; storytelling — processed at render time.</p>
 
-    <div class="row toggle-row">
-      <label class="toggle-label">
-        <input type="checkbox" id="loudnessNorm">
-        <span class="toggle-text">
-          <strong>Loudness Normalization</strong>
-          <span class="muted">Balances volume to −14 LUFS (Instagram standard)</span>
-        </span>
-      </label>
-    </div>
+      <div class="auphonic-presets">
+        <button class="auphonic-preset-btn" data-preset="interview">Interview</button>
+        <button class="auphonic-preset-btn" data-preset="podcast">Podcast</button>
+        <button class="auphonic-preset-btn" data-preset="storytelling">Storytelling</button>
+        <button class="auphonic-preset-btn" data-preset="cleanroom">Clean Room</button>
+      </div>
 
-    <div class="row toggle-row">
-      <label class="toggle-label">
-        <input type="checkbox" id="voiceClarity">
-        <span class="toggle-text">
-          <strong>Voice Clarity</strong>
-          <span class="muted">Gentle presence boost + de-esser for smooth, professional vocals</span>
-        </span>
-      </label>
+      <div class="row toggle-row" style="margin-top:14px">
+        <label class="toggle-label">
+          <input type="checkbox" id="auphonicSpeechIsolation">
+          <span class="toggle-text">
+            <strong>Speech Isolation</strong>
+            <span class="muted">Separate voice from background noise using AI</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="auphonicAdaptiveLeveler">
+          <span class="toggle-text">
+            <strong>Adaptive Leveler</strong>
+            <span class="muted">Automatically balance uneven volume levels</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row" style="margin-top:4px">
+        <label style="min-width:140px;font-size:.95rem;color:#c8cdd3">Loudness Target</label>
+        <select id="auphonicLoudness">
+          <option value="-16">Podcast / Broadcast −16 LUFS</option>
+          <option value="-14">Social −14 LUFS</option>
+          <option value="-23">Broadcast −23 LUFS</option>
+          <option value="">Off</option>
+        </select>
+      </div>
+
+      <p class="muted" style="font-size:.82rem;margin-top:14px">
+        Preview unavailable — Auphonic processes at render time.
+      </p>
     </div>
+    {% endif %}
+
   </section>
 
   <!-- Emoji Rules panel (collapsible) -->

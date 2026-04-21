@@ -6,6 +6,8 @@ import os
 import re
 import time
 import uuid
+import json
+import base64
 import subprocess
 import threading
 from pathlib import Path
@@ -44,7 +46,11 @@ except (ValueError, TypeError):
 _CLEANUP_INTERVAL = 300  # 5 minutes
 
 # Statuses treated as "job still in progress / waiting for user action"
-_PENDING_STATUSES = {"queued", "transcribing", "awaiting_edit", "building subtitles", "enhancing audio", "rendering video"}
+_PENDING_STATUSES = {
+    "queued", "transcribing", "awaiting_edit", "building subtitles",
+    "enhancing audio", "rendering video",
+    "uploading to Auphonic", "processing audio", "downloading enhanced video",
+}
 
 # ---- Job tracking (in-memory; fine for single-user Replit) ----
 jobs = {}  # job_id -> {status, progress, output, error, words, completed_at}
@@ -386,6 +392,137 @@ def apply_audio_enhancements(video_path: Path, output_path: Path, af: str, durat
         raise RuntimeError(f"FFmpeg audio enhancement failed: {proc.stderr[-2000:]}")
 
 
+def _auphonic_auth_headers() -> dict:
+    """Build HTTP auth headers from AUPHONIC_API_KEY.
+
+    If the value contains a colon it is treated as "user:password" (Basic Auth),
+    otherwise it is used as a Bearer token.
+    """
+    key = os.environ.get("AUPHONIC_API_KEY", "")
+    if ":" in key:
+        token = base64.b64encode(key.encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+    return {"Authorization": f"Bearer {key}"}
+
+
+def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, status_callback=None) -> None:
+    """Upload video to Auphonic, apply AI audio enhancement, download the result.
+
+    settings keys (all optional):
+      speech_isolation   (bool)
+      adaptive_leveler   (bool)
+      noise_hum_reduction (bool)
+      highpass           (bool)
+      loudness_lufs      (int | None) — e.g. -16, -14, -23, or None for off
+    """
+    import requests
+
+    headers = _auphonic_auth_headers()
+    base_url = "https://auphonic.com/api"
+
+    production_data: dict = {
+        "output_files": [{"format": "mp4"}],
+        "speech_isolation": bool(settings.get("speech_isolation", False)),
+        "adaptive_leveler": bool(settings.get("adaptive_leveler", True)),
+        "noise_hum_reduction": bool(settings.get("noise_hum_reduction", False)),
+    }
+
+    if settings.get("highpass"):
+        production_data["filtering"] = {"highpass": True}
+
+    loudness = settings.get("loudness_lufs")
+    if loudness is not None:
+        production_data["loudness_target"] = int(loudness)
+
+    if status_callback:
+        status_callback("uploading to Auphonic")
+
+    with open(video_path, "rb") as fh:
+        resp = requests.post(
+            f"{base_url}/productions.json",
+            headers=headers,
+            files={
+                "input_file": (video_path.name, fh, "video/mp4"),
+                "data": (None, json.dumps(production_data), "application/json"),
+            },
+            timeout=300,
+        )
+
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Auphonic create production failed ({resp.status_code}): {resp.text[:500]}"
+        )
+
+    prod_uuid = resp.json()["data"]["uuid"]
+
+    resp = requests.post(
+        f"{base_url}/production/{prod_uuid}/start.json",
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Auphonic start production failed ({resp.status_code}): {resp.text[:500]}"
+        )
+
+    if status_callback:
+        status_callback("processing audio")
+
+    _MAX_POLL_SECONDS = 1800  # 30-minute hard deadline
+    _poll_start = time.time()
+
+    while True:
+        time.sleep(3)
+        if time.time() - _poll_start > _MAX_POLL_SECONDS:
+            raise RuntimeError(
+                "Auphonic processing timed out after 30 minutes. "
+                "Check your Auphonic dashboard for production status."
+            )
+        resp = requests.get(
+            f"{base_url}/production/{prod_uuid}.json",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Auphonic poll failed ({resp.status_code}): {resp.text[:300]}"
+            )
+
+        data = resp.json()["data"]
+        status_string = data.get("status_string", "")
+
+        if status_string == "Done":
+            break
+        if status_string in ("Error", "Encoding Failed"):
+            msg = data.get("error_message") or status_string
+            raise RuntimeError(f"Auphonic processing failed: {msg}")
+
+    if status_callback:
+        status_callback("downloading enhanced video")
+
+    output_files = data.get("output_files", [])
+    mp4_url = None
+    for out in output_files:
+        fmt = out.get("format", "")
+        name = out.get("filename", "")
+        if fmt == "mp4" or name.endswith(".mp4"):
+            mp4_url = out.get("download_url")
+            break
+    if not mp4_url and output_files:
+        mp4_url = output_files[0].get("download_url")
+
+    if not mp4_url:
+        raise RuntimeError("Auphonic: no output file URL found in production result")
+
+    resp = requests.get(mp4_url, headers=headers, timeout=600, stream=True)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Auphonic download failed ({resp.status_code})")
+
+    with open(output_path, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=65536):
+            fh.write(chunk)
+
+
 def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path, audio_path: Path | None = None):
     """Burn the ASS file into the video using FFmpeg.
 
@@ -454,6 +591,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
     """Build ASS, optionally enhance audio, then burn subtitles."""
     ass_path: Path | None = None
     enhanced_audio_path: Path | None = None
+    auphonic_video_path: Path | None = None
     try:
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
@@ -463,17 +601,37 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         ass_path = UPLOAD_DIR / f"{job_id}.ass"
         ass_path.write_text(ass_content, encoding="utf-8")
 
-        af = build_audio_filter_chain(audio)
-        if af:
-            jobs[job_id]["status"] = "enhancing audio"
-            jobs[job_id]["progress"] = 68
-            enhanced_audio_path = UPLOAD_DIR / f"{job_id}_audio.aac"
-            apply_audio_enhancements(video_path, enhanced_audio_path, af)
+        source_video = video_path
+
+        if audio.get("provider") == "auphonic":
+            if not os.environ.get("AUPHONIC_API_KEY"):
+                raise RuntimeError(
+                    "Auphonic is not configured on this server (AUPHONIC_API_KEY not set)."
+                )
+
+            def _set_status(s: str) -> None:
+                jobs[job_id]["status"] = s
+                jobs[job_id]["progress"] = {
+                    "uploading to Auphonic": 60,
+                    "processing audio": 68,
+                    "downloading enhanced video": 78,
+                }.get(s, jobs[job_id]["progress"])
+
+            auphonic_video_path = UPLOAD_DIR / f"{job_id}_auphonic.mp4"
+            enhance_with_auphonic(video_path, auphonic_video_path, audio, status_callback=_set_status)
+            source_video = auphonic_video_path
+        else:
+            af = build_audio_filter_chain(audio)
+            if af:
+                jobs[job_id]["status"] = "enhancing audio"
+                jobs[job_id]["progress"] = 68
+                enhanced_audio_path = UPLOAD_DIR / f"{job_id}_audio.aac"
+                apply_audio_enhancements(video_path, enhanced_audio_path, af)
 
         jobs[job_id]["status"] = "rendering video"
         jobs[job_id]["progress"] = 80
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
-        burn_subtitles(video_path, ass_path, output_path, audio_path=enhanced_audio_path)
+        burn_subtitles(source_video, ass_path, output_path, audio_path=enhanced_audio_path)
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
@@ -484,8 +642,9 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
     finally:
-        # Temp files (upload, .ass, _audio.aac) are no longer needed.
+        # Temp files (upload, .ass, _audio.aac, _auphonic.mp4) are no longer needed.
         _cleanup_temp_files(video_path, ass_path, enhanced_audio_path)
+        _safe_unlink(auphonic_video_path)
 
 
 def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
@@ -511,7 +670,8 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 # ---- Routes ----
 @app.route("/")
 def index():
-    return render_template("index.html")
+    auphonic_enabled = bool(os.environ.get("AUPHONIC_API_KEY"))
+    return render_template("index.html", auphonic_enabled=auphonic_enabled)
 
 
 @app.route("/transcribe-only", methods=["POST"])

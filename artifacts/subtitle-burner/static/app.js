@@ -48,11 +48,84 @@ let currentJobId = null;
 let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
 
+// ---- Audio engine tab state ----
+// "ffmpeg" or "auphonic". Defaults to ffmpeg; only switches if tabs are present.
+let activeAudioTab = "ffmpeg";
+
+const ffmpegTabContent   = $("ffmpegTabContent");
+const auphonicTabContent = $("auphonicTabContent");  // null when auphonic_enabled=false
+const audioTabsEl        = $("audioTabs");            // null when auphonic_enabled=false
+
+if (audioTabsEl) {
+  audioTabsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".audio-tab");
+    if (!btn) return;
+    const tab = btn.dataset.tab;
+    if (tab === activeAudioTab) return;
+    activeAudioTab = tab;
+    audioTabsEl.querySelectorAll(".audio-tab").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    if (tab === "ffmpeg") {
+      ffmpegTabContent.classList.remove("hidden");
+      if (auphonicTabContent) auphonicTabContent.classList.add("hidden");
+    } else {
+      ffmpegTabContent.classList.add("hidden");
+      if (auphonicTabContent) auphonicTabContent.classList.remove("hidden");
+    }
+    updateAudioPreviewVisibility();
+  });
+}
+
+// ---- Auphonic presets ----
+const AUPHONIC_PRESETS = {
+  interview:    { speech_isolation: true,  adaptive_leveler: true,  noise_hum_reduction: true,  highpass: true,  loudness_lufs: -16 },
+  podcast:      { speech_isolation: true,  adaptive_leveler: true,  noise_hum_reduction: true,  highpass: true,  loudness_lufs: -16 },
+  storytelling: { speech_isolation: true,  adaptive_leveler: true,  noise_hum_reduction: false, highpass: true,  loudness_lufs: -14 },
+  cleanroom:    { speech_isolation: false, adaptive_leveler: true,  noise_hum_reduction: false, highpass: false, loudness_lufs: -16 },
+};
+
+// State for preset-only fields (no direct toggles in UI)
+let auphonicNoiseHumReduction = true;
+let auphonicHighpass = true;
+
+function applyAuphonicPreset(name) {
+  const p = AUPHONIC_PRESETS[name];
+  if (!p) return;
+  const si  = $("auphonicSpeechIsolation");
+  const al  = $("auphonicAdaptiveLeveler");
+  const ld  = $("auphonicLoudness");
+  if (si)  si.checked  = p.speech_isolation;
+  if (al)  al.checked  = p.adaptive_leveler;
+  if (ld)  ld.value    = p.loudness_lufs !== null ? String(p.loudness_lufs) : "";
+  auphonicNoiseHumReduction = p.noise_hum_reduction;
+  auphonicHighpass          = p.highpass;
+  // Mark active preset button
+  if (auphonicTabContent) {
+    auphonicTabContent.querySelectorAll(".auphonic-preset-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.preset === name);
+    });
+  }
+}
+
+// Apply default preset on load (Interview) — only if elements exist
+if ($("auphonicSpeechIsolation")) {
+  applyAuphonicPreset("interview");
+  auphonicTabContent.querySelectorAll(".auphonic-preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => applyAuphonicPreset(btn.dataset.preset));
+  });
+}
+
 // ---- Audio toggle visibility ----
 // The audio preview panel lives inside the editor section (available after transcription).
 const audioCheckboxes = ["noiseReduction", "loudnessNorm", "voiceClarity"].map($);
 
 function updateAudioPreviewVisibility() {
+  if (activeAudioTab !== "ffmpeg") {
+    // Auphonic mode: no preview panel
+    previewWrap.classList.add("hidden");
+    audioPreviewArea.classList.add("hidden");
+    return;
+  }
   const anyOn = audioCheckboxes.some(cb => cb.checked);
   if (anyOn && currentJobId) {
     previewWrap.classList.remove("hidden");
@@ -129,7 +202,19 @@ function getStyle() {
 }
 
 function getAudio() {
+  if (activeAudioTab === "auphonic") {
+    const loudnessVal = $("auphonicLoudness") ? $("auphonicLoudness").value : "-16";
+    return {
+      provider:            "auphonic",
+      speech_isolation:    $("auphonicSpeechIsolation") ? $("auphonicSpeechIsolation").checked : false,
+      adaptive_leveler:    $("auphonicAdaptiveLeveler") ? $("auphonicAdaptiveLeveler").checked : true,
+      noise_hum_reduction: auphonicNoiseHumReduction,
+      highpass:            auphonicHighpass,
+      loudness_lufs:       loudnessVal !== "" ? parseInt(loudnessVal, 10) : null,
+    };
+  }
   return {
+    provider:        "ffmpeg",
     noise_reduction: $("noiseReduction").checked,
     loudness_norm:   $("loudnessNorm").checked,
     voice_clarity:   $("voiceClarity").checked,

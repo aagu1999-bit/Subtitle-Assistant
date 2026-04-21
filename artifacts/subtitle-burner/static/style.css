@@ -443,6 +443,49 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 }
 .audio-preset-btn:hover { opacity: .9; transform: translateY(-1px); }
 
+/* ---- Audio engine tabs ---- */
+.audio-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #232833;
+}
+.audio-tab {
+  padding: 8px 20px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #9aa0a6;
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.audio-tab:hover { color: #e8eaed; }
+.audio-tab.active { color: #ffd60a; border-bottom-color: #ffd60a; }
+
+/* ---- Auphonic preset buttons ---- */
+.auphonic-presets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.auphonic-preset-btn {
+  padding: 7px 16px;
+  background: #232833;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  color: #c8cdd3;
+  font-size: .88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .1s;
+}
+.auphonic-preset-btn:hover { background: #2d3340; border-color: #ffd60a; color: #e8eaed; }
+.auphonic-preset-btn.active { background: #2d3340; border-color: #ffd60a; color: #ffd60a; }
+
 /* ---- Audio preview panel (inside editor) ---- */
 #audioPreviewWrap {
   margin-top: 24px;
