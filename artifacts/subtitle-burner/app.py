@@ -50,7 +50,7 @@ _CLEANUP_INTERVAL = 300  # 5 minutes
 _PENDING_STATUSES = {
     "queued", "transcribing", "awaiting_edit", "building subtitles",
     "enhancing audio", "rendering video",
-    "uploading to Auphonic", "processing audio", "downloading enhanced video",
+    "uploading to Auphonic", "processing audio", "downloading enhanced audio",
 }
 
 # ---- Job tracking (in-memory; fine for single-user Replit) ----
@@ -73,10 +73,19 @@ def _db_init() -> None:
                     output       TEXT,
                     error        TEXT,
                     words        TEXT,
+                    style        TEXT,
+                    audio        TEXT,
+                    emoji_rules  TEXT,
                     created_at   REAL,
                     completed_at REAL
                 )
             """)
+            existing_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            for col in ("style", "audio", "emoji_rules"):
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
             conn.commit()
 
 
@@ -86,13 +95,16 @@ def _db_save_job(job_id: str) -> None:
     if job is None:
         return
     words_json = json.dumps(job.get("words")) if job.get("words") is not None else None
+    style_json = json.dumps(job.get("style")) if job.get("style") is not None else None
+    audio_json = json.dumps(job.get("audio")) if job.get("audio") is not None else None
+    emoji_rules_json = json.dumps(job.get("emoji_rules")) if job.get("emoji_rules") is not None else None
     with _db_lock:
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO jobs
-                    (job_id, status, progress, output, error, words, created_at, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -101,6 +113,9 @@ def _db_save_job(job_id: str) -> None:
                     job.get("output"),
                     job.get("error"),
                     words_json,
+                    style_json,
+                    audio_json,
+                    emoji_rules_json,
                     job.get("created_at"),
                     job.get("completed_at"),
                 ),
@@ -124,18 +139,27 @@ def _load_jobs_from_db() -> None:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM jobs").fetchall()
     for row in rows:
-        words = None
-        if row["words"]:
-            try:
-                words = json.loads(row["words"])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        def _load_json_col(name: str):
+            if row[name]:
+                try:
+                    return json.loads(row[name])
+                except (json.JSONDecodeError, TypeError):
+                    return None
+            return None
+
+        words = _load_json_col("words")
+        style = _load_json_col("style")
+        audio = _load_json_col("audio")
+        emoji_rules = _load_json_col("emoji_rules")
         jobs[row["job_id"]] = {
             "status": row["status"],
             "progress": row["progress"],
             "output": row["output"],
             "error": row["error"],
             "words": words,
+            "style": style,
+            "audio": audio,
+            "emoji_rules": emoji_rules,
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
         }
@@ -819,6 +843,9 @@ def transcribe_only():
         "output": None,
         "error": None,
         "words": None,
+        "style": None,
+        "audio": None,
+        "emoji_rules": None,
         "created_at": time.time(),
     }
     _db_save_job(job_id)
@@ -845,22 +872,18 @@ def render():
     if not words:
         return jsonify({"error": "No words provided"}), 400
 
-    # Validate word objects — each must have word (str), start (num), end (num)
-    for i, w in enumerate(words):
-        if not isinstance(w, dict):
-            return jsonify({"error": f"Word at index {i} is not an object"}), 400
-        if not isinstance(w.get("word"), str) or not w["word"].strip():
-            return jsonify({"error": f"Word at index {i} missing valid 'word' field"}), 400
-        if not isinstance(w.get("start"), (int, float)):
-            return jsonify({"error": f"Word at index {i} missing numeric 'start' field"}), 400
-        if not isinstance(w.get("end"), (int, float)):
-            return jsonify({"error": f"Word at index {i} missing numeric 'end' field"}), 400
+    error = _validate_words(words)
+    if error:
+        return jsonify({"error": error}), 400
 
     video_path = find_video_path(job_id)
     if not video_path:
         return jsonify({"error": "Original video not found on server"}), 404
 
-    # Reset job state for the render phase (keep words for potential re-renders)
+    jobs[job_id]["words"] = words
+    jobs[job_id]["style"] = style
+    jobs[job_id]["audio"] = audio
+    jobs[job_id]["emoji_rules"] = emoji_rules
     jobs[job_id]["status"] = "queued"
     jobs[job_id]["progress"] = 0
     jobs[job_id]["output"] = None
@@ -875,6 +898,41 @@ def render():
     t.start()
 
     return jsonify({"job_id": job_id})
+
+
+def _validate_words(words: list) -> str | None:
+    for i, w in enumerate(words):
+        if not isinstance(w, dict):
+            return f"Word at index {i} is not an object"
+        if not isinstance(w.get("word"), str) or not w["word"].strip():
+            return f"Word at index {i} missing valid 'word' field"
+        if not isinstance(w.get("start"), (int, float)):
+            return f"Word at index {i} missing numeric 'start' field"
+        if not isinstance(w.get("end"), (int, float)):
+            return f"Word at index {i} missing numeric 'end' field"
+    return None
+
+
+@app.route("/save-draft", methods=["POST"])
+def save_draft():
+    data = request.get_json(force=True)
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+
+    words = data.get("words")
+    if words is not None:
+        error = _validate_words(words)
+        if error:
+            return jsonify({"error": error}), 400
+        jobs[job_id]["words"] = words
+
+    for key in ("style", "audio", "emoji_rules"):
+        if key in data:
+            jobs[job_id][key] = data.get(key) or {}
+
+    _db_save_job(job_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/upload", methods=["POST"])
@@ -895,7 +953,7 @@ def upload():
     style = json.loads(request.form.get("style", "{}"))
     audio = json.loads(request.form.get("audio", "{}"))
 
-    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None, "created_at": time.time()}
+    jobs[job_id] = {"status": "queued", "progress": 0, "output": None, "error": None, "words": None, "style": style, "audio": audio, "emoji_rules": {}, "created_at": time.time()}
     _db_save_job(job_id)
     t = threading.Thread(target=process_job, args=(job_id, video_path, style, audio))
     t.daemon = True

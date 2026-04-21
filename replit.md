@@ -33,6 +33,9 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
 - Transcribes speech using faster-whisper (base model, CPU)
 - Generates ASS subtitle files with word-by-word highlighting
 - Burns captions into video using FFmpeg
+- Supports FFmpeg audio enhancement and optional Auphonic AI enhancement
+- Persists job state, edited subtitle words, style settings, audio settings, and emoji rules in SQLite (`jobs.db`)
+- Auto-saves subtitle/style drafts from the browser while editing and restores the latest job after reload
 - Runs on port 8081 (local), served at `/` via external port 80 (no port suffix in URL)
 
 ### Structure
@@ -42,6 +45,7 @@ artifacts/subtitle-burner/
 ├── templates/index.html   # Frontend UI
 ├── static/style.css       # Styles
 ├── static/app.js          # Frontend JavaScript
+├── jobs.db                # SQLite job/draft persistence
 ├── fonts/                 # Add .ttf/.otf font files here
 ├── uploads/               # Temp uploads (auto-created)
 └── outputs/               # Rendered videos (auto-created)

@@ -47,6 +47,7 @@ let currentFile = null;
 let currentJobId = null;
 let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
+let draftSaveTimer = null;
 
 // ---- Audio engine tab state ----
 // "ffmpeg" or "auphonic". Defaults to ffmpeg; only switches if tabs are present.
@@ -73,6 +74,7 @@ if (audioTabsEl) {
       if (auphonicTabContent) auphonicTabContent.classList.remove("hidden");
     }
     updateAudioPreviewVisibility();
+    scheduleDraftSave();
   });
 }
 
@@ -105,6 +107,7 @@ function applyAuphonicPreset(name) {
       b.classList.toggle("active", b.dataset.preset === name);
     });
   }
+  scheduleDraftSave();
 }
 
 // Apply default preset on load (Interview) — only if elements exist
@@ -143,6 +146,7 @@ $("instagramPreset").onclick = () => {
   $("loudnessNorm").checked = true;
   $("voiceClarity").checked = true;
   updateAudioPreviewVisibility();
+  scheduleDraftSave();
 };
 
 // ---- Themes ----
@@ -157,15 +161,36 @@ THEMES.forEach((t, i) => {
     primaryEl.value = t.primary;
     highlightEl.value = t.highlight;
     outlineEl.value = t.outline;
+    scheduleDraftSave();
   };
   themesDiv.appendChild(b);
 });
 
 // ---- Live labels ----
-sizeEl.oninput  = () => sizeVal.textContent = sizeEl.value;
-owEl.oninput    = () => owVal.textContent = owEl.value;
-posEl.oninput   = () => posVal.textContent = posEl.value + "%";
-groupEl.oninput = () => { groupVal.textContent = groupEl.value; renderPhraseList(currentWords); updateRowCount(); };
+sizeEl.oninput  = () => { sizeVal.textContent = sizeEl.value; scheduleDraftSave(); };
+owEl.oninput    = () => { owVal.textContent = owEl.value; scheduleDraftSave(); };
+posEl.oninput   = () => { posVal.textContent = posEl.value + "%"; scheduleDraftSave(); };
+groupEl.oninput = () => {
+  const edited = collectEditedWords({ silent: true });
+  if (edited.length) currentWords = edited;
+  groupVal.textContent = groupEl.value;
+  renderPhraseList(currentWords);
+  updateRowCount();
+  scheduleDraftSave();
+};
+
+["font", "primary", "highlight", "outlineColor", "allCaps", "shadow"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("input", scheduleDraftSave);
+  el.addEventListener("change", scheduleDraftSave);
+});
+
+["noiseReduction", "loudnessNorm", "voiceClarity", "auphonicSpeechIsolation", "auphonicAdaptiveLeveler", "auphonicLoudness"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("change", scheduleDraftSave);
+});
 
 // ---- Drag & drop ----
 drop.onclick = () => fileInput.click();
@@ -279,13 +304,18 @@ function addEmojiRule(keyword = "", emoji = "") {
   removeBtn.className = "emoji-remove-btn";
   removeBtn.title = "Remove rule";
   removeBtn.textContent = "×";
-  removeBtn.onclick = () => row.remove();
+  removeBtn.onclick = () => {
+    row.remove();
+    scheduleDraftSave();
+  };
 
   row.appendChild(kwInput);
   row.appendChild(emojiInput);
   row.appendChild(removeBtn);
   emojiRulesList.appendChild(row);
 
+  kwInput.addEventListener("input", scheduleDraftSave);
+  emojiInput.addEventListener("input", scheduleDraftSave);
   kwInput.focus();
 }
 
@@ -299,6 +329,116 @@ function getEmojiRules() {
   return rules;
 }
 
+function applyStyle(style = {}) {
+  if (!style || typeof style !== "object") return;
+  if (style.font_name) $("font").value = style.font_name;
+  if (style.font_size) sizeEl.value = style.font_size;
+  if (style.primary_color) primaryEl.value = style.primary_color;
+  if (style.highlight_color) highlightEl.value = style.highlight_color;
+  if (style.outline_color) outlineEl.value = style.outline_color;
+  if (style.outline_width !== undefined) owEl.value = style.outline_width;
+  if (style.position_y !== undefined) posEl.value = style.position_y;
+  if (style.all_caps !== undefined) $("allCaps").checked = !!style.all_caps;
+  if (style.shadow !== undefined) $("shadow").checked = !!style.shadow;
+  if (style.group_size) groupEl.value = style.group_size;
+  sizeVal.textContent = sizeEl.value;
+  owVal.textContent = owEl.value;
+  posVal.textContent = posEl.value + "%";
+  groupVal.textContent = groupEl.value;
+  document.querySelectorAll(".theme").forEach(x => x.classList.remove("active"));
+}
+
+function applyAudio(audio = {}) {
+  if (!audio || typeof audio !== "object") return;
+  activeAudioTab = audio.provider === "auphonic" && auphonicTabContent ? "auphonic" : "ffmpeg";
+  if (audioTabsEl) {
+    audioTabsEl.querySelectorAll(".audio-tab").forEach(b => {
+      b.classList.toggle("active", b.dataset.tab === activeAudioTab);
+    });
+    ffmpegTabContent.classList.toggle("hidden", activeAudioTab !== "ffmpeg");
+    if (auphonicTabContent) auphonicTabContent.classList.toggle("hidden", activeAudioTab !== "auphonic");
+  }
+  $("noiseReduction").checked = !!audio.noise_reduction;
+  $("loudnessNorm").checked = !!audio.loudness_norm;
+  $("voiceClarity").checked = !!audio.voice_clarity;
+  if ($("auphonicSpeechIsolation") && audio.provider === "auphonic") {
+    $("auphonicSpeechIsolation").checked = !!audio.speech_isolation;
+    $("auphonicAdaptiveLeveler").checked = audio.adaptive_leveler !== false;
+    $("auphonicLoudness").value = audio.loudness_lufs !== null && audio.loudness_lufs !== undefined ? String(audio.loudness_lufs) : "";
+    auphonicNoiseHumReduction = !!audio.noise_hum_reduction;
+    auphonicHighpass = !!audio.highpass;
+  }
+  updateAudioPreviewVisibility();
+}
+
+function applyEmojiRules(rules = {}) {
+  if (!rules || typeof rules !== "object") return;
+  emojiRulesList.innerHTML = "";
+  Object.entries(rules).forEach(([keyword, emoji]) => addEmojiRule(keyword, emoji));
+}
+
+function collectEditedWords(options = {}) {
+  const rows = phraseListEl.querySelectorAll(".phrase-row");
+  const editedWords = [];
+  rows.forEach(row => {
+    const text = row.querySelector(".phrase-text").textContent.trim();
+    if (!text) return;
+    const start     = parseFloat(row.dataset.start);
+    const end       = parseFloat(row.dataset.end);
+    const origTimes = JSON.parse(row.dataset.words || "[]");
+    const words     = text.split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+
+    if (words.length === origTimes.length) {
+      words.forEach((word, i) => {
+        editedWords.push({ word, start: origTimes[i].s, end: origTimes[i].e });
+      });
+    } else {
+      const duration = Math.max(0, end - start);
+      const wordDur  = duration / words.length;
+      words.forEach((word, i) => {
+        editedWords.push({
+          word,
+          start: start + i * wordDur,
+          end:   start + (i + 1) * wordDur,
+        });
+      });
+    }
+  });
+
+  if (!editedWords.length && !options.silent) {
+    alert("No subtitle phrases to render — please keep at least one row.");
+  }
+  return editedWords;
+}
+
+function scheduleDraftSave() {
+  if (!currentJobId) return;
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(saveDraftNow, 500);
+}
+
+async function saveDraftNow() {
+  if (!currentJobId) return;
+  const editedWords = collectEditedWords({ silent: true });
+  if (editedWords.length) currentWords = editedWords;
+  localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
+  try {
+    await fetch("/save-draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        words: editedWords.length ? editedWords : currentWords,
+        style: getStyle(),
+        audio: getAudio(),
+        emoji_rules: getEmojiRules(),
+      }),
+    });
+  } catch (e) {
+  }
+}
+
 // Populate preset chips
 EMOJI_PRESETS.forEach(p => {
   const btn = document.createElement("button");
@@ -310,6 +450,7 @@ EMOJI_PRESETS.forEach(p => {
       .map(el => el.value.trim().toLowerCase());
     if (!existing.includes(p.keyword)) {
       addEmojiRule(p.keyword, p.emoji);
+      scheduleDraftSave();
     }
   };
   emojiPresetsDiv.appendChild(btn);
@@ -366,7 +507,7 @@ async function pollTranscription(jobId) {
     setTimeout(() => {
       progress.classList.add("hidden");
       go.disabled = false;
-      showEditor(currentWords);
+      showEditor(currentWords, s);
     }, 600);
     return;
   }
@@ -412,6 +553,7 @@ function renderPhraseList(words) {
     textEl.addEventListener("keydown", e => {
       if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
     });
+    textEl.addEventListener("input", scheduleDraftSave);
 
     // Delete row button
     const delBtn = document.createElement("button");
@@ -422,6 +564,7 @@ function renderPhraseList(words) {
       e.stopPropagation();
       row.remove();
       updateRowCount();
+      scheduleDraftSave();
     };
 
     // Row click → seek video; skip when clicking text (for editing) or delete button
@@ -472,7 +615,11 @@ function fmtTime(sec) {
   return `${m}:${s}`;
 }
 
-function showEditor(words) {
+function showEditor(words, saved = {}) {
+  if (saved.style) applyStyle(saved.style);
+  if (saved.audio) applyAudio(saved.audio);
+  if (saved.emoji_rules) applyEmojiRules(saved.emoji_rules);
+
   // Load the original uploaded video into the source player
   sourcePlayer.src = "/raw-upload/" + currentJobId;
 
@@ -485,46 +632,20 @@ function showEditor(words) {
 
   editor.classList.remove("hidden");
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
 }
 
 // ---- Phase 2: Render ----
 renderBtn.onclick = async () => {
-  const rows = phraseListEl.querySelectorAll(".phrase-row");
-  const editedWords = [];
-  rows.forEach(row => {
-    const text = row.querySelector(".phrase-text").textContent.trim();
-    if (!text) return;
-    const start     = parseFloat(row.dataset.start);
-    const end       = parseFloat(row.dataset.end);
-    const origTimes = JSON.parse(row.dataset.words || "[]");
-    const words     = text.split(/\s+/).filter(Boolean);
-    if (!words.length) return;
-
-    if (words.length === origTimes.length) {
-      // Same word count — preserve original per-word timestamps 1:1
-      words.forEach((word, i) => {
-        editedWords.push({ word, start: origTimes[i].s, end: origTimes[i].e });
-      });
-    } else {
-      // Different count — distribute evenly across the group's time span
-      const duration = Math.max(0, end - start);
-      const wordDur  = duration / words.length;
-      words.forEach((word, i) => {
-        editedWords.push({
-          word,
-          start: start + i * wordDur,
-          end:   start + (i + 1) * wordDur,
-        });
-      });
-    }
-  });
+  const editedWords = collectEditedWords();
 
   if (!editedWords.length) {
-    alert("No subtitle phrases to render — please keep at least one row.");
     return;
   }
 
   const emojiRules = getEmojiRules();
+  currentWords = editedWords;
+  saveDraftNow();
 
   result.classList.add("hidden");
   progress.classList.remove("hidden");
@@ -603,3 +724,25 @@ function showError(msg) {
   progress.classList.remove("hidden");
   barFill.style.width = "0%";
 }
+
+async function restoreLastJob() {
+  const jobId = localStorage.getItem("subtitleBurner:lastJobId");
+  if (!jobId) return;
+  try {
+    const res = await fetch("/status/" + jobId);
+    if (!res.ok) return;
+    const s = await res.json();
+    if (!s.words || !s.words.length) return;
+    currentJobId = jobId;
+    currentWords = s.words;
+    showEditor(currentWords, s);
+    if (s.output && s.status === "done") {
+      result.classList.remove("hidden");
+      player.src = "/preview/" + s.output;
+      dl.href = "/download/" + s.output;
+    }
+  } catch (e) {
+  }
+}
+
+restoreLastJob();
