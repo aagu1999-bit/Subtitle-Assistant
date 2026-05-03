@@ -269,11 +269,37 @@ def find_video_path(job_id: str) -> Path | None:
 
 
 # ---- Whisper transcription with word-level timestamps ----
+WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+
+_whisper_model = None
+_whisper_lock = threading.Lock()
+
+
+def _get_whisper_model():
+    """Lazy-init a single shared WhisperModel. Re-used across all transcriptions."""
+    global _whisper_model
+    if _whisper_model is None:
+        with _whisper_lock:
+            if _whisper_model is None:
+                from faster_whisper import WhisperModel
+                _whisper_model = WhisperModel(
+                    WHISPER_MODEL_NAME,
+                    device=WHISPER_DEVICE,
+                    compute_type=WHISPER_COMPUTE_TYPE,
+                )
+    return _whisper_model
+
+
+# Warm up the Whisper model in the background so the first transcription
+# doesn't pay the model-load cost.
+threading.Thread(target=_get_whisper_model, daemon=True).start()
+
+
 def transcribe(video_path: Path):
     """Return a list of word dicts: [{'word': str, 'start': float, 'end': float}, ...]"""
-    from faster_whisper import WhisperModel
-
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    model = _get_whisper_model()
     segments, _info = model.transcribe(
         str(video_path),
         word_timestamps=True,
