@@ -130,7 +130,12 @@ if ($("auphonicSpeechIsolation")) {
 
 // ---- Audio toggle visibility ----
 // The audio preview panel lives inside the editor section (available after transcription).
-const audioCheckboxes = ["noiseReduction", "voiceBoost", "loudnessNorm", "voiceClarity"].map($);
+// Filter null in case any checkbox is omitted from the rendered HTML
+// (e.g. by a Jinja conditional). Without the filter a missing element would
+// throw on .addEventListener / .checked and crash the rest of init.
+const audioCheckboxes = ["noiseReduction", "voiceBoost", "loudnessNorm", "voiceClarity"]
+  .map($)
+  .filter(Boolean);
 
 function updateAudioPreviewVisibility() {
   if (activeAudioTab !== "ffmpeg") {
