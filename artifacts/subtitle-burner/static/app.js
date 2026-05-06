@@ -53,9 +53,25 @@ let draftSaveTimer = null;
 // "ffmpeg" or "auphonic". Defaults to ffmpeg; only switches if tabs are present.
 let activeAudioTab = "ffmpeg";
 
-const ffmpegTabContent   = $("ffmpegTabContent");
-const auphonicTabContent = $("auphonicTabContent");  // null when auphonic_enabled=false
-const audioTabsEl        = $("audioTabs");            // null when auphonic_enabled=false
+const ffmpegTabContent     = $("ffmpegTabContent");
+const auphonicTabContent   = $("auphonicTabContent");    // null when auphonic_enabled=false
+const elevenlabsTabContent = $("elevenlabsTabContent");  // null when elevenlabs_enabled=false
+const dolbyTabContent      = $("dolbyTabContent");       // null when dolby_enabled=false
+const audioTabsEl          = $("audioTabs");             // null when no AI provider enabled
+
+const audioTabContents = {
+  ffmpeg: ffmpegTabContent,
+  auphonic: auphonicTabContent,
+  elevenlabs: elevenlabsTabContent,
+  dolby: dolbyTabContent,
+};
+
+function showAudioTabContent(name) {
+  for (const [key, el] of Object.entries(audioTabContents)) {
+    if (!el) continue;
+    el.classList.toggle("hidden", key !== name);
+  }
+}
 
 if (audioTabsEl) {
   audioTabsEl.addEventListener("click", (e) => {
@@ -66,13 +82,7 @@ if (audioTabsEl) {
     activeAudioTab = tab;
     audioTabsEl.querySelectorAll(".audio-tab").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
-    if (tab === "ffmpeg") {
-      ffmpegTabContent.classList.remove("hidden");
-      if (auphonicTabContent) auphonicTabContent.classList.add("hidden");
-    } else {
-      ffmpegTabContent.classList.add("hidden");
-      if (auphonicTabContent) auphonicTabContent.classList.remove("hidden");
-    }
+    showAudioTabContent(tab);
     updateAudioPreviewVisibility();
     scheduleDraftSave();
   });
@@ -120,7 +130,7 @@ if ($("auphonicSpeechIsolation")) {
 
 // ---- Audio toggle visibility ----
 // The audio preview panel lives inside the editor section (available after transcription).
-const audioCheckboxes = ["noiseReduction", "loudnessNorm", "voiceClarity"].map($);
+const audioCheckboxes = ["noiseReduction", "voiceBoost", "loudnessNorm", "voiceClarity"].map($);
 
 function updateAudioPreviewVisibility() {
   if (activeAudioTab !== "ffmpeg") {
@@ -143,6 +153,7 @@ audioCheckboxes.forEach(cb => cb.addEventListener("change", updateAudioPreviewVi
 // ---- Instagram Pro preset ----
 $("instagramPreset").onclick = () => {
   $("noiseReduction").checked = true;
+  $("voiceBoost").checked = true;
   $("loudnessNorm").checked = true;
   $("voiceClarity").checked = true;
   updateAudioPreviewVisibility();
@@ -186,7 +197,62 @@ groupEl.oninput = () => {
   el.addEventListener("change", scheduleDraftSave);
 });
 
-["noiseReduction", "loudnessNorm", "voiceClarity", "auphonicSpeechIsolation", "auphonicAdaptiveLeveler", "auphonicLoudness"].forEach(id => {
+// Wire the ElevenLabs sliders so their pill labels update live.
+const elevenWet = $("elevenWetMix");
+const elevenGain = $("elevenGain");
+if (elevenWet) {
+  elevenWet.oninput = () => {
+    $("elevenWetMixVal").textContent = elevenWet.value + "%";
+    scheduleDraftSave();
+  };
+}
+if (elevenGain) {
+  elevenGain.oninput = () => {
+    const v = parseFloat(elevenGain.value);
+    $("elevenGainVal").textContent = (v > 0 ? "+" : "") + v + " dB";
+    scheduleDraftSave();
+  };
+}
+
+const dolbySpeechIso = $("dolbySpeechIsolation");
+if (dolbySpeechIso) {
+  dolbySpeechIso.oninput = () => {
+    $("dolbySpeechIsolationVal").textContent = dolbySpeechIso.value;
+    scheduleDraftSave();
+  };
+}
+
+const auphonicWetEl = $("auphonicWetMix");
+if (auphonicWetEl) {
+  auphonicWetEl.oninput = () => {
+    $("auphonicWetMixVal").textContent = auphonicWetEl.value + "%";
+    scheduleDraftSave();
+  };
+}
+const auphonicGainEl = $("auphonicGain");
+if (auphonicGainEl) {
+  auphonicGainEl.oninput = () => {
+    const v = parseFloat(auphonicGainEl.value);
+    $("auphonicGainVal").textContent = (v > 0 ? "+" : "") + v + " dB";
+    scheduleDraftSave();
+  };
+}
+
+const audioOffsetEl = $("audioOffset");
+function _updateAudioOffsetLabel() {
+  if (!audioOffsetEl) return;
+  const v = parseFloat(audioOffsetEl.value);
+  const sign = v > 0 ? "+" : "";
+  $("audioOffsetVal").textContent = sign + v.toFixed(2) + "s";
+}
+if (audioOffsetEl) {
+  audioOffsetEl.oninput = () => {
+    _updateAudioOffsetLabel();
+    scheduleDraftSave();
+  };
+}
+
+["noiseReduction", "voiceBoost", "loudnessNorm", "voiceClarity", "auphonicSpeechIsolation", "auphonicAdaptiveLeveler", "auphonicLoudness", "elevenVoiceBoost", "elevenLoudnessNorm", "elevenVoiceClarity", "dolbyContentType", "dolbyNoiseReduction", "dolbyDynamics", "dolbyLoudness"].forEach(id => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("change", scheduleDraftSave);
@@ -199,15 +265,29 @@ drop.onclick = () => fileInput.click();
 ["dragleave", "drop"].forEach(ev =>
   drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
 drop.addEventListener("drop", e => {
-  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
 });
-fileInput.onchange = () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); };
+fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
 
-function handleFile(f) {
-  if (!f.type.startsWith("video/")) { alert("Please select a video file."); return; }
-  currentFile = f;
-  fn.textContent = f.name + "  (" + (f.size / 1048576).toFixed(1) + " MB)";
-  go.disabled = false;
+function handleFiles(files) {
+  const videos = Array.from(files).filter(f => f.type.startsWith("video/"));
+  if (!videos.length) { alert("Please select video files."); return; }
+  if (videos.length === 1) {
+    // Preserve the existing single-file path for the "Transcribe" button.
+    currentFile = videos[0];
+    fn.textContent = videos[0].name + "  (" + (videos[0].size / 1048576).toFixed(1) + " MB)";
+    go.disabled = false;
+  } else {
+    // Multi-file mode: kick all of them off immediately, no need for the button.
+    currentFile = null;
+    fn.textContent = `Queueing ${videos.length} videos…`;
+    go.disabled = true;
+    videos.forEach(f => uploadAndTranscribe(f, getPreCleanFlag()));
+  }
+}
+
+function getPreCleanFlag() {
+  return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
 }
 
 // ---- Helpers: collect style / audio ----
@@ -223,12 +303,21 @@ function getStyle() {
     position_y:      parseInt(posEl.value, 10),
     all_caps:        $("allCaps").checked,
     group_size:      parseInt(groupEl.value, 10),
+    quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
   };
 }
 
+function _audioOffsetSec() {
+  const el = $("audioOffset");
+  return el ? parseFloat(el.value) : 0;
+}
+
 function getAudio() {
+  const offset = _audioOffsetSec();
   if (activeAudioTab === "auphonic") {
     const loudnessVal = $("auphonicLoudness") ? $("auphonicLoudness").value : "-16";
+    const wet = $("auphonicWetMix");
+    const gain = $("auphonicGain");
     return {
       provider:            "auphonic",
       speech_isolation:    $("auphonicSpeechIsolation") ? $("auphonicSpeechIsolation").checked : false,
@@ -236,13 +325,46 @@ function getAudio() {
       noise_hum_reduction: auphonicNoiseHumReduction,
       highpass:            auphonicHighpass,
       loudness_lufs:       loudnessVal !== "" ? parseInt(loudnessVal, 10) : null,
+      // Post-process knobs (excluded from cache key — adjust freely):
+      wet_mix:             wet ? parseInt(wet.value, 10) : 100,
+      output_gain_db:      gain ? parseFloat(gain.value) : 0,
+      offset_seconds:      offset,
+    };
+  }
+  if (activeAudioTab === "elevenlabs") {
+    const wet = $("elevenWetMix");
+    const gain = $("elevenGain");
+    return {
+      provider:       "elevenlabs",
+      wet_mix:        wet ? parseInt(wet.value, 10) : 100,
+      output_gain_db: gain ? parseFloat(gain.value) : 0,
+      post_filters: {
+        voice_boost:   $("elevenVoiceBoost") ? $("elevenVoiceBoost").checked : false,
+        loudness_norm: $("elevenLoudnessNorm") ? $("elevenLoudnessNorm").checked : true,
+        voice_clarity: $("elevenVoiceClarity") ? $("elevenVoiceClarity").checked : false,
+      },
+      offset_seconds: offset,
+    };
+  }
+  if (activeAudioTab === "dolby") {
+    const lufsRaw = $("dolbyLoudness") ? $("dolbyLoudness").value : "-14";
+    return {
+      provider:             "dolby",
+      content_type:         $("dolbyContentType") ? $("dolbyContentType").value : "social_media",
+      speech_isolation:     $("dolbySpeechIsolation") ? parseInt($("dolbySpeechIsolation").value, 10) : 50,
+      noise_reduction:      $("dolbyNoiseReduction") ? $("dolbyNoiseReduction").value : "medium",
+      dynamics:             $("dolbyDynamics") ? $("dolbyDynamics").value : "low",
+      loudness_target_lufs: lufsRaw !== "" ? parseInt(lufsRaw, 10) : null,
+      offset_seconds:       offset,
     };
   }
   return {
     provider:        "ffmpeg",
     noise_reduction: $("noiseReduction").checked,
+    voice_boost:     $("voiceBoost").checked,
     loudness_norm:   $("loudnessNorm").checked,
     voice_clarity:   $("voiceClarity").checked,
+    offset_seconds:  offset,
   };
 }
 
@@ -341,6 +463,9 @@ function applyStyle(style = {}) {
   if (style.all_caps !== undefined) $("allCaps").checked = !!style.all_caps;
   if (style.shadow !== undefined) $("shadow").checked = !!style.shadow;
   if (style.group_size) groupEl.value = style.group_size;
+  if (style.quality_boost !== undefined && $("qualityBoost")) {
+    $("qualityBoost").checked = !!style.quality_boost;
+  }
   sizeVal.textContent = sizeEl.value;
   owVal.textContent = owEl.value;
   posVal.textContent = posEl.value + "%";
@@ -350,23 +475,64 @@ function applyStyle(style = {}) {
 
 function applyAudio(audio = {}) {
   if (!audio || typeof audio !== "object") return;
-  activeAudioTab = audio.provider === "auphonic" && auphonicTabContent ? "auphonic" : "ffmpeg";
+  let restoredTab = "ffmpeg";
+  if (audio.provider === "auphonic" && auphonicTabContent) restoredTab = "auphonic";
+  else if (audio.provider === "elevenlabs" && elevenlabsTabContent) restoredTab = "elevenlabs";
+  else if (audio.provider === "dolby" && dolbyTabContent) restoredTab = "dolby";
+  activeAudioTab = restoredTab;
   if (audioTabsEl) {
     audioTabsEl.querySelectorAll(".audio-tab").forEach(b => {
       b.classList.toggle("active", b.dataset.tab === activeAudioTab);
     });
-    ffmpegTabContent.classList.toggle("hidden", activeAudioTab !== "ffmpeg");
-    if (auphonicTabContent) auphonicTabContent.classList.toggle("hidden", activeAudioTab !== "auphonic");
+    showAudioTabContent(activeAudioTab);
   }
   $("noiseReduction").checked = !!audio.noise_reduction;
+  $("voiceBoost").checked = !!audio.voice_boost;
   $("loudnessNorm").checked = !!audio.loudness_norm;
   $("voiceClarity").checked = !!audio.voice_clarity;
+  if ($("elevenWetMix") && audio.provider === "elevenlabs") {
+    const wm = audio.wet_mix !== undefined ? audio.wet_mix : 100;
+    $("elevenWetMix").value = wm;
+    $("elevenWetMixVal").textContent = wm + "%";
+    const gn = audio.output_gain_db !== undefined ? audio.output_gain_db : 0;
+    $("elevenGain").value = gn;
+    $("elevenGainVal").textContent = (gn > 0 ? "+" : "") + gn + " dB";
+    const pf = audio.post_filters || {};
+    $("elevenVoiceBoost").checked = !!pf.voice_boost;
+    $("elevenLoudnessNorm").checked = pf.loudness_norm !== false;
+    $("elevenVoiceClarity").checked = !!pf.voice_clarity;
+  }
+  if (audioOffsetEl && audio.offset_seconds !== undefined) {
+    audioOffsetEl.value = audio.offset_seconds;
+    _updateAudioOffsetLabel();
+  }
+  if ($("dolbyContentType") && audio.provider === "dolby") {
+    if (audio.content_type) $("dolbyContentType").value = audio.content_type;
+    if (audio.speech_isolation !== undefined) {
+      $("dolbySpeechIsolation").value = audio.speech_isolation;
+      $("dolbySpeechIsolationVal").textContent = audio.speech_isolation;
+    }
+    if (audio.noise_reduction) $("dolbyNoiseReduction").value = audio.noise_reduction;
+    if (audio.dynamics) $("dolbyDynamics").value = audio.dynamics;
+    $("dolbyLoudness").value = audio.loudness_target_lufs !== null && audio.loudness_target_lufs !== undefined
+      ? String(audio.loudness_target_lufs) : "";
+  }
   if ($("auphonicSpeechIsolation") && audio.provider === "auphonic") {
     $("auphonicSpeechIsolation").checked = !!audio.speech_isolation;
     $("auphonicAdaptiveLeveler").checked = audio.adaptive_leveler !== false;
     $("auphonicLoudness").value = audio.loudness_lufs !== null && audio.loudness_lufs !== undefined ? String(audio.loudness_lufs) : "";
     auphonicNoiseHumReduction = !!audio.noise_hum_reduction;
     auphonicHighpass = !!audio.highpass;
+    if ($("auphonicWetMix")) {
+      const wm = audio.wet_mix !== undefined ? audio.wet_mix : 100;
+      $("auphonicWetMix").value = wm;
+      $("auphonicWetMixVal").textContent = wm + "%";
+    }
+    if ($("auphonicGain")) {
+      const gn = audio.output_gain_db !== undefined ? audio.output_gain_db : 0;
+      $("auphonicGain").value = gn;
+      $("auphonicGainVal").textContent = (gn > 0 ? "+" : "") + gn + " dB";
+    }
   }
   updateAudioPreviewVisibility();
 }
@@ -459,44 +625,64 @@ EMOJI_PRESETS.forEach(p => {
 addRuleBtn.onclick = () => addEmojiRule();
 
 // ---- Phase 1: Transcribe ----
-go.onclick = async () => {
-  if (!currentFile) return;
-
-  result.classList.add("hidden");
-  editor.classList.add("hidden");
-  progress.classList.remove("hidden");
-  go.disabled = true;
-  barFill.style.width = "5%";
-  statusText.textContent = "Uploading…";
-
+async function uploadAndTranscribe(file, preClean, makeActive = false) {
   const fd = new FormData();
-  fd.append("video", currentFile);
+  fd.append("video", file);
+  if (preClean) fd.append("pre_clean", "true");
 
-  let job;
   try {
     const res = await fetch("/transcribe-only", { method: "POST", body: fd });
-    job = await res.json();
+    const job = await res.json();
     if (job.error) throw new Error(job.error);
-  } catch (e) {
-    showError("Upload failed: " + e.message);
-    go.disabled = false;
-    return;
-  }
 
-  currentJobId = job.job_id;
-  pollTranscription(job.job_id);
+    addJobToList(job.job_id);
+    if (makeActive) {
+      currentJobId = job.job_id;
+      result.classList.add("hidden");
+      editor.classList.add("hidden");
+      progress.classList.remove("hidden");
+      barFill.style.width = "5%";
+      statusText.textContent = "Uploading…";
+      pollTranscription(job.job_id);
+    }
+    refreshJobsList();
+    return job.job_id;
+  } catch (e) {
+    if (makeActive) {
+      showError("Upload failed: " + e.message);
+      go.disabled = false;
+    } else {
+      console.error("Upload failed for", file.name, e);
+    }
+    return null;
+  }
+}
+
+go.onclick = async () => {
+  if (!currentFile) return;
+  go.disabled = true;
+  await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
 };
 
 async function pollTranscription(jobId) {
   let s;
   try {
     const res = await fetch("/status/" + jobId);
+    if (res.status === 404) {
+      showError("Job is no longer available on the server. Please re-upload.");
+      go.disabled = false;
+      return;
+    }
     s = await res.json();
   } catch (e) {
     showError("Connection error — retrying…");
     setTimeout(() => pollTranscription(jobId), 3000);
     return;
   }
+
+  // If the user switched to another job while we were polling, drop this
+  // poller — the new job's poller (or the periodic /jobs refresh) takes over.
+  if (currentJobId && currentJobId !== jobId) return;
 
   barFill.style.width = (s.progress || 10) + "%";
 
@@ -505,6 +691,7 @@ async function pollTranscription(jobId) {
     statusText.textContent = "Transcription complete!";
     currentWords = s.words || [];
     setTimeout(() => {
+      if (currentJobId !== jobId) return;
       progress.classList.add("hidden");
       go.disabled = false;
       showEditor(currentWords, s);
@@ -678,11 +865,19 @@ async function pollRender(jobId) {
   let s;
   try {
     const res = await fetch("/status/" + jobId);
+    if (res.status === 404) {
+      showError("Job is no longer available on the server. Please re-upload.");
+      renderBtn.disabled = false;
+      return;
+    }
     s = await res.json();
   } catch (e) {
     setTimeout(() => pollRender(jobId), 3000);
     return;
   }
+
+  // Drop UI updates if user switched jobs mid-render.
+  if (currentJobId && currentJobId !== jobId) return;
 
   barFill.style.width = (s.progress || 10) + "%";
   statusText.textContent = capitalize(s.status) + "…";
@@ -725,24 +920,191 @@ function showError(msg) {
   barFill.style.width = "0%";
 }
 
-async function restoreLastJob() {
-  const jobId = localStorage.getItem("subtitleBurner:lastJobId");
-  if (!jobId) return;
+// =====================================================================
+// Multi-video sidebar
+// =====================================================================
+//
+// State:
+//   localStorage["subtitleBurner:jobIds"]      JSON array, newest first
+//   localStorage["subtitleBurner:lastJobId"]   single id (kept for backward-compat)
+//
+// In-memory:
+//   jobsById      { jobId -> last /jobs summary record } for sidebar rendering
+
+const jobsPanel = $("jobsPanel");
+const jobsListEl = $("jobsList");
+const jobsCountEl = $("jobsCount");
+let jobsById = {};
+
+function _loadJobIds() {
   try {
-    const res = await fetch("/status/" + jobId);
-    if (!res.ok) return;
-    const s = await res.json();
-    if (!s.words || !s.words.length) return;
-    currentJobId = jobId;
-    currentWords = s.words;
-    showEditor(currentWords, s);
-    if (s.output && s.status === "done") {
-      result.classList.remove("hidden");
-      player.src = "/preview/" + s.output;
-      dl.href = "/download/" + s.output;
+    const raw = localStorage.getItem("subtitleBurner:jobIds");
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.filter(x => typeof x === "string");
     }
-  } catch (e) {
+  } catch (e) {}
+  // Fall back to legacy single-id key
+  const legacy = localStorage.getItem("subtitleBurner:lastJobId");
+  return legacy ? [legacy] : [];
+}
+
+function _saveJobIds(ids) {
+  localStorage.setItem("subtitleBurner:jobIds", JSON.stringify(ids));
+}
+
+function addJobToList(jobId) {
+  if (!jobId) return;
+  const ids = _loadJobIds();
+  if (!ids.includes(jobId)) {
+    ids.unshift(jobId);
+    _saveJobIds(ids);
   }
 }
 
-restoreLastJob();
+function removeJobFromList(jobId) {
+  const ids = _loadJobIds().filter(x => x !== jobId);
+  _saveJobIds(ids);
+  delete jobsById[jobId];
+  if (currentJobId === jobId) {
+    currentJobId = null;
+    localStorage.removeItem("subtitleBurner:lastJobId");
+    editor.classList.add("hidden");
+    result.classList.add("hidden");
+  }
+  renderJobsList();
+}
+
+function _statusBadgeClass(status) {
+  if (!status) return "";
+  if (status === "done") return "done";
+  if (status === "error") return "error";
+  if (status.includes("rendering") || status.includes("burn") || status.includes("remuxing")) return "rendering";
+  if (status === "transcribing" || status === "queued") return status;
+  return "transcribing";
+}
+
+function renderJobsList() {
+  const ids = _loadJobIds();
+  if (!ids.length) {
+    jobsPanel.classList.add("hidden");
+    return;
+  }
+  jobsPanel.classList.remove("hidden");
+  jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  jobsListEl.innerHTML = "";
+  ids.forEach(jobId => {
+    const meta = jobsById[jobId] || {};
+    const div = document.createElement("div");
+    div.className = "job-item" + (jobId === currentJobId ? " active" : "");
+    div.dataset.jobId = jobId;
+
+    const name = document.createElement("div");
+    name.className = "job-name";
+    name.textContent = meta.filename || jobId.slice(0, 8) + "…";
+    div.appendChild(name);
+
+    const status = document.createElement("span");
+    status.className = "job-status " + _statusBadgeClass(meta.status);
+    let label = meta.status || "loading";
+    if (label === "awaiting_edit") label = "ready";
+    status.textContent = label;
+    div.appendChild(status);
+
+    const del = document.createElement("button");
+    del.className = "job-delete";
+    del.textContent = "✕";
+    del.title = "Remove from list";
+    del.onclick = (e) => {
+      e.stopPropagation();
+      if (confirm(`Remove "${meta.filename || jobId.slice(0, 8)}" from your list?`)) {
+        removeJobFromList(jobId);
+      }
+    };
+    div.appendChild(del);
+
+    div.onclick = () => switchToJob(jobId);
+    jobsListEl.appendChild(div);
+  });
+}
+
+async function switchToJob(jobId) {
+  if (currentJobId === jobId) return;
+  if (saveDraftNow) await saveDraftNow();  // persist current job's edits first
+  try {
+    const res = await fetch("/status/" + jobId);
+    if (res.status === 404) {
+      removeJobFromList(jobId);
+      return;
+    }
+    if (!res.ok) return;
+    const s = await res.json();
+    currentJobId = jobId;
+    localStorage.setItem("subtitleBurner:lastJobId", jobId);
+    if (s.words && s.words.length) {
+      currentWords = s.words;
+      showEditor(currentWords, s);
+      if (s.output && s.status === "done") {
+        result.classList.remove("hidden");
+        player.src = "/preview/" + s.output;
+        dl.href = "/download/" + s.output;
+      } else {
+        result.classList.add("hidden");
+      }
+    } else {
+      // Still transcribing — show the progress UI for this job
+      editor.classList.add("hidden");
+      result.classList.add("hidden");
+      progress.classList.remove("hidden");
+      barFill.style.width = (s.progress || 10) + "%";
+      statusText.textContent = capitalize(s.status || "loading") + "…";
+      pollTranscription(jobId);
+    }
+    renderJobsList();
+  } catch (e) {
+    console.error("switchToJob failed", e);
+  }
+}
+
+async function refreshJobsList() {
+  try {
+    const res = await fetch("/jobs");
+    if (!res.ok) return;
+    const data = await res.json();
+    const validIds = new Set();
+    (data.jobs || []).forEach(j => {
+      jobsById[j.job_id] = j;
+      validIds.add(j.job_id);
+    });
+    // Drop any localStorage IDs the server no longer knows about.
+    const ids = _loadJobIds();
+    const filtered = ids.filter(id => validIds.has(id));
+    if (filtered.length !== ids.length) {
+      _saveJobIds(filtered);
+      if (currentJobId && !validIds.has(currentJobId)) {
+        currentJobId = null;
+        localStorage.removeItem("subtitleBurner:lastJobId");
+      }
+    }
+    renderJobsList();
+  } catch (e) {
+    console.error("refreshJobsList failed", e);
+  }
+}
+
+async function initJobs() {
+  await refreshJobsList();
+  // Auto-restore the most recently active job into the editor (if it's
+  // still in a usable state). Skip errored jobs and abandoned uploads.
+  const lastId = localStorage.getItem("subtitleBurner:lastJobId");
+  if (lastId && jobsById[lastId]) {
+    const meta = jobsById[lastId];
+    if (meta.status !== "error" && (meta.status === "done" || meta.video_available !== false)) {
+      await switchToJob(lastId);
+    }
+  }
+  // Poll for status updates of in-progress jobs every 4 seconds.
+  setInterval(refreshJobsList, 4000);
+}
+
+initJobs();

@@ -513,3 +513,50 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   margin-bottom: 4px;
 }
 .editor-header h2 { margin: 0; }
+
+/* ---- Multi-video sidebar ---- */
+#jobsList { display: flex; flex-direction: column; gap: 6px; }
+.job-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #1a1e2a;
+  border: 1px solid #232833;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.job-item:hover { background: #1f2330; border-color: #2c3240; }
+.job-item.active { border-color: #ffd60a; background: #1d2030; }
+.job-item .job-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.job-item .job-status {
+  font-size: 0.78rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #2a2f3a;
+  color: #c8cdd3;
+  white-space: nowrap;
+}
+.job-item .job-status.done { background: #1f3d22; color: #7cd98a; }
+.job-item .job-status.error { background: #3d1f1f; color: #ff8a8a; }
+.job-item .job-status.transcribing,
+.job-item .job-status.queued,
+.job-item .job-status.rendering { background: #2d2a3d; color: #b9a8ff; }
+.job-item .job-delete {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.job-item .job-delete:hover { color: #ff8a8a; }

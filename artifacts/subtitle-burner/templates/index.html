@@ -15,13 +15,32 @@
 
   <!-- Drop zone -->
   <div id="drop" class="drop">
-    <input type="file" id="file" accept="video/*" hidden>
+    <input type="file" id="file" accept="video/*" multiple hidden>
     <div class="drop-inner">
       <div class="icon">🎬</div>
-      <p><strong>Drag &amp; drop a video here</strong></p>
-      <p class="muted">or click to browse (mp4, mov, mkv, webm)</p>
+      <p><strong>Drag &amp; drop video(s) here</strong></p>
+      <p class="muted">or click to browse — drop multiple to queue them all (mp4, mov, mkv, webm)</p>
       <p id="filename" class="filename"></p>
     </div>
+  </div>
+
+  <!-- Jobs list (multi-video sidebar) -->
+  <section id="jobsPanel" class="panel hidden" style="margin-top:12px">
+    <h2 style="display:flex;align-items:center;justify-content:space-between">
+      <span>Your videos</span>
+      <span id="jobsCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
+    </h2>
+    <div id="jobsList"></div>
+  </section>
+
+  <div class="row toggle-row" style="margin-top:8px">
+    <label class="toggle-label">
+      <input type="checkbox" id="preCleanForTranscribe">
+      <span class="toggle-text">
+        <strong>Pre-clean audio for transcription</strong>
+        <span class="muted">Run a quick local denoise + soft-voice boost before Whisper. Try this only if the transcript has many errors — for clean audio it can hurt accuracy.</span>
+      </span>
+    </label>
   </div>
 
   <!-- Style panel -->
@@ -40,8 +59,8 @@
 
     <div class="row">
       <label>Font size</label>
-      <input type="range" id="size" min="32" max="140" value="72">
-      <span id="sizeVal" class="pill">72</span>
+      <input type="range" id="size" min="16" max="140" value="56">
+      <span id="sizeVal" class="pill">56</span>
     </div>
 
     <div class="row">
@@ -60,8 +79,8 @@
       <label>Outline</label>
       <input type="color" id="outlineColor" value="#000000">
       <label class="inline">Width</label>
-      <input type="range" id="outlineWidth" min="0" max="8" value="3">
-      <span id="owVal" class="pill">3</span>
+      <input type="range" id="outlineWidth" min="0" max="8" value="2">
+      <span id="owVal" class="pill">2</span>
     </div>
 
     <div class="row">
@@ -81,17 +100,35 @@
       <input type="range" id="group" min="1" max="5" value="3">
       <span id="groupVal" class="pill">3</span>
     </div>
+
+    <div class="row toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" id="qualityBoost">
+        <span class="toggle-text">
+          <strong>Quality Boost</strong>
+          <span class="muted">Lanczos upscale to ≥1080p short edge + light sharpen — sharper output, no AI</span>
+        </span>
+      </label>
+    </div>
   </section>
 
   <!-- Audio Enhancement panel -->
   <section class="panel">
     <h2>Audio Enhancement</h2>
 
-    {% if auphonic_enabled %}
+    {% if auphonic_enabled or elevenlabs_enabled or dolby_enabled %}
     <!-- Engine tab switcher -->
     <div class="audio-tabs" id="audioTabs">
       <button class="audio-tab active" id="tabFfmpeg" data-tab="ffmpeg">FFmpeg</button>
+      {% if auphonic_enabled %}
       <button class="audio-tab" id="tabAuphonic" data-tab="auphonic">⚡ Auphonic AI</button>
+      {% endif %}
+      {% if elevenlabs_enabled %}
+      <button class="audio-tab" id="tabElevenlabs" data-tab="elevenlabs">🎙 ElevenLabs</button>
+      {% endif %}
+      {% if dolby_enabled %}
+      <button class="audio-tab" id="tabDolby" data-tab="dolby">🎚 Dolby.io</button>
+      {% endif %}
     </div>
     {% endif %}
 
@@ -110,6 +147,16 @@
           <span class="toggle-text">
             <strong>Noise Reduction</strong>
             <span class="muted">Reduces background hiss and hum</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="voiceBoost">
+          <span class="toggle-text">
+            <strong>Voice Boost</strong>
+            <span class="muted">Amplifies soft voices so quiet speech stays audible</span>
           </span>
         </label>
       </div>
@@ -177,11 +224,180 @@
         </select>
       </div>
 
+      <p class="muted panel-desc" style="margin-top:18px;font-size:.85rem;border-top:1px solid #2a2f36;padding-top:12px">
+        Local post-process — adjusting these does NOT re-run Auphonic or use credits:
+      </p>
+
+      <div class="row" style="margin-top:8px">
+        <label style="min-width:140px">Cleanup strength</label>
+        <input type="range" id="auphonicWetMix" min="0" max="100" value="100">
+        <span id="auphonicWetMixVal" class="pill">100%</span>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        100% = pure Auphonic. Lower values blend in some original audio if Auphonic feels over-processed.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Output gain</label>
+        <input type="range" id="auphonicGain" min="-12" max="12" value="0" step="0.5">
+        <span id="auphonicGainVal" class="pill">0 dB</span>
+      </div>
+
       <p class="muted" style="font-size:.82rem;margin-top:14px">
         Preview unavailable — Auphonic processes at render time.
       </p>
     </div>
     {% endif %}
+
+    {% if elevenlabs_enabled %}
+    <!-- ElevenLabs tab content -->
+    <div id="elevenlabsTabContent" class="hidden">
+      <p class="muted panel-desc">
+        Studio-quality AI voice isolation. Removes background noise, music, and reverb
+        while preserving natural speech — best for noisy real-world recordings.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Cleanup strength</label>
+        <input type="range" id="elevenWetMix" min="0" max="100" value="100">
+        <span id="elevenWetMixVal" class="pill">100%</span>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        100% = pure isolated voice. Lower values mix in some original audio so the result feels less clinical.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Output gain</label>
+        <input type="range" id="elevenGain" min="-12" max="12" value="0" step="0.5">
+        <span id="elevenGainVal" class="pill">0 dB</span>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        Final volume adjustment after isolation and post-processing. Use −3 to −6 dB if the result sounds too hot,
+        or +3 to +6 dB to push quiet recordings louder. The brick-wall limiter prevents clipping regardless.
+      </p>
+
+      <p class="muted panel-desc" style="margin-top:18px;font-size:.85rem">
+        Post-processing (applied after isolation):
+      </p>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="elevenVoiceBoost">
+          <span class="toggle-text">
+            <strong>Voice Boost</strong>
+            <span class="muted">Amplify quiet passages after isolation</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="elevenLoudnessNorm" checked>
+          <span class="toggle-text">
+            <strong>Loudness Normalization</strong>
+            <span class="muted">−14 LUFS target (Instagram standard)</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="elevenVoiceClarity">
+          <span class="toggle-text">
+            <strong>Voice Clarity</strong>
+            <span class="muted">Presence boost + de-esser</span>
+          </span>
+        </label>
+      </div>
+
+      <p class="muted" style="font-size:.78rem;margin-top:14px">
+        Processed at render time. Preview unavailable. Usage is billed by ElevenLabs.
+      </p>
+    </div>
+    {% endif %}
+
+    {% if dolby_enabled %}
+    <!-- Dolby tab content -->
+    <div id="dolbyTabContent" class="hidden">
+      <p class="muted panel-desc">
+        Dolby.io Media Enhance — broadcast-grade speech cleanup with fine-grained control.
+        Best for noisy real-world recordings where you want to dial in noise / dynamics / loudness.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Content type</label>
+        <select id="dolbyContentType">
+          <option value="social_media" selected>Social Media</option>
+          <option value="podcast">Podcast</option>
+          <option value="voice_over">Voice-over</option>
+          <option value="mobile_phone">Mobile / Phone</option>
+          <option value="interview">Interview</option>
+        </select>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        Dolby tunes its model for the type of audio you tell it. Match your source.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Speech isolation</label>
+        <input type="range" id="dolbySpeechIsolation" min="0" max="100" value="50">
+        <span id="dolbySpeechIsolationVal" class="pill">50</span>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        0 = off, 100 = aggressive removal of music/background. Higher values can sound thinner — start at 50.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Noise reduction</label>
+        <select id="dolbyNoiseReduction">
+          <option value="off">Off</option>
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="max">Max</option>
+        </select>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Dynamics</label>
+        <select id="dolbyDynamics">
+          <option value="off">Off</option>
+          <option value="low" selected>Low (subtle)</option>
+          <option value="medium">Medium</option>
+          <option value="high">High (heavy compression)</option>
+        </select>
+      </div>
+      <p class="muted" style="font-size:.78rem;margin-top:-4px">
+        Compresses the dynamic range so soft and loud parts sit closer together. Low works for most spoken content.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <label style="min-width:140px">Loudness target</label>
+        <select id="dolbyLoudness">
+          <option value="-14" selected>Social −14 LUFS</option>
+          <option value="-16">Podcast / Broadcast −16 LUFS</option>
+          <option value="-23">Broadcast −23 LUFS</option>
+          <option value="">Off</option>
+        </select>
+      </div>
+
+      <p class="muted" style="font-size:.78rem;margin-top:14px">
+        Processed at render time. Preview unavailable. Usage is billed by Dolby.io.
+      </p>
+    </div>
+    {% endif %}
+
+    <!-- Audio sync offset (applies regardless of provider) -->
+    <div class="row" style="margin-top:18px;border-top:1px solid #2a2f36;padding-top:14px">
+      <label style="min-width:140px">Audio sync offset</label>
+      <input type="range" id="audioOffset" min="-3" max="3" value="0" step="0.05">
+      <span id="audioOffsetVal" class="pill">0.00s</span>
+    </div>
+    <p class="muted" style="font-size:.78rem;margin-top:-4px">
+      Fine-tune timing if the cleaned audio is still off after auto-alignment.
+      <strong>Positive</strong> = trim more from the audio start (audio plays late).
+      <strong>Negative</strong> = delay the audio (audio plays early).
+    </p>
 
   </section>
 
