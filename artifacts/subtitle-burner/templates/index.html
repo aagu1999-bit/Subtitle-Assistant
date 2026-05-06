@@ -7,41 +7,68 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<div class="wrap">
-  <header>
+
+<!-- Empty state: hero welcome shown when there are no jobs yet -->
+<div id="emptyState" class="empty-state hidden">
+  <div class="empty-hero">
+    <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
-    <p class="sub">Drop a video, transcribe it, edit the words, then burn captions.</p>
-  </header>
+    <p class="empty-tagline">Drop a video, transcribe it, edit the words, then burn captions.<br>AI audio enhancement, intelligent clip suggestions, and multi-video compilation built in.</p>
+    <button id="emptyDropBtn" class="btn btn-primary btn-lg">Choose a video to start</button>
+    <p class="muted" style="margin-top:14px">or drag &amp; drop a video anywhere on this page</p>
+  </div>
+</div>
 
-  <!-- Drop zone -->
-  <div id="drop" class="drop">
-    <input type="file" id="file" accept="video/*" multiple hidden>
-    <div class="drop-inner">
-      <div class="icon">🎬</div>
-      <p><strong>Drag &amp; drop video(s) here</strong></p>
-      <p class="muted">or click to browse — drop multiple to queue them all (mp4, mov, mkv, webm)</p>
-      <p id="filename" class="filename"></p>
+<!-- Main app shell: sidebar + tabbed main area -->
+<div id="appShell" class="app-shell">
+  <aside class="sidebar">
+    <header class="sidebar-header">
+      <h1>Subtitle Burner</h1>
+      <p class="sub">Caption · Enhance · Clip</p>
+    </header>
+
+    <!-- Drop zone (compact) -->
+    <div id="drop" class="drop drop-compact">
+      <input type="file" id="file" accept="video/*" multiple hidden>
+      <div class="drop-inner">
+        <div class="icon">🎬</div>
+        <p><strong>Drag &amp; drop video(s)</strong></p>
+        <p class="muted">or click to browse</p>
+        <p id="filename" class="filename"></p>
+      </div>
     </div>
-  </div>
 
-  <!-- Jobs list (multi-video sidebar) -->
-  <section id="jobsPanel" class="panel hidden" style="margin-top:12px">
-    <h2 style="display:flex;align-items:center;justify-content:space-between">
-      <span>Your videos</span>
-      <span id="jobsCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
-    </h2>
-    <div id="jobsList"></div>
-  </section>
+    <div class="row toggle-row" style="margin-top:8px">
+      <label class="toggle-label">
+        <input type="checkbox" id="preCleanForTranscribe">
+        <span class="toggle-text">
+          <strong>Pre-clean for transcription</strong>
+          <span class="muted">Local denoise before Whisper. Use only if transcripts have many errors.</span>
+        </span>
+      </label>
+    </div>
 
-  <div class="row toggle-row" style="margin-top:8px">
-    <label class="toggle-label">
-      <input type="checkbox" id="preCleanForTranscribe">
-      <span class="toggle-text">
-        <strong>Pre-clean audio for transcription</strong>
-        <span class="muted">Run a quick local denoise + soft-voice boost before Whisper. Try this only if the transcript has many errors — for clean audio it can hurt accuracy.</span>
-      </span>
-    </label>
-  </div>
+    <!-- Jobs list -->
+    <section id="jobsPanel" class="panel hidden" style="margin-top:14px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between">
+        <span>Your videos</span>
+        <span id="jobsCount" class="muted" style="font-size:.78rem;font-weight:normal"></span>
+      </h2>
+      <div id="jobsList"></div>
+    </section>
+  </aside>
+
+  <main class="main-area">
+    <!-- Tab navigation -->
+    <nav class="main-tabs" id="mainTabs">
+      <button type="button" class="main-tab active" data-tab="edit">Edit</button>
+      {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="highlights">✨ Highlights</button>{% endif %}
+      {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>{% endif %}
+      <button type="button" class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
+    </nav>
+
+    <!-- Tab: Edit -->
+    <div class="tab-content" data-tab-group="edit">
 
   <!-- Style panel -->
   <section class="panel">
@@ -417,7 +444,7 @@
   </details>
 
   <!-- Transcribe button -->
-  <button id="go" class="go" disabled>Transcribe Video</button>
+  <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:8px" disabled>Transcribe Video</button>
 
   <!-- Progress bar (used for both transcription and rendering) -->
   <div id="progress" class="progress hidden">
@@ -466,10 +493,15 @@
 
     </div>
 
-    <button id="renderBtn" class="go render-btn">Render with Edits</button>
+    <button id="renderBtn" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px">Render with Edits</button>
+
+    </div>
+    <!-- /Tab: Edit -->
 
     {% if gemini_enabled %}
-    <section id="highlightsPanel" class="panel" style="margin-top:18px">
+    <!-- Tab: Highlights -->
+    <div class="tab-content hidden" data-tab-group="highlights">
+    <section id="highlightsPanel" class="panel" style="margin-top:0">
       <h2 style="display:flex;align-items:center;gap:10px">
         <span>✨ Find highlights</span>
         <span class="muted" style="font-size:.78rem;font-weight:normal">AI clip suggestions</span>
@@ -504,17 +536,20 @@
         </select>
       </div>
 
-      <button id="hlFindBtn" class="go" style="background:#6c5cff;color:#fff;margin-top:6px">Find highlights</button>
+      <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff;margin-top:6px">Find highlights</button>
 
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
       <div id="hlResults" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
     </section>
+    </div>
+    <!-- /Tab: Highlights -->
     {% endif %}
   </div>
 
   {% if gemini_enabled %}
-  <!-- Compilation queue (visible only when queue is non-empty) -->
-  <section id="compilePanel" class="panel hidden" style="margin-top:18px;border-color:#6c5cff">
+  <!-- Tab: Compilation -->
+  <div class="tab-content hidden" data-tab-group="compilation">
+  <section id="compilePanel" class="panel" style="margin-top:0;border-color:#6c5cff">
     <h2 style="display:flex;align-items:center;justify-content:space-between">
       <span>🎞 Compilation queue</span>
       <span id="compileCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
@@ -526,23 +561,34 @@
     <div id="compileList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
     <div class="row" style="gap:8px">
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
-      <button id="compileGoBtn" class="go" style="background:#6c5cff;color:#fff;width:auto;padding:10px 18px">Compile</button>
-      <button id="compileClearBtn" class="go" style="background:#2a2f3a;color:#c8cdd3;width:auto;padding:10px 18px">Clear all</button>
+      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
+      <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
   </section>
+  </div>
+  <!-- /Tab: Compilation -->
   {% endif %}
 
-  <!-- Result -->
-  <div id="result" class="result hidden">
-    <h2>Done!</h2>
-    <video id="player" controls></video>
-    <div class="result-actions">
-      <a id="dl" class="dl" href="#" download>⬇ Download video</a>
-      <button id="reEditBtn" class="re-edit-btn">Edit transcript again</button>
+  <!-- Tab: Result -->
+  <div class="tab-content hidden" data-tab-group="result">
+    <div id="result" class="result hidden">
+      <h2>Done!</h2>
+      <video id="player" controls></video>
+      <div class="result-actions">
+        <a id="dl" class="dl btn btn-primary" href="#" download>⬇ Download video</a>
+        <button id="reEditBtn" class="btn btn-secondary">Edit transcript again</button>
+      </div>
     </div>
+    <p id="resultEmpty" class="muted" style="text-align:center;padding:40px 20px">
+      No render yet. Edit your captions, then click <strong>Render with Edits</strong> on the Edit tab.
+    </p>
   </div>
+  <!-- /Tab: Result -->
+
+  </main>
 </div>
+<!-- /app-shell -->
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

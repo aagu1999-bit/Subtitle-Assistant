@@ -696,3 +696,196 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   outline: none;
   border-color: #6c5cff;
 }
+
+/* =========================================================
+   App shell: two-column layout (sidebar + tabbed main)
+   ========================================================= */
+.app-shell {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 0;
+  min-height: 100vh;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.sidebar {
+  background: #11141b;
+  border-right: 1px solid #1f242e;
+  padding: 20px 18px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  text-align: left;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+.sidebar-header h1 { font-size: 1.4rem; }
+.sidebar-header .sub { font-size: 0.78rem; margin-top: 2px; }
+
+.drop.drop-compact {
+  padding: 22px 14px;
+  border-radius: 10px;
+}
+.drop.drop-compact .icon { font-size: 1.8rem; margin-bottom: 4px; }
+.drop.drop-compact p { font-size: 0.86rem; }
+
+.main-area {
+  padding: 28px 32px 80px;
+  min-width: 0;       /* let inner content shrink in grid */
+}
+
+/* Tab navigation */
+.main-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #232833;
+  margin-bottom: 20px;
+  padding-bottom: 0;
+  position: sticky;
+  top: 0;
+  background: #0d0f14;
+  z-index: 10;
+}
+.main-tab {
+  background: transparent;
+  border: none;
+  color: #9aa0a6;
+  font-size: 0.95rem;
+  font-weight: 500;
+  padding: 12px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.main-tab:hover { color: #e8eaed; }
+.main-tab.active {
+  color: #ffd60a;
+  border-bottom-color: #ffd60a;
+}
+.tab-badge {
+  display: inline-block;
+  background: #6c5cff;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  min-width: 20px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.tab-content { animation: fadeIn 0.15s ease; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* When inside the tabbed main area, the first .panel shouldn't push down */
+.main-area .tab-content > .panel:first-child { margin-top: 0; }
+
+/* =========================================================
+   Empty state (no jobs yet)
+   ========================================================= */
+.empty-state {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+.empty-hero {
+  text-align: center;
+  max-width: 540px;
+}
+.empty-logo {
+  font-size: 4rem;
+  margin-bottom: 12px;
+}
+.empty-hero h1 {
+  font-size: 2.6rem;
+  margin: 0 0 12px;
+}
+.empty-tagline {
+  color: #9aa0a6;
+  font-size: 1rem;
+  margin: 0 0 28px;
+  line-height: 1.5;
+}
+
+/* =========================================================
+   Button hierarchy
+   ========================================================= */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.92rem;
+  padding: 10px 18px;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.05s ease, background 0.15s ease;
+  border: 1px solid transparent;
+  font-family: inherit;
+  text-decoration: none;
+}
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn:hover:not(:disabled) { filter: brightness(1.08); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+
+.btn-primary {
+  background: linear-gradient(135deg, #ffd60a, #ff9500);
+  color: #0d0f14;
+}
+.btn-secondary {
+  background: transparent;
+  border-color: #2c3240;
+  color: #e8eaed;
+}
+.btn-secondary:hover:not(:disabled) {
+  border-color: #ffd60a;
+  color: #ffd60a;
+}
+.btn-tertiary {
+  background: transparent;
+  color: #9aa0a6;
+  padding: 8px 12px;
+}
+.btn-tertiary:hover:not(:disabled) { color: #e8eaed; }
+
+.btn-lg {
+  font-size: 1.05rem;
+  padding: 14px 28px;
+  border-radius: 12px;
+}
+
+/* =========================================================
+   Responsive: stack to single column on narrow screens
+   ========================================================= */
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: static;
+    border-right: none;
+    border-bottom: 1px solid #1f242e;
+    max-height: none;
+  }
+  .main-area { padding: 20px 16px 60px; }
+  .main-tabs { overflow-x: auto; }
+}

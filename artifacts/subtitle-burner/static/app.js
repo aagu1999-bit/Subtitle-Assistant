@@ -277,17 +277,26 @@ fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.f
 function handleFiles(files) {
   const videos = Array.from(files).filter(f => f.type.startsWith("video/"));
   if (!videos.length) { alert("Please select video files."); return; }
-  if (videos.length === 1) {
-    // Preserve the existing single-file path for the "Transcribe" button.
+
+  // In the empty state the Transcribe button isn't visible (it's in the
+  // sidebar which is hidden). Auto-kick everything immediately and activate
+  // the first one so the user lands directly in the editor for it.
+  const isEmpty = (typeof _loadJobIds === "function") && _loadJobIds().length === 0;
+
+  if (videos.length === 1 && !isEmpty) {
+    // Existing behaviour: stage the file, let user click Transcribe.
     currentFile = videos[0];
     fn.textContent = videos[0].name + "  (" + (videos[0].size / 1048576).toFixed(1) + " MB)";
     go.disabled = false;
   } else {
-    // Multi-file mode: kick all of them off immediately, no need for the button.
     currentFile = null;
-    fn.textContent = `Queueing ${videos.length} videos…`;
-    go.disabled = true;
-    videos.forEach(f => uploadAndTranscribe(f, getPreCleanFlag()));
+    if (fn) {
+      fn.textContent = videos.length === 1
+        ? `Queueing ${videos[0].name}…`
+        : `Queueing ${videos.length} videos…`;
+    }
+    if (go) go.disabled = true;
+    videos.forEach((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0));
   }
 }
 
@@ -1403,16 +1412,26 @@ function moveInCompileQueue(idx, delta) {
 
 function renderCompileQueue() {
   if (!compilePanel) return;
-  const q = loadCompileQueue();
-  if (!q.length) {
-    compilePanel.classList.add("hidden");
-    return;
-  }
+  // Panel itself always stays visible inside the Compilation tab; only the
+  // list contents and the action buttons reflect the current queue state.
   compilePanel.classList.remove("hidden");
+  const q = loadCompileQueue();
   const totalDur = q.reduce((s, c) => s + (c.end_time - c.start_time), 0);
-  compileCountEl.textContent = `${q.length} clip${q.length === 1 ? "" : "s"} · ~${Math.round(totalDur)}s total`;
+  compileCountEl.textContent = q.length
+    ? `${q.length} clip${q.length === 1 ? "" : "s"} · ~${Math.round(totalDur)}s total`
+    : "0 clips";
+  if (compileGoBtn) compileGoBtn.disabled = !q.length;
+  if (compileClearBtn) compileClearBtn.disabled = !q.length;
 
   compileListEl.innerHTML = "";
+  if (!q.length) {
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.style.cssText = "text-align:center;padding:24px 12px;font-size:.9rem";
+    hint.innerHTML = "Nothing queued yet. Open the <strong>✨ Highlights</strong> tab on any video and click <strong>+ Add to compilation</strong> on the suggestions you want to stitch together.";
+    compileListEl.appendChild(hint);
+    return;
+  }
   q.forEach((item, idx) => {
     const row = document.createElement("div");
     row.className = "compile-item";
@@ -1512,4 +1531,109 @@ if (compileClearBtn) {
   };
 }
 
+renderCompileQueue();
+
+// =====================================================================
+// Layout shell: empty state, tab switching, compilation badge
+// =====================================================================
+
+const emptyState = $("emptyState");
+const appShell = $("appShell");
+const mainTabs = $("mainTabs");
+const tabContents = document.querySelectorAll("[data-tab-group]");
+const tabResultBtn = $("tabResult");
+const compileBadge = $("compileBadge");
+const emptyDropBtn = $("emptyDropBtn");
+
+function setActiveTab(tab) {
+  if (!mainTabs) return;
+  mainTabs.querySelectorAll(".main-tab").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
+  tabContents.forEach(c => {
+    c.classList.toggle("hidden", c.dataset.tabGroup !== tab);
+  });
+}
+
+if (mainTabs) {
+  mainTabs.addEventListener("click", (e) => {
+    const btn = e.target.closest(".main-tab");
+    if (!btn || btn.classList.contains("hidden")) return;
+    setActiveTab(btn.dataset.tab);
+  });
+}
+
+// Trigger the file input from the empty-state hero button.
+if (emptyDropBtn) {
+  emptyDropBtn.onclick = () => fileInput.click();
+}
+
+// Allow drag-and-drop anywhere on the page in the empty state.
+document.addEventListener("dragover", (e) => {
+  if (!emptyState || emptyState.classList.contains("hidden")) return;
+  e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  if (!emptyState || emptyState.classList.contains("hidden")) return;
+  if (e.dataTransfer && e.dataTransfer.files.length) {
+    e.preventDefault();
+    handleFiles(e.dataTransfer.files);
+  }
+});
+
+// Show the empty state when no jobs exist; otherwise show the app shell.
+function updateEmptyStateVisibility() {
+  if (!emptyState || !appShell) return;
+  const hasJobs = _loadJobIds().length > 0;
+  emptyState.classList.toggle("hidden", hasJobs);
+  appShell.classList.toggle("hidden", !hasJobs);
+}
+
+// Wrap the existing renderJobsList so empty-state visibility tracks it.
+const _origRenderJobsList = renderJobsList;
+renderJobsList = function() {
+  _origRenderJobsList();
+  updateEmptyStateVisibility();
+};
+
+// Wrap renderCompileQueue to keep the tab badge synced.
+const _origRenderCompileQueue = renderCompileQueue;
+renderCompileQueue = function() {
+  _origRenderCompileQueue();
+  if (!compileBadge) return;
+  const count = loadCompileQueue().length;
+  if (count > 0) {
+    compileBadge.textContent = count;
+    compileBadge.classList.remove("hidden");
+  } else {
+    compileBadge.classList.add("hidden");
+  }
+};
+
+// Show the Result tab only after a render has completed at least once.
+// Hook into showEditor to reveal Result tab if the job already has output.
+const _origShowEditor = showEditor;
+showEditor = function(words, saved = {}) {
+  _origShowEditor(words, saved);
+  if (saved && saved.output && tabResultBtn) {
+    tabResultBtn.classList.remove("hidden");
+  }
+  // When switching to a job, default the user back to the Edit tab.
+  setActiveTab("edit");
+};
+
+// Auto-switch to Result tab when the result panel becomes visible.
+// pollRender shows the result element by removing .hidden — observe that.
+if (result && tabResultBtn) {
+  const obs = new MutationObserver(() => {
+    if (!result.classList.contains("hidden")) {
+      tabResultBtn.classList.remove("hidden");
+      setActiveTab("result");
+    }
+  });
+  obs.observe(result, { attributes: true, attributeFilter: ["class"] });
+}
+
+// Initial state sync.
+updateEmptyStateVisibility();
 renderCompileQueue();
