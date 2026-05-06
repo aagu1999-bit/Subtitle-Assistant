@@ -70,6 +70,29 @@
     <!-- Tab: Edit -->
     <div class="tab-content" data-tab-group="edit">
 
+  <!-- Preview-edit banner: shown only when reviewing a highlight from the ✨ Highlights tab -->
+  <section id="previewEditPanel" class="panel hidden" style="border-color:#6c5cff;margin-top:0;margin-bottom:18px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+      <h2 style="margin:0">🎬 Reviewing highlight: <span id="previewEditTitle" style="color:#9785ff"></span></h2>
+      <button id="previewEditClose" class="job-delete" style="font-size:1.1rem;background:transparent;border:1px solid #2c3240;border-radius:6px;width:28px;height:28px">✕</button>
+    </div>
+    <p id="previewEditHook" class="hl-quote" style="margin:0 0 14px"></p>
+    <div class="row" style="margin-bottom:6px">
+      <label style="min-width:60px">Start</label>
+      <input type="text" id="previewEditStart" placeholder="0:00.0" style="width:110px;font-family:ui-monospace,monospace;padding:6px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
+      <label class="inline" style="min-width:50px;margin-left:14px">End</label>
+      <input type="text" id="previewEditEnd" placeholder="0:00.0" style="width:110px;font-family:ui-monospace,monospace;padding:6px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
+      <span id="previewEditDur" class="pill" style="margin-left:10px">0.0s</span>
+    </div>
+    <p class="muted" style="font-size:.78rem;margin:0 0 12px">
+      Accepts <code>m:ss.s</code> (e.g. <code>1:23.5</code>) or plain seconds (e.g. <code>83.5</code>).
+    </p>
+    <div class="row" style="margin-bottom:0">
+      <button id="previewEditReplay" class="btn btn-secondary">▶ Replay clip</button>
+      <button id="previewEditSave" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">💾 Save &amp; back to ✨ Highlights</button>
+    </div>
+  </section>
+
   <!-- Style panel -->
   <section class="panel">
     <h2>Style</h2>

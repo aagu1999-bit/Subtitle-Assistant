@@ -1173,10 +1173,37 @@ const hlDurationEl = $("hlDuration");
 const hlCountEl = $("hlCount");
 
 function _fmtTime(t) {
+  // mm:ss (no decimals) — used for status displays and queue rows
   const tt = Math.max(0, Math.floor(t || 0));
   const mm = Math.floor(tt / 60).toString().padStart(2, "0");
   const ss = (tt % 60).toString().padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+function _fmtTimeFine(t) {
+  // m:ss.s — used for editable time inputs where 0.1s precision matters
+  const sign = (t || 0) < 0 ? "-" : "";
+  let v = Math.abs(t || 0);
+  const m = Math.floor(v / 60);
+  const s = v - m * 60;
+  return `${sign}${m}:${s.toFixed(1).padStart(4, "0")}`;
+}
+
+function _parseTime(str) {
+  // Accept either "m:ss.s" / "m:ss" or plain seconds. Return null if invalid.
+  if (str === null || str === undefined) return null;
+  const s = String(str).trim();
+  if (!s) return null;
+  if (s.includes(":")) {
+    const parts = s.split(":");
+    if (parts.length !== 2) return null;
+    const m = parseFloat(parts[0]);
+    const sec = parseFloat(parts[1]);
+    if (isNaN(m) || isNaN(sec) || sec < 0) return null;
+    return m * 60 + sec;
+  }
+  const v = parseFloat(s);
+  return isNaN(v) || v < 0 ? null : v;
 }
 
 function renderHighlights(clips, format) {
@@ -1227,15 +1254,17 @@ function renderHighlights(clips, format) {
     const timeRow = document.createElement("div");
     timeRow.className = "hl-time-edit";
 
+    // Text inputs that accept either "m:ss.s" or plain seconds. Internal
+    // state stays in seconds so downstream code (FFmpeg, /clip-from-job)
+    // doesn't change.
     const mkInput = (val, onChange) => {
       const i = document.createElement("input");
-      i.type = "number";
-      i.step = "0.1";
-      i.min = "0";
-      i.value = val.toFixed(1);
+      i.type = "text";
+      i.value = _fmtTimeFine(val);
+      i.style.fontFamily = "ui-monospace, monospace";
       i.oninput = () => {
-        const v = parseFloat(i.value);
-        if (!isNaN(v) && v >= 0) onChange(v);
+        const v = _parseTime(i.value);
+        if (v !== null) onChange(v);
       };
       return i;
     };
@@ -1247,9 +1276,6 @@ function renderHighlights(clips, format) {
       updateDurLabel();
     });
     startLabel.appendChild(startInput);
-    const startUnit = document.createElement("span");
-    startUnit.textContent = "s";
-    startLabel.appendChild(startUnit);
     timeRow.appendChild(startLabel);
 
     const endLabel = document.createElement("label");
@@ -1259,9 +1285,6 @@ function renderHighlights(clips, format) {
       updateDurLabel();
     });
     endLabel.appendChild(endInput);
-    const endUnit = document.createElement("span");
-    endUnit.textContent = "s";
-    endLabel.appendChild(endUnit);
     timeRow.appendChild(endLabel);
 
     card.appendChild(timeRow);
@@ -1273,37 +1296,20 @@ function renderHighlights(clips, format) {
     const previewBtn = document.createElement("button");
     previewBtn.textContent = "▶ Preview";
     previewBtn.onclick = () => {
-      // Source player lives on the Edit tab. If we're not on Edit (e.g. user
-      // is on Highlights when they hit Preview), the player is display:none
-      // and won't be visible. Switch to Edit, then play.
-      setActiveTab("edit");
-      const target = sourcePlayer;
-      if (!target || !target.src) {
-        alert("Source video isn't available — open this job's editor first.");
-        return;
-      }
-      if (previewStopHandler) {
-        target.removeEventListener("timeupdate", previewStopHandler);
-        previewStopHandler = null;
-      }
-      // Defer play+seek to the next frame so the tab switch's display:none
-      // → display:block has actually applied; otherwise scrollIntoView/play
-      // can fire while the element is still hidden.
-      requestAnimationFrame(() => {
-        try {
-          target.currentTime = editedStart;
-          target.play();
-          const stopAt = editedEnd;
-          previewStopHandler = () => {
-            if (target.currentTime >= stopAt) {
-              target.pause();
-              target.removeEventListener("timeupdate", previewStopHandler);
-              previewStopHandler = null;
-            }
-          };
-          target.addEventListener("timeupdate", previewStopHandler);
-          target.scrollIntoView({ behavior: "smooth", block: "center" });
-        } catch (e) {}
+      // Open the preview-edit banner on the Edit tab so the user can scrub
+      // start/end while watching, then save back here.
+      openPreviewEditor({
+        title: c.title || "Untitled clip",
+        hookQuote: c.hook_quote || "",
+        start: editedStart,
+        end: editedEnd,
+        onSave: (newStart, newEnd) => {
+          editedStart = newStart;
+          editedEnd = newEnd;
+          startInput.value = _fmtTimeFine(newStart);
+          endInput.value = _fmtTimeFine(newEnd);
+          updateDurLabel();
+        },
       });
     };
     actions.appendChild(previewBtn);
@@ -1661,3 +1667,115 @@ if (result && tabResultBtn) {
 // renderCompileQueue / showEditor instead of via function-wrapping.
 renderJobsList();
 renderCompileQueue();
+
+// =====================================================================
+// Highlight preview-edit banner (lives on the Edit tab)
+// =====================================================================
+//
+// Flow:
+//   1. User clicks ▶ Preview on a Highlights card → openPreviewEditor() called
+//   2. Edit tab is activated; the banner pre-fills with the clip's start/end
+//      and hook quote, then plays the source player from start, auto-pausing
+//      at end so the user hears the proposed range.
+//   3. User can scrub the start/end inputs (mm:ss.s format) and click
+//      Replay to re-play with the new times.
+//   4. Save → calls the highlight card's onSave callback (which updates the
+//      card's stored editedStart/editedEnd) and switches back to ✨ Highlights.
+//   5. Cancel → close panel, no save.
+
+let _activePreview = null;          // { title, hookQuote, start, end, onSave }
+let _previewStopHandler = null;     // timeupdate listener for auto-pause
+
+function _peClearStopHandler() {
+  if (_previewStopHandler && sourcePlayer) {
+    sourcePlayer.removeEventListener("timeupdate", _previewStopHandler);
+  }
+  _previewStopHandler = null;
+}
+
+function _peUpdateDur() {
+  const dur = $("previewEditDur");
+  const startEl = $("previewEditStart");
+  const endEl = $("previewEditEnd");
+  if (!dur || !startEl || !endEl) return;
+  const s = _parseTime(startEl.value);
+  const e = _parseTime(endEl.value);
+  if (s === null || e === null || e <= s) {
+    dur.textContent = "—";
+    return;
+  }
+  dur.textContent = (e - s).toFixed(1) + "s";
+}
+
+function _pePlay() {
+  const target = sourcePlayer;
+  if (!target || !target.src) return;
+  const s = _parseTime($("previewEditStart").value);
+  const e = _parseTime($("previewEditEnd").value);
+  if (s === null || e === null || e <= s) return;
+  _peClearStopHandler();
+  try {
+    target.currentTime = s;
+    target.play();
+    _previewStopHandler = () => {
+      if (target.currentTime >= e) {
+        target.pause();
+        _peClearStopHandler();
+      }
+    };
+    target.addEventListener("timeupdate", _previewStopHandler);
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (err) { /* ignore play() rejections */ }
+}
+
+function openPreviewEditor(clip) {
+  const panel = $("previewEditPanel");
+  if (!panel) return;
+  _activePreview = clip;
+  $("previewEditTitle").textContent = clip.title || "Untitled clip";
+  $("previewEditHook").textContent = clip.hookQuote ? `"${clip.hookQuote}"` : "";
+  $("previewEditStart").value = _fmtTimeFine(clip.start);
+  $("previewEditEnd").value = _fmtTimeFine(clip.end);
+  _peUpdateDur();
+  panel.classList.remove("hidden");
+
+  setActiveTab("edit");
+  // Defer the play call so the tab switch's display change has applied.
+  requestAnimationFrame(() => _pePlay());
+}
+
+function closePreviewEditor() {
+  _peClearStopHandler();
+  _activePreview = null;
+  const panel = $("previewEditPanel");
+  if (panel) panel.classList.add("hidden");
+}
+
+const _peStart = $("previewEditStart");
+const _peEnd = $("previewEditEnd");
+if (_peStart) _peStart.oninput = _peUpdateDur;
+if (_peEnd) _peEnd.oninput = _peUpdateDur;
+
+const _peReplay = $("previewEditReplay");
+if (_peReplay) _peReplay.onclick = _pePlay;
+
+const _peClose = $("previewEditClose");
+if (_peClose) _peClose.onclick = closePreviewEditor;
+
+const _peSave = $("previewEditSave");
+if (_peSave) {
+  _peSave.onclick = () => {
+    if (!_activePreview) return;
+    const s = _parseTime($("previewEditStart").value);
+    const e = _parseTime($("previewEditEnd").value);
+    if (s === null || e === null || e <= s) {
+      alert("Invalid times. End must be greater than start.");
+      return;
+    }
+    if (typeof _activePreview.onSave === "function") {
+      _activePreview.onSave(s, e);
+    }
+    closePreviewEditor();
+    setActiveTab("highlights");
+  };
+}
