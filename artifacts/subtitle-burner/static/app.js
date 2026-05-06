@@ -1296,14 +1296,15 @@ function renderHighlights(clips, format) {
     const previewBtn = document.createElement("button");
     previewBtn.textContent = "▶ Preview";
     previewBtn.onclick = () => {
-      // Open the preview-edit banner on the Edit tab so the user can scrub
-      // start/end while watching, then save back here.
+      // Open the preview-edit panel on the Edit tab. onUpdate is called on
+      // every input change in the panel (live sync back to this card) plus
+      // on Save / Make-a-clip / Add-to-compilation actions.
       openPreviewEditor({
         title: c.title || "Untitled clip",
         hookQuote: c.hook_quote || "",
         start: editedStart,
         end: editedEnd,
-        onSave: (newStart, newEnd) => {
+        onUpdate: (newStart, newEnd) => {
           editedStart = newStart;
           editedEnd = newEnd;
           startInput.value = _fmtTimeFine(newStart);
@@ -1669,22 +1670,17 @@ renderJobsList();
 renderCompileQueue();
 
 // =====================================================================
-// Highlight preview-edit banner (lives on the Edit tab)
+// Highlight preview-edit panel (lives below the source player on Edit tab)
 // =====================================================================
 //
-// Flow:
-//   1. User clicks ▶ Preview on a Highlights card → openPreviewEditor() called
-//   2. Edit tab is activated; the banner pre-fills with the clip's start/end
-//      and hook quote, then plays the source player from start, auto-pausing
-//      at end so the user hears the proposed range.
-//   3. User can scrub the start/end inputs (mm:ss.s format) and click
-//      Replay to re-play with the new times.
-//   4. Save → calls the highlight card's onSave callback (which updates the
-//      card's stored editedStart/editedEnd) and switches back to ✨ Highlights.
-//   5. Cancel → close panel, no save.
+// User clicks ▶ Preview on a Highlights card → switches to the Edit tab
+// and opens this panel under the source video. The panel mirrors the card:
+// editable Start/End (mm:ss.s), Add to compilation, Make a clip — plus
+// Replay and Save & back. Edits live-sync to the Highlights card so both
+// representations stay aligned.
 
-let _activePreview = null;          // { title, hookQuote, start, end, onSave }
-let _previewStopHandler = null;     // timeupdate listener for auto-pause
+let _activePreview = null;       // { title, hookQuote, start, end, onUpdate }
+let _previewStopHandler = null;  // timeupdate listener for auto-pause
 
 function _peClearStopHandler() {
   if (_previewStopHandler && sourcePlayer) {
@@ -1693,32 +1689,46 @@ function _peClearStopHandler() {
   _previewStopHandler = null;
 }
 
+function _peGetTimes() {
+  const s = _parseTime($("previewEditStart").value);
+  const e = _parseTime($("previewEditEnd").value);
+  return { s, e, valid: s !== null && e !== null && e > s };
+}
+
 function _peUpdateDur() {
   const dur = $("previewEditDur");
-  const startEl = $("previewEditStart");
-  const endEl = $("previewEditEnd");
-  if (!dur || !startEl || !endEl) return;
-  const s = _parseTime(startEl.value);
-  const e = _parseTime(endEl.value);
-  if (s === null || e === null || e <= s) {
-    dur.textContent = "—";
-    return;
-  }
-  dur.textContent = (e - s).toFixed(1) + "s";
+  if (!dur) return;
+  const t = _peGetTimes();
+  dur.textContent = t.valid ? (t.e - t.s).toFixed(1) + "s" : "—";
+}
+
+function _peSyncToCard() {
+  // Live-propagate panel changes back to the Highlights card so both
+  // representations stay aligned no matter where the user edits.
+  if (!_activePreview || typeof _activePreview.onUpdate !== "function") return;
+  const t = _peGetTimes();
+  if (!t.valid) return;
+  _activePreview.onUpdate(t.s, t.e);
+}
+
+function _peSetStatus(msg, ok = true) {
+  const el = $("previewEditStatus");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.color = ok ? "#9aa0a6" : "#ff8a8a";
 }
 
 function _pePlay() {
   const target = sourcePlayer;
   if (!target || !target.src) return;
-  const s = _parseTime($("previewEditStart").value);
-  const e = _parseTime($("previewEditEnd").value);
-  if (s === null || e === null || e <= s) return;
+  const t = _peGetTimes();
+  if (!t.valid) return;
   _peClearStopHandler();
   try {
-    target.currentTime = s;
+    target.currentTime = t.s;
     target.play();
     _previewStopHandler = () => {
-      if (target.currentTime >= e) {
+      if (target.currentTime >= t.e) {
         target.pause();
         _peClearStopHandler();
       }
@@ -1736,11 +1746,12 @@ function openPreviewEditor(clip) {
   $("previewEditHook").textContent = clip.hookQuote ? `"${clip.hookQuote}"` : "";
   $("previewEditStart").value = _fmtTimeFine(clip.start);
   $("previewEditEnd").value = _fmtTimeFine(clip.end);
+  _peSetStatus("");
   _peUpdateDur();
   panel.classList.remove("hidden");
 
   setActiveTab("edit");
-  // Defer the play call so the tab switch's display change has applied.
+  // Defer play+scroll until the tab switch's display change has applied.
   requestAnimationFrame(() => _pePlay());
 }
 
@@ -1751,11 +1762,17 @@ function closePreviewEditor() {
   if (panel) panel.classList.add("hidden");
 }
 
+// Inputs: live duration update + live sync back to the Highlights card.
 const _peStart = $("previewEditStart");
 const _peEnd = $("previewEditEnd");
-if (_peStart) _peStart.oninput = _peUpdateDur;
-if (_peEnd) _peEnd.oninput = _peUpdateDur;
+function _peOnInput() {
+  _peUpdateDur();
+  _peSyncToCard();
+}
+if (_peStart) _peStart.oninput = _peOnInput;
+if (_peEnd) _peEnd.oninput = _peOnInput;
 
+// Buttons.
 const _peReplay = $("previewEditReplay");
 if (_peReplay) _peReplay.onclick = _pePlay;
 
@@ -1765,17 +1782,72 @@ if (_peClose) _peClose.onclick = closePreviewEditor;
 const _peSave = $("previewEditSave");
 if (_peSave) {
   _peSave.onclick = () => {
-    if (!_activePreview) return;
-    const s = _parseTime($("previewEditStart").value);
-    const e = _parseTime($("previewEditEnd").value);
-    if (s === null || e === null || e <= s) {
-      alert("Invalid times. End must be greater than start.");
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
       return;
     }
-    if (typeof _activePreview.onSave === "function") {
-      _activePreview.onSave(s, e);
-    }
+    _peSyncToCard();
     closePreviewEditor();
     setActiveTab("highlights");
+  };
+}
+
+const _peAdd = $("previewEditAdd");
+if (_peAdd) {
+  _peAdd.onclick = () => {
+    if (!_activePreview || !currentJobId) return;
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
+      return;
+    }
+    _peSyncToCard();
+    addToCompileQueue({
+      source_job_id: currentJobId,
+      source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+      start_time: t.s,
+      end_time: t.e,
+      hook_quote: _activePreview.hookQuote || "",
+      title: _activePreview.title || "",
+    });
+    _peSetStatus(`✓ Added to compilation queue (${(t.e - t.s).toFixed(1)}s).`);
+  };
+}
+
+const _peMakeClip = $("previewEditMakeClip");
+if (_peMakeClip) {
+  _peMakeClip.onclick = async () => {
+    if (!_activePreview || !currentJobId) return;
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
+      return;
+    }
+    _peSyncToCard();
+    _peMakeClip.disabled = true;
+    _peSetStatus("Trimming clip…");
+    try {
+      const res = await fetch("/clip-from-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_job_id: currentJobId,
+          start_time: t.s,
+          end_time: t.e,
+          label: _activePreview.title || "highlight",
+        }),
+      });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      addJobToList(j.job_id);
+      await refreshJobsList();
+      closePreviewEditor();
+      await switchToJob(j.job_id);
+    } catch (err) {
+      _peSetStatus("Could not create clip: " + err.message, false);
+    } finally {
+      _peMakeClip.disabled = false;
+    }
   };
 }
