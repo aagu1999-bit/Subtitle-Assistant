@@ -1367,6 +1367,151 @@ def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Pat
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+# ---- AI clip suggestions (Gemini) ----
+
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220) -> str:
+    """Group word-timestamp records into readable [mm:ss] lines.
+
+    Breaks at natural pauses (>0.7s gap) or when a chunk reaches
+    ``max_chars_per_chunk``. The LLM uses these timestamps to choose clip
+    boundaries that fall on sentence-ish edges.
+    """
+    if not words:
+        return ""
+    chunks: list[str] = []
+    current_words: list[str] = []
+    current_start = float(words[0].get("start", 0))
+
+    def _ts(t: float) -> str:
+        mm = int(t // 60)
+        ss = int(t % 60)
+        return f"[{mm:02d}:{ss:02d}]"
+
+    for i, w in enumerate(words):
+        current_words.append(str(w.get("word", "")).strip())
+        end = float(w.get("end", 0))
+        next_gap = (
+            float(words[i + 1].get("start", end)) - end
+            if i + 1 < len(words) else 999.0
+        )
+        text_so_far = " ".join(current_words).strip()
+        if (len(text_so_far) >= max_chars_per_chunk or next_gap > 0.7) and text_so_far:
+            chunks.append(f"{_ts(current_start)} {text_so_far}")
+            current_words = []
+            if i + 1 < len(words):
+                current_start = float(words[i + 1].get("start", end))
+    if current_words:
+        chunks.append(f"{_ts(current_start)} {' '.join(current_words).strip()}")
+    return "\n".join(chunks)
+
+
+_FORMAT_RUBRICS = {
+    "comedy": (
+        "Format: COMEDY.\n"
+        "- Look for setup → tension → punchline. The punchline is the payoff.\n"
+        "- Rule of three: two normal items then a twist. Identify these patterns.\n"
+        "- Callbacks: a line that pays off something earlier. These travel well as clips.\n"
+        "- Reaction beats matter — the line right after the joke can land harder than the joke.\n"
+        "- AVOID slow setups; if a joke needs 30s of context, don't pick it."
+    ),
+    "interview": (
+        "Format: INTERVIEW.\n"
+        "- Lead with the ANSWER, not the question. Hook should be the strongest, most quotable line.\n"
+        "- Vulnerability beats: moments of admission, hesitation, surprise, raw honesty.\n"
+        "- Quote-worthiness: a line that stands alone without setup.\n"
+        "- A whole arc inside 60s: one strong claim, evidence/example, takeaway."
+    ),
+    "event_recap": (
+        "Format: EVENT RECAP.\n"
+        "- Front-load the peak. Don't save the best moment — open with it.\n"
+        "- Three-beat arc: anticipation → climax → reaction. The reaction often beats the climax.\n"
+        "- Audience energy: cheers, gasps, laughter spikes are gold. Note when the transcript shows audience response.\n"
+        "- Visual/spatial language ('I couldn't believe what I saw') is good for hooks even without B-roll."
+    ),
+    "auto": (
+        "Format: AUTO. Detect the dominant content type from the transcript "
+        "(comedy / interview / event recap / monologue / tutorial) and apply "
+        "the relevant rubric. State your detected type in the reason field."
+    ),
+}
+
+
+def _build_clip_suggestion_prompt(transcript: str, format_type: str,
+                                   target_duration: int, num_clips: int) -> str:
+    rubric = _FORMAT_RUBRICS.get(format_type, _FORMAT_RUBRICS["auto"])
+    return f"""You are an expert short-form video editor. Identify the most engaging segments in the transcript below for clipping into stand-alone short-form videos.
+
+{rubric}
+
+Universal rubric (applies to every format):
+- HOOK (first 3-5s of the clip): a strong opener — quotable line, surprising claim, open loop, or pattern interrupt. Within 5 seconds the viewer must know why they should keep watching. The hook can be the literal start of the clip OR a line from later you'd want pulled forward.
+- BODY (~{target_duration}s total): retention engine — something interesting (new angle, escalation, surprise, emotional shift) every 7-10s.
+- PAYOFF (last 5-10s): punchline, conclusion, emotional peak, or callback. Don't trail off mid-thought.
+
+Length target: ~{target_duration} seconds per clip (acceptable range: {max(15, target_duration - 20)}-{target_duration + 30}s). Pick clips that BEGIN AND END at natural sentence boundaries — match the [mm:ss] timestamps on the transcript lines.
+
+Return EXACTLY {num_clips} clips, ranked by engagement potential (best first). For each clip output:
+- start_time (float seconds, must equal the start of one of the transcript lines)
+- end_time (float seconds)
+- hook_start_time, hook_end_time (3-5s window inside the clip; the strongest opening moment)
+- hook_quote (the literal line of dialogue serving as the hook)
+- title (3-7 word descriptive title)
+- reason (1-2 sentences: WHY this segment works under the rubric above)
+
+Output STRICT JSON only, no prose, no markdown fences. Schema:
+{{
+  "clips": [
+    {{
+      "start_time": <float>,
+      "end_time": <float>,
+      "hook_start_time": <float>,
+      "hook_end_time": <float>,
+      "hook_quote": "<string>",
+      "title": "<string>",
+      "reason": "<string>"
+    }}
+  ]
+}}
+
+Transcript (each line begins with [mm:ss] indicating the start time of that sentence):
+{transcript}
+"""
+
+
+def _gemini_generate_clip_suggestions(prompt: str) -> dict:
+    """Call Gemini and parse a JSON-mode response. Raises on failure."""
+    import requests
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("Gemini is not configured (GEMINI_API_KEY not set).")
+
+    url = f"{_GEMINI_BASE_URL}/{GEMINI_MODEL}:generateContent?key={api_key}"
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.6,
+            "responseMimeType": "application/json",
+        },
+    }
+    resp = requests.post(url, json=body, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini API failed ({resp.status_code}): {resp.text[:500]}")
+    data = resp.json()
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Gemini returned an unexpected response shape: {e}")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Gemini returned non-JSON output: {e}; first 500 chars: {text[:500]}")
+
+
 # ---- Background workers ----
 
 def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
@@ -1653,16 +1798,300 @@ def list_jobs():
     return jsonify({"jobs": out})
 
 
+@app.route("/suggest-clips", methods=["POST"])
+def suggest_clips():
+    """LLM-driven clip suggestions for a job's transcript.
+
+    Body: {job_id, format, target_duration, num_clips}
+      format: "comedy" | "interview" | "event_recap" | "auto"
+      target_duration: int seconds (default 60)
+      num_clips: int (default 5)
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    format_type = (data.get("format") or "auto").lower()
+    if format_type not in _FORMAT_RUBRICS:
+        format_type = "auto"
+    try:
+        target_duration = int(data.get("target_duration") or 60)
+    except (TypeError, ValueError):
+        target_duration = 60
+    target_duration = max(15, min(180, target_duration))
+    try:
+        num_clips = int(data.get("num_clips") or 5)
+    except (TypeError, ValueError):
+        num_clips = 5
+    num_clips = max(1, min(10, num_clips))
+
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    job = jobs[job_id]
+    words = job.get("words")
+    if not words:
+        return jsonify({"error": "Transcript not available for this job yet."}), 400
+
+    transcript = _format_transcript_for_llm(words)
+    prompt = _build_clip_suggestion_prompt(transcript, format_type, target_duration, num_clips)
+
+    try:
+        result = _gemini_generate_clip_suggestions(prompt)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    clips = result.get("clips") or []
+    # Light validation: drop entries missing required fields, clamp times
+    src_max_t = float(words[-1].get("end", 0)) if words else 0
+    cleaned = []
+    for c in clips:
+        try:
+            start = float(c.get("start_time"))
+            end = float(c.get("end_time"))
+            if end <= start or start < 0 or end > src_max_t + 1:
+                continue
+            cleaned.append({
+                "start_time": start,
+                "end_time": end,
+                "hook_start_time": float(c.get("hook_start_time", start)),
+                "hook_end_time": float(c.get("hook_end_time", min(end, start + 5))),
+                "hook_quote": str(c.get("hook_quote", ""))[:300],
+                "title": str(c.get("title", ""))[:120],
+                "reason": str(c.get("reason", ""))[:500],
+            })
+        except (TypeError, ValueError):
+            continue
+    return jsonify({"clips": cleaned, "format": format_type})
+
+
+@app.route("/clip-from-job", methods=["POST"])
+def clip_from_job():
+    """Spawn a new job that's a trimmed slice of an existing job's source video.
+
+    Body: {source_job_id, start_time, end_time, label}
+    Inherits the source job's style, emoji_rules, and transcript words
+    (filtered + offset to the new range). The new job lands at
+    awaiting_edit so the user can immediately tweak and render.
+    """
+    data = request.get_json(force=True) or {}
+    source_job_id = data.get("source_job_id")
+    try:
+        start = max(0.0, float(data.get("start_time", 0)))
+        end = float(data.get("end_time", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid start/end time"}), 400
+    label = (data.get("label") or "").strip()[:80]
+
+    if not source_job_id or source_job_id not in jobs:
+        return jsonify({"error": "Source job not found"}), 404
+    src_video = find_video_path(source_job_id)
+    if not src_video:
+        return jsonify({"error": "Source video no longer available on the server"}), 404
+    if end <= start:
+        return jsonify({"error": "end_time must be greater than start_time"}), 400
+
+    src_job = jobs[source_job_id]
+    new_job_id = uuid.uuid4().hex
+    ext = src_video.suffix.lstrip(".") or "mp4"
+    new_video_path = UPLOAD_DIR / f"{new_job_id}.{ext}"
+
+    # Fast-seek + re-encode for accurate trim. Re-encode is needed because
+    # `-c copy` snaps to keyframes, which would desync the inherited
+    # word-level timestamps by up to several seconds.
+    duration = end - start
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{start:.3f}",
+        "-i", str(src_video),
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(new_video_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        _safe_unlink(new_video_path)
+        return jsonify({"error": f"Trim failed: {proc.stderr[-500:]}"}), 500
+
+    # Filter source words to the requested range, with timestamps offset to
+    # the new clip's local timeline.
+    src_words = src_job.get("words") or []
+    new_words = []
+    for w in src_words:
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if we <= start or ws >= end:
+            continue
+        new_words.append({
+            "word": w.get("word", ""),
+            "start": max(0.0, ws - start),
+            "end": max(0.0, min(end, we) - start),
+        })
+
+    src_filename = src_job.get("filename") or "clip"
+    base_stem = Path(src_filename).stem if src_filename else "clip"
+    new_filename = f"{base_stem} — {label or 'highlight'}.{ext}"
+
+    jobs[new_job_id] = {
+        "status": "awaiting_edit",
+        "progress": 100,
+        "output": None,
+        "error": None,
+        "words": new_words,
+        "style": src_job.get("style"),
+        "audio": None,
+        "emoji_rules": src_job.get("emoji_rules"),
+        "created_at": time.time(),
+        "filename": new_filename,
+    }
+    _db_save_job(new_job_id)
+    return jsonify({"job_id": new_job_id, "filename": new_filename})
+
+
+@app.route("/compile-clips", methods=["POST"])
+def compile_clips():
+    """Stitch multiple clip ranges into one composite job.
+
+    Body: {clips: [{source_job_id, start_time, end_time}], label}
+    Returns: {job_id, filename}
+
+    Each segment is trimmed and re-encoded (libx264 / aac) at 1080p / 30fps
+    so the concat demuxer can copy-stream them into one mp4 without re-encode.
+    The merged transcript is built by filtering each source's words to the
+    requested range and offsetting them by cumulative segment duration.
+    """
+    data = request.get_json(force=True) or {}
+    items = data.get("clips") or []
+    if not items:
+        return jsonify({"error": "No clips provided"}), 400
+    label = (data.get("label") or "compilation").strip()[:80] or "compilation"
+
+    validated = []
+    for idx, item in enumerate(items):
+        sid = item.get("source_job_id")
+        if not sid or sid not in jobs:
+            return jsonify({"error": f"Source job not found: {sid}"}), 404
+        src_video = find_video_path(sid)
+        if not src_video:
+            return jsonify({"error": f"Source video missing for clip {idx + 1}"}), 404
+        try:
+            start = max(0.0, float(item.get("start_time", 0)))
+            end = float(item.get("end_time", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Invalid time on clip {idx + 1}"}), 400
+        if end <= start:
+            return jsonify({"error": f"end_time must be > start_time on clip {idx + 1}"}), 400
+        validated.append({
+            "source_job_id": sid,
+            "src_video": src_video,
+            "start": start,
+            "end": end,
+        })
+
+    new_job_id = uuid.uuid4().hex
+    composite_path = UPLOAD_DIR / f"{new_job_id}.mp4"
+
+    # 1. Trim + normalize each segment to a uniform format so concat is clean.
+    seg_paths: list[Path] = []
+    list_path: Path | None = None
+    try:
+        for i, v in enumerate(validated):
+            seg_path = UPLOAD_DIR / f"{new_job_id}_seg{i:03d}.mp4"
+            duration = v["end"] - v["start"]
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{v['start']:.3f}",
+                "-i", str(v["src_video"]),
+                "-t", f"{duration:.3f}",
+                "-vf", "scale=1080:-2:flags=lanczos,fps=30",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                str(seg_path),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                return jsonify({"error": f"Trim failed on clip {i + 1}: {proc.stderr[-400:]}"}), 500
+            seg_paths.append(seg_path)
+
+        # 2. Concat with the demuxer (cheap stream copy now that all segs match).
+        list_path = UPLOAD_DIR / f"{new_job_id}_concat.txt"
+        list_path.write_text(
+            "\n".join(f"file '{p.absolute()}'" for p in seg_paths) + "\n"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(composite_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            return jsonify({"error": f"Concat failed: {proc.stderr[-500:]}"}), 500
+    finally:
+        for p in seg_paths:
+            _safe_unlink(p)
+        if list_path:
+            _safe_unlink(list_path)
+
+    # 3. Stitch the merged transcript with cumulative offsets.
+    merged_words: list[dict] = []
+    cumulative = 0.0
+    inherited_style = None
+    inherited_emoji = None
+    for v in validated:
+        src_job = jobs[v["source_job_id"]]
+        if inherited_style is None and src_job.get("style"):
+            inherited_style = src_job.get("style")
+        if inherited_emoji is None and src_job.get("emoji_rules"):
+            inherited_emoji = src_job.get("emoji_rules")
+        for w in (src_job.get("words") or []):
+            try:
+                ws = float(w.get("start", 0))
+                we = float(w.get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            if we <= v["start"] or ws >= v["end"]:
+                continue
+            merged_words.append({
+                "word": w.get("word", ""),
+                "start": cumulative + max(0.0, ws - v["start"]),
+                "end": cumulative + max(0.0, min(v["end"], we) - v["start"]),
+            })
+        cumulative += (v["end"] - v["start"])
+
+    new_filename = f"{label}.mp4"
+    jobs[new_job_id] = {
+        "status": "awaiting_edit",
+        "progress": 100,
+        "output": None,
+        "error": None,
+        "words": merged_words,
+        "style": inherited_style,
+        "audio": None,
+        "emoji_rules": inherited_emoji,
+        "created_at": time.time(),
+        "filename": new_filename,
+    }
+    _db_save_job(new_job_id)
+    return jsonify({"job_id": new_job_id, "filename": new_filename, "segments": len(validated)})
+
+
 @app.route("/")
 def index():
     auphonic_enabled = bool(os.environ.get("AUPHONIC_API_KEY"))
     elevenlabs_enabled = bool(os.environ.get("ELEVENLABS_API_KEY"))
     dolby_enabled = bool(os.environ.get("DOLBY_API_KEY"))
+    gemini_enabled = bool(os.environ.get("GEMINI_API_KEY"))
     return render_template(
         "index.html",
         auphonic_enabled=auphonic_enabled,
         elevenlabs_enabled=elevenlabs_enabled,
         dolby_enabled=dolby_enabled,
+        gemini_enabled=gemini_enabled,
     )
 
 

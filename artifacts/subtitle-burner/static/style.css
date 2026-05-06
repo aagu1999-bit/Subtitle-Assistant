@@ -560,3 +560,139 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   line-height: 1;
 }
 .job-item .job-delete:hover { color: #ff8a8a; }
+
+/* ---- AI Highlights ---- */
+.hl-card {
+  background: #1a1e2a;
+  border: 1px solid #232833;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hl-card .hl-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.hl-card .hl-title strong { font-size: 1rem; }
+.hl-card .hl-time {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.82rem;
+  color: #9aa3ad;
+}
+.hl-card .hl-quote {
+  font-style: italic;
+  color: #ffd60a;
+  border-left: 3px solid #ffd60a;
+  padding: 4px 0 4px 12px;
+  font-size: 0.95rem;
+}
+.hl-card .hl-reason {
+  color: #c8cdd3;
+  font-size: 0.85rem;
+}
+.hl-card .hl-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.hl-card button {
+  background: #2a2f3a;
+  color: #c8cdd3;
+  border: 1px solid #2c3240;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.hl-card button.primary {
+  background: #6c5cff;
+  color: #fff;
+  border-color: #6c5cff;
+}
+.hl-card button:hover { filter: brightness(1.1); }
+.hl-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Compilation queue ---- */
+.compile-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #1a1e2a;
+  border: 1px solid #232833;
+  border-radius: 10px;
+}
+.compile-item .compile-meta { flex: 1; min-width: 0; }
+.compile-item .compile-source {
+  font-size: 0.78rem;
+  color: #9aa3ad;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compile-item .compile-quote {
+  font-style: italic;
+  color: #ffd60a;
+  font-size: 0.88rem;
+  margin-top: 2px;
+}
+.compile-item .compile-time {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.78rem;
+  color: #c8cdd3;
+}
+.compile-item .compile-controls {
+  display: flex;
+  gap: 4px;
+}
+.compile-item .compile-controls button {
+  background: transparent;
+  border: 1px solid #2c3240;
+  color: #9aa3ad;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+.compile-item .compile-controls button:hover {
+  color: #fff;
+  border-color: #6c5cff;
+}
+.compile-item .compile-controls .compile-remove:hover {
+  color: #ff8a8a;
+  border-color: #ff8a8a;
+}
+
+/* Editable start/end inputs on highlight cards */
+.hl-time-edit {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 0.85rem;
+  color: #c8cdd3;
+}
+.hl-time-edit label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.hl-time-edit input[type="number"] {
+  width: 70px;
+  padding: 4px 8px;
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  color: #e8eaee;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.85rem;
+}
+.hl-time-edit input[type="number"]:focus {
+  outline: none;
+  border-color: #6c5cff;
+}

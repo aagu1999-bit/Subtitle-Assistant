@@ -1113,3 +1113,403 @@ async function initJobs() {
 }
 
 initJobs();
+
+// =====================================================================
+// AI Highlights — Gemini-driven clip suggestions
+// =====================================================================
+
+const hlFindBtn = $("hlFindBtn");
+const hlResults = $("hlResults");
+const hlStatus = $("hlStatus");
+const hlFormatEl = $("hlFormat");
+const hlDurationEl = $("hlDuration");
+const hlCountEl = $("hlCount");
+
+function _fmtTime(t) {
+  const tt = Math.max(0, Math.floor(t || 0));
+  const mm = Math.floor(tt / 60).toString().padStart(2, "0");
+  const ss = (tt % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function renderHighlights(clips, format) {
+  hlResults.innerHTML = "";
+  if (!clips.length) {
+    hlStatus.textContent = "No suggestions returned. Try a different format or longer transcript.";
+    return;
+  }
+  hlStatus.textContent = `${clips.length} suggestion${clips.length === 1 ? "" : "s"} (${format})`;
+
+  clips.forEach((c, idx) => {
+    const card = document.createElement("div");
+    card.className = "hl-card";
+
+    // ---- Mutable per-card state so the user can nudge boundaries ----
+    let editedStart = c.start_time;
+    let editedEnd = c.end_time;
+    let previewStopHandler = null;
+
+    const title = document.createElement("div");
+    title.className = "hl-title";
+    const titleText = document.createElement("strong");
+    titleText.textContent = `${idx + 1}. ${c.title || "Untitled clip"}`;
+    title.appendChild(titleText);
+    const dur = document.createElement("span");
+    dur.className = "hl-time";
+    const updateDurLabel = () =>
+      dur.textContent = `${(editedEnd - editedStart).toFixed(1)}s`;
+    updateDurLabel();
+    title.appendChild(dur);
+    card.appendChild(title);
+
+    if (c.hook_quote) {
+      const quote = document.createElement("div");
+      quote.className = "hl-quote";
+      quote.textContent = `"${c.hook_quote}"`;
+      card.appendChild(quote);
+    }
+
+    if (c.reason) {
+      const reason = document.createElement("div");
+      reason.className = "hl-reason";
+      reason.textContent = c.reason;
+      card.appendChild(reason);
+    }
+
+    // ---- Editable start/end time inputs ----
+    const timeRow = document.createElement("div");
+    timeRow.className = "hl-time-edit";
+
+    const mkInput = (val, onChange) => {
+      const i = document.createElement("input");
+      i.type = "number";
+      i.step = "0.1";
+      i.min = "0";
+      i.value = val.toFixed(1);
+      i.oninput = () => {
+        const v = parseFloat(i.value);
+        if (!isNaN(v) && v >= 0) onChange(v);
+      };
+      return i;
+    };
+
+    const startLabel = document.createElement("label");
+    startLabel.textContent = "Start ";
+    const startInput = mkInput(editedStart, v => {
+      editedStart = v;
+      updateDurLabel();
+    });
+    startLabel.appendChild(startInput);
+    const startUnit = document.createElement("span");
+    startUnit.textContent = "s";
+    startLabel.appendChild(startUnit);
+    timeRow.appendChild(startLabel);
+
+    const endLabel = document.createElement("label");
+    endLabel.textContent = "End ";
+    const endInput = mkInput(editedEnd, v => {
+      editedEnd = v;
+      updateDurLabel();
+    });
+    endLabel.appendChild(endInput);
+    const endUnit = document.createElement("span");
+    endUnit.textContent = "s";
+    endLabel.appendChild(endUnit);
+    timeRow.appendChild(endLabel);
+
+    card.appendChild(timeRow);
+
+    // ---- Action buttons ----
+    const actions = document.createElement("div");
+    actions.className = "hl-actions";
+
+    const previewBtn = document.createElement("button");
+    previewBtn.textContent = "▶ Preview";
+    previewBtn.onclick = () => {
+      // Use the source video player (sourcePlayer), not the rendered result.
+      const target = sourcePlayer;
+      if (!target || !target.src) {
+        alert("Source video isn't available — open this job's editor first.");
+        return;
+      }
+      // Tear down any previous auto-stop listener.
+      if (previewStopHandler) {
+        target.removeEventListener("timeupdate", previewStopHandler);
+        previewStopHandler = null;
+      }
+      try {
+        target.currentTime = editedStart;
+        target.play();
+        // Auto-pause at editedEnd so they hear the exact clip range.
+        const stopAt = editedEnd;
+        previewStopHandler = () => {
+          if (target.currentTime >= stopAt) {
+            target.pause();
+            target.removeEventListener("timeupdate", previewStopHandler);
+            previewStopHandler = null;
+          }
+        };
+        target.addEventListener("timeupdate", previewStopHandler);
+        // Scroll the source player into view if it's offscreen.
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      } catch (e) {}
+    };
+    actions.appendChild(previewBtn);
+
+    const addBtn = document.createElement("button");
+    addBtn.textContent = "+ Add to compilation";
+    addBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      addToCompileQueue({
+        source_job_id: currentJobId,
+        source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+        start_time: editedStart,
+        end_time: editedEnd,
+        hook_quote: c.hook_quote || "",
+        title: c.title || "",
+      });
+      addBtn.textContent = "✓ Added";
+      addBtn.disabled = true;
+      setTimeout(() => {
+        addBtn.disabled = false;
+        addBtn.textContent = "+ Add to compilation";
+      }, 1500);
+    };
+    actions.appendChild(addBtn);
+
+    const makeBtn = document.createElement("button");
+    makeBtn.className = "primary";
+    makeBtn.textContent = "Make a clip";
+    makeBtn.onclick = async () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      makeBtn.disabled = true;
+      makeBtn.textContent = "Trimming…";
+      try {
+        const res = await fetch("/clip-from-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_job_id: currentJobId,
+            start_time: editedStart,
+            end_time: editedEnd,
+            label: c.title || "highlight",
+          }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        addJobToList(j.job_id);
+        await refreshJobsList();
+        await switchToJob(j.job_id);
+      } catch (e) {
+        alert("Could not create clip: " + e.message);
+        makeBtn.disabled = false;
+        makeBtn.textContent = "Make a clip";
+      }
+    };
+    actions.appendChild(makeBtn);
+
+    card.appendChild(actions);
+    hlResults.appendChild(card);
+  });
+}
+
+if (hlFindBtn) {
+  hlFindBtn.onclick = async () => {
+    if (!currentJobId) {
+      alert("No active job. Transcribe a video first.");
+      return;
+    }
+    hlFindBtn.disabled = true;
+    hlStatus.textContent = "Asking Gemini…";
+    hlResults.innerHTML = "";
+    try {
+      const res = await fetch("/suggest-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: currentJobId,
+          format: hlFormatEl.value,
+          target_duration: parseInt(hlDurationEl.value, 10),
+          num_clips: parseInt(hlCountEl.value, 10),
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      renderHighlights(data.clips || [], data.format || hlFormatEl.value);
+    } catch (e) {
+      hlStatus.textContent = "Error: " + e.message;
+    } finally {
+      hlFindBtn.disabled = false;
+    }
+  };
+}
+
+// =====================================================================
+// Compilation queue
+// =====================================================================
+
+const COMPILE_QUEUE_KEY = "subtitleBurner:compilationQueue";
+const compilePanel = $("compilePanel");
+const compileListEl = $("compileList");
+const compileCountEl = $("compileCount");
+const compileGoBtn = $("compileGoBtn");
+const compileClearBtn = $("compileClearBtn");
+const compileLabelEl = $("compileLabel");
+const compileStatus = $("compileStatus");
+
+function loadCompileQueue() {
+  try {
+    const raw = localStorage.getItem(COMPILE_QUEUE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function saveCompileQueue(q) {
+  localStorage.setItem(COMPILE_QUEUE_KEY, JSON.stringify(q));
+}
+
+function addToCompileQueue(item) {
+  const q = loadCompileQueue();
+  q.push(item);
+  saveCompileQueue(q);
+  renderCompileQueue();
+}
+
+function removeFromCompileQueue(idx) {
+  const q = loadCompileQueue();
+  q.splice(idx, 1);
+  saveCompileQueue(q);
+  renderCompileQueue();
+}
+
+function moveInCompileQueue(idx, delta) {
+  const q = loadCompileQueue();
+  const target = idx + delta;
+  if (target < 0 || target >= q.length) return;
+  [q[idx], q[target]] = [q[target], q[idx]];
+  saveCompileQueue(q);
+  renderCompileQueue();
+}
+
+function renderCompileQueue() {
+  if (!compilePanel) return;
+  const q = loadCompileQueue();
+  if (!q.length) {
+    compilePanel.classList.add("hidden");
+    return;
+  }
+  compilePanel.classList.remove("hidden");
+  const totalDur = q.reduce((s, c) => s + (c.end_time - c.start_time), 0);
+  compileCountEl.textContent = `${q.length} clip${q.length === 1 ? "" : "s"} · ~${Math.round(totalDur)}s total`;
+
+  compileListEl.innerHTML = "";
+  q.forEach((item, idx) => {
+    const row = document.createElement("div");
+    row.className = "compile-item";
+
+    const meta = document.createElement("div");
+    meta.className = "compile-meta";
+    const src = document.createElement("div");
+    src.className = "compile-source";
+    src.textContent = `${idx + 1}. ${item.source_filename || item.source_job_id.slice(0, 8) + "…"} · ${item.title || "highlight"}`;
+    meta.appendChild(src);
+    if (item.hook_quote) {
+      const quote = document.createElement("div");
+      quote.className = "compile-quote";
+      quote.textContent = `"${item.hook_quote}"`;
+      meta.appendChild(quote);
+    }
+    row.appendChild(meta);
+
+    const time = document.createElement("span");
+    time.className = "compile-time";
+    time.textContent = `${_fmtTime(item.start_time)} → ${_fmtTime(item.end_time)}`;
+    row.appendChild(time);
+
+    const controls = document.createElement("div");
+    controls.className = "compile-controls";
+
+    const up = document.createElement("button");
+    up.textContent = "↑";
+    up.title = "Move up";
+    up.disabled = idx === 0;
+    up.onclick = () => moveInCompileQueue(idx, -1);
+    controls.appendChild(up);
+
+    const down = document.createElement("button");
+    down.textContent = "↓";
+    down.title = "Move down";
+    down.disabled = idx === q.length - 1;
+    down.onclick = () => moveInCompileQueue(idx, 1);
+    controls.appendChild(down);
+
+    const rm = document.createElement("button");
+    rm.textContent = "✕";
+    rm.className = "compile-remove";
+    rm.title = "Remove from queue";
+    rm.onclick = () => removeFromCompileQueue(idx);
+    controls.appendChild(rm);
+
+    row.appendChild(controls);
+    compileListEl.appendChild(row);
+  });
+}
+
+if (compileGoBtn) {
+  compileGoBtn.onclick = async () => {
+    const q = loadCompileQueue();
+    if (!q.length) return;
+    compileGoBtn.disabled = true;
+    compileStatus.textContent = "Stitching clips…";
+    try {
+      const res = await fetch("/compile-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clips: q.map(c => ({
+            source_job_id: c.source_job_id,
+            start_time: c.start_time,
+            end_time: c.end_time,
+          })),
+          label: (compileLabelEl.value || "compilation").trim(),
+        }),
+      });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      compileStatus.textContent = `✓ Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"} into a new job.`;
+      // Clear the queue and switch to the new compilation job.
+      saveCompileQueue([]);
+      renderCompileQueue();
+      compileLabelEl.value = "";
+      addJobToList(j.job_id);
+      await refreshJobsList();
+      await switchToJob(j.job_id);
+    } catch (e) {
+      compileStatus.textContent = "Error: " + e.message;
+    } finally {
+      compileGoBtn.disabled = false;
+    }
+  };
+}
+
+if (compileClearBtn) {
+  compileClearBtn.onclick = () => {
+    if (!loadCompileQueue().length) return;
+    if (confirm("Clear all clips from the compilation queue?")) {
+      saveCompileQueue([]);
+      renderCompileQueue();
+    }
+  };
+}
+
+renderCompileQueue();
