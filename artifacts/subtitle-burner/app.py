@@ -2080,6 +2080,24 @@ def compile_clips():
     return jsonify({"job_id": new_job_id, "filename": new_filename, "segments": len(validated)})
 
 
+@app.route("/rename-job", methods=["POST"])
+def rename_job():
+    """Set a human-friendly filename label for a job (sidebar display only).
+
+    Body: {job_id, filename}
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    new_name = (data.get("filename") or "").strip()[:200]
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    if not new_name:
+        return jsonify({"error": "Filename cannot be empty"}), 400
+    jobs[job_id]["filename"] = new_name
+    _db_save_job(job_id)
+    return jsonify({"job_id": job_id, "filename": new_name})
+
+
 @app.route("/")
 def index():
     auphonic_enabled = bool(os.environ.get("AUPHONIC_API_KEY"))

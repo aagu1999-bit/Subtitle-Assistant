@@ -1036,6 +1036,33 @@ function renderJobsList() {
     status.textContent = label;
     div.appendChild(status);
 
+    const rename = document.createElement("button");
+    rename.className = "job-rename";
+    rename.textContent = "✎";
+    rename.title = "Rename";
+    rename.onclick = async (e) => {
+      e.stopPropagation();
+      const current = meta.filename || "";
+      const next = prompt("Rename this video:", current);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (!trimmed || trimmed === current) return;
+      try {
+        const res = await fetch("/rename-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: jobId, filename: trimmed }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        if (jobsById[jobId]) jobsById[jobId].filename = trimmed;
+        renderJobsList();
+      } catch (err) {
+        alert("Rename failed: " + err.message);
+      }
+    };
+    div.appendChild(rename);
+
     const del = document.createElement("button");
     del.className = "job-delete";
     del.textContent = "✕";
@@ -1246,33 +1273,38 @@ function renderHighlights(clips, format) {
     const previewBtn = document.createElement("button");
     previewBtn.textContent = "▶ Preview";
     previewBtn.onclick = () => {
-      // Use the source video player (sourcePlayer), not the rendered result.
+      // Source player lives on the Edit tab. If we're not on Edit (e.g. user
+      // is on Highlights when they hit Preview), the player is display:none
+      // and won't be visible. Switch to Edit, then play.
+      setActiveTab("edit");
       const target = sourcePlayer;
       if (!target || !target.src) {
         alert("Source video isn't available — open this job's editor first.");
         return;
       }
-      // Tear down any previous auto-stop listener.
       if (previewStopHandler) {
         target.removeEventListener("timeupdate", previewStopHandler);
         previewStopHandler = null;
       }
-      try {
-        target.currentTime = editedStart;
-        target.play();
-        // Auto-pause at editedEnd so they hear the exact clip range.
-        const stopAt = editedEnd;
-        previewStopHandler = () => {
-          if (target.currentTime >= stopAt) {
-            target.pause();
-            target.removeEventListener("timeupdate", previewStopHandler);
-            previewStopHandler = null;
-          }
-        };
-        target.addEventListener("timeupdate", previewStopHandler);
-        // Scroll the source player into view if it's offscreen.
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
-      } catch (e) {}
+      // Defer play+seek to the next frame so the tab switch's display:none
+      // → display:block has actually applied; otherwise scrollIntoView/play
+      // can fire while the element is still hidden.
+      requestAnimationFrame(() => {
+        try {
+          target.currentTime = editedStart;
+          target.play();
+          const stopAt = editedEnd;
+          previewStopHandler = () => {
+            if (target.currentTime >= stopAt) {
+              target.pause();
+              target.removeEventListener("timeupdate", previewStopHandler);
+              previewStopHandler = null;
+            }
+          };
+          target.addEventListener("timeupdate", previewStopHandler);
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+        } catch (e) {}
+      });
     };
     actions.appendChild(previewBtn);
 
