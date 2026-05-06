@@ -821,6 +821,12 @@ function showEditor(words, saved = {}) {
   if (saved.audio) applyAudio(saved.audio);
   if (saved.emoji_rules) applyEmojiRules(saved.emoji_rules);
 
+  // Reveal the Result tab if this job already has a finished render.
+  if (saved && saved.output) {
+    const resultBtn = document.getElementById("tabResult");
+    if (resultBtn) resultBtn.classList.remove("hidden");
+  }
+
   // Load the original uploaded video into the source player
   sourcePlayer.src = "/raw-upload/" + currentJobId;
 
@@ -1000,6 +1006,11 @@ function _statusBadgeClass(status) {
 
 function renderJobsList() {
   const ids = _loadJobIds();
+  // Toggle empty-state vs app-shell here — single source of truth.
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  if (emptyEl) emptyEl.classList.toggle("hidden", ids.length > 0);
+  if (shellEl) shellEl.classList.toggle("hidden", ids.length === 0);
   if (!ids.length) {
     jobsPanel.classList.add("hidden");
     return;
@@ -1416,6 +1427,16 @@ function renderCompileQueue() {
   // list contents and the action buttons reflect the current queue state.
   compilePanel.classList.remove("hidden");
   const q = loadCompileQueue();
+  // Update the tab nav badge in lockstep.
+  const badge = document.getElementById("compileBadge");
+  if (badge) {
+    if (q.length > 0) {
+      badge.textContent = String(q.length);
+      badge.classList.remove("hidden");
+    } else {
+      badge.classList.add("hidden");
+    }
+  }
   const totalDur = q.reduce((s, c) => s + (c.end_time - c.start_time), 0);
   compileCountEl.textContent = q.length
     ? `${q.length} clip${q.length === 1 ? "" : "s"} · ~${Math.round(totalDur)}s total`
@@ -1546,12 +1567,20 @@ const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
 
 function setActiveTab(tab) {
-  if (!mainTabs) return;
+  if (!mainTabs) {
+    console.warn("[tabs] setActiveTab called but #mainTabs not found");
+    return;
+  }
+  // Re-query tab content nodes every call so we don't depend on a snapshot
+  // taken before the DOM was fully parsed (defensive against script timing).
+  const contents = document.querySelectorAll("[data-tab-group]");
+  console.log("[tabs] setActiveTab", tab, "found", contents.length, "tab-content elements");
   mainTabs.querySelectorAll(".main-tab").forEach(b => {
     b.classList.toggle("active", b.dataset.tab === tab);
   });
-  tabContents.forEach(c => {
-    c.classList.toggle("hidden", c.dataset.tabGroup !== tab);
+  contents.forEach(c => {
+    const match = c.dataset.tabGroup === tab;
+    c.classList.toggle("hidden", !match);
   });
 }
 
@@ -1581,49 +1610,6 @@ document.addEventListener("drop", (e) => {
   }
 });
 
-// Show the empty state when no jobs exist; otherwise show the app shell.
-function updateEmptyStateVisibility() {
-  if (!emptyState || !appShell) return;
-  const hasJobs = _loadJobIds().length > 0;
-  emptyState.classList.toggle("hidden", hasJobs);
-  appShell.classList.toggle("hidden", !hasJobs);
-}
-
-// Wrap the existing renderJobsList so empty-state visibility tracks it.
-const _origRenderJobsList = renderJobsList;
-renderJobsList = function() {
-  _origRenderJobsList();
-  updateEmptyStateVisibility();
-};
-
-// Wrap renderCompileQueue to keep the tab badge synced.
-const _origRenderCompileQueue = renderCompileQueue;
-renderCompileQueue = function() {
-  _origRenderCompileQueue();
-  if (!compileBadge) return;
-  const count = loadCompileQueue().length;
-  if (count > 0) {
-    compileBadge.textContent = count;
-    compileBadge.classList.remove("hidden");
-  } else {
-    compileBadge.classList.add("hidden");
-  }
-};
-
-// Reveal the Result tab whenever a job with output is loaded, but DO NOT
-// auto-switch the active tab — let the user stay on whichever tab they
-// chose. The previous version had two competing auto-switches (one to
-// Edit on showEditor, one to Result on the MutationObserver) which could
-// race and produce a tab whose nav button was active but whose content
-// area appeared blank because the wrong panel was actually toggled.
-const _origShowEditor = showEditor;
-showEditor = function(words, saved = {}) {
-  _origShowEditor(words, saved);
-  if (saved && saved.output && tabResultBtn) {
-    tabResultBtn.classList.remove("hidden");
-  }
-};
-
 // Reveal Result tab when a render completes; only auto-switch to it when
 // the user is currently on Edit (so render output gets surfaced) — leave
 // them alone if they're on Highlights or Compilation.
@@ -1639,6 +1625,7 @@ if (result && tabResultBtn) {
   obs.observe(result, { attributes: true, attributeFilter: ["class"] });
 }
 
-// Initial state sync.
-updateEmptyStateVisibility();
+// Initial render — hooks now live inline inside renderJobsList /
+// renderCompileQueue / showEditor instead of via function-wrapping.
+renderJobsList();
 renderCompileQueue();
