@@ -496,16 +496,12 @@
     <button id="renderBtn" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px">Render with Edits</button>
 
     </div>
+    </div>
     <!-- /Tab: Edit -->
 
     {% if gemini_enabled %}
     <!-- Tab: Highlights -->
     <div class="tab-content hidden" data-tab-group="highlights">
-    <div id="hlDebugMarker" style="background:#ff4444;color:#fff;padding:18px;font-size:1rem;font-weight:600;border-radius:10px;margin-bottom:14px">
-      🩺 DEBUG MARKER: If you can read this red box, the Highlights tab is rendering correctly.
-      The form below (Format / Length / Count / Find highlights) should appear under it.
-      If this red box is not visible, the tab content itself isn't rendering — let the dev know.
-    </div>
     <section id="highlightsPanel" class="panel" style="margin-top:0">
       <h2 style="display:flex;align-items:center;gap:10px">
         <span>✨ Find highlights</span>
