@@ -2086,12 +2086,25 @@ def index():
     elevenlabs_enabled = bool(os.environ.get("ELEVENLABS_API_KEY"))
     dolby_enabled = bool(os.environ.get("DOLBY_API_KEY"))
     gemini_enabled = bool(os.environ.get("GEMINI_API_KEY"))
+    # Cache-bust static assets whenever they change on disk (e.g. after a
+    # `git pull`). Browsers caching old app.js/style.css was producing
+    # phantom layout bugs (e.g. tab content appearing blank).
+    static_dir = BASE_DIR / "static"
+    try:
+        latest_mtime = max(
+            (p.stat().st_mtime for p in static_dir.iterdir() if p.is_file()),
+            default=0,
+        )
+        asset_version = str(int(latest_mtime))
+    except OSError:
+        asset_version = str(int(time.time()))
     return render_template(
         "index.html",
         auphonic_enabled=auphonic_enabled,
         elevenlabs_enabled=elevenlabs_enabled,
         dolby_enabled=dolby_enabled,
         gemini_enabled=gemini_enabled,
+        asset_version=asset_version,
     )
 
 

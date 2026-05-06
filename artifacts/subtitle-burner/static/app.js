@@ -1610,24 +1610,29 @@ renderCompileQueue = function() {
   }
 };
 
-// Show the Result tab only after a render has completed at least once.
-// Hook into showEditor to reveal Result tab if the job already has output.
+// Reveal the Result tab whenever a job with output is loaded, but DO NOT
+// auto-switch the active tab — let the user stay on whichever tab they
+// chose. The previous version had two competing auto-switches (one to
+// Edit on showEditor, one to Result on the MutationObserver) which could
+// race and produce a tab whose nav button was active but whose content
+// area appeared blank because the wrong panel was actually toggled.
 const _origShowEditor = showEditor;
 showEditor = function(words, saved = {}) {
   _origShowEditor(words, saved);
   if (saved && saved.output && tabResultBtn) {
     tabResultBtn.classList.remove("hidden");
   }
-  // When switching to a job, default the user back to the Edit tab.
-  setActiveTab("edit");
 };
 
-// Auto-switch to Result tab when the result panel becomes visible.
-// pollRender shows the result element by removing .hidden — observe that.
+// Reveal Result tab when a render completes; only auto-switch to it when
+// the user is currently on Edit (so render output gets surfaced) — leave
+// them alone if they're on Highlights or Compilation.
 if (result && tabResultBtn) {
   const obs = new MutationObserver(() => {
-    if (!result.classList.contains("hidden")) {
-      tabResultBtn.classList.remove("hidden");
+    if (result.classList.contains("hidden")) return;
+    tabResultBtn.classList.remove("hidden");
+    const activeTabBtn = mainTabs && mainTabs.querySelector(".main-tab.active");
+    if (activeTabBtn && activeTabBtn.dataset.tab === "edit") {
       setActiveTab("result");
     }
   });

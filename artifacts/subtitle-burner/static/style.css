@@ -787,11 +787,8 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   line-height: 1.4;
 }
 
-.tab-content { animation: fadeIn 0.15s ease; }
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+.tab-content { display: block; }
+.tab-content.hidden { display: none; }
 
 /* When inside the tabbed main area, the first .panel shouldn't push down */
 .main-area .tab-content > .panel:first-child { margin-top: 0; }
