@@ -775,18 +775,7 @@ async function pollTranscription(jobId) {
 // ---- Phrase timeline / editable subtitle list ----
 function renderPhraseList(words) {
   phraseListEl.innerHTML = "";
-  // Diagnostic — let us see exactly what the function received.
-  try {
-    const stack = (new Error()).stack || "";
-    const caller = stack.split("\n").slice(2, 4).join(" | ");
-    console.log("[renderPhraseList] words.length=", words ? words.length : 0,
-                "_tLastGaps.length=", (typeof _tLastGaps !== "undefined" && Array.isArray(_tLastGaps)) ? _tLastGaps.length : "undef",
-                "caller:", caller);
-  } catch (_) {}
-  if (!words || !words.length) {
-    console.log("[renderPhraseList] EARLY RETURN (no words)");
-    return;
-  }
+  if (!words || !words.length) return;
 
   // Pull the latest scan results so we can interleave gap markers inline.
   // Empty array if the user hasn't scanned yet — in that case the list
@@ -795,15 +784,16 @@ function renderPhraseList(words) {
   let gapIdx = 0;
 
   const groupSize = parseInt(groupEl.value, 10) || 3;
-  let prevPhraseEnd = -1;
 
   const insertGapsUpTo = (nextPhraseStart) => {
-    // Insert any gap whose start time falls before this phrase begins.
+    // Insert every gap whose start time falls before this phrase begins.
+    // We do NOT skip intra-phrase gaps: the user wants to see all detected
+    // pauses regardless of where they fall relative to phrase grouping.
+    // A gap inside a phrase (between word 1 and word 2 of the same phrase)
+    // appears just before the NEXT phrase starts — close enough to the
+    // actual position for visual scanning.
     while (gapIdx < gaps.length && gaps[gapIdx].start < nextPhraseStart) {
-      const g = gaps[gapIdx++];
-      // Skip gaps that fall before the start of the transcript.
-      if (prevPhraseEnd >= 0 && g.start < prevPhraseEnd - 0.1) continue;
-      phraseListEl.appendChild(_buildInlineGapRow(g));
+      phraseListEl.appendChild(_buildInlineGapRow(gaps[gapIdx++]));
     }
   };
 
@@ -861,20 +851,12 @@ function renderPhraseList(words) {
     row.appendChild(delBtn);
 
     phraseListEl.appendChild(row);
-    prevPhraseEnd = group[group.length - 1].end;
   }
 
   // Trailing gaps that fall after the last phrase (rare but possible).
   while (gapIdx < gaps.length) {
     phraseListEl.appendChild(_buildInlineGapRow(gaps[gapIdx++]));
   }
-  // Diagnostic
-  try {
-    const gapRowsInDom = phraseListEl.querySelectorAll(".gap-row").length;
-    const phraseRowsInDom = phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)").length;
-    console.log("[renderPhraseList] DONE — gap rows in DOM:", gapRowsInDom,
-                "phrase rows:", phraseRowsInDom);
-  } catch (_) {}
 }
 
 function _buildInlineGapRow(g) {
