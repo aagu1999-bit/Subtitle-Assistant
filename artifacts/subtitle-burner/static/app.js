@@ -322,6 +322,7 @@ function getStyle() {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
       max_gap:    $("tightenMaxGap") ? parseFloat($("tightenMaxGap").value) : 1.0,
       target_gap: $("tightenTargetGap") ? parseFloat($("tightenTargetGap").value) : 0.3,
+      preserved_gap_starts: (typeof _tPreservedCache !== "undefined") ? _tPreservedCache.slice() : [],
     },
   };
 }
@@ -500,6 +501,9 @@ function applyStyle(style = {}) {
     }
     const ctrls = $("tightenControls");
     if (ctrls) ctrls.classList.toggle("hidden", !ts.enabled);
+    if (Array.isArray(ts.preserved_gap_starts)) {
+      _tPreservedCache = ts.preserved_gap_starts.slice();
+    }
   }
   sizeVal.textContent = sizeEl.value;
   owVal.textContent = owEl.value;
@@ -1884,7 +1888,9 @@ const _tTargetGap = $("tightenTargetGap");
 const _tMaxGapLbl = $("tightenMaxGapVal");
 const _tTargetGapLbl = $("tightenTargetGapVal");
 const _tPreviewBtn = $("tightenPreviewBtn");
-const _tPreviewResult = $("tightenPreviewResult");
+const _tPreviewSummary = $("tightenPreviewSummary");
+const _tGapListEl = $("tightenGapList");
+let _tLastGaps = [];
 
 if (_tEnabled && _tControls) {
   _tEnabled.addEventListener("change", () => {
@@ -1905,44 +1911,162 @@ if (_tTargetGap && _tTargetGapLbl) {
   };
 }
 
-if (_tPreviewBtn && _tPreviewResult) {
-  _tPreviewBtn.onclick = async () => {
-    if (!currentJobId) {
-      _tPreviewResult.textContent = "Open a transcribed video first.";
-      return;
-    }
-    _tPreviewBtn.disabled = true;
-    _tPreviewResult.textContent = "Computing…";
-    try {
-      const res = await fetch("/preview-tightening", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          job_id: currentJobId,
-          max_gap: parseFloat(_tMaxGap.value),
-          target_gap: parseFloat(_tTargetGap.value),
-        }),
-      });
-      const j = await res.json();
-      if (j.error) throw new Error(j.error);
-      const orig = j.original_duration || 0;
-      const newd = j.new_duration || 0;
-      const cut = j.total_cut || 0;
-      const pct = orig > 0 ? Math.round((cut / orig) * 100) : 0;
-      if (j.gaps_cut === 0) {
-        _tPreviewResult.style.color = "#9aa0a6";
-        _tPreviewResult.textContent =
-          `No gaps longer than ${_tMaxGap.value}s found. Try lowering the threshold.`;
-      } else {
-        _tPreviewResult.style.color = "#7cd98a";
-        _tPreviewResult.textContent =
-          `${j.gaps_cut} gap${j.gaps_cut === 1 ? "" : "s"} → ${cut.toFixed(1)}s removed (${pct}% tighter). New length ≈ ${newd.toFixed(1)}s (was ${orig.toFixed(1)}s).`;
-      }
-    } catch (e) {
-      _tPreviewResult.style.color = "#ff8a8a";
-      _tPreviewResult.textContent = "Error: " + e.message;
-    } finally {
-      _tPreviewBtn.disabled = false;
-    }
-  };
+function _tFmtTime(t) {
+  const tt = Math.max(0, t || 0);
+  const m = Math.floor(tt / 60);
+  const s = (tt - m * 60).toFixed(1);
+  return `${m}:${s.padStart(4, "0")}`;
 }
+
+function _tEscapeHTML(s) {
+  const d = document.createElement("div");
+  d.textContent = s || "";
+  return d.innerHTML;
+}
+
+function _tGetPreservedSet() {
+  const arr = (getStyle().tighten_silences || {}).preserved_gap_starts || [];
+  return new Set(arr.map(x => Math.round(parseFloat(x) * 10) / 10));
+}
+
+function _tCommitPreservedSet(set) {
+  // Round-trip through getStyle() / setter — we shadow into a global the
+  // getStyle() reader honours, then schedule a draft save.
+  _tPreservedCache = Array.from(set);
+  if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+}
+
+let _tPreservedCache = [];
+
+function _tRenderSummary(stats) {
+  if (!_tPreviewSummary) return;
+  if (!stats || stats.gaps_total === 0) {
+    _tPreviewSummary.style.color = "#9aa0a6";
+    _tPreviewSummary.textContent =
+      `No gaps longer than ${_tMaxGap.value}s found. Try lowering the threshold.`;
+    return;
+  }
+  const cut = stats.total_cut || 0;
+  const orig = stats.original_duration || 0;
+  const newd = stats.new_duration || 0;
+  const pct = orig > 0 ? Math.round((cut / orig) * 100) : 0;
+  const preserved = stats.gaps_total - stats.gaps_cut;
+  const preservedNote = preserved > 0 ? `, ${preserved} preserved` : "";
+  _tPreviewSummary.style.color = "#7cd98a";
+  _tPreviewSummary.textContent =
+    `${stats.gaps_cut} cut${preservedNote} → ${cut.toFixed(1)}s removed (${pct}% tighter). New length ≈ ${newd.toFixed(1)}s (was ${orig.toFixed(1)}s).`;
+}
+
+function _tRenderGapList(gaps) {
+  if (!_tGapListEl) return;
+  _tGapListEl.innerHTML = "";
+  if (!gaps || !gaps.length) return;
+
+  const helper = document.createElement("p");
+  helper.className = "muted";
+  helper.style.cssText = "font-size:.78rem;margin:0 0 6px";
+  helper.textContent = "Each row is a gap that would be cut. Tick to PRESERVE the pause (e.g. a comedic beat). Click any row to seek the source player to that moment.";
+  _tGapListEl.appendChild(helper);
+
+  gaps.forEach(g => {
+    const row = document.createElement("div");
+    row.className = "tighten-gap-row" + (g.preserved ? " preserved" : "");
+
+    const left = document.createElement("div");
+    left.className = "tighten-gap-meta";
+    const time = document.createElement("div");
+    time.className = "tighten-gap-time";
+    time.textContent = `${_tFmtTime(g.start)} · ${g.duration.toFixed(1)}s gap`;
+    left.appendChild(time);
+    const ctx = document.createElement("div");
+    ctx.className = "tighten-gap-ctx";
+    const before = (g.context_before || "").trim();
+    const after = (g.context_after || "").trim();
+    ctx.innerHTML = before
+      ? `<span>“…${_tEscapeHTML(before)}”</span> <span class="tighten-gap-arrow">→</span> <span>“${_tEscapeHTML(after)}…”</span>`
+      : `<span>“${_tEscapeHTML(after)}…”</span>`;
+    left.appendChild(ctx);
+    row.appendChild(left);
+
+    const label = document.createElement("label");
+    label.className = "tighten-gap-toggle";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!g.preserved;
+    cb.dataset.gapStart = g.start.toFixed(1);
+    cb.onchange = (e) => {
+      e.stopPropagation();
+      const set = _tGetPreservedSet();
+      const key = Math.round(parseFloat(cb.dataset.gapStart) * 10) / 10;
+      if (cb.checked) set.add(key); else set.delete(key);
+      _tCommitPreservedSet(set);
+      row.classList.toggle("preserved", cb.checked);
+      _tFetchPreview(false);
+    };
+    label.appendChild(cb);
+    const lblTxt = document.createElement("span");
+    lblTxt.textContent = "Preserve";
+    label.appendChild(lblTxt);
+    row.appendChild(label);
+
+    row.onclick = (e) => {
+      if (e.target.closest("input,label")) return;
+      if (sourcePlayer && sourcePlayer.src) {
+        try {
+          sourcePlayer.currentTime = Math.max(0, g.start - 0.5);
+          sourcePlayer.play().catch(() => {});
+          sourcePlayer.scrollIntoView({ behavior: "smooth", block: "center" });
+        } catch (_) {}
+      }
+    };
+
+    _tGapListEl.appendChild(row);
+  });
+}
+
+async function _tFetchPreview(showLoading) {
+  if (!currentJobId) {
+    if (_tPreviewSummary) _tPreviewSummary.textContent = "Open a transcribed video first.";
+    return;
+  }
+  if (showLoading && _tPreviewBtn) {
+    _tPreviewBtn.disabled = true;
+    if (_tPreviewSummary) _tPreviewSummary.textContent = "Scanning gaps…";
+  }
+  try {
+    const preserved = (getStyle().tighten_silences || {}).preserved_gap_starts || [];
+    const res = await fetch("/preview-tightening", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        max_gap: parseFloat(_tMaxGap.value),
+        target_gap: parseFloat(_tTargetGap.value),
+        preserved_gap_starts: preserved,
+      }),
+    });
+    const j = await res.json();
+    if (j.error) throw new Error(j.error);
+    _tLastGaps = j.gaps || [];
+    _tRenderSummary(j.stats);
+    _tRenderGapList(_tLastGaps);
+  } catch (e) {
+    if (_tPreviewSummary) {
+      _tPreviewSummary.style.color = "#ff8a8a";
+      _tPreviewSummary.textContent = "Error: " + e.message;
+    }
+  } finally {
+    if (showLoading && _tPreviewBtn) _tPreviewBtn.disabled = false;
+  }
+}
+
+if (_tPreviewBtn) _tPreviewBtn.onclick = () => _tFetchPreview(true);
+
+// Re-scan automatically if the user changes thresholds AFTER an initial scan.
+function _tMaybeReScan() {
+  if (_tGapListEl && _tGapListEl.children.length > 0) {
+    _tFetchPreview(false);
+  }
+}
+if (_tMaxGap) _tMaxGap.addEventListener("change", _tMaybeReScan);
+if (_tTargetGap) _tTargetGap.addEventListener("change", _tMaybeReScan);

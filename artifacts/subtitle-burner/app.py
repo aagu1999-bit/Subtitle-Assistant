@@ -559,13 +559,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def compute_silence_compression(words: list, max_gap: float = 1.0,
-                                 target_gap: float = 0.3) -> dict:
+                                 target_gap: float = 0.3,
+                                 preserved_gap_starts: list | None = None) -> dict:
     """Compute keep-ranges and remapped word timestamps for silence-tightening.
 
     Walks consecutive word pairs in the transcript. Whenever the gap between
     two words exceeds ``max_gap``, the gap is compressed to ``target_gap``
     by cutting (gap - target_gap) seconds out of the middle, splitting the
     breath room evenly between the two words.
+
+    Gaps whose start time (the previous word's `end`, rounded to 0.1s) is in
+    ``preserved_gap_starts`` are NOT cut — they're listed in the returned
+    `gaps` payload with `preserved=True` so the UI can show them as opted-out.
+    Use this to keep specific dramatic pauses or comedic beats intact.
 
     A 0.05s safety buffer protects each word boundary so a slightly-late
     Whisper timestamp can't lop off a trailing consonant.
@@ -574,28 +580,51 @@ def compute_silence_compression(words: list, max_gap: float = 1.0,
         {
           "ranges": [(src_start, src_end), …]  segments of source to keep,
           "words":  [{word, start, end}, …]    remapped to compressed timeline,
-          "stats":  {original_duration, new_duration, gaps_cut, total_cut},
+          "gaps":   [ { index, start, end, duration, preserved,
+                        context_before, context_after }, … ]   one per
+                    above-threshold gap, in source-timeline order,
+          "stats":  {original_duration, new_duration, gaps_cut, gaps_total,
+                     total_cut},
         }
     """
     BUFFER = 0.05  # protect word boundaries from imprecise timestamps
+    CONTEXT_WORDS = 4
 
+    preserved = set()
+    if preserved_gap_starts:
+        for t in preserved_gap_starts:
+            try:
+                preserved.add(round(float(t), 1))
+            except (TypeError, ValueError):
+                continue
+
+    empty_stats = {
+        "original_duration": 0.0, "new_duration": 0.0,
+        "gaps_cut": 0, "gaps_total": 0, "total_cut": 0.0,
+    }
     if not words:
-        return {
-            "ranges": [],
-            "words": [],
-            "stats": {"original_duration": 0.0, "new_duration": 0.0,
-                      "gaps_cut": 0, "total_cut": 0.0},
-        }
+        return {"ranges": [], "words": [], "gaps": [], "stats": empty_stats}
 
     src_start = max(0.0, float(words[0].get("start", 0)) - BUFFER)
     src_end = float(words[-1].get("end", 0)) + BUFFER
 
     ranges: list[tuple[float, float]] = []
     new_words: list[dict] = []
+    gaps_detail: list[dict] = []
     keep_start = src_start
     cumulative_drop = 0.0
     gaps_cut = 0
     half = target_gap / 2.0
+
+    def _ctx_before(i: int) -> str:
+        start = max(0, i - CONTEXT_WORDS)
+        return " ".join(str(words[j].get("word", "")).strip()
+                        for j in range(start, i)).strip()
+
+    def _ctx_after(i: int) -> str:
+        end = min(len(words), i + CONTEXT_WORDS)
+        return " ".join(str(words[j].get("word", "")).strip()
+                        for j in range(i, end)).strip()
 
     for i, w in enumerate(words):
         try:
@@ -611,15 +640,26 @@ def compute_silence_compression(words: list, max_gap: float = 1.0,
                 pe = ws
             gap = ws - pe
             if gap > max_gap:
-                # Cut the middle of the gap; leave half of target_gap on each side.
-                keep_end = max(pe + BUFFER, pe + half)
-                next_start = min(ws - BUFFER, ws - half)
-                # Only commit the cut if it actually saves >= 0.2s.
-                if next_start > keep_end + 0.2:
-                    ranges.append((keep_start, keep_end))
-                    cumulative_drop += (next_start - keep_end)
-                    keep_start = next_start
-                    gaps_cut += 1
+                gap_start_key = round(pe, 1)
+                is_preserved = gap_start_key in preserved
+                gaps_detail.append({
+                    "index": len(gaps_detail),
+                    "start": pe,
+                    "end": ws,
+                    "duration": gap,
+                    "preserved": is_preserved,
+                    "context_before": _ctx_before(i),
+                    "context_after": _ctx_after(i),
+                })
+                if not is_preserved:
+                    # Cut the middle of the gap; leave half of target_gap on each side.
+                    keep_end = max(pe + BUFFER, pe + half)
+                    next_start = min(ws - BUFFER, ws - half)
+                    if next_start > keep_end + 0.2:
+                        ranges.append((keep_start, keep_end))
+                        cumulative_drop += (next_start - keep_end)
+                        keep_start = next_start
+                        gaps_cut += 1
         new_words.append({
             "word": w.get("word", ""),
             "start": ws - cumulative_drop,
@@ -634,10 +674,12 @@ def compute_silence_compression(words: list, max_gap: float = 1.0,
     return {
         "ranges": ranges,
         "words": new_words,
+        "gaps": gaps_detail,
         "stats": {
             "original_duration": original_duration,
             "new_duration": new_duration,
             "gaps_cut": gaps_cut,
+            "gaps_total": len(gaps_detail),
             "total_cut": original_duration - new_duration,
         },
     }
@@ -1721,7 +1763,13 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 target_gap = float(tight_settings.get("target_gap", 0.3))
             except (TypeError, ValueError):
                 target_gap = 0.3
-            comp = compute_silence_compression(words, max_gap=max_gap, target_gap=target_gap)
+            preserved_starts = tight_settings.get("preserved_gap_starts") or []
+            comp = compute_silence_compression(
+                words,
+                max_gap=max_gap,
+                target_gap=target_gap,
+                preserved_gap_starts=preserved_starts,
+            )
             if comp["stats"]["gaps_cut"] > 0:
                 jobs[job_id]["status"] = "tightening silences"
                 jobs[job_id]["progress"] = 50
@@ -2279,10 +2327,11 @@ def compile_clips():
 
 @app.route("/preview-tightening", methods=["POST"])
 def preview_tightening():
-    """Compute silence-compression stats for a job without rendering.
+    """Compute silence-compression stats and per-gap details for a job.
 
-    Body: {job_id, max_gap, target_gap}
-    Returns: {gaps_cut, total_cut, original_duration, new_duration}
+    Body: {job_id, max_gap, target_gap, preserved_gap_starts?}
+    Returns: {stats: {...}, gaps: [{index, start, end, duration,
+                                    preserved, context_before, context_after}, …]}
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
@@ -2296,8 +2345,14 @@ def preview_tightening():
         target_gap = float(data.get("target_gap", 0.3))
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid threshold values"}), 400
-    comp = compute_silence_compression(words, max_gap=max_gap, target_gap=target_gap)
-    return jsonify(comp["stats"])
+    preserved = data.get("preserved_gap_starts") or []
+    comp = compute_silence_compression(
+        words,
+        max_gap=max_gap,
+        target_gap=target_gap,
+        preserved_gap_starts=preserved,
+    )
+    return jsonify({"stats": comp["stats"], "gaps": comp["gaps"]})
 
 
 @app.route("/rename-job", methods=["POST"])
