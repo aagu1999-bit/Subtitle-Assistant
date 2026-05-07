@@ -1665,20 +1665,40 @@ _FORMAT_RUBRICS = {
 
 
 def _build_clip_suggestion_prompt(transcript: str, format_type: str,
-                                   target_duration: int, num_clips: int) -> str:
+                                   target_durations: list, num_clips: int) -> str:
     rubric = _FORMAT_RUBRICS.get(format_type, _FORMAT_RUBRICS["auto"])
+    sorted_durations = sorted(set(int(d) for d in target_durations if int(d) > 0))
+    if not sorted_durations:
+        sorted_durations = [60]
+    durations_str = ", ".join(f"{d}s" for d in sorted_durations)
+    longest = max(sorted_durations)
     return f"""You are an expert short-form video editor. Identify the most engaging segments in the transcript below for clipping into stand-alone short-form videos.
 
 {rubric}
 
 Universal rubric (applies to every format):
 - HOOK (first 3-5s of the clip): a strong opener — quotable line, surprising claim, open loop, or pattern interrupt. Within 5 seconds the viewer must know why they should keep watching. The hook can be the literal start of the clip OR a line from later you'd want pulled forward.
-- BODY (~{target_duration}s total): retention engine — something interesting (new angle, escalation, surprise, emotional shift) every 7-10s.
+- BODY: retention engine — something interesting (new angle, escalation, surprise, emotional shift) every 7-10s.
 - PAYOFF (last 5-10s): punchline, conclusion, emotional peak, or callback. Don't trail off mid-thought.
 
-Length target: ~{target_duration} seconds per clip (acceptable range: {max(15, target_duration - 20)}-{target_duration + 30}s). Pick clips that BEGIN AND END at natural sentence boundaries — match the [mm:ss] timestamps on the transcript lines.
+Length targets: produce a MIX of clips at these target durations: {durations_str}.
+Each clip should match one of those targets within ±3 seconds. Pick the
+duration that fits each moment's content arc — shorter for punchlines and
+hooks, longer for stories and explanations. You may use the same duration
+multiple times if the source has several strong moments at that length.
 
-Return EXACTLY {num_clips} clips, ranked by engagement potential (best first). For each clip output:
+Pick clips that BEGIN AND END at natural sentence boundaries — match the
+[mm:ss] timestamps on the transcript lines.
+
+Overlapping clips are explicitly allowed and useful: a 5s hook can live
+INSIDE a 30s clip of the same moment if both stand alone. The user wants
+to compare and pick.
+
+Return UP TO {num_clips} clips, ranked by engagement potential (best first).
+Quality > quantity: if the source only has 4 truly strong moments, return
+4 — do NOT pad to {num_clips}. The longest clip should not exceed {longest + 10}s.
+
+For each clip output:
 - start_time (float seconds, must equal the start of one of the transcript lines)
 - end_time (float seconds)
 - hook_start_time, hook_end_time (3-5s window inside the clip; the strongest opening moment)
@@ -1704,6 +1724,58 @@ Output STRICT JSON only, no prose, no markdown fences. Schema:
 Transcript (each line begins with [mm:ss] indicating the start time of that sentence):
 {transcript}
 """
+
+
+def _detect_overlap_groups(clips: list, threshold: float = 0.90) -> list:
+    """Mark clips that substantially overlap each other with a shared group_id.
+
+    Two clips are in the same group if the overlap region covers at least
+    *threshold* of the SHORTER clip's duration. Singleton clips get
+    ``group_id = None`` so the UI knows to leave them un-tinted.
+    Operates on the list in place and returns it.
+    """
+    n = len(clips)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        si = float(clips[i]["start_time"])
+        ei = float(clips[i]["end_time"])
+        for j in range(i + 1, n):
+            sj = float(clips[j]["start_time"])
+            ej = float(clips[j]["end_time"])
+            ov_start = max(si, sj)
+            ov_end = min(ei, ej)
+            if ov_end <= ov_start:
+                continue
+            overlap = ov_end - ov_start
+            shorter = min(ei - si, ej - sj)
+            if shorter > 0 and (overlap / shorter) >= threshold:
+                union(i, j)
+
+    buckets: dict[int, list[int]] = {}
+    for i in range(n):
+        buckets.setdefault(find(i), []).append(i)
+
+    next_group = 0
+    for members in buckets.values():
+        if len(members) >= 2:
+            for idx in members:
+                clips[idx]["group_id"] = next_group
+            next_group += 1
+        else:
+            clips[members[0]]["group_id"] = None
+    return clips
 
 
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
@@ -2070,26 +2142,44 @@ def list_jobs():
 def suggest_clips():
     """LLM-driven clip suggestions for a job's transcript.
 
-    Body: {job_id, format, target_duration, num_clips}
+    Body: {job_id, format, target_durations, num_clips}
       format: "comedy" | "interview" | "event_recap" | "auto"
-      target_duration: int seconds (default 60)
-      num_clips: int (default 5)
+      target_durations: list of ints in seconds (e.g. [5, 15, 30, 60]).
+                        Falls back to [60] if missing/empty. Single-int
+                        legacy `target_duration` is also accepted.
+      num_clips: int (default 5, max 12). Quality > quantity — if Gemini
+                 returns fewer, that's fine.
+
+    Response: {clips, format}. Clips are sorted by start_time (earliest
+    first) and each carries a group_id grouping any clips that overlap
+    by ≥90% of the shorter clip — so the UI can tint same-content variants
+    with a shared hue.
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
     format_type = (data.get("format") or "auto").lower()
     if format_type not in _FORMAT_RUBRICS:
         format_type = "auto"
-    try:
-        target_duration = int(data.get("target_duration") or 60)
-    except (TypeError, ValueError):
-        target_duration = 60
-    target_duration = max(15, min(180, target_duration))
+
+    raw_durations = data.get("target_durations")
+    if raw_durations is None and "target_duration" in data:
+        raw_durations = [data.get("target_duration")]
+    durations: list[int] = []
+    for d in (raw_durations or []):
+        try:
+            v = int(d)
+            if 5 <= v <= 180:
+                durations.append(v)
+        except (TypeError, ValueError):
+            continue
+    if not durations:
+        durations = [60]
+
     try:
         num_clips = int(data.get("num_clips") or 5)
     except (TypeError, ValueError):
         num_clips = 5
-    num_clips = max(1, min(10, num_clips))
+    num_clips = max(1, min(12, num_clips))
 
     if not job_id or job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
@@ -2099,7 +2189,7 @@ def suggest_clips():
         return jsonify({"error": "Transcript not available for this job yet."}), 400
 
     transcript = _format_transcript_for_llm(words)
-    prompt = _build_clip_suggestion_prompt(transcript, format_type, target_duration, num_clips)
+    prompt = _build_clip_suggestion_prompt(transcript, format_type, durations, num_clips)
 
     try:
         result = _gemini_generate_clip_suggestions(prompt)
@@ -2107,9 +2197,8 @@ def suggest_clips():
         return jsonify({"error": str(exc)}), 500
 
     clips = result.get("clips") or []
-    # Light validation: drop entries missing required fields, clamp times
     src_max_t = float(words[-1].get("end", 0)) if words else 0
-    cleaned = []
+    cleaned: list[dict] = []
     for c in clips:
         try:
             start = float(c.get("start_time"))
@@ -2127,6 +2216,12 @@ def suggest_clips():
             })
         except (TypeError, ValueError):
             continue
+
+    # Sort by source-timeline start (earliest first) so the UI reads in order.
+    cleaned.sort(key=lambda c: c["start_time"])
+    # Tag overlap groups so the UI can tint same-content variants together.
+    _detect_overlap_groups(cleaned, threshold=0.90)
+
     return jsonify({"clips": cleaned, "format": format_type})
 
 

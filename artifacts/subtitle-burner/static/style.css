@@ -996,3 +996,44 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 .phrase-row.gap-row .gap-toggle input[type="checkbox"] {
   accent-color: #7cd98a;
 }
+
+/* ---- Highlights: target-length checkboxes ---- */
+.hl-duration-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+.hl-duration-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+  transition: border-color 0.12s, background 0.12s;
+}
+.hl-duration-checks label:hover { border-color: #6c5cff; }
+.hl-duration-checks label:has(input:checked) {
+  background: rgba(108, 92, 255, 0.18);
+  border-color: #6c5cff;
+  color: #fff;
+}
+.hl-duration-checks input[type="checkbox"] { accent-color: #6c5cff; }
+
+/* ---- Overlap-group badge on highlight cards ---- */
+.hl-overlap-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  margin-left: 8px;
+  border-radius: 999px;
+  color: #f1f3f5;
+  border: 1px solid rgba(255,255,255,0.12);
+}

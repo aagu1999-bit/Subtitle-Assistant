@@ -1342,17 +1342,37 @@ function _parseTime(str) {
   return isNaN(v) || v < 0 ? null : v;
 }
 
+// Tint palette for clips that overlap each other (≥90% by shorter clip).
+// Singleton clips (group_id null) keep the default card background.
+const HL_GROUP_TINTS = [
+  "rgba(108, 92, 255, 0.16)",   // purple
+  "rgba(255, 149, 85, 0.16)",   // orange
+  "rgba(124, 217, 138, 0.14)",  // green
+  "rgba(255, 215, 102, 0.14)",  // gold
+  "rgba(102, 204, 220, 0.14)",  // cyan
+  "rgba(255, 130, 180, 0.14)",  // pink
+];
+
 function renderHighlights(clips, format) {
   hlResults.innerHTML = "";
   if (!clips.length) {
     hlStatus.textContent = "No suggestions returned. Try a different format or longer transcript.";
     return;
   }
-  hlStatus.textContent = `${clips.length} suggestion${clips.length === 1 ? "" : "s"} (${format})`;
+  // Count groups that have ≥2 members for a friendlier summary.
+  const groupSet = new Set(clips.filter(c => c.group_id !== null && c.group_id !== undefined).map(c => c.group_id));
+  const overlapNote = groupSet.size > 0
+    ? ` · ${groupSet.size} overlap group${groupSet.size === 1 ? "" : "s"}`
+    : "";
+  hlStatus.textContent = `${clips.length} suggestion${clips.length === 1 ? "" : "s"} (${format})${overlapNote} · earliest first`;
 
   clips.forEach((c, idx) => {
     const card = document.createElement("div");
     card.className = "hl-card";
+    if (c.group_id !== null && c.group_id !== undefined) {
+      card.style.background = HL_GROUP_TINTS[c.group_id % HL_GROUP_TINTS.length];
+      card.dataset.groupId = c.group_id;
+    }
 
     // ---- Mutable per-card state so the user can nudge boundaries ----
     let editedStart = c.start_time;
@@ -1370,6 +1390,14 @@ function renderHighlights(clips, format) {
       dur.textContent = `${(editedEnd - editedStart).toFixed(1)}s`;
     updateDurLabel();
     title.appendChild(dur);
+    if (c.group_id !== null && c.group_id !== undefined) {
+      const badge = document.createElement("span");
+      badge.className = "hl-overlap-badge";
+      badge.style.background = HL_GROUP_TINTS[c.group_id % HL_GROUP_TINTS.length];
+      badge.textContent = `Overlap #${c.group_id + 1}`;
+      badge.title = "This clip shares ≥90% of its content with another clip flagged with the same color/number.";
+      title.appendChild(badge);
+    }
     card.appendChild(title);
 
     if (c.hook_quote) {
@@ -1520,6 +1548,12 @@ if (hlFindBtn) {
       alert("No active job. Transcribe a video first.");
       return;
     }
+    const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
+      .map(el => parseInt(el.value, 10));
+    if (!durations.length) {
+      alert("Pick at least one target length.");
+      return;
+    }
     hlFindBtn.disabled = true;
     hlStatus.textContent = "Asking Gemini…";
     hlResults.innerHTML = "";
@@ -1530,7 +1564,7 @@ if (hlFindBtn) {
         body: JSON.stringify({
           job_id: currentJobId,
           format: hlFormatEl.value,
-          target_duration: parseInt(hlDurationEl.value, 10),
+          target_durations: durations,
           num_clips: parseInt(hlCountEl.value, 10),
         }),
       });
