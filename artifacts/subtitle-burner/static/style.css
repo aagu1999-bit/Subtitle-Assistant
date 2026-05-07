@@ -954,17 +954,22 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 
 /* ---- Inline gap markers in the transcript phrase list ---- */
 .phrase-row.gap-row {
-  background: linear-gradient(90deg, rgba(255,107,53,0.08), rgba(255,107,53,0.02));
+  /* Solid (not gradient) tint so gap markers are always visually distinct
+     from real subtitles — no risk of mistaking one for editable text. */
+  background: rgba(255, 107, 53, 0.18);
   border-left: 3px solid #ff6b35;
   padding-left: 9px;     /* compensate for the 3px border */
   align-items: center;
 }
 .phrase-row.gap-row:hover {
-  background: linear-gradient(90deg, rgba(255,149,85,0.14), rgba(255,149,85,0.04));
+  background: rgba(255, 149, 85, 0.26);
 }
 .phrase-row.gap-row.preserved {
-  background: linear-gradient(90deg, rgba(124,217,138,0.10), rgba(124,217,138,0.02));
+  background: rgba(124, 217, 138, 0.16);
   border-left-color: #7cd98a;
+}
+.phrase-row.gap-row.preserved:hover {
+  background: rgba(124, 217, 138, 0.24);
 }
 .phrase-row.gap-row .gap-time {
   font-family: ui-monospace, "SF Mono", monospace;

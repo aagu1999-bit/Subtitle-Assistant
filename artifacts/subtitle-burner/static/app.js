@@ -586,8 +586,28 @@ function applyEmojiRules(rules = {}) {
   Object.entries(rules).forEach(([keyword, emoji]) => addEmojiRule(keyword, emoji));
 }
 
+function _sanitizeWords(words) {
+  // Strip any phantom gap-marker entries that may have leaked into a saved
+  // draft from earlier builds (before .gap-row was excluded from
+  // collectEditedWords). A real word has a non-empty word string and a
+  // numeric start/end. Gap markers start with ✂ or ⏸.
+  if (!Array.isArray(words)) return [];
+  return words.filter(w => {
+    if (!w || typeof w !== "object") return false;
+    const text = String(w.word || "").trim();
+    if (!text) return false;
+    if (text.startsWith("✂") || text.startsWith("⏸")) return false;
+    if (text.includes("Cutting silence") || text.includes("Pause kept")) return false;
+    const s = parseFloat(w.start), e = parseFloat(w.end);
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return false;
+    return true;
+  });
+}
+
 function collectEditedWords(options = {}) {
-  const rows = phraseListEl.querySelectorAll(".phrase-row");
+  // Only iterate REAL transcript phrase rows. Gap-marker rows share the
+  // .phrase-row class for layout but must NOT be saved as words.
+  const rows = phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)");
   const editedWords = [];
   rows.forEach(row => {
     const text = row.querySelector(".phrase-text").textContent.trim();
@@ -732,7 +752,7 @@ async function pollTranscription(jobId) {
   if (s.status === "awaiting_edit") {
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
-    currentWords = s.words || [];
+    currentWords = _sanitizeWords(s.words);
     setTimeout(() => {
       if (currentJobId !== jobId) return;
       progress.classList.add("hidden");
@@ -900,7 +920,8 @@ function _buildInlineGapRow(g) {
 }
 
 function updateRowCount() {
-  const n = phraseListEl.querySelectorAll(".phrase-row").length;
+  // Count real phrases only — gap markers share .phrase-row for layout.
+  const n = phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)").length;
   rowCount.textContent = n + " phrase" + (n !== 1 ? "s" : "");
 }
 
@@ -912,7 +933,7 @@ function highlightPhraseRow(target) {
 // Sync phrase list highlight as the source video plays
 sourcePlayer.addEventListener("timeupdate", () => {
   const t = sourcePlayer.currentTime;
-  const rows = Array.from(phraseListEl.querySelectorAll(".phrase-row"));
+  const rows = Array.from(phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)"));
   let activeRow = null;
   for (let i = 0; i < rows.length; i++) {
     const start = parseFloat(rows[i].dataset.start);
@@ -1209,7 +1230,7 @@ async function switchToJob(jobId) {
     currentJobId = jobId;
     localStorage.setItem("subtitleBurner:lastJobId", jobId);
     if (s.words && s.words.length) {
-      currentWords = s.words;
+      currentWords = _sanitizeWords(s.words);
       showEditor(currentWords, s);
       if (s.output && s.status === "done") {
         result.classList.remove("hidden");
