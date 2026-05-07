@@ -686,12 +686,19 @@ def compute_silence_compression(words: list, max_gap: float = 1.0,
 
 
 def apply_silence_tightening(video_path: Path, ranges: list,
-                               output_path: Path) -> None:
+                               output_path: Path,
+                               crossfade_ms: int = 0) -> None:
     """Trim source video to the given keep-ranges and concatenate them.
 
     Single ffmpeg pass via filter_complex (atrim/trim + concat) so the
     cuts land at frame-accurate positions. Re-encodes for accurate seek;
     stream-copy concat would snap cuts to keyframes and shift the audio.
+
+    If *crossfade_ms* > 0, applies a brief fade-out at the end of each
+    segment (except the last) and a fade-in at the start of each segment
+    (except the first). Total length is preserved (unlike acrossfade,
+    which overlaps segments) so audio stays in lockstep with the
+    hard-cut video. Practical range: 20–60 ms.
     """
     if not ranges:
         raise RuntimeError("No keep-ranges supplied to silence-tightening.")
@@ -709,17 +716,26 @@ def apply_silence_tightening(video_path: Path, ranges: list,
             str(output_path),
         ]
     else:
+        fade_dur = max(0.0, crossfade_ms / 1000.0)
+        n = len(ranges)
         parts = []
         for i, (a, b) in enumerate(ranges):
+            seg_dur = b - a
             parts.append(
                 f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}]"
             )
-            parts.append(
-                f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]"
-            )
-        concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(ranges)))
+            audio_chain = f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS"
+            if fade_dur > 0 and seg_dur > 2 * fade_dur:
+                if i > 0:
+                    audio_chain += f",afade=t=in:st=0:d={fade_dur:.3f}"
+                if i < n - 1:
+                    fade_out_st = max(0.0, seg_dur - fade_dur)
+                    audio_chain += f",afade=t=out:st={fade_out_st:.3f}:d={fade_dur:.3f}"
+            parts.append(f"{audio_chain}[a{i}]")
+
+        concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
         parts.append(
-            f"{concat_inputs}concat=n={len(ranges)}:v=1:a=1[outv][outa]"
+            f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
         )
         filter_complex = ";".join(parts)
         cmd = [
@@ -1355,6 +1371,8 @@ def _audio_cache_key(audio: dict, style: dict | None = None) -> str:
         payload["__tighten"] = {
             "max_gap": ts.get("max_gap"),
             "target_gap": ts.get("target_gap"),
+            "crossfade": bool(ts.get("crossfade")),
+            "preserved": sorted(ts.get("preserved_gap_starts") or []),
         }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
@@ -1775,7 +1793,12 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 jobs[job_id]["progress"] = 50
                 _db_save_job(job_id)
                 tight_video_path = UPLOAD_DIR / f"{job_id}_tight.mp4"
-                apply_silence_tightening(video_path, comp["ranges"], tight_video_path)
+                # Default 30ms crossfade if user enabled it on the panel.
+                crossfade_ms = 30 if tight_settings.get("crossfade") else 0
+                apply_silence_tightening(
+                    video_path, comp["ranges"], tight_video_path,
+                    crossfade_ms=crossfade_ms,
+                )
                 # Replace the source so everything downstream uses the
                 # tightened version. Words are also remapped to the new
                 # timeline so subtitle timing stays correct.

@@ -322,6 +322,7 @@ function getStyle() {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
       max_gap:    $("tightenMaxGap") ? parseFloat($("tightenMaxGap").value) : 1.0,
       target_gap: $("tightenTargetGap") ? parseFloat($("tightenTargetGap").value) : 0.3,
+      crossfade:  $("tightenCrossfade") ? $("tightenCrossfade").checked : false,
       preserved_gap_starts: (typeof _tPreservedCache !== "undefined") ? _tPreservedCache.slice() : [],
     },
   };
@@ -503,6 +504,9 @@ function applyStyle(style = {}) {
     if (ctrls) ctrls.classList.toggle("hidden", !ts.enabled);
     if (Array.isArray(ts.preserved_gap_starts)) {
       _tPreservedCache = ts.preserved_gap_starts.slice();
+    }
+    if ($("tightenCrossfade") && ts.crossfade !== undefined) {
+      $("tightenCrossfade").checked = !!ts.crossfade;
     }
   }
   sizeVal.textContent = sizeEl.value;
@@ -1909,6 +1913,13 @@ if (_tTargetGap && _tTargetGapLbl) {
     _tTargetGapLbl.textContent = parseFloat(_tTargetGap.value).toFixed(2) + "s";
     scheduleDraftSave();
   };
+}
+
+const _tCrossfade = $("tightenCrossfade");
+if (_tCrossfade) {
+  _tCrossfade.addEventListener("change", () => {
+    if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+  });
 }
 
 function _tFmtTime(t) {
