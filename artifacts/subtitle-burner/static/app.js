@@ -775,7 +775,18 @@ async function pollTranscription(jobId) {
 // ---- Phrase timeline / editable subtitle list ----
 function renderPhraseList(words) {
   phraseListEl.innerHTML = "";
-  if (!words || !words.length) return;
+  // Diagnostic — let us see exactly what the function received.
+  try {
+    const stack = (new Error()).stack || "";
+    const caller = stack.split("\n").slice(2, 4).join(" | ");
+    console.log("[renderPhraseList] words.length=", words ? words.length : 0,
+                "_tLastGaps.length=", (typeof _tLastGaps !== "undefined" && Array.isArray(_tLastGaps)) ? _tLastGaps.length : "undef",
+                "caller:", caller);
+  } catch (_) {}
+  if (!words || !words.length) {
+    console.log("[renderPhraseList] EARLY RETURN (no words)");
+    return;
+  }
 
   // Pull the latest scan results so we can interleave gap markers inline.
   // Empty array if the user hasn't scanned yet — in that case the list
@@ -857,6 +868,13 @@ function renderPhraseList(words) {
   while (gapIdx < gaps.length) {
     phraseListEl.appendChild(_buildInlineGapRow(gaps[gapIdx++]));
   }
+  // Diagnostic
+  try {
+    const gapRowsInDom = phraseListEl.querySelectorAll(".gap-row").length;
+    const phraseRowsInDom = phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)").length;
+    console.log("[renderPhraseList] DONE — gap rows in DOM:", gapRowsInDom,
+                "phrase rows:", phraseRowsInDom);
+  } catch (_) {}
 }
 
 function _buildInlineGapRow(g) {
