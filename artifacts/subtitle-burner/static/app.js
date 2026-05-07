@@ -318,6 +318,11 @@ function getStyle() {
     all_caps:        $("allCaps").checked,
     group_size:      parseInt(groupEl.value, 10),
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
+    tighten_silences: {
+      enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
+      max_gap:    $("tightenMaxGap") ? parseFloat($("tightenMaxGap").value) : 1.0,
+      target_gap: $("tightenTargetGap") ? parseFloat($("tightenTargetGap").value) : 0.3,
+    },
   };
 }
 
@@ -479,6 +484,22 @@ function applyStyle(style = {}) {
   if (style.group_size) groupEl.value = style.group_size;
   if (style.quality_boost !== undefined && $("qualityBoost")) {
     $("qualityBoost").checked = !!style.quality_boost;
+  }
+  if (style.tighten_silences && $("tightenEnabled")) {
+    const ts = style.tighten_silences;
+    $("tightenEnabled").checked = !!ts.enabled;
+    if ($("tightenMaxGap") && ts.max_gap !== undefined) {
+      $("tightenMaxGap").value = ts.max_gap;
+      const lbl = $("tightenMaxGapVal");
+      if (lbl) lbl.textContent = parseFloat(ts.max_gap).toFixed(1) + "s";
+    }
+    if ($("tightenTargetGap") && ts.target_gap !== undefined) {
+      $("tightenTargetGap").value = ts.target_gap;
+      const lbl = $("tightenTargetGapVal");
+      if (lbl) lbl.textContent = parseFloat(ts.target_gap).toFixed(2) + "s";
+    }
+    const ctrls = $("tightenControls");
+    if (ctrls) ctrls.classList.toggle("hidden", !ts.enabled);
   }
   sizeVal.textContent = sizeEl.value;
   owVal.textContent = owEl.value;
@@ -1848,6 +1869,80 @@ if (_peMakeClip) {
       _peSetStatus("Could not create clip: " + err.message, false);
     } finally {
       _peMakeClip.disabled = false;
+    }
+  };
+}
+
+// =====================================================================
+// Tighten silences (Style panel) — UI wiring
+// =====================================================================
+
+const _tEnabled = $("tightenEnabled");
+const _tControls = $("tightenControls");
+const _tMaxGap = $("tightenMaxGap");
+const _tTargetGap = $("tightenTargetGap");
+const _tMaxGapLbl = $("tightenMaxGapVal");
+const _tTargetGapLbl = $("tightenTargetGapVal");
+const _tPreviewBtn = $("tightenPreviewBtn");
+const _tPreviewResult = $("tightenPreviewResult");
+
+if (_tEnabled && _tControls) {
+  _tEnabled.addEventListener("change", () => {
+    _tControls.classList.toggle("hidden", !_tEnabled.checked);
+    scheduleDraftSave();
+  });
+}
+if (_tMaxGap && _tMaxGapLbl) {
+  _tMaxGap.oninput = () => {
+    _tMaxGapLbl.textContent = parseFloat(_tMaxGap.value).toFixed(1) + "s";
+    scheduleDraftSave();
+  };
+}
+if (_tTargetGap && _tTargetGapLbl) {
+  _tTargetGap.oninput = () => {
+    _tTargetGapLbl.textContent = parseFloat(_tTargetGap.value).toFixed(2) + "s";
+    scheduleDraftSave();
+  };
+}
+
+if (_tPreviewBtn && _tPreviewResult) {
+  _tPreviewBtn.onclick = async () => {
+    if (!currentJobId) {
+      _tPreviewResult.textContent = "Open a transcribed video first.";
+      return;
+    }
+    _tPreviewBtn.disabled = true;
+    _tPreviewResult.textContent = "Computing…";
+    try {
+      const res = await fetch("/preview-tightening", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: currentJobId,
+          max_gap: parseFloat(_tMaxGap.value),
+          target_gap: parseFloat(_tTargetGap.value),
+        }),
+      });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      const orig = j.original_duration || 0;
+      const newd = j.new_duration || 0;
+      const cut = j.total_cut || 0;
+      const pct = orig > 0 ? Math.round((cut / orig) * 100) : 0;
+      if (j.gaps_cut === 0) {
+        _tPreviewResult.style.color = "#9aa0a6";
+        _tPreviewResult.textContent =
+          `No gaps longer than ${_tMaxGap.value}s found. Try lowering the threshold.`;
+      } else {
+        _tPreviewResult.style.color = "#7cd98a";
+        _tPreviewResult.textContent =
+          `${j.gaps_cut} gap${j.gaps_cut === 1 ? "" : "s"} → ${cut.toFixed(1)}s removed (${pct}% tighter). New length ≈ ${newd.toFixed(1)}s (was ${orig.toFixed(1)}s).`;
+      }
+    } catch (e) {
+      _tPreviewResult.style.color = "#ff8a8a";
+      _tPreviewResult.textContent = "Error: " + e.message;
+    } finally {
+      _tPreviewBtn.disabled = false;
     }
   };
 }

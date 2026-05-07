@@ -558,6 +558,159 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(lines) + "\n"
 
 
+def compute_silence_compression(words: list, max_gap: float = 1.0,
+                                 target_gap: float = 0.3) -> dict:
+    """Compute keep-ranges and remapped word timestamps for silence-tightening.
+
+    Walks consecutive word pairs in the transcript. Whenever the gap between
+    two words exceeds ``max_gap``, the gap is compressed to ``target_gap``
+    by cutting (gap - target_gap) seconds out of the middle, splitting the
+    breath room evenly between the two words.
+
+    A 0.05s safety buffer protects each word boundary so a slightly-late
+    Whisper timestamp can't lop off a trailing consonant.
+
+    Returns:
+        {
+          "ranges": [(src_start, src_end), …]  segments of source to keep,
+          "words":  [{word, start, end}, …]    remapped to compressed timeline,
+          "stats":  {original_duration, new_duration, gaps_cut, total_cut},
+        }
+    """
+    BUFFER = 0.05  # protect word boundaries from imprecise timestamps
+
+    if not words:
+        return {
+            "ranges": [],
+            "words": [],
+            "stats": {"original_duration": 0.0, "new_duration": 0.0,
+                      "gaps_cut": 0, "total_cut": 0.0},
+        }
+
+    src_start = max(0.0, float(words[0].get("start", 0)) - BUFFER)
+    src_end = float(words[-1].get("end", 0)) + BUFFER
+
+    ranges: list[tuple[float, float]] = []
+    new_words: list[dict] = []
+    keep_start = src_start
+    cumulative_drop = 0.0
+    gaps_cut = 0
+    half = target_gap / 2.0
+
+    for i, w in enumerate(words):
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if i > 0:
+            prev = words[i - 1]
+            try:
+                pe = float(prev.get("end", 0))
+            except (TypeError, ValueError):
+                pe = ws
+            gap = ws - pe
+            if gap > max_gap:
+                # Cut the middle of the gap; leave half of target_gap on each side.
+                keep_end = max(pe + BUFFER, pe + half)
+                next_start = min(ws - BUFFER, ws - half)
+                # Only commit the cut if it actually saves >= 0.2s.
+                if next_start > keep_end + 0.2:
+                    ranges.append((keep_start, keep_end))
+                    cumulative_drop += (next_start - keep_end)
+                    keep_start = next_start
+                    gaps_cut += 1
+        new_words.append({
+            "word": w.get("word", ""),
+            "start": ws - cumulative_drop,
+            "end": we - cumulative_drop,
+        })
+
+    ranges.append((keep_start, src_end))
+
+    original_duration = src_end - src_start
+    new_duration = sum(b - a for a, b in ranges)
+
+    return {
+        "ranges": ranges,
+        "words": new_words,
+        "stats": {
+            "original_duration": original_duration,
+            "new_duration": new_duration,
+            "gaps_cut": gaps_cut,
+            "total_cut": original_duration - new_duration,
+        },
+    }
+
+
+def apply_silence_tightening(video_path: Path, ranges: list,
+                               output_path: Path) -> None:
+    """Trim source video to the given keep-ranges and concatenate them.
+
+    Single ffmpeg pass via filter_complex (atrim/trim + concat) so the
+    cuts land at frame-accurate positions. Re-encodes for accurate seek;
+    stream-copy concat would snap cuts to keyframes and shift the audio.
+    """
+    if not ranges:
+        raise RuntimeError("No keep-ranges supplied to silence-tightening.")
+
+    if len(ranges) == 1:
+        a, b = ranges[0]
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{a:.3f}",
+            "-i", str(video_path),
+            "-t", f"{(b - a):.3f}",
+            *_VIDEO_ENC_ARGS,
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    else:
+        parts = []
+        for i, (a, b) in enumerate(ranges):
+            parts.append(
+                f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}]"
+            )
+            parts.append(
+                f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+        concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(ranges)))
+        parts.append(
+            f"{concat_inputs}concat=n={len(ranges)}:v=1:a=1[outv][outa]"
+        )
+        filter_complex = ";".join(parts)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            *_VIDEO_ENC_ARGS,
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 and VIDEO_ENC_NAME == "h264_videotoolbox":
+        # Hardware encoder can choke on certain inputs; retry libx264.
+        fallback = [a for a in cmd]
+        # Replace the videotoolbox args with libx264 args
+        fb_v_idx = fallback.index("-c:v") if "-c:v" in fallback else None
+        if fb_v_idx is not None:
+            fallback[fb_v_idx + 1] = "libx264"
+            # Also tweak preset/crf to reasonable defaults
+            try:
+                fallback[fb_v_idx:fb_v_idx + 4] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+            except Exception:
+                pass
+        proc = subprocess.run(fallback, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Silence-tightening ffmpeg failed: {proc.stderr[-1500:]}"
+        )
+
+
 def get_video_dimensions(video_path: Path):
     """Return (width, height) in *display* orientation.
 
@@ -1140,16 +1293,27 @@ def enhance_with_elevenlabs(video_path: Path, output_path: Path, settings: dict,
 _POSTPROCESS_KEYS = {"offset_seconds", "wet_mix", "output_gain_db", "post_filters"}
 
 
-def _audio_cache_key(audio: dict) -> str:
+def _audio_cache_key(audio: dict, style: dict | None = None) -> str:
     """Stable hash of the audio settings that REQUIRE re-running the AI provider.
 
     Local post-process knobs (wet/dry blend, output gain, post-filters, sync
     offset) are excluded so the user can iterate on them without burning
     credits — they get re-applied on every render via _apply_isolation_postprocess.
+
+    If silence-tightening is enabled in *style*, its parameters are folded
+    into the key. Tightening produces a different source audio (cuts removed,
+    timeline compressed) so cached audio from a non-tightened or differently-
+    tightened render must be invalidated.
     """
     if not audio or not audio.get("provider"):
         return ""
     payload = {k: v for k, v in audio.items() if k not in _POSTPROCESS_KEYS}
+    if style and style.get("tighten_silences", {}).get("enabled"):
+        ts = style["tighten_silences"]
+        payload["__tighten"] = {
+            "max_gap": ts.get("max_gap"),
+            "target_gap": ts.get("target_gap"),
+        }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -1540,7 +1704,36 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
     """Build ASS, optionally enhance audio, then burn subtitles."""
     ass_path: Path | None = None
     enhanced_audio_path: Path | None = None
+    tight_video_path: Path | None = None
     try:
+        # ---- Optional silence-tightening pre-step ----
+        # If style.tighten_silences is enabled, compress long pauses in the
+        # source video FIRST. The downstream pipeline (subtitle burn, audio
+        # enhancement) then operates on the tightened video and remapped
+        # word timestamps so subtitles stay in sync with the cuts.
+        tight_settings = (style or {}).get("tighten_silences") or {}
+        if tight_settings.get("enabled"):
+            try:
+                max_gap = float(tight_settings.get("max_gap", 1.0))
+            except (TypeError, ValueError):
+                max_gap = 1.0
+            try:
+                target_gap = float(tight_settings.get("target_gap", 0.3))
+            except (TypeError, ValueError):
+                target_gap = 0.3
+            comp = compute_silence_compression(words, max_gap=max_gap, target_gap=target_gap)
+            if comp["stats"]["gaps_cut"] > 0:
+                jobs[job_id]["status"] = "tightening silences"
+                jobs[job_id]["progress"] = 50
+                _db_save_job(job_id)
+                tight_video_path = UPLOAD_DIR / f"{job_id}_tight.mp4"
+                apply_silence_tightening(video_path, comp["ranges"], tight_video_path)
+                # Replace the source so everything downstream uses the
+                # tightened version. Words are also remapped to the new
+                # timeline so subtitle timing stays correct.
+                video_path = tight_video_path
+                words = comp["words"]
+
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
         _db_save_job(job_id)
@@ -1557,7 +1750,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
 
         provider = audio.get("provider", "ffmpeg") if audio else "ffmpeg"
         cache_path = UPLOAD_DIR / f"{job_id}_audiocache.aac"
-        cache_key = _audio_cache_key(audio) if audio else ""
+        cache_key = _audio_cache_key(audio, style) if audio else ""
         cached_key = jobs[job_id].get("audio_cache_key") or ""
         cache_hit = (
             provider in ("auphonic", "elevenlabs", "dolby")
@@ -1748,6 +1941,10 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         # The background cleanup loop reclaims it after UPLOAD_TTL_SECONDS.
         _safe_unlink(ass_path) if ass_path else None
         _safe_unlink(enhanced_audio_path) if enhanced_audio_path else None
+        # The tightened-source intermediate isn't cached — burn / audio caches
+        # already reflect the tighten settings via their cache keys, so the
+        # tightened mp4 only needs to live for the duration of this render.
+        _safe_unlink(tight_video_path) if tight_video_path else None
 
 
 def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
@@ -2078,6 +2275,29 @@ def compile_clips():
     }
     _db_save_job(new_job_id)
     return jsonify({"job_id": new_job_id, "filename": new_filename, "segments": len(validated)})
+
+
+@app.route("/preview-tightening", methods=["POST"])
+def preview_tightening():
+    """Compute silence-compression stats for a job without rendering.
+
+    Body: {job_id, max_gap, target_gap}
+    Returns: {gaps_cut, total_cut, original_duration, new_duration}
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words")
+    if not words:
+        return jsonify({"error": "Transcript not available for this job."}), 400
+    try:
+        max_gap = float(data.get("max_gap", 1.0))
+        target_gap = float(data.get("target_gap", 0.3))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid threshold values"}), 400
+    comp = compute_silence_compression(words, max_gap=max_gap, target_gap=target_gap)
+    return jsonify(comp["stats"])
 
 
 @app.route("/rename-job", methods=["POST"])
