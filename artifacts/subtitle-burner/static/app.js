@@ -850,9 +850,10 @@ function _buildInlineGapRow(g) {
 
   const textEl = document.createElement("span");
   textEl.className = "phrase-text gap-label";
+  const _gapRange = `${fmtTime(g.start)} → ${fmtTime(g.end)}`;
   textEl.textContent = g.preserved
-    ? `⏸ Pause kept (${fmtTime(g.start)})`
-    : `✂ Cutting silence (${fmtTime(g.start)})`;
+    ? `⏸ Pause kept (${_gapRange})`
+    : `✂ Cutting silence (${_gapRange})`;
 
   const label = document.createElement("label");
   label.className = "gap-toggle";
@@ -870,8 +871,8 @@ function _buildInlineGapRow(g) {
     g.preserved = cb.checked;
     row.classList.toggle("preserved", cb.checked);
     textEl.textContent = cb.checked
-      ? `⏸ Pause kept (${fmtTime(g.start)})`
-      : `✂ Cutting silence (${fmtTime(g.start)})`;
+      ? `⏸ Pause kept (${_gapRange})`
+      : `✂ Cutting silence (${_gapRange})`;
     // Refresh summary numbers from server.
     if (typeof _tFetchPreview === "function") _tFetchPreview(false);
   };
