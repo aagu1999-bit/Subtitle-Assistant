@@ -954,22 +954,20 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 
 /* ---- Inline gap markers in the transcript phrase list ---- */
 .phrase-row.gap-row {
-  /* Solid (not gradient) tint so gap markers are always visually distinct
-     from real subtitles — no risk of mistaking one for editable text. */
-  background: rgba(255, 107, 53, 0.18);
-  border-left: 3px solid #ff6b35;
-  padding-left: 9px;     /* compensate for the 3px border */
+  /* Soft orange wash — visible at a glance, but not aggressive about it.
+     No bold border. Gap markers should read as "look at this region",
+     not as a destructive cut warning. */
+  background: rgba(255, 153, 102, 0.10);
   align-items: center;
 }
 .phrase-row.gap-row:hover {
-  background: rgba(255, 149, 85, 0.26);
+  background: rgba(255, 153, 102, 0.18);
 }
 .phrase-row.gap-row.preserved {
-  background: rgba(124, 217, 138, 0.16);
-  border-left-color: #7cd98a;
+  background: rgba(124, 217, 138, 0.09);
 }
 .phrase-row.gap-row.preserved:hover {
-  background: rgba(124, 217, 138, 0.24);
+  background: rgba(124, 217, 138, 0.16);
 }
 .phrase-row.gap-row .gap-time {
   font-family: ui-monospace, "SF Mono", monospace;
