@@ -951,3 +951,45 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
 .tighten-gap-toggle input[type="checkbox"] {
   accent-color: #7cd98a;
 }
+
+/* ---- Inline gap markers in the transcript phrase list ---- */
+.phrase-row.gap-row {
+  background: linear-gradient(90deg, rgba(255,107,53,0.08), rgba(255,107,53,0.02));
+  border-left: 3px solid #ff6b35;
+  padding-left: 9px;     /* compensate for the 3px border */
+  align-items: center;
+}
+.phrase-row.gap-row:hover {
+  background: linear-gradient(90deg, rgba(255,149,85,0.14), rgba(255,149,85,0.04));
+}
+.phrase-row.gap-row.preserved {
+  background: linear-gradient(90deg, rgba(124,217,138,0.10), rgba(124,217,138,0.02));
+  border-left-color: #7cd98a;
+}
+.phrase-row.gap-row .gap-time {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-weight: 700;
+  color: #ff9555;
+  text-align: right;
+}
+.phrase-row.gap-row.preserved .gap-time {
+  color: #7cd98a;
+}
+.phrase-row.gap-row .gap-label {
+  font-style: italic;
+  color: #d2d8e0;
+  font-size: 0.92rem;
+}
+.phrase-row.gap-row .gap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #c8cdd3;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.phrase-row.gap-row .gap-toggle input[type="checkbox"] {
+  accent-color: #7cd98a;
+}

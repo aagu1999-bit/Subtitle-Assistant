@@ -757,10 +757,30 @@ function renderPhraseList(words) {
   phraseListEl.innerHTML = "";
   if (!words || !words.length) return;
 
+  // Pull the latest scan results so we can interleave gap markers inline.
+  // Empty array if the user hasn't scanned yet — in that case the list
+  // renders identically to before.
+  const gaps = Array.isArray(_tLastGaps) ? _tLastGaps.slice() : [];
+  let gapIdx = 0;
+
   const groupSize = parseInt(groupEl.value, 10) || 3;
+  let prevPhraseEnd = -1;
+
+  const insertGapsUpTo = (nextPhraseStart) => {
+    // Insert any gap whose start time falls before this phrase begins.
+    while (gapIdx < gaps.length && gaps[gapIdx].start < nextPhraseStart) {
+      const g = gaps[gapIdx++];
+      // Skip gaps that fall before the start of the transcript.
+      if (prevPhraseEnd >= 0 && g.start < prevPhraseEnd - 0.1) continue;
+      phraseListEl.appendChild(_buildInlineGapRow(g));
+    }
+  };
+
   for (let i = 0; i < words.length; i += groupSize) {
     const group = words.slice(i, i + groupSize);
     if (!group.length) continue;
+
+    insertGapsUpTo(group[0].start);
 
     const row = document.createElement("div");
     row.className = "phrase-row";
@@ -810,7 +830,72 @@ function renderPhraseList(words) {
     row.appendChild(delBtn);
 
     phraseListEl.appendChild(row);
+    prevPhraseEnd = group[group.length - 1].end;
   }
+
+  // Trailing gaps that fall after the last phrase (rare but possible).
+  while (gapIdx < gaps.length) {
+    phraseListEl.appendChild(_buildInlineGapRow(gaps[gapIdx++]));
+  }
+}
+
+function _buildInlineGapRow(g) {
+  const row = document.createElement("div");
+  row.className = "phrase-row gap-row" + (g.preserved ? " preserved" : "");
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "phrase-time gap-time";
+  timeEl.textContent = `${g.duration.toFixed(1)}s`;
+  timeEl.title = `Gap at ${fmtTime(g.start)} — click to listen`;
+
+  const textEl = document.createElement("span");
+  textEl.className = "phrase-text gap-label";
+  textEl.textContent = g.preserved
+    ? `⏸ Pause kept (${fmtTime(g.start)})`
+    : `✂ Cutting silence (${fmtTime(g.start)})`;
+
+  const label = document.createElement("label");
+  label.className = "gap-toggle";
+  label.title = "Tick to PRESERVE this pause";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = !!g.preserved;
+  cb.dataset.gapStart = g.start.toFixed(1);
+  cb.onclick = (e) => e.stopPropagation();
+  cb.onchange = () => {
+    const set = _tGetPreservedSet();
+    const key = Math.round(parseFloat(cb.dataset.gapStart) * 10) / 10;
+    if (cb.checked) set.add(key); else set.delete(key);
+    _tCommitPreservedSet(set);
+    g.preserved = cb.checked;
+    row.classList.toggle("preserved", cb.checked);
+    textEl.textContent = cb.checked
+      ? `⏸ Pause kept (${fmtTime(g.start)})`
+      : `✂ Cutting silence (${fmtTime(g.start)})`;
+    // Refresh summary numbers from server.
+    if (typeof _tFetchPreview === "function") _tFetchPreview(false);
+  };
+  label.appendChild(cb);
+  const lblTxt = document.createElement("span");
+  lblTxt.textContent = "Keep";
+  label.appendChild(lblTxt);
+
+  row.appendChild(timeEl);
+  row.appendChild(textEl);
+  row.appendChild(label);
+
+  // Click on the row body (not the checkbox) → seek source player to the gap
+  row.onclick = (e) => {
+    if (e.target.closest("input,label")) return;
+    if (sourcePlayer && sourcePlayer.src) {
+      try {
+        sourcePlayer.currentTime = Math.max(0, g.start - 0.5);
+        sourcePlayer.play().catch(() => {});
+      } catch (_) {}
+    }
+  };
+
+  return row;
 }
 
 function updateRowCount() {
@@ -2060,7 +2145,11 @@ async function _tFetchPreview(showLoading) {
     if (j.error) throw new Error(j.error);
     _tLastGaps = j.gaps || [];
     _tRenderSummary(j.stats);
-    _tRenderGapList(_tLastGaps);
+    // Inline: re-render the transcript phrase list so gap markers appear
+    // between phrases at their actual time positions.
+    if (Array.isArray(currentWords) && currentWords.length) {
+      renderPhraseList(currentWords);
+    }
   } catch (e) {
     if (_tPreviewSummary) {
       _tPreviewSummary.style.color = "#ff8a8a";
@@ -2075,7 +2164,8 @@ if (_tPreviewBtn) _tPreviewBtn.onclick = () => _tFetchPreview(true);
 
 // Re-scan automatically if the user changes thresholds AFTER an initial scan.
 function _tMaybeReScan() {
-  if (_tGapListEl && _tGapListEl.children.length > 0) {
+  if (Array.isArray(_tLastGaps) && _tLastGaps.length >= 0 &&
+      _tPreviewSummary && _tPreviewSummary.textContent.trim() !== "") {
     _tFetchPreview(false);
   }
 }
