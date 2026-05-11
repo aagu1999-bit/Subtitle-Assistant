@@ -77,10 +77,27 @@
     <div class="row">
       <label>Font</label>
       <select id="font">
-        <option value="DM Sans">DM Sans</option>
-        <option value="The Bold Font">The Bold Font</option>
-        <option value="Montserrat Thin Black" selected>Montserrat Black</option>
-        <option value="Integral CF">Integral CF</option>
+        <optgroup label="Default">
+          <option value="DM Sans">DM Sans</option>
+          <option value="Montserrat Thin Black" selected>Montserrat Black</option>
+        </optgroup>
+        <optgroup label="🔥 Viral / street-interview">
+          <option value="Bebas Neue">Bebas Neue</option>
+          <option value="Anton">Anton</option>
+          <option value="Oswald">Oswald</option>
+          <option value="Archivo Black">Archivo Black</option>
+          <option value="Alfa Slab One">Alfa Slab One</option>
+          <option value="Bowlby One">Bowlby One</option>
+          <option value="Passion One">Passion One</option>
+          <option value="Rubik Mono One">Rubik Mono One</option>
+          <option value="Staatliches">Staatliches</option>
+          <option value="Bagel Fat One">Bagel Fat One</option>
+          <option value="Sigmar">Sigmar</option>
+        </optgroup>
+        <optgroup label="Other (drop TTF in fonts/)">
+          <option value="The Bold Font">The Bold Font</option>
+          <option value="Integral CF">Integral CF</option>
+        </optgroup>
       </select>
     </div>
 
@@ -100,6 +117,8 @@
       <input type="color" id="primary" value="#FFFFFF">
       <label class="inline">Highlight</label>
       <input type="color" id="highlight" value="#FFD60A">
+      <label class="inline">Accent</label>
+      <input type="color" id="accent" value="#FF6B35" title="Used to emphasise punchwords (long words, numbers, proper nouns) — at most 2 per group">
     </div>
 
     <div class="row">
@@ -123,6 +142,11 @@
     </div>
 
     <div class="row">
+      <label><input type="checkbox" id="smoothTimings" checked> Smooth pacing</label>
+      <label class="inline"><input type="checkbox" id="punchwordEmphasis" checked> Punchword accents</label>
+    </div>
+
+    <div class="row">
       <label>Words per group</label>
       <input type="range" id="group" min="1" max="5" value="3">
       <span id="groupVal" class="pill">3</span>
@@ -136,6 +160,16 @@
           <span class="muted">Lanczos upscale to ≥1080p short edge + light sharpen — sharper output, no AI</span>
         </span>
       </label>
+    </div>
+
+    <div class="font-preview-wrap">
+      <div class="font-preview-head">
+        <label>Preview</label>
+        <input type="text" id="fontPreviewText" value="Wait for it…" placeholder="Type sample text" maxlength="80">
+      </div>
+      <div id="fontPreviewStage" class="font-preview-stage">
+        <span id="fontPreviewWord" class="font-preview-word">Wait for it…</span>
+      </div>
     </div>
 
   </section>
@@ -576,7 +610,10 @@
       <div id="previewEditStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
     </section>
 
-    <button id="renderBtn" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px">Render with Edits</button>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:14px">
+      <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1">Render with Edits</button>
+      <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
+    </div>
 
     </div>
     </div>
@@ -631,7 +668,10 @@
         <span class="muted" style="font-size:.78rem;margin-left:8px">Quality &gt; quantity — fewer if the source warrants it.</span>
       </div>
 
-      <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff;margin-top:6px">Find highlights</button>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+        <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Find highlights</button>
+        <button id="hlMoreBtn" class="btn" style="display:none">↻ More options</button>
+      </div>
 
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
       <div id="hlResults" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
@@ -655,10 +695,21 @@
     <div id="compileList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
     <div class="row" style="gap:8px">
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
+      <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
       <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
+  </section>
+  <section id="pastCompilesPanel" class="panel" style="margin-top:14px;border-color:#2a2f3a">
+    <h2 style="display:flex;align-items:center;justify-content:space-between">
+      <span>📋 Past compilations</span>
+      <span id="pastCompilesCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
+    </h2>
+    <p class="muted panel-desc">
+      Reload a previous compilation's clip list into the queue above to tweak it and render a new version.
+    </p>
+    <div id="pastCompilesList" style="display:flex;flex-direction:column;gap:8px"></div>
   </section>
   </div>
   <!-- /Tab: Compilation -->

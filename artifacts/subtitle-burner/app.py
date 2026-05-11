@@ -16,6 +16,37 @@ import threading
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 
+# ---- Local env auto-load ----
+# Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
+# always boots with the same set of API keys regardless of which terminal
+# launched it. Without this, restarting Flask from a fresh shell silently
+# disabled every `*_API_KEY`-gated panel (Gemini, Auphonic, Dolby, etc.) —
+# fix is to keep keys on disk in .env.local (gitignored) and load them here.
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            # Strip optional surrounding quotes; do NOT overwrite if already
+            # set in the real environment, so an explicit `export` always wins.
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+# Project root holds `.env.local`; the burner directory may also have its own.
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_load_env_file(_PROJECT_ROOT / ".env.local")
+_load_env_file(_PROJECT_ROOT / ".env")
+_load_env_file(Path(__file__).parent / ".env.local")
+_load_env_file(Path(__file__).parent / ".env")
+
 app = Flask(__name__)
 
 # ---- Config ----
@@ -85,7 +116,7 @@ def _db_init() -> None:
             existing_cols = {
                 row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
             }
-            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename"):
+            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe"):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
             conn.commit()
@@ -100,13 +131,14 @@ def _db_save_job(job_id: str) -> None:
     style_json = json.dumps(job.get("style")) if job.get("style") is not None else None
     audio_json = json.dumps(job.get("audio")) if job.get("audio") is not None else None
     emoji_rules_json = json.dumps(job.get("emoji_rules")) if job.get("emoji_rules") is not None else None
+    compile_recipe_json = json.dumps(job.get("compile_recipe")) if job.get("compile_recipe") is not None else None
     with _db_lock:
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO jobs
-                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename, compile_recipe)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -123,6 +155,7 @@ def _db_save_job(job_id: str) -> None:
                     job.get("audio_cache_key"),
                     job.get("burn_cache_key"),
                     job.get("filename"),
+                    compile_recipe_json,
                 ),
             )
             conn.commit()
@@ -156,6 +189,12 @@ def _load_jobs_from_db() -> None:
         style = _load_json_col("style")
         audio = _load_json_col("audio")
         emoji_rules = _load_json_col("emoji_rules")
+        compile_recipe = None
+        try:
+            if row["compile_recipe"]:
+                compile_recipe = json.loads(row["compile_recipe"])
+        except (IndexError, KeyError, json.JSONDecodeError, TypeError):
+            compile_recipe = None
         cache_key = None
         burn_key = None
         filename = None
@@ -185,6 +224,7 @@ def _load_jobs_from_db() -> None:
             "filename": filename,
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
+            "compile_recipe": compile_recipe,
         }
 
 
@@ -406,34 +446,116 @@ def _visible_len(ass_text: str) -> int:
     return len(re.sub(r"\{[^}]*\}", "", ass_text))
 
 
-def _clamp_line_width(line: str, font_size: int, video_w: int,
-                      char_factor: float = 0.76, safe_pct: float = 0.84) -> str:
-    """Return *line* with a \\fscx override that squishes it to fit the safe area.
+# Words/lines this length or shorter never get scaled or hyphen-broken —
+# the user explicitly asked that medium-length words like "CONTEMPLATING"
+# (13) be rendered at their natural size even if they brush the safe area.
+NO_SHRINK_MAX_CHARS = 15
 
-    Uses an empirical pixel-width estimate (char_factor × font_size per visible
-    character).  0.76 is conservative enough to cover wide fonts like Montserrat
-    Black in all-caps mode.  The scale is floored at 40 % to keep text legible.
+
+def _fit_line_uniform(line: str, font_size: int, video_w: int,
+                       char_factor: float = 0.76, safe_pct: float = 0.84) -> str:
+    """Return *line* with a uniform \\fscx/\\fscy scale that fits the safe area.
+
+    Older logic only squished horizontally (\\fscx) which made long words like
+    "contemplating" look stretched-thin. Uniform scaling preserves letter
+    proportions: a long word just becomes smaller, not deformed. The scale
+    floor of 40 % keeps text legible if a word is absurdly long.
+
+    Lines whose visible length is ≤ NO_SHRINK_MAX_CHARS are left at full
+    size even if our estimator says they overflow. If the user picked a
+    font/size that genuinely runs off-screen, lowering the size is the
+    correct fix — silent shrinking just hides it.
     """
     raw_len = _visible_len(line)
-    if raw_len == 0:
+    if raw_len == 0 or raw_len <= NO_SHRINK_MAX_CHARS:
         return line
     est_px = raw_len * font_size * char_factor
     max_px = video_w * safe_pct
     if est_px <= max_px:
-        return line
-    scale = max(40, int((max_px / est_px) * 100))
-    return f"{{\\fscx{scale}}}{line}"
+        return line  # Fits already.
+    scale_pct = max(40, int((max_px / est_px) * 100))
+    return f"{{\\fscx{scale_pct}\\fscy{scale_pct}}}{line}"
+
+
+# Back-compat alias — old name kept so external imports / debug grep still work.
+_clamp_line_width = _fit_line_uniform
+
+
+def _hyphenate_oversized_word(part: str, max_chars: int,
+                                no_break_max_chars: int = NO_SHRINK_MAX_CHARS) -> str:
+    """Split a word that's longer than *max_chars* across multiple lines
+    with a trailing hyphen on each non-last fragment.
+
+    Preserves any leading/trailing ASS override tags wrapping the word —
+    e.g. ``{\\c&H...}CONTEMPLATING{\\c&H...}`` becomes
+    ``{\\c&H...}CONTEM-{\\c&H...}\\N{\\c&H...}PLATING{\\c&H...}`` so the
+    karaoke highlight colour stays consistent across both halves.
+
+    If the visible region contains inline tags (rare — happens only when the
+    middle of a word changes colour mid-letter), we leave the word alone and
+    let the uniform-fit step shrink it as a fallback. That's safer than
+    splitting through a tag and corrupting the ASS stream.
+    """
+    visible_chars = _visible_len(part)
+    if visible_chars <= max_chars or visible_chars <= no_break_max_chars:
+        return part
+    m = re.match(r"^((?:\{[^}]*\})*)(.*?)((?:\{[^}]*\})*)$", part, re.DOTALL)
+    if not m:
+        return part
+    pre, middle, post = m.group(1), m.group(2), m.group(3)
+    if re.search(r"\{[^}]*\}", middle):
+        return part
+    if not middle:
+        return part
+    # Balanced split: find the minimum line count N where every roughly-even
+    # chunk fits within max_chars (allowing 1 char for the trailing hyphen).
+    # Naive greedy packing tends to leave a tiny orphan last line.
+    word_len = len(middle)
+    n = 2
+    def chunk_fits(count: int) -> bool:
+        for k in range(count):
+            start = (word_len * k) // count
+            end = (word_len * (k + 1)) // count
+            chars = end - start + (1 if k < count - 1 else 0)  # +hyphen
+            if chars > max_chars:
+                return False
+        return True
+    while n < word_len and not chunk_fits(n):
+        n += 1
+    pieces = []
+    for k in range(n):
+        start = (word_len * k) // n
+        end = (word_len * (k + 1)) // n
+        chunk = middle[start:end]
+        if k < n - 1:
+            chunk += "-"
+        pieces.append(pre + chunk + post)
+    return r"\N".join(pieces)
 
 
 def _wrap_ass_text(text: str, max_chars: int) -> str:
     """Split ASS-tagged subtitle text at word boundaries to fit max_chars per line.
 
     Inline ASS tags (e.g. {\\cXXX}) are counted as zero-width so they don't
-    trigger early wrapping.  Lines are joined with \\N (hard newline in ASS).
+    trigger early wrapping. Words longer than *max_chars* on their own get
+    hyphen-split across lines instead of running off-screen or being shrunk.
+    Lines are joined with \\N (hard newline in ASS).
     """
-    if _visible_len(text) <= max_chars:
-        return text
     parts = text.split(" ")
+    # Pre-pass: any single word that exceeds max_chars gets hyphenated. We
+    # expand the resulting \N segments into separate "parts" so the wrap
+    # loop below treats each fragment as its own line candidate.
+    expanded: list[str] = []
+    for p in parts:
+        if _visible_len(p) > max_chars:
+            broken = _hyphenate_oversized_word(p, max_chars)
+            expanded.extend(broken.split(r"\N"))
+        else:
+            expanded.append(p)
+    parts = expanded
+    if all(_visible_len(p) <= max_chars for p in parts) and \
+            _visible_len(text) <= max_chars:
+        return text
     lines: list[list[str]] = []
     current: list[str] = []
     current_len = 0
@@ -452,17 +574,126 @@ def _wrap_ass_text(text: str, max_chars: int) -> str:
     return r"\N".join(" ".join(ln) for ln in lines)
 
 
+_PUNCHWORD_STOPLIST = frozenset({
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "so",
+    "because", "as", "at", "by", "for", "from", "in", "into", "of", "off",
+    "on", "onto", "out", "over", "to", "up", "with", "without", "is", "am",
+    "are", "was", "were", "be", "been", "being", "do", "does", "did",
+    "done", "have", "has", "had", "having", "i", "me", "my", "we", "us",
+    "our", "you", "your", "he", "him", "his", "she", "her", "it", "its",
+    "they", "them", "their", "this", "that", "these", "those", "what",
+    "which", "who", "whom", "whose", "when", "where", "why", "how", "not",
+    "no", "yes", "there", "here", "than", "too", "very", "just", "also",
+    "only", "any", "all", "some", "each", "every", "other", "another",
+    "again", "once", "more", "most", "such", "much", "many", "few", "like",
+    "go", "goes", "get", "got", "make", "made", "know", "see", "say",
+    "said", "can", "could", "will", "would", "should", "may", "might",
+    "must", "shall", "let", "yeah", "ok", "okay", "um", "uh", "oh", "well",
+})
+
+
+def _is_punchword_candidate(raw: str) -> bool:
+    """Heuristic: would emphasising *raw* feel right? Catches content words
+    (long, rare, numerals, proper nouns) and rejects function words.
+
+    The heuristic deliberately runs against the ORIGINAL casing because
+    proper nouns lose their cue once we apply ALL CAPS at render time.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return False
+    if any(ch.isdigit() for ch in raw):
+        return True
+    clean = re.sub(r"[^A-Za-z']", "", raw)
+    if not clean:
+        return False
+    if clean.lower() in _PUNCHWORD_STOPLIST:
+        return False
+    if raw[:1].isupper() and not raw.isupper():  # mid-sentence proper noun
+        return True
+    return len(clean) >= 6
+
+
+def _select_group_punchword_indices(group: list, max_per_group: int = 2) -> set:
+    """Pick at most *max_per_group* punchword positions inside *group*.
+
+    Without a per-group cap every other word would light up and the effect
+    burns out — emphasising 1–2 words per group is what reads as deliberate.
+    Tie-break: longest visible-letter count wins; positional order breaks
+    further ties so earlier candidates win.
+    """
+    candidates = []
+    for i, w in enumerate(group):
+        text = w.get("word", "")
+        if _is_punchword_candidate(text):
+            visible_len = len(re.sub(r"[^A-Za-z0-9']", "", text))
+            candidates.append((-visible_len, i))
+    candidates.sort()  # most-emphatic first
+    return {idx for _, idx in candidates[:max_per_group]}
+
+
+def _smooth_word_timings(words: list,
+                          min_active: float = 0.18,
+                          max_active: float = 0.90) -> list:
+    """Clamp each word's [start, end] highlight window so karaoke moves at a
+    comfortable read speed (~150–180 WPM).
+
+    Whisper sometimes emits word durations as short as 60 ms or as long as
+    1.2 s — the highlight either flickers or lingers past the natural beat.
+    Returns a NEW list (originals untouched):
+
+      - duration < *min_active*: extend the window forward but never past
+        the next word's onset. Audio onset is preserved either way.
+      - duration > *max_active*: cap the window. Audio still plays past the
+        cap; the highlight just resolves earlier so the eye moves on.
+    """
+    out = []
+    for i, w in enumerate(words):
+        try:
+            s = float(w.get("start", 0))
+            e = float(w.get("end", s))
+        except (TypeError, ValueError):
+            out.append(dict(w))
+            continue
+        dur = e - s
+        if dur < min_active:
+            next_start = None
+            if i + 1 < len(words):
+                try:
+                    next_start = float(words[i + 1].get("start"))
+                except (TypeError, ValueError):
+                    next_start = None
+            target = s + min_active
+            if next_start is not None:
+                target = min(target, next_start)
+            if target > e:
+                e = target
+        elif dur > max_active:
+            e = s + max_active
+        out.append({**w, "start": s, "end": e})
+    return out
+
+
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None) -> str:
     font = style.get("font_name", "Montserrat Thin Black")
     font_size = int(style.get("font_size", 72))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
     highlight = hex_to_ass_color(style.get("highlight_color", "#FFD60A"))
+    accent = hex_to_ass_color(style.get("accent_color", "#FF6B35"))
     outline = hex_to_ass_color(style.get("outline_color", "#000000"))
     outline_w = int(style.get("outline_width", 3))
     shadow = int(style.get("shadow", 1))
     pos_y_pct = float(style.get("position_y", 85))
     all_caps = bool(style.get("all_caps", True))
     group_size = int(style.get("group_size", 3))
+    smoothing_on = style.get("smooth_timings", True)
+    punchword_on = style.get("punchword_emphasis", True)
+
+    # Smooth karaoke pacing: keep every word's highlight window in a
+    # comfortable read band (~180–900 ms). Skipped if the user explicitly
+    # turned it off in case they want raw Whisper timings for some reason.
+    if smoothing_on:
+        words = _smooth_word_timings(words)
 
     pos_x = video_w // 2
     pos_y = int(video_h * (pos_y_pct / 100.0))
@@ -470,14 +701,24 @@ def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict 
     # Two char-factor estimates, tuned for different jobs:
     #   - WRAP factor (0.62): optimistic — lets more words land on one line.
     #     Used to decide where to insert \N line breaks.
-    #   - CLAMP factor (0.88): conservative — matches Montserrat Black in
-    #     all-caps. Used by _clamp_line_width as a safety net to apply \fscx
-    #     squish when a wrapped line still overflows the safe area.
-    # Safe area is 84% of video width (8% margins each side).
+    #   - CLAMP factor: conservative — bumped per font for slabby/wide
+    #     typefaces (Alfa Slab One, Bagel Fat One, Sigmar). Used by the
+    #     uniform-fit step to shrink any line that would overflow.
+    # Safe area is 78% of video width (11% margins each side) — was 84%,
+    # but a) wide display fonts were pushing right up against the frame
+    # and b) the extra room makes captions less claustrophobic on phones.
     _wrap_char_factor = 0.62
-    _clamp_char_factor = 0.88
-    _safe_pct = 0.84
-    max_chars_per_line = max(6, int((video_w * _safe_pct) / (font_size * _wrap_char_factor)))
+    _wide_fonts = {
+        "alfa slab one", "bagel fat one", "sigmar", "passion one",
+        "rubik mono one", "archivo black", "bowlby one",
+    }
+    _clamp_char_factor = 0.96 if font.lower().strip() in _wide_fonts else 0.88
+    _safe_pct = 0.78
+    # Floor matches NO_SHRINK_MAX_CHARS: phrases of 15 or fewer visible
+    # characters never break across lines, regardless of font size or safe
+    # area math. Otherwise short groups like "WHY DO I HAVE TO" were getting
+    # split unnecessarily when the per-char estimate ran tight.
+    max_chars_per_line = max(NO_SHRINK_MAX_CHARS, int((video_w * _safe_pct) / (font_size * _wrap_char_factor)))
 
     # Normalise emoji rule keys to lowercase alpha-only for robust matching
     normalised_emoji: dict[str, str] = {}
@@ -522,6 +763,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     group_emoji = normalised_emoji[word_key]
                     break
 
+        # Pick at most 2 words per group to wear the accent color. Only
+        # affects non-active words — the active (karaoke) word always uses
+        # the highlight color so the moving focus stays unambiguous.
+        punch_idxs = _select_group_punchword_indices(group) if punchword_on else set()
+
         for idx, active in enumerate(group):
             pieces = []
             for j, w in enumerate(group):
@@ -529,6 +775,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 word_text = word_text.replace("{", "").replace("}", "")
                 if j == idx:
                     pieces.append(f"{{\\c{highlight}}}{word_text}{{\\c{primary}}}")
+                elif j in punch_idxs:
+                    pieces.append(f"{{\\c{accent}}}{word_text}{{\\c{primary}}}")
                 else:
                     pieces.append(word_text)
 
@@ -539,10 +787,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if group_emoji:
                 text = text + " " + group_emoji
 
-            # Wrap long lines, then clamp any remaining overflow with \fscx
+            # Wrap long lines, then uniformly scale each line to fit the
+            # safe area. Letters keep their natural proportions — only words
+            # that actually overflow get scaled down.
             text = _wrap_ass_text(text, max_chars_per_line)
             text = r"\N".join(
-                _clamp_line_width(ln, font_size, video_w, _clamp_char_factor, _safe_pct)
+                _fit_line_uniform(ln, font_size, video_w,
+                                  _clamp_char_factor, _safe_pct)
                 for ln in text.split(r"\N")
             )
 
@@ -612,7 +863,13 @@ def compute_silence_compression(words: list, max_gap: float = 1.0,
     new_words: list[dict] = []
     gaps_detail: list[dict] = []
     keep_start = src_start
-    cumulative_drop = 0.0
+    # cumulative_drop counts EVERY second of the original timeline that
+    # doesn't make it into the tightened output — which includes the
+    # initial src_start offset (any silence before the first spoken word
+    # that's outside the BUFFER), not just the gap-cuts that come later.
+    # Without seeding it here, every remapped word lands `src_start`
+    # seconds too late and the burned captions drift behind the video.
+    cumulative_drop = src_start
     gaps_cut = 0
     half = target_gap / 2.0
 
@@ -710,44 +967,109 @@ def apply_silence_tightening(video_path: Path, ranges: list,
             "-ss", f"{a:.3f}",
             "-i", str(video_path),
             "-t", f"{(b - a):.3f}",
+            "-fflags", "+genpts",
             *_VIDEO_ENC_ARGS,
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-vsync", "cfr",
+            "-avoid_negative_ts", "make_zero",
+            # No +faststart here: this is an intermediate file consumed by
+            # the burn pipeline. ffmpeg 8.x's faststart rewrite was failing
+            # on the second pass and killing the whole render.
             str(output_path),
         ]
     else:
+        # Multi-range tightening. We *used* to do this in a single ffmpeg pass
+        # via filter_complex (trim+concat filter), but ffmpeg 8.x's concat
+        # filter aborts with "Failed to configure output pad" / EINVAL on
+        # multi-segment trims even when every output param is normalised.
+        # The reliable pattern is the same one /compile-clips uses: render
+        # each kept range to its own file at uniform encoder params, then
+        # stitch them with the concat *demuxer* (stream copy, no re-encode).
         fade_dur = max(0.0, crossfade_ms / 1000.0)
+        seg_paths: list[Path] = []
+        list_path: Path | None = None
         n = len(ranges)
-        parts = []
-        for i, (a, b) in enumerate(ranges):
-            seg_dur = b - a
-            parts.append(
-                f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}]"
-            )
-            audio_chain = f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS"
-            if fade_dur > 0 and seg_dur > 2 * fade_dur:
-                if i > 0:
-                    audio_chain += f",afade=t=in:st=0:d={fade_dur:.3f}"
-                if i < n - 1:
-                    fade_out_st = max(0.0, seg_dur - fade_dur)
-                    audio_chain += f",afade=t=out:st={fade_out_st:.3f}:d={fade_dur:.3f}"
-            parts.append(f"{audio_chain}[a{i}]")
+        try:
+            for i, (a, b) in enumerate(ranges):
+                seg_dur = b - a
+                seg_path = output_path.with_name(
+                    f"{output_path.stem}_seg{i:03d}.mp4"
+                )
+                # Per-segment audio chain — we apply the crossfades here so
+                # the concat demuxer never has to touch audio samples.
+                a_filter = (
+                    "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+                )
+                if fade_dur > 0 and seg_dur > 2 * fade_dur:
+                    fades = []
+                    if i > 0:
+                        fades.append(f"afade=t=in:st=0:d={fade_dur:.3f}")
+                    if i < n - 1:
+                        fades.append(
+                            f"afade=t=out:st={max(0.0, seg_dur - fade_dur):.3f}:d={fade_dur:.3f}"
+                        )
+                    if fades:
+                        a_filter = ",".join(fades) + "," + a_filter
+                seg_cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{a:.3f}",
+                    "-i", str(video_path),
+                    "-t", f"{seg_dur:.3f}",
+                    "-vf", "fps=30,format=yuv420p,setsar=1",
+                    "-af", a_filter,
+                    *_VIDEO_ENC_ARGS,
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                    "-avoid_negative_ts", "make_zero",
+                    str(seg_path),
+                ]
+                proc = subprocess.run(seg_cmd, capture_output=True, text=True)
+                if proc.returncode != 0 and VIDEO_ENC_NAME == "h264_videotoolbox":
+                    fallback = list(seg_cmd)
+                    fb_v_idx = fallback.index("-c:v")
+                    fallback[fb_v_idx:fb_v_idx + 4] = [
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"
+                    ]
+                    proc = subprocess.run(fallback, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    err = proc.stderr or ""
+                    diag = [
+                        ln for ln in err.splitlines()
+                        if any(t in ln for t in ("Error", "error", "Invalid", "failed", "Failed"))
+                    ]
+                    details = "\n".join(diag[-15:]) if diag else err[-2000:]
+                    raise RuntimeError(
+                        f"Silence-tightening segment {i + 1}/{n} failed:\n{details}"
+                    )
+                seg_paths.append(seg_path)
 
-        concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
-        parts.append(
-            f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
-        )
-        filter_complex = ";".join(parts)
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]",
-            *_VIDEO_ENC_ARGS,
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
+            # Stitch with the demuxer (stream copy). All segments share
+            # identical encoder params so this is fast and lossless.
+            list_path = output_path.with_name(f"{output_path.stem}_concat.txt")
+            list_path.write_text(
+                "\n".join(f"file '{p.absolute()}'" for p in seg_paths) + "\n"
+            )
+            concat_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_path),
+                "-c", "copy",
+                str(output_path),
+            ]
+            proc = subprocess.run(concat_cmd, capture_output=True, text=True)
+        finally:
+            for p in seg_paths:
+                _safe_unlink(p)
+            if list_path is not None:
+                _safe_unlink(list_path)
+        if proc.returncode != 0:
+            err = proc.stderr or ""
+            diag = [
+                ln for ln in err.splitlines()
+                if any(t in ln for t in ("Error", "error", "Invalid", "failed", "Failed"))
+            ]
+            details = "\n".join(diag[-15:]) if diag else err[-2000:]
+            raise RuntimeError(f"Silence-tightening concat-demuxer failed:\n{details}")
+        return
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 and VIDEO_ENC_NAME == "h264_videotoolbox":
@@ -764,8 +1086,23 @@ def apply_silence_tightening(video_path: Path, ranges: list,
                 pass
         proc = subprocess.run(fallback, capture_output=True, text=True)
     if proc.returncode != 0:
+        # Pull out the lines that actually describe the failure: anything
+        # tagged with [error], "Error", "Invalid", or "failed" — trailing
+        # libx264 stats are noise. Falls back to the last 3000 chars if
+        # nothing matches so we never throw away the real reason.
+        err = proc.stderr or ""
+        signal_hint = ""
+        if proc.returncode < 0:
+            signal_hint = f" (process killed by signal {-proc.returncode})"
+        diag = [
+            ln for ln in err.splitlines()
+            if any(t in ln for t in ("Error", "error", "Invalid", "failed", "Failed"))
+        ]
+        details = "\n".join(diag[-25:]) if diag else err[-3000:]
         raise RuntimeError(
-            f"Silence-tightening ffmpeg failed: {proc.stderr[-1500:]}"
+            f"Silence-tightening ffmpeg failed (returncode={proc.returncode}{signal_hint}).\n"
+            f"Command: ffmpeg ... {output_path.name}\n"
+            f"Diagnostics:\n{details}"
         )
 
 
@@ -1665,14 +2002,28 @@ _FORMAT_RUBRICS = {
 
 
 def _build_clip_suggestion_prompt(transcript: str, format_type: str,
-                                   target_durations: list, num_clips: int) -> str:
+                                   target_durations: list, num_clips: int,
+                                   avoid_ranges: list | None = None) -> str:
     rubric = _FORMAT_RUBRICS.get(format_type, _FORMAT_RUBRICS["auto"])
-    sorted_durations = sorted(set(int(d) for d in target_durations if int(d) > 0))
+    # 3s is the hard floor — anything shorter isn't a clip, it's a flicker.
+    sorted_durations = sorted(set(int(d) for d in target_durations if int(d) >= 3))
     if not sorted_durations:
         sorted_durations = [60]
     durations_str = ", ".join(f"{d}s" for d in sorted_durations)
     longest = max(sorted_durations)
-    return f"""You are an expert short-form video editor. Identify the most engaging segments in the transcript below for clipping into stand-alone short-form videos.
+    avoid_block = ""
+    if avoid_ranges:
+        formatted = "; ".join(
+            f"[{float(r[0]):.1f}s–{float(r[1]):.1f}s]"
+            for r in avoid_ranges if len(r) == 2
+        )
+        if formatted:
+            avoid_block = (
+                f"\nAVOID these source-time ranges — they were already shown to "
+                f"the user and rejected. Pick DIFFERENT moments that don't "
+                f"materially overlap any of: {formatted}\n"
+            )
+    return f"""You are an expert short-form video editor. Identify the most engaging segments in the transcript below for clipping into stand-alone short-form videos.{avoid_block}
 
 {rubric}
 
@@ -1681,11 +2032,13 @@ Universal rubric (applies to every format):
 - BODY: retention engine — something interesting (new angle, escalation, surprise, emotional shift) every 7-10s.
 - PAYOFF (last 5-10s): punchline, conclusion, emotional peak, or callback. Don't trail off mid-thought.
 
-Length targets: produce a MIX of clips at these target durations: {durations_str}.
-Each clip should match one of those targets within ±3 seconds. Pick the
-duration that fits each moment's content arc — shorter for punchlines and
-hooks, longer for stories and explanations. You may use the same duration
-multiple times if the source has several strong moments at that length.
+Length targets — STRICT REQUIREMENT: every clip's total duration
+(end_time − start_time) MUST match one of these values: {durations_str}.
+Tolerance is ±2 seconds; do NOT return clips outside these lengths.
+Pick the target duration that best fits each moment's content arc —
+shorter for hooks and punchlines, longer for stories and explanations.
+You may reuse the same duration multiple times if the source has several
+strong moments at that length.
 
 Pick clips that BEGIN AND END at natural sentence boundaries — match the
 [mm:ss] timestamps on the transcript lines.
@@ -1778,6 +2131,47 @@ def _detect_overlap_groups(clips: list, threshold: float = 0.90) -> list:
     return clips
 
 
+def _snap_clip_to_target_durations(clips: list, words: list,
+                                    target_durations: list[int]) -> list:
+    """Force each clip's duration to one of *target_durations* (seconds).
+
+    For each clip we pick the target closest to its current duration, then
+    snap end_time to the nearest word boundary near ``start + target``. The
+    hook range is clamped to fit inside the new clip window. start_time is
+    left alone so Gemini's chosen hook moment stays anchored.
+    """
+    if not clips or not words or not target_durations:
+        return clips
+    valid_targets = [int(d) for d in target_durations if int(d) >= 3]
+    if not valid_targets:
+        return clips
+    boundaries = sorted({float(w.get("end", 0)) for w in words if w.get("end") is not None})
+    if not boundaries:
+        return clips
+    src_max_t = boundaries[-1]
+    for c in clips:
+        start = float(c["start_time"])
+        end = float(c["end_time"])
+        actual = end - start
+        target = min(valid_targets, key=lambda d: abs(d - actual))
+        ideal_end = min(start + target, src_max_t)
+        snapped_end = min(boundaries, key=lambda b: abs(b - ideal_end))
+        if snapped_end - start < 3:
+            continue
+        c["end_time"] = snapped_end
+        hs = float(c.get("hook_start_time", start))
+        he = float(c.get("hook_end_time", min(snapped_end, start + 5)))
+        if hs < start:
+            hs = start
+        if he > snapped_end:
+            he = snapped_end
+        if he <= hs:
+            he = min(snapped_end, hs + 5)
+        c["hook_start_time"] = hs
+        c["hook_end_time"] = he
+    return clips
+
+
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
     """Call Gemini and parse a JSON-mode response. Raises on failure."""
     import requests
@@ -1830,6 +2224,39 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         _db_save_job(job_id)
         # No render will follow — clean up the uploaded video now.
         _safe_unlink(video_path)
+
+
+def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
+    """Re-run Whisper on an existing job's video and overwrite its words.
+
+    Used by /retranscribe — handy when a job's stored words drift out of sync
+    with its video file (e.g. the job was a clip of a previously-rendered
+    video, so the original timestamps don't match the current frames).
+
+    Differences vs transcribe_job:
+      - Existing words/style/audio/emoji_rules are preserved (not cleared).
+      - On failure we DON'T delete the source video — the user's intent is to
+        recover, not start over.
+      - burn_cache_key is invalidated so the next render rebuilds against
+        the fresh transcript.
+    """
+    try:
+        jobs[job_id]["status"] = "re-transcribing"
+        jobs[job_id]["progress"] = 30
+        jobs[job_id]["error"] = None
+        _db_save_job(job_id)
+        words = transcribe(video_path, pre_clean=pre_clean)
+        if not words:
+            raise RuntimeError("No speech detected in the video.")
+        jobs[job_id]["words"] = words
+        jobs[job_id]["burn_cache_key"] = None
+        jobs[job_id]["status"] = "awaiting_edit"
+        jobs[job_id]["progress"] = 100
+        _db_save_job(job_id)
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = f"Re-transcribe failed: {e}"
+        _db_save_job(job_id)
 
 
 def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: dict, emoji_rules: dict):
@@ -2188,8 +2615,20 @@ def suggest_clips():
     if not words:
         return jsonify({"error": "Transcript not available for this job yet."}), 400
 
+    raw_avoid = data.get("avoid_ranges") or []
+    avoid_ranges: list[tuple[float, float]] = []
+    for r in raw_avoid:
+        try:
+            s, e = float(r[0]), float(r[1])
+            if e > s >= 0:
+                avoid_ranges.append((s, e))
+        except (TypeError, ValueError, IndexError):
+            continue
+
     transcript = _format_transcript_for_llm(words)
-    prompt = _build_clip_suggestion_prompt(transcript, format_type, durations, num_clips)
+    prompt = _build_clip_suggestion_prompt(
+        transcript, format_type, durations, num_clips, avoid_ranges
+    )
 
     try:
         result = _gemini_generate_clip_suggestions(prompt)
@@ -2217,6 +2656,26 @@ def suggest_clips():
         except (TypeError, ValueError):
             continue
 
+    # Force every clip's length to one of the user's selected targets — Gemini
+    # treats durations as suggestions even when told they're strict, so we snap
+    # end_time to the nearest word boundary at start + nearest_target.
+    _snap_clip_to_target_durations(cleaned, words, durations)
+    # Hard 3s floor — drop anything that ended up too short to be a real clip.
+    cleaned = [c for c in cleaned if (c["end_time"] - c["start_time"]) >= 3]
+    # Drop clips that materially overlap any avoid_range (≥50% of clip inside).
+    if avoid_ranges:
+        kept: list[dict] = []
+        for c in cleaned:
+            cs, ce = c["start_time"], c["end_time"]
+            cdur = ce - cs
+            overlap_ratio = 0.0
+            for (a_s, a_e) in avoid_ranges:
+                ov = max(0.0, min(ce, a_e) - max(cs, a_s))
+                if cdur > 0 and ov / cdur > overlap_ratio:
+                    overlap_ratio = ov / cdur
+            if overlap_ratio < 0.5:
+                kept.append(c)
+        cleaned = kept
     # Sort by source-timeline start (earliest first) so the UI reads in order.
     cleaned.sort(key=lambda c: c["start_time"])
     # Tag overlap groups so the UI can tint same-content variants together.
@@ -2351,6 +2810,9 @@ def compile_clips():
             "src_video": src_video,
             "start": start,
             "end": end,
+            "title": str(item.get("title") or "")[:120],
+            "hook_quote": str(item.get("hook_quote") or "")[:300],
+            "source_filename": str(item.get("source_filename") or "")[:200],
         })
 
     new_job_id = uuid.uuid4().hex
@@ -2427,6 +2889,21 @@ def compile_clips():
         cumulative += (v["end"] - v["start"])
 
     new_filename = f"{label}.mp4"
+    recipe = {
+        "label": label,
+        "created_at": time.time(),
+        "clips": [
+            {
+                "source_job_id": v["source_job_id"],
+                "start_time": v["start"],
+                "end_time": v["end"],
+                "title": v["title"],
+                "hook_quote": v["hook_quote"],
+                "source_filename": v["source_filename"],
+            }
+            for v in validated
+        ],
+    }
     jobs[new_job_id] = {
         "status": "awaiting_edit",
         "progress": 100,
@@ -2438,9 +2915,70 @@ def compile_clips():
         "emoji_rules": inherited_emoji,
         "created_at": time.time(),
         "filename": new_filename,
+        "compile_recipe": recipe,
     }
     _db_save_job(new_job_id)
     return jsonify({"job_id": new_job_id, "filename": new_filename, "segments": len(validated)})
+
+
+@app.route("/list-compilations", methods=["GET"])
+def list_compilations():
+    """Return every job that was produced by /compile-clips, newest first.
+
+    Each entry carries enough metadata for the UI to render a card without
+    a follow-up call: label, segment count, total duration, and a list of
+    source_job_ids so the frontend can flag missing-source clips up front.
+    """
+    out = []
+    for jid, j in jobs.items():
+        recipe = j.get("compile_recipe")
+        if not recipe:
+            continue
+        clips = recipe.get("clips") or []
+        total = sum(
+            max(0.0, float(c.get("end_time", 0)) - float(c.get("start_time", 0)))
+            for c in clips
+        )
+        out.append({
+            "job_id": jid,
+            "label": recipe.get("label") or j.get("filename") or "compilation",
+            "filename": j.get("filename"),
+            "created_at": recipe.get("created_at") or j.get("created_at"),
+            "segment_count": len(clips),
+            "total_duration": total,
+            "source_job_ids": list({c.get("source_job_id") for c in clips if c.get("source_job_id")}),
+        })
+    out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    return jsonify({"compilations": out})
+
+
+@app.route("/load-compilation/<job_id>", methods=["GET"])
+def load_compilation(job_id: str):
+    """Return the recipe for a previously-compiled job, with availability flags.
+
+    For each clip we report whether its source job still exists (and has a
+    video on disk) so the UI can grey out / let the user remove unavailable
+    segments before re-rendering.
+    """
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    recipe = jobs[job_id].get("compile_recipe")
+    if not recipe:
+        return jsonify({"error": "This job is not a compilation."}), 400
+    annotated = []
+    for c in (recipe.get("clips") or []):
+        sid = c.get("source_job_id")
+        source_ok = bool(sid and sid in jobs and find_video_path(sid))
+        annotated.append({
+            **c,
+            "source_available": source_ok,
+        })
+    return jsonify({
+        "job_id": job_id,
+        "label": recipe.get("label"),
+        "created_at": recipe.get("created_at"),
+        "clips": annotated,
+    })
 
 
 @app.route("/preview-tightening", methods=["POST"])
@@ -2552,6 +3090,33 @@ def transcribe_only():
     t.start()
 
     return jsonify({"job_id": job_id})
+
+
+@app.route("/retranscribe", methods=["POST"])
+def retranscribe():
+    """Re-run Whisper on an existing job's video file. Returns 200 immediately;
+    poll /status/<job_id> to see when the new words land.
+
+    Body: {job_id, pre_clean?}. The pre_clean flag mirrors the upload-time
+    option (extra denoise pass before Whisper).
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({
+            "error": "Source video missing. The original upload was deleted "
+                     "after the previous render — re-upload to transcribe."
+        }), 404
+    pre_clean = bool(data.get("pre_clean"))
+    t = threading.Thread(
+        target=retranscribe_job, args=(job_id, video_path, pre_clean)
+    )
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id, "status": "re-transcribing"})
 
 
 @app.route("/render", methods=["POST"])
@@ -2681,6 +3246,91 @@ def download(filename):
 @app.route("/preview/<path:filename>")
 def preview(filename):
     return send_from_directory(OUTPUT_DIR, filename)
+
+
+@app.route("/job-poster/<job_id>.jpg")
+def job_poster(job_id: str):
+    """Serve a single representative frame from the source video so the font
+    preview can sit on top of real footage instead of a checkerboard.
+
+    The frame is grabbed at ~0.5s (skipping black openings) and downscaled
+    so it stays cheap to fetch. Cached on disk per-job; cleared if the
+    source mtime is newer than the poster.
+    """
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Source video missing"}), 404
+    poster_path = UPLOAD_DIR / f"{job_id}_poster.jpg"
+    if (
+        not poster_path.exists()
+        or poster_path.stat().st_mtime < video_path.stat().st_mtime
+    ):
+        cmd = [
+            "ffmpeg", "-y",
+            # Grab frame 0 — if the user is editing a job that was itself
+            # rendered from a previously-burned video, t=0.5s would already
+            # show baked-in subtitles. Frame 0 is usually before any
+            # subtitle event fires.
+            "-i", str(video_path),
+            "-vf", (
+                "select=eq(n\\,0),"
+                "scale='if(gt(iw,ih),min(720,iw),-2)':'if(gt(iw,ih),-2,min(720,ih))'"
+            ),
+            "-frames:v", "1",
+            "-q:v", "4",
+            str(poster_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 or not poster_path.exists():
+            return jsonify({"error": "Could not extract poster frame"}), 500
+    return send_from_directory(UPLOAD_DIR, poster_path.name)
+
+
+@app.route("/job-canvas/<job_id>")
+def job_canvas(job_id: str):
+    """Return the burn-canvas dimensions for *job_id* so the font preview
+    can mirror the actual output: aspect ratio, the size the renderer will
+    use for libass (post-quality-boost), plus the source dims as a fallback."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Source video missing"}), 404
+    try:
+        src_w, src_h = get_video_dimensions(video_path)
+    except Exception as exc:
+        return jsonify({"error": f"Could not probe video: {exc}"}), 500
+    quality_boost = bool((jobs[job_id].get("style") or {}).get("quality_boost"))
+    burn_w, burn_h = src_w, src_h
+    if quality_boost:
+        burn_w, burn_h, _ = _quality_boost_scale(src_w, src_h)
+    return jsonify({
+        "source_width": src_w,
+        "source_height": src_h,
+        "burn_width": burn_w,
+        "burn_height": burn_h,
+        "quality_boost": quality_boost,
+    })
+
+
+@app.route("/fonts/<path:filename>")
+def serve_font(filename):
+    """Serve TTF/OTF files so the browser can preview subtitles in the same
+    typeface libass will use at burn time."""
+    return send_from_directory(FONT_DIR, filename)
+
+
+@app.route("/list-fonts")
+def list_fonts():
+    """List font files available in FONT_DIR so the UI can register
+    @font-face for everything that's actually on disk."""
+    out = []
+    for p in sorted(FONT_DIR.glob("*")):
+        if p.suffix.lower() in (".ttf", ".otf"):
+            out.append(p.name)
+    return jsonify({"fonts": out})
 
 
 @app.route("/raw-upload/<job_id>")

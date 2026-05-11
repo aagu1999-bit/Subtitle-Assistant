@@ -48,6 +48,12 @@ Thumbs.db
 .cache/
 .local/
 
+# Local secrets — auto-loaded by app.py. Never commit real keys.
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # Subtitle burner rendered outputs and runtime state (transient)
 artifacts/subtitle-burner/outputs/
 artifacts/subtitle-burner/uploads/

@@ -1,12 +1,61 @@
+// ---- Punchword heuristic (mirrors _is_punchword_candidate in app.py) ----
+// Used by the transcript editor to mark which words will be auto-emphasised
+// in the burn. Keep this list in sync with _PUNCHWORD_STOPLIST in app.py.
+const _PUNCHWORD_STOPLIST = new Set([
+  "a","an","the","and","or","but","if","then","else","so","because",
+  "as","at","by","for","from","in","into","of","off","on","onto","out",
+  "over","to","up","with","without","is","am","are","was","were","be",
+  "been","being","do","does","did","done","have","has","had","having",
+  "i","me","my","we","us","our","you","your","he","him","his","she",
+  "her","it","its","they","them","their","this","that","these","those",
+  "what","which","who","whom","whose","when","where","why","how","not",
+  "no","yes","there","here","than","too","very","just","also","only",
+  "any","all","some","each","every","other","another","again","once",
+  "more","most","such","much","many","few","like","go","goes","get","got",
+  "make","made","know","see","say","said","can","could","will","would",
+  "should","may","might","must","shall","let","yeah","ok","okay","um",
+  "uh","oh","well",
+]);
+
+function _isPunchwordCandidate(raw) {
+  raw = (raw || "").trim();
+  if (!raw) return false;
+  if (/\d/.test(raw)) return true;
+  const clean = raw.replace(/[^A-Za-z']/g, "");
+  if (!clean) return false;
+  if (_PUNCHWORD_STOPLIST.has(clean.toLowerCase())) return false;
+  if (raw[0] === raw[0].toUpperCase() && raw !== raw.toUpperCase() &&
+      /[a-z]/.test(raw)) {
+    return true; // mid-sentence proper-noun cue
+  }
+  return clean.length >= 6;
+}
+
+function _selectGroupPunchwordIndices(group, maxPerGroup = 2) {
+  const candidates = [];
+  for (let i = 0; i < group.length; i++) {
+    const text = (group[i].word || "").toString();
+    if (_isPunchwordCandidate(text)) {
+      const visibleLen = text.replace(/[^A-Za-z0-9']/g, "").length;
+      candidates.push([-visibleLen, i]);
+    }
+  }
+  candidates.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return new Set(candidates.slice(0, maxPerGroup).map(c => c[1]));
+}
+
 // ---- Color themes ----
+// Each theme also defines an *accent* used for non-active "punchword"
+// emphasis (long words, numbers, proper nouns). Picked to contrast with
+// both the primary and highlight without colliding with either.
 const THEMES = [
-  { name: "Classic",   primary: "#FFFFFF", highlight: "#FFD60A", outline: "#000000" },
-  { name: "TikTok",    primary: "#FFFFFF", highlight: "#00F2EA", outline: "#000000" },
-  { name: "Fire",      primary: "#FFFFFF", highlight: "#FF4D4D", outline: "#1a0000" },
-  { name: "Neon",      primary: "#00FF88", highlight: "#FF00FF", outline: "#000000" },
-  { name: "Mint",      primary: "#FFFFFF", highlight: "#7CFFB2", outline: "#0a1f14" },
-  { name: "Sunset",    primary: "#FFE4B5", highlight: "#FF6B35", outline: "#2a0f00" },
-  { name: "Mono",      primary: "#FFFFFF", highlight: "#AAAAAA", outline: "#000000" },
+  { name: "Classic",   primary: "#FFFFFF", highlight: "#FFD60A", outline: "#000000", accent: "#FF6B35" },
+  { name: "TikTok",    primary: "#FFFFFF", highlight: "#00F2EA", outline: "#000000", accent: "#FF4D8F" },
+  { name: "Fire",      primary: "#FFFFFF", highlight: "#FF4D4D", outline: "#1a0000", accent: "#FFD60A" },
+  { name: "Neon",      primary: "#00FF88", highlight: "#FF00FF", outline: "#000000", accent: "#00CFFF" },
+  { name: "Mint",      primary: "#FFFFFF", highlight: "#7CFFB2", outline: "#0a1f14", accent: "#FFB347" },
+  { name: "Sunset",    primary: "#FFE4B5", highlight: "#FF6B35", outline: "#2a0f00", accent: "#FFD60A" },
+  { name: "Mono",      primary: "#FFFFFF", highlight: "#AAAAAA", outline: "#000000", accent: "#666666" },
 ];
 
 // Preset emoji rules — keyword and matching emoji
@@ -31,10 +80,12 @@ const owEl = $("outlineWidth"), owVal = $("owVal");
 const posEl = $("posY"), posVal = $("posVal");
 const groupEl = $("group"), groupVal = $("groupVal");
 const primaryEl = $("primary"), highlightEl = $("highlight"), outlineEl = $("outlineColor");
+const accentEl = $("accent");
 const go = $("go"), progress = $("progress"), barFill = $("barFill"), statusText = $("statusText");
 const result = $("result"), player = $("player"), dl = $("dl");
 const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
+const retranscribeBtn = $("retranscribeBtn");
 const emojiRulesList = $("emojiRulesList"), addRuleBtn = $("addRuleBtn");
 const emojiPresetsDiv = $("emojiPresets");
 const previewWrap = $("audioPreviewWrap"), previewBtn = $("previewAudio");
@@ -177,6 +228,7 @@ THEMES.forEach((t, i) => {
     primaryEl.value = t.primary;
     highlightEl.value = t.highlight;
     outlineEl.value = t.outline;
+    if (accentEl && t.accent) accentEl.value = t.accent;
     scheduleDraftSave();
   };
   themesDiv.appendChild(b);
@@ -195,12 +247,270 @@ groupEl.oninput = () => {
   scheduleDraftSave();
 };
 
-["font", "primary", "highlight", "outlineColor", "allCaps", "shadow"].forEach(id => {
+["font", "primary", "highlight", "accent", "outlineColor", "allCaps", "shadow", "smoothTimings", "punchwordEmphasis"].forEach(id => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("input", scheduleDraftSave);
   el.addEventListener("change", scheduleDraftSave);
 });
+
+// ---- Font preview ----
+// Pull a list of TTF/OTF files from the backend and inject @font-face rules
+// so the dropdown values render in their actual typeface inside the preview.
+// Filename → CSS font-family is best-effort: we strip the extension, replace
+// dashes/underscores with spaces, and let the browser pick by exact match
+// against the dropdown's option values. Anything that doesn't match falls
+// back to the platform sans (still useful for size/color/outline checks).
+// Track which subtitle families have actually finished downloading. The
+// preview's canvas.measureText() silently falls back to the system default
+// (much wider) until the real TTF lands, so we kick off explicit loads and
+// re-render the preview the moment the active family becomes available.
+const _loadedSubtitleFonts = new Set();
+
+async function _registerSubtitleFonts() {
+  let fonts = [];
+  try {
+    const res = await fetch("/list-fonts");
+    fonts = (await res.json()).fonts || [];
+  } catch { return; }
+  const wanted = Array.from(document.querySelectorAll("#font option"))
+    .map(o => o.value);
+  const norm = s => s.toLowerCase().replace(/[-_\s]+/g, "");
+  const styleEl = document.createElement("style");
+  let css = "";
+  const loadPromises = [];
+  for (const family of wanted) {
+    const target = norm(family);
+    const match = fonts.find(f => {
+      const stem = f.replace(/\.[^.]+$/, "");
+      return norm(stem) === target || norm(stem).includes(target) || target.includes(norm(stem));
+    });
+    if (!match) continue;
+    const url = `/fonts/${encodeURIComponent(match)}`;
+    css += `@font-face { font-family: ${JSON.stringify(family)}; src: url("${url}"); font-display: swap; }\n`;
+    // Trigger an explicit download. Without this, the font isn't fetched
+    // until the first DOM node references it, which races the preview's
+    // measureText call.
+    if (document.fonts && document.fonts.load) {
+      loadPromises.push(
+        document.fonts.load(`16px "${family}"`).then(() => {
+          _loadedSubtitleFonts.add(family);
+          // If the user is currently looking at this family, re-measure.
+          if ($("font") && $("font").value === family) {
+            updateFontPreview();
+          }
+        }).catch(() => { /* missing TTF → silent fallback */ })
+      );
+    }
+  }
+  styleEl.textContent = css;
+  document.head.appendChild(styleEl);
+  await Promise.all(loadPromises);
+}
+_registerSubtitleFonts();
+
+const fontPreviewWord = $("fontPreviewWord");
+const fontPreviewText = $("fontPreviewText");
+const fontPreviewStage = $("fontPreviewStage");
+let _fontPreviewMeasureCtx = null;
+
+// Burn-canvas dimensions for the active job. Defaults to 1080×1920 (9:16
+// short-form) until the backend reports the real ones; updated on every job
+// switch and whenever Quality Boost toggles. The preview frame's aspect ratio
+// and font scaling key off these so the preview matches the actual render.
+let _previewCanvas = { w: 1080, h: 1920, qualityBoost: false };
+
+async function refreshPreviewCanvas(jobId) {
+  if (!jobId) return;
+  try {
+    const res = await fetch(`/job-canvas/${jobId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.error) return;
+    _previewCanvas = {
+      w: data.burn_width || 1080,
+      h: data.burn_height || 1920,
+      qualityBoost: !!data.quality_boost,
+    };
+    if (fontPreviewStage) {
+      fontPreviewStage.style.aspectRatio = `${_previewCanvas.w} / ${_previewCanvas.h}`;
+      // Lock the long-edge cap so wide videos don't blow out the panel.
+      fontPreviewStage.style.maxWidth =
+        _previewCanvas.w >= _previewCanvas.h ? "320px" : "220px";
+      // Drop in a representative frame from the source so the user sees the
+      // subtitle landing on actual footage. Cache-bust per session only —
+      // the backend regenerates when the source mtime changes.
+      fontPreviewStage.style.backgroundImage = `url(/job-poster/${jobId}.jpg)`;
+      fontPreviewStage.style.backgroundSize = "cover";
+      fontPreviewStage.style.backgroundPosition = "center";
+      fontPreviewStage.classList.add("has-poster");
+    }
+    updateFontPreview();
+  } catch { /* offline / unknown job — keep defaults */ }
+}
+
+function _hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [0, 0, 0];
+}
+
+function updateFontPreview() {
+  if (!fontPreviewWord) return;
+  const family = $("font").value;
+  const size = parseInt(sizeEl.value, 10) || 56;
+  const primary = primaryEl.value;
+  const outlineColor = outlineEl.value;
+  const outlineWidth = parseInt(owEl.value, 10) || 0;
+  const allCaps = $("allCaps").checked;
+  const shadow = $("shadow").checked;
+  const posY = parseInt(posEl.value, 10) || 85;
+  const text = (fontPreviewText && fontPreviewText.value.trim()) || "Wait for it…";
+
+  // Scale font-size from the burn canvas (after any Quality Boost upscale)
+  // to the preview frame's pixel height so size/position look proportionally
+  // honest for THIS job's actual output, not a hard-coded 1080-tall canvas.
+  const stageH = fontPreviewStage ? fontPreviewStage.clientHeight : 240;
+  const stageW = fontPreviewStage ? fontPreviewStage.clientWidth : 135;
+  const canvasH = _previewCanvas.h || 1080;
+  const previewSize = Math.max(10, Math.round(size * (stageH / canvasH)));
+  // Mirror the renderer's behaviour: words wider than the 78% safe area get
+  // hyphen-broken across lines instead of being shrunk. Use canvas
+  // measureText so the break math matches the actual font's pixel width
+  // (heavy slab fonts are way wider than a flat 0.55-per-char estimate).
+  const safeW = stageW * 0.78;
+  const measure = (() => {
+    if (!_fontPreviewMeasureCtx) {
+      _fontPreviewMeasureCtx = document
+        .createElement("canvas")
+        .getContext("2d");
+    }
+    const ctx = _fontPreviewMeasureCtx;
+    const allCapsBool = $("allCaps").checked;
+    // No weight override here — see CSS comment on .font-preview-word. Most
+    // display fonts ship one weight; faking 900 makes measureText report
+    // 25–30% wider than the actual ASS render produces.
+    ctx.font = `${previewSize}px "${family}", "Arial Black", sans-serif`;
+    return (s) => ctx.measureText(allCapsBool ? s.toUpperCase() : s).width;
+  })();
+  // Mirrors NO_SHRINK_MAX_CHARS in app.py — words this length or shorter
+  // are never broken or shrunk even if they brush the safe area.
+  const NO_BREAK_MAX_CHARS = 15;
+  function hyphenateWord(w) {
+    if (w.length <= NO_BREAK_MAX_CHARS) return w;
+    if (measure(w) <= safeW) return w;
+    // Find the minimum number of lines N such that the word can be split
+    // into N roughly-even chunks where every chunk (with its trailing
+    // hyphen, except the last) fits the safe area. Greedy max-pack would
+    // give "INTERNAT-/IONALIZ-/ATION" (3 lines, last too short); even
+    // splits at N=2 gives "INTERNATI-/ONALIZATION" if that fits.
+    function fitsAt(n) {
+      for (let k = 0; k < n; k++) {
+        const start = Math.floor((w.length * k) / n);
+        const end = Math.floor((w.length * (k + 1)) / n);
+        const piece = w.slice(start, end) + (k < n - 1 ? "-" : "");
+        if (measure(piece) > safeW) return false;
+      }
+      return true;
+    }
+    let n = 2;
+    while (n < w.length && !fitsAt(n)) n += 1;
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const start = Math.floor((w.length * k) / n);
+      const end = Math.floor((w.length * (k + 1)) / n);
+      out.push(w.slice(start, end) + (k < n - 1 ? "-" : ""));
+    }
+    return out.join("\n");
+  }
+  const wrapped = (text || "")
+    .split(/\s+/)
+    .map(hyphenateWord)
+    .join(" ");
+
+  fontPreviewWord.style.fontFamily = `"${family}", "Arial Black", sans-serif`;
+  fontPreviewWord.style.fontSize = `${previewSize}px`;
+  fontPreviewWord.style.color = primary;
+  fontPreviewWord.style.textTransform = allCaps ? "uppercase" : "none";
+  fontPreviewWord.style.top = `${posY}%`;
+  // Push lines apart so a thick text-shadow outline on one line doesn't
+  // overlap the outline of the next line and merge into a black blob.
+  // Each pixel of outline needs roughly 2× the room (top + bottom).
+  const previewOutline = Math.round(outlineWidth * (stageH / canvasH));
+  const extraGap = (previewOutline * 2) / Math.max(1, previewSize);
+  fontPreviewWord.style.lineHeight = (1.1 + extraGap).toFixed(3);
+
+  // Build a multi-direction text-shadow stack to mimic libass's outline +
+  // optional drop shadow. Browsers have no true text-stroke, and the outline
+  // width has to be scaled from 1080-canvas pixels to preview pixels or it
+  // visually overwhelms the smaller preview text.
+  const layers = [];
+  if (previewOutline > 0) {
+    const w = previewOutline;
+    for (let dx = -w; dx <= w; dx++) {
+      for (let dy = -w; dy <= w; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        layers.push(`${dx}px ${dy}px 0 ${outlineColor}`);
+      }
+    }
+  }
+  if (shadow) {
+    const [r, g, b] = _hexToRgb(outlineColor);
+    layers.push(`3px 4px 6px rgba(${r}, ${g}, ${b}, 0.65)`);
+  }
+  fontPreviewWord.style.textShadow = layers.join(", ");
+  fontPreviewWord.style.whiteSpace = "pre-line";
+  fontPreviewWord.textContent = wrapped;
+}
+
+// Wire every style control to update the preview live, in addition to the
+// draft-save path that's already attached.
+["font", "size", "primary", "outlineColor", "outlineWidth", "allCaps", "shadow", "posY"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("input", updateFontPreview);
+  el.addEventListener("change", updateFontPreview);
+});
+// Repaint the transcript when the accent color or punchword toggle change
+// — those decide which words get tinted.
+if (accentEl) {
+  accentEl.addEventListener("input", () => {
+    if (currentWords && currentWords.length) renderPhraseList(currentWords);
+  });
+}
+if ($("punchwordEmphasis")) {
+  $("punchwordEmphasis").addEventListener("change", () => {
+    if (currentWords && currentWords.length) renderPhraseList(currentWords);
+  });
+}
+
+if ($("font")) {
+  // When the dropdown switches families, force a font load before measuring.
+  $("font").addEventListener("change", async () => {
+    const fam = $("font").value;
+    if (document.fonts && document.fonts.load && !_loadedSubtitleFonts.has(fam)) {
+      try {
+        await document.fonts.load(`16px "${fam}"`);
+        _loadedSubtitleFonts.add(fam);
+      } catch { /* fallback */ }
+      updateFontPreview();
+    }
+  });
+}
+if (fontPreviewText) fontPreviewText.addEventListener("input", updateFontPreview);
+// Quality Boost upscales the burn canvas — re-fetch dimensions when toggled.
+if ($("qualityBoost")) {
+  $("qualityBoost").addEventListener("change", () => {
+    if (currentJobId) refreshPreviewCanvas(currentJobId);
+  });
+}
+// Theme buttons mutate primary/outline directly via .value = …, which doesn't
+// fire input events — so refresh after click.
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.classList && e.target.classList.contains("theme")) {
+    setTimeout(updateFontPreview, 0);
+  }
+});
+updateFontPreview();
 
 // Wire the ElevenLabs sliders so their pill labels update live.
 const elevenWet = $("elevenWetMix");
@@ -311,12 +621,15 @@ function getStyle() {
     font_size:       parseInt(sizeEl.value, 10),
     primary_color:   primaryEl.value,
     highlight_color: highlightEl.value,
+    accent_color:    accentEl ? accentEl.value : "#FF6B35",
     outline_color:   outlineEl.value,
     outline_width:   parseInt(owEl.value, 10),
     shadow:          $("shadow").checked ? 1 : 0,
     position_y:      parseInt(posEl.value, 10),
     all_caps:        $("allCaps").checked,
     group_size:      parseInt(groupEl.value, 10),
+    smooth_timings:  $("smoothTimings") ? $("smoothTimings").checked : true,
+    punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
     tighten_silences: {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
@@ -478,12 +791,19 @@ function applyStyle(style = {}) {
   if (style.font_size) sizeEl.value = style.font_size;
   if (style.primary_color) primaryEl.value = style.primary_color;
   if (style.highlight_color) highlightEl.value = style.highlight_color;
+  if (style.accent_color && accentEl) accentEl.value = style.accent_color;
   if (style.outline_color) outlineEl.value = style.outline_color;
   if (style.outline_width !== undefined) owEl.value = style.outline_width;
   if (style.position_y !== undefined) posEl.value = style.position_y;
   if (style.all_caps !== undefined) $("allCaps").checked = !!style.all_caps;
   if (style.shadow !== undefined) $("shadow").checked = !!style.shadow;
   if (style.group_size) groupEl.value = style.group_size;
+  if (style.smooth_timings !== undefined && $("smoothTimings")) {
+    $("smoothTimings").checked = !!style.smooth_timings;
+  }
+  if (style.punchword_emphasis !== undefined && $("punchwordEmphasis")) {
+    $("punchwordEmphasis").checked = !!style.punchword_emphasis;
+  }
   if (style.quality_boost !== undefined && $("qualityBoost")) {
     $("qualityBoost").checked = !!style.quality_boost;
   }
@@ -815,12 +1135,28 @@ function renderPhraseList(words) {
     timeEl.textContent = fmtTime(group[0].start);
     timeEl.title = "Seek to " + fmtTime(group[0].start);
 
-    // Editable text
+    // Editable text — punchwords (long words / numbers / proper nouns)
+    // are wrapped in a span tinted with the user's accent color so the
+    // user can see at a glance which words will be auto-emphasised in the
+    // burn. The wrap is purely visual; textContent strips it, so editing
+    // and word-collection behave identically to plain text.
     const textEl = document.createElement("span");
     textEl.className = "phrase-text";
     textEl.contentEditable = "true";
     textEl.spellcheck = false;
-    textEl.textContent = group.map(w => w.word).join(" ");
+    const punchEnabled = $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true;
+    const punchIdxs = punchEnabled ? _selectGroupPunchwordIndices(group) : new Set();
+    const accentColor = accentEl ? accentEl.value : "#FF6B35";
+    const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+    }[c]));
+    textEl.innerHTML = group.map((w, j) => {
+      const safe = escapeHtml(w.word || "");
+      if (punchIdxs.has(j)) {
+        return `<span class="punchword" style="color:${accentColor}">${safe}</span>`;
+      }
+      return safe;
+    }).join(" ");
     textEl.addEventListener("keydown", e => {
       if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
     });
@@ -953,6 +1289,7 @@ function fmtTime(sec) {
 }
 
 function showEditor(words, saved = {}) {
+  if (retranscribeBtn) retranscribeBtn.disabled = false;
   if (saved.style) applyStyle(saved.style);
   if (saved.audio) applyAudio(saved.audio);
   if (saved.emoji_rules) applyEmojiRules(saved.emoji_rules);
@@ -1063,6 +1400,40 @@ reEditBtn.onclick = () => {
   result.classList.add("hidden");
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 };
+
+// "Re-transcribe" — discard current words and re-run Whisper on the video.
+// Useful when timestamps have drifted from the actual frames (typically when
+// the job's video file is itself the output of a previous render/clip op).
+if (retranscribeBtn) {
+  retranscribeBtn.onclick = async () => {
+    if (!currentJobId) return;
+    const ok = confirm(
+      "Re-transcribe this video? Your current transcript edits will be discarded and replaced with a fresh Whisper pass. This usually takes 20–60 seconds."
+    );
+    if (!ok) return;
+    retranscribeBtn.disabled = true;
+    try {
+      const res = await fetch("/retranscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: currentJobId }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      // Swap the editor for the progress UI and let pollTranscription drive
+      // the rest. When it completes, showEditor() repopulates the new words.
+      editor.classList.add("hidden");
+      result.classList.add("hidden");
+      progress.classList.remove("hidden");
+      barFill.style.width = "30%";
+      statusText.textContent = "Re-transcribing…";
+      pollTranscription(currentJobId);
+    } catch (e) {
+      alert("Re-transcribe failed: " + e.message);
+      retranscribeBtn.disabled = false;
+    }
+  };
+}
 
 // ---- Utilities ----
 function capitalize(s) {
@@ -1229,6 +1600,7 @@ async function switchToJob(jobId) {
     const s = await res.json();
     currentJobId = jobId;
     localStorage.setItem("subtitleBurner:lastJobId", jobId);
+    refreshPreviewCanvas(jobId);
     if (s.words && s.words.length) {
       currentWords = _sanitizeWords(s.words);
       showEditor(currentWords, s);
@@ -1377,12 +1749,32 @@ function renderHighlights(clips, format) {
     // ---- Mutable per-card state so the user can nudge boundaries ----
     let editedStart = c.start_time;
     let editedEnd = c.end_time;
+    let editedTitle = c.title || "Untitled clip";
+    let editedQuote = c.hook_quote || "";
     let previewStopHandler = null;
 
     const title = document.createElement("div");
     title.className = "hl-title";
+    // Index prefix sits outside the editable element so renumbering on
+    // re-renders doesn't get baked into the user's edit.
+    const indexLabel = document.createElement("span");
+    indexLabel.textContent = `${idx + 1}. `;
+    indexLabel.style.opacity = "0.7";
+    title.appendChild(indexLabel);
     const titleText = document.createElement("strong");
-    titleText.textContent = `${idx + 1}. ${c.title || "Untitled clip"}`;
+    titleText.textContent = editedTitle;
+    titleText.contentEditable = "true";
+    titleText.spellcheck = false;
+    titleText.title = "Click to rename";
+    titleText.style.cursor = "text";
+    titleText.style.outline = "none";
+    titleText.style.borderBottom = "1px dashed rgba(255,255,255,0.18)";
+    titleText.addEventListener("input", () => {
+      editedTitle = titleText.textContent.trim() || "Untitled clip";
+    });
+    titleText.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); titleText.blur(); }
+    });
     title.appendChild(titleText);
     const dur = document.createElement("span");
     dur.className = "hl-time";
@@ -1400,12 +1792,37 @@ function renderHighlights(clips, format) {
     }
     card.appendChild(title);
 
-    if (c.hook_quote) {
-      const quote = document.createElement("div");
-      quote.className = "hl-quote";
-      quote.textContent = `"${c.hook_quote}"`;
-      card.appendChild(quote);
-    }
+    // Hook quote — editable too. Always render the row so the user can add
+    // a quote even when Gemini didn't supply one.
+    const quote = document.createElement("div");
+    quote.className = "hl-quote";
+    quote.contentEditable = "true";
+    quote.spellcheck = false;
+    quote.title = "Click to edit the hook quote";
+    quote.style.cursor = "text";
+    quote.style.outline = "none";
+    quote.dataset.placeholder = "(no hook quote — click to add)";
+    quote.textContent = editedQuote ? `"${editedQuote}"` : "";
+    quote.addEventListener("focus", () => {
+      // Strip surrounding quotes while editing so the user only types the
+      // content, not the punctuation. Re-applied on blur.
+      const t = quote.textContent.trim();
+      if (t.startsWith("\"") && t.endsWith("\"")) {
+        quote.textContent = t.slice(1, -1);
+      }
+    });
+    quote.addEventListener("input", () => {
+      editedQuote = quote.textContent.trim();
+    });
+    quote.addEventListener("blur", () => {
+      const t = quote.textContent.trim();
+      editedQuote = t;
+      quote.textContent = t ? `"${t}"` : "";
+    });
+    quote.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); quote.blur(); }
+    });
+    card.appendChild(quote);
 
     if (c.reason) {
       const reason = document.createElement("div");
@@ -1464,8 +1881,8 @@ function renderHighlights(clips, format) {
       // every input change in the panel (live sync back to this card) plus
       // on Save / Make-a-clip / Add-to-compilation actions.
       openPreviewEditor({
-        title: c.title || "Untitled clip",
-        hookQuote: c.hook_quote || "",
+        title: editedTitle,
+        hookQuote: editedQuote,
         start: editedStart,
         end: editedEnd,
         onUpdate: (newStart, newEnd) => {
@@ -1491,8 +1908,8 @@ function renderHighlights(clips, format) {
         source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
         start_time: editedStart,
         end_time: editedEnd,
-        hook_quote: c.hook_quote || "",
-        title: c.title || "",
+        hook_quote: editedQuote,
+        title: editedTitle,
       });
       addBtn.textContent = "✓ Added";
       addBtn.disabled = true;
@@ -1521,7 +1938,7 @@ function renderHighlights(clips, format) {
             source_job_id: currentJobId,
             start_time: editedStart,
             end_time: editedEnd,
-            label: c.title || "highlight",
+            label: editedTitle || "highlight",
           }),
         });
         const j = await res.json();
@@ -1542,41 +1959,66 @@ function renderHighlights(clips, format) {
   });
 }
 
+// Ranges already shown to the user — fed back as avoid_ranges so "More
+// options" returns a different batch instead of the same top picks.
+let _hlAvoidRanges = [];
+const hlMoreBtn = $("hlMoreBtn");
+
+async function _runFindHighlights({ avoid }) {
+  if (!currentJobId) {
+    alert("No active job. Transcribe a video first.");
+    return;
+  }
+  const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
+    .map(el => parseInt(el.value, 10));
+  if (!durations.length) {
+    alert("Pick at least one target length.");
+    return;
+  }
+  hlFindBtn.disabled = true;
+  if (hlMoreBtn) hlMoreBtn.disabled = true;
+  hlStatus.textContent = avoid && avoid.length ? "Looking for different moments…" : "Asking Gemini…";
+  hlResults.innerHTML = "";
+  try {
+    const res = await fetch("/suggest-clips", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        format: hlFormatEl.value,
+        target_durations: durations,
+        num_clips: parseInt(hlCountEl.value, 10),
+        avoid_ranges: avoid || [],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const clips = data.clips || [];
+    renderHighlights(clips, data.format || hlFormatEl.value);
+    // Accumulate every range we've shown so the next "More options" excludes them all.
+    for (const c of clips) {
+      _hlAvoidRanges.push([c.start_time, c.end_time]);
+    }
+    if (hlMoreBtn) hlMoreBtn.style.display = clips.length ? "" : "none";
+    if (clips.length === 0 && avoid && avoid.length) {
+      hlStatus.textContent = "No more distinct moments — Gemini ran out of fresh material.";
+    }
+  } catch (e) {
+    hlStatus.textContent = "Error: " + e.message;
+  } finally {
+    hlFindBtn.disabled = false;
+    if (hlMoreBtn) hlMoreBtn.disabled = false;
+  }
+}
+
 if (hlFindBtn) {
-  hlFindBtn.onclick = async () => {
-    if (!currentJobId) {
-      alert("No active job. Transcribe a video first.");
-      return;
-    }
-    const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
-      .map(el => parseInt(el.value, 10));
-    if (!durations.length) {
-      alert("Pick at least one target length.");
-      return;
-    }
-    hlFindBtn.disabled = true;
-    hlStatus.textContent = "Asking Gemini…";
-    hlResults.innerHTML = "";
-    try {
-      const res = await fetch("/suggest-clips", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          job_id: currentJobId,
-          format: hlFormatEl.value,
-          target_durations: durations,
-          num_clips: parseInt(hlCountEl.value, 10),
-        }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      renderHighlights(data.clips || [], data.format || hlFormatEl.value);
-    } catch (e) {
-      hlStatus.textContent = "Error: " + e.message;
-    } finally {
-      hlFindBtn.disabled = false;
-    }
+  hlFindBtn.onclick = () => {
+    _hlAvoidRanges = [];
+    _runFindHighlights({ avoid: [] });
   };
+}
+if (hlMoreBtn) {
+  hlMoreBtn.onclick = () => _runFindHighlights({ avoid: _hlAvoidRanges.slice() });
 }
 
 // =====================================================================
@@ -1621,15 +2063,6 @@ function removeFromCompileQueue(idx) {
   renderCompileQueue();
 }
 
-function moveInCompileQueue(idx, delta) {
-  const q = loadCompileQueue();
-  const target = idx + delta;
-  if (target < 0 || target >= q.length) return;
-  [q[idx], q[target]] = [q[target], q[idx]];
-  saveCompileQueue(q);
-  renderCompileQueue();
-}
-
 function renderCompileQueue() {
   if (!compilePanel) return;
   // Panel itself always stays visible inside the Compilation tab; only the
@@ -1665,53 +2098,315 @@ function renderCompileQueue() {
   q.forEach((item, idx) => {
     const row = document.createElement("div");
     row.className = "compile-item";
+    if (item.source_available === false) row.classList.add("compile-missing");
+    row.draggable = true;
+    row.dataset.idx = String(idx);
+
+    const grip = document.createElement("span");
+    grip.className = "compile-grip";
+    grip.title = "Drag to reorder";
+    grip.textContent = "⋮⋮";
+    row.appendChild(grip);
 
     const meta = document.createElement("div");
     meta.className = "compile-meta";
     const src = document.createElement("div");
     src.className = "compile-source";
-    src.textContent = `${idx + 1}. ${item.source_filename || item.source_job_id.slice(0, 8) + "…"} · ${item.title || "highlight"}`;
-    meta.appendChild(src);
-    if (item.hook_quote) {
-      const quote = document.createElement("div");
-      quote.className = "compile-quote";
-      quote.textContent = `"${item.hook_quote}"`;
-      meta.appendChild(quote);
+
+    // Static prefix: `<idx>. <filename> · ` — index renumbers on reorder so
+    // it lives outside the editable element, otherwise the edit cursor
+    // would land in dead text.
+    const prefix = document.createElement("span");
+    prefix.textContent = `${idx + 1}. ${item.source_filename || item.source_job_id.slice(0, 8) + "…"} · `;
+    src.appendChild(prefix);
+
+    // Editable title — persisted to localStorage immediately so the new
+    // value flows into /compile-clips and is restored on page reload.
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "compile-title-edit";
+    titleSpan.contentEditable = "true";
+    titleSpan.spellcheck = false;
+    titleSpan.draggable = false;
+    titleSpan.title = "Click to rename this clip";
+    titleSpan.textContent = item.title || "highlight";
+    titleSpan.addEventListener("input", () => {
+      const q = loadCompileQueue();
+      if (q[idx]) {
+        q[idx] = { ...q[idx], title: titleSpan.textContent.trim() || "highlight" };
+        saveCompileQueue(q);
+      }
+    });
+    titleSpan.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); titleSpan.blur(); }
+    });
+    src.appendChild(titleSpan);
+
+    if (item.source_available === false) {
+      const missing = document.createElement("span");
+      missing.textContent = " ⚠ source missing";
+      missing.style.color = "#ff8a8a";
+      src.appendChild(missing);
     }
+    meta.appendChild(src);
+
+    // Editable hook quote — always shown so the user can add one even when
+    // the highlight didn't have one.
+    const quote = document.createElement("div");
+    quote.className = "compile-quote";
+    quote.contentEditable = "true";
+    quote.spellcheck = false;
+    quote.draggable = false;
+    quote.title = "Click to edit the hook quote";
+    quote.dataset.placeholder = "(no hook quote — click to add)";
+    quote.textContent = item.hook_quote ? `"${item.hook_quote}"` : "";
+    quote.addEventListener("focus", () => {
+      const t = quote.textContent.trim();
+      if (t.startsWith("\"") && t.endsWith("\"")) quote.textContent = t.slice(1, -1);
+    });
+    quote.addEventListener("input", () => {
+      const q = loadCompileQueue();
+      if (q[idx]) {
+        q[idx] = { ...q[idx], hook_quote: quote.textContent.trim() };
+        saveCompileQueue(q);
+      }
+    });
+    quote.addEventListener("blur", () => {
+      const t = quote.textContent.trim();
+      quote.textContent = t ? `"${t}"` : "";
+    });
+    quote.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); quote.blur(); }
+    });
+    meta.appendChild(quote);
     row.appendChild(meta);
 
+    // Inline editable start/end. Persists to localStorage on every input
+    // so re-renders, drag-reorders, and the eventual /compile-clips POST
+    // all see the latest times. Format is m:ss.s — same as the highlight
+    // cards — so muscle memory carries over.
     const time = document.createElement("span");
     time.className = "compile-time";
-    time.textContent = `${_fmtTime(item.start_time)} → ${_fmtTime(item.end_time)}`;
+    const durLabel = document.createElement("span");
+    durLabel.className = "compile-duration";
+    const refreshDur = () => {
+      const cur = loadCompileQueue()[idx];
+      if (!cur) return;
+      const dur = cur.end_time - cur.start_time;
+      durLabel.textContent = `${dur.toFixed(1)}s`;
+      // Flag invalid ranges (end ≤ start) on the row so the user notices
+      // before hitting Compile, where the backend would reject the clip.
+      const invalid = !(dur > 0);
+      row.classList.toggle("compile-invalid", invalid);
+      durLabel.title = invalid ? "End must be greater than start" : "";
+    };
+    const mkTimeInput = (val, onChange) => {
+      const i = document.createElement("input");
+      i.type = "text";
+      i.value = _fmtTimeFine(val);
+      i.className = "compile-time-input";
+      i.draggable = false;
+      i.addEventListener("click", (ev) => ev.stopPropagation());
+      i.addEventListener("input", () => {
+        const v = _parseTime(i.value);
+        if (v === null) return;
+        onChange(v);
+      });
+      return i;
+    };
+    const startIn = mkTimeInput(item.start_time, (v) => {
+      const cur = loadCompileQueue();
+      if (!cur[idx]) return;
+      cur[idx] = { ...cur[idx], start_time: v };
+      saveCompileQueue(cur);
+      refreshDur();
+    });
+    const endIn = mkTimeInput(item.end_time, (v) => {
+      const cur = loadCompileQueue();
+      if (!cur[idx]) return;
+      cur[idx] = { ...cur[idx], end_time: v };
+      saveCompileQueue(cur);
+      refreshDur();
+    });
+    time.appendChild(startIn);
+    const arrow = document.createElement("span");
+    arrow.textContent = "→";
+    arrow.style.opacity = "0.6";
+    arrow.style.padding = "0 4px";
+    time.appendChild(arrow);
+    time.appendChild(endIn);
+    time.appendChild(durLabel);
+    refreshDur();
     row.appendChild(time);
 
-    const controls = document.createElement("div");
-    controls.className = "compile-controls";
-
-    const up = document.createElement("button");
-    up.textContent = "↑";
-    up.title = "Move up";
-    up.disabled = idx === 0;
-    up.onclick = () => moveInCompileQueue(idx, -1);
-    controls.appendChild(up);
-
-    const down = document.createElement("button");
-    down.textContent = "↓";
-    down.title = "Move down";
-    down.disabled = idx === q.length - 1;
-    down.onclick = () => moveInCompileQueue(idx, 1);
-    controls.appendChild(down);
+    const previewBtn = document.createElement("button");
+    previewBtn.textContent = "▶";
+    previewBtn.className = "compile-preview";
+    previewBtn.title = "Preview just this clip";
+    previewBtn.disabled = item.source_available === false;
+    previewBtn.onclick = (e) => {
+      e.stopPropagation();
+      previewCompileItem(idx);
+    };
+    row.appendChild(previewBtn);
 
     const rm = document.createElement("button");
     rm.textContent = "✕";
     rm.className = "compile-remove";
     rm.title = "Remove from queue";
     rm.onclick = () => removeFromCompileQueue(idx);
-    controls.appendChild(rm);
+    row.appendChild(rm);
 
-    row.appendChild(controls);
+    row.addEventListener("dragstart", (e) => {
+      row.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox refuses to start a drag without setData.
+      e.dataTransfer.setData("text/plain", String(idx));
+    });
+    row.addEventListener("dragend", () => {
+      row.classList.remove("dragging");
+      compileListEl.querySelectorAll(".compile-item.drop-target")
+        .forEach(el => el.classList.remove("drop-target", "drop-above", "drop-below"));
+    });
+
+    row.addEventListener("dragover", (e) => {
+      const dragging = compileListEl.querySelector(".compile-item.dragging");
+      if (!dragging || dragging === row) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const r = row.getBoundingClientRect();
+      const above = (e.clientY - r.top) < r.height / 2;
+      row.classList.add("drop-target");
+      row.classList.toggle("drop-above", above);
+      row.classList.toggle("drop-below", !above);
+    });
+    row.addEventListener("dragleave", () => {
+      row.classList.remove("drop-target", "drop-above", "drop-below");
+    });
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const fromIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
+      if (Number.isNaN(fromIdx) || fromIdx === idx) return;
+      const r = row.getBoundingClientRect();
+      const above = (e.clientY - r.top) < r.height / 2;
+      let toIdx = above ? idx : idx + 1;
+      if (fromIdx < toIdx) toIdx -= 1;
+      reorderCompileQueue(fromIdx, toIdx);
+    });
+
     compileListEl.appendChild(row);
   });
+}
+
+function reorderCompileQueue(fromIdx, toIdx) {
+  const q = loadCompileQueue();
+  if (fromIdx < 0 || fromIdx >= q.length) return;
+  if (toIdx < 0) toIdx = 0;
+  if (toIdx > q.length - 1) toIdx = q.length - 1;
+  if (fromIdx === toIdx) return;
+  const [moved] = q.splice(fromIdx, 1);
+  q.splice(toIdx, 0, moved);
+  saveCompileQueue(q);
+  renderCompileQueue();
+}
+
+// Preview a single queued item by reusing the Edit-tab preview-editor
+// (sourcePlayer + start/end stop-handler). Switches the player's source if
+// the clip belongs to a different job than the one currently loaded, and
+// wires onUpdate so any timing nudges in the panel persist back to the
+// compilation queue's localStorage entry.
+function previewCompileItem(idx) {
+  const q = loadCompileQueue();
+  const item = q[idx];
+  if (!item) return;
+  if (item.source_available === false) {
+    alert("This clip's source video is missing — can't preview.");
+    return;
+  }
+  const targetSrc = `/raw-upload/${item.source_job_id}`;
+  const sameSrc = sourcePlayer && sourcePlayer.src.endsWith(targetSrc);
+  if (!sameSrc && sourcePlayer) sourcePlayer.src = targetSrc;
+  openPreviewEditor({
+    title: item.title || "highlight",
+    hookQuote: item.hook_quote || "",
+    start: item.start_time,
+    end: item.end_time,
+    onUpdate: (newStart, newEnd) => {
+      const cur = loadCompileQueue();
+      if (!cur[idx]) return;
+      cur[idx] = { ...cur[idx], start_time: newStart, end_time: newEnd };
+      saveCompileQueue(cur);
+      renderCompileQueue();
+    },
+  });
+}
+
+// Sequence-play every queued clip in order through the source player. Skips
+// items whose source is missing. Uses the Edit-tab player so the user gets
+// the standard scrubber + audio. Clips from different jobs work because we
+// switch the player's src between segments.
+let _compileSequenceActive = false;
+let _compileSequenceCancel = null;
+
+async function previewCompileAll() {
+  if (_compileSequenceActive) {
+    if (_compileSequenceCancel) _compileSequenceCancel();
+    return;
+  }
+  const q = loadCompileQueue();
+  const playable = q.filter(it => it.source_available !== false);
+  if (!playable.length) {
+    alert("Queue is empty (or all clips have missing sources).");
+    return;
+  }
+  setActiveTab("edit");
+  await new Promise(r => requestAnimationFrame(r));
+  _compileSequenceActive = true;
+  const btn = $("compilePreviewAllBtn");
+  if (btn) btn.textContent = "⏹ Stop preview";
+
+  let cancelled = false;
+  _compileSequenceCancel = () => { cancelled = true; sourcePlayer.pause(); };
+
+  try {
+    for (let i = 0; i < playable.length; i++) {
+      if (cancelled) break;
+      const it = playable[i];
+      const src = `/raw-upload/${it.source_job_id}`;
+      if (!sourcePlayer.src.endsWith(src)) {
+        sourcePlayer.src = src;
+        // Wait for the new source to be seekable.
+        await new Promise(resolve => {
+          const ready = () => {
+            sourcePlayer.removeEventListener("loadedmetadata", ready);
+            resolve();
+          };
+          sourcePlayer.addEventListener("loadedmetadata", ready);
+        });
+      }
+      sourcePlayer.currentTime = it.start_time;
+      try { await sourcePlayer.play(); } catch { /* autoplay blocked? */ }
+      // Wait for end of segment OR cancellation.
+      await new Promise(resolve => {
+        const onTime = () => {
+          if (cancelled || sourcePlayer.currentTime >= it.end_time) {
+            sourcePlayer.pause();
+            sourcePlayer.removeEventListener("timeupdate", onTime);
+            resolve();
+          }
+        };
+        sourcePlayer.addEventListener("timeupdate", onTime);
+      });
+    }
+  } finally {
+    _compileSequenceActive = false;
+    _compileSequenceCancel = null;
+    if (btn) btn.textContent = "▶ Preview all";
+  }
+}
+
+const compilePreviewAllBtn = $("compilePreviewAllBtn");
+if (compilePreviewAllBtn) {
+  compilePreviewAllBtn.onclick = previewCompileAll;
 }
 
 if (compileGoBtn) {
@@ -1729,6 +2424,9 @@ if (compileGoBtn) {
             source_job_id: c.source_job_id,
             start_time: c.start_time,
             end_time: c.end_time,
+            title: c.title || "",
+            hook_quote: c.hook_quote || "",
+            source_filename: c.source_filename || "",
           })),
           label: (compileLabelEl.value || "compilation").trim(),
         }),
@@ -1742,6 +2440,7 @@ if (compileGoBtn) {
       compileLabelEl.value = "";
       addJobToList(j.job_id);
       await refreshJobsList();
+      refreshPastCompiles();
       await switchToJob(j.job_id);
     } catch (e) {
       compileStatus.textContent = "Error: " + e.message;
@@ -1762,6 +2461,119 @@ if (compileClearBtn) {
 }
 
 renderCompileQueue();
+
+// ---- Past compilations: list, load-back-into-queue ----
+const pastCompilesListEl = $("pastCompilesList");
+const pastCompilesCountEl = $("pastCompilesCount");
+
+function _fmtCompileDate(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit",
+  });
+}
+
+async function refreshPastCompiles() {
+  if (!pastCompilesListEl) return;
+  let comps = [];
+  try {
+    const res = await fetch("/list-compilations");
+    const data = await res.json();
+    comps = data.compilations || [];
+  } catch (e) {
+    pastCompilesListEl.innerHTML = `<div class="muted" style="padding:12px">Couldn't load: ${e.message}</div>`;
+    return;
+  }
+  if (pastCompilesCountEl) {
+    pastCompilesCountEl.textContent = comps.length
+      ? `${comps.length} saved`
+      : "";
+  }
+  pastCompilesListEl.innerHTML = "";
+  if (!comps.length) {
+    const hint = document.createElement("div");
+    hint.className = "muted";
+    hint.style.cssText = "text-align:center;padding:20px 12px;font-size:.88rem";
+    hint.textContent = "No past compilations yet. After your first Compile, it'll show up here so you can edit and re-render.";
+    pastCompilesListEl.appendChild(hint);
+    return;
+  }
+  comps.forEach(c => {
+    const card = document.createElement("div");
+    card.className = "past-compile-card";
+    const head = document.createElement("div");
+    head.className = "past-compile-head";
+    const label = document.createElement("strong");
+    label.textContent = c.label || c.filename || "compilation";
+    head.appendChild(label);
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.style.fontSize = ".78rem";
+    meta.textContent = `${c.segment_count} clip${c.segment_count === 1 ? "" : "s"} · ${c.total_duration.toFixed(1)}s · ${_fmtCompileDate(c.created_at)}`;
+    head.appendChild(meta);
+    card.appendChild(head);
+
+    const actions = document.createElement("div");
+    actions.className = "past-compile-actions";
+
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "✎ Edit clips";
+    editBtn.className = "btn btn-secondary";
+    editBtn.onclick = () => loadCompilationIntoQueue(c.job_id);
+    actions.appendChild(editBtn);
+
+    const openBtn = document.createElement("button");
+    openBtn.textContent = "Open job";
+    openBtn.className = "btn";
+    openBtn.onclick = async () => { await switchToJob(c.job_id); };
+    actions.appendChild(openBtn);
+
+    card.appendChild(actions);
+    pastCompilesListEl.appendChild(card);
+  });
+}
+
+async function loadCompilationIntoQueue(jobId) {
+  let data;
+  try {
+    const res = await fetch(`/load-compilation/${jobId}`);
+    data = await res.json();
+    if (data.error) throw new Error(data.error);
+  } catch (e) {
+    alert("Couldn't load: " + e.message);
+    return;
+  }
+  const existing = loadCompileQueue();
+  if (existing.length) {
+    const ok = confirm(
+      `The compilation queue has ${existing.length} clip${existing.length === 1 ? "" : "s"} in it. Replace with the ${data.clips.length}-clip recipe from "${data.label}"?`
+    );
+    if (!ok) return;
+  }
+  const missing = data.clips.filter(c => !c.source_available).length;
+  const restored = data.clips.map(c => ({
+    source_job_id: c.source_job_id,
+    source_filename: c.source_filename || "",
+    start_time: c.start_time,
+    end_time: c.end_time,
+    title: c.title || "",
+    hook_quote: c.hook_quote || "",
+    source_available: c.source_available,
+  }));
+  saveCompileQueue(restored);
+  renderCompileQueue();
+  if (compileLabelEl && data.label) compileLabelEl.value = data.label;
+  if (compileStatus) {
+    compileStatus.textContent = missing
+      ? `Loaded ${restored.length} clips. ⚠️ ${missing} clip${missing === 1 ? "" : "s"} can't be re-rendered (source video missing) — remove them before compiling.`
+      : `Loaded ${restored.length} clips from "${data.label}". Edit and hit Compile to render a new version.`;
+  }
+}
+
+refreshPastCompiles();
 
 // =====================================================================
 // Layout shell: empty state, tab switching, compilation badge

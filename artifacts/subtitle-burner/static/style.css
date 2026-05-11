@@ -589,6 +589,20 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   border-left: 3px solid #ffd60a;
   padding: 4px 0 4px 12px;
   font-size: 0.95rem;
+  min-height: 1em;
+}
+.hl-card .hl-quote:empty::before {
+  content: attr(data-placeholder);
+  color: #6a6f78;
+  font-style: italic;
+}
+.hl-card .hl-title strong:hover,
+.hl-card .hl-title strong:focus {
+  border-bottom-color: #ffd60a !important;
+}
+.hl-card .hl-quote:focus {
+  background: rgba(255, 214, 10, 0.06);
+  border-radius: 4px;
 }
 .hl-card .hl-reason {
   color: #c8cdd3;
@@ -645,11 +659,108 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   font-size: 0.78rem;
   color: #c8cdd3;
 }
-.compile-item .compile-controls {
-  display: flex;
-  gap: 4px;
+.compile-item {
+  cursor: default;
+  transition: border-color 0.12s, background 0.12s, opacity 0.12s;
 }
-.compile-item .compile-controls button {
+.compile-item .compile-grip {
+  cursor: grab;
+  color: #6b7280;
+  font-size: 1rem;
+  letter-spacing: -3px;
+  padding: 0 6px;
+  user-select: none;
+  flex: 0 0 auto;
+}
+.compile-item .compile-grip:hover { color: #c8cdd3; }
+.compile-item:active .compile-grip,
+.compile-item.dragging .compile-grip { cursor: grabbing; }
+.compile-item.dragging {
+  opacity: 0.45;
+  border-color: #6c5cff;
+}
+.compile-item.drop-target.drop-above {
+  box-shadow: 0 -2px 0 0 #6c5cff inset, 0 -2px 0 0 #6c5cff;
+}
+.compile-item.drop-target.drop-below {
+  box-shadow: 0 2px 0 0 #6c5cff inset, 0 2px 0 0 #6c5cff;
+}
+.compile-item .compile-title-edit {
+  cursor: text;
+  outline: none;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.18);
+  padding: 0 1px;
+}
+.compile-item .compile-title-edit:hover,
+.compile-item .compile-title-edit:focus {
+  border-bottom-color: #6c5cff;
+  background: rgba(108, 92, 255, 0.08);
+  border-radius: 3px;
+}
+.compile-item .compile-quote {
+  cursor: text;
+  outline: none;
+  min-height: 1em;
+}
+.compile-item .compile-quote:empty::before {
+  content: attr(data-placeholder);
+  color: #6a6f78;
+  font-style: italic;
+}
+.compile-item .compile-quote:focus {
+  background: rgba(255, 214, 10, 0.06);
+  border-radius: 4px;
+}
+.compile-item .compile-time {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.compile-item .compile-time-input {
+  width: 72px;
+  padding: 4px 6px;
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  color: #e8eaee;
+  border-radius: 6px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.78rem;
+  text-align: center;
+}
+.compile-item .compile-time-input:focus {
+  outline: none;
+  border-color: #6c5cff;
+}
+.compile-item .compile-duration {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.72rem;
+  color: #9aa3ad;
+  margin-left: 8px;
+  min-width: 38px;
+  text-align: right;
+}
+.compile-item .compile-preview {
+  background: transparent;
+  border: 1px solid #2c3240;
+  color: #c8cdd3;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+.compile-item .compile-preview:hover:not(:disabled) {
+  color: #fff;
+  border-color: #6c5cff;
+  background: rgba(108, 92, 255, 0.12);
+}
+.compile-item .compile-preview:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.compile-item .compile-remove {
   background: transparent;
   border: 1px solid #2c3240;
   color: #9aa3ad;
@@ -660,13 +771,57 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   cursor: pointer;
   padding: 0;
 }
-.compile-item .compile-controls button:hover {
-  color: #fff;
-  border-color: #6c5cff;
-}
-.compile-item .compile-controls .compile-remove:hover {
+.compile-item .compile-remove:hover {
   color: #ff8a8a;
   border-color: #ff8a8a;
+}
+.compile-item.compile-missing {
+  border-color: #5a3030;
+  background: #2a1a1f;
+}
+.compile-item.compile-missing .compile-source { color: #ff8a8a; }
+.compile-item.compile-invalid {
+  border-color: #5a3030;
+}
+.compile-item.compile-invalid .compile-duration {
+  color: #ff8a8a;
+}
+.compile-item.compile-invalid .compile-time-input {
+  border-color: #ff8a8a;
+}
+
+/* ---- Past compilations cards ---- */
+.past-compile-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #1a1e2a;
+  border: 1px solid #232833;
+  border-radius: 10px;
+}
+.past-compile-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.past-compile-head strong {
+  color: #e8eaee;
+  font-size: 0.92rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.past-compile-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.past-compile-actions button {
+  padding: 6px 10px;
+  font-size: 0.82rem;
 }
 
 /* Editable start/end inputs on highlight cards */
@@ -1036,4 +1191,93 @@ h2 { font-size: 1.1rem; margin: 0 0 16px; }
   border-radius: 999px;
   color: #f1f3f5;
   border: 1px solid rgba(255,255,255,0.12);
+}
+
+/* ---- Font preview ---- */
+.font-preview-wrap {
+  margin-top: 14px;
+  padding: 12px;
+  background: #14171f;
+  border: 1px solid #232833;
+  border-radius: 10px;
+}
+.font-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.font-preview-head label {
+  min-width: 120px;
+  color: #c8cdd3;
+  font-size: 0.86rem;
+}
+.font-preview-head input {
+  flex: 1;
+  padding: 6px 10px;
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  color: #e8eaee;
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+.font-preview-stage {
+  /* Aspect ratio + max-width are set live from JS to match the active job's
+     actual burn canvas (post-quality-boost). Defaults below are the 9:16
+     short-form canvas and apply until a job is loaded. Once a poster frame
+     is loaded, .has-poster swaps the checkerboard for the still. Text is
+     absolutely positioned at the chosen vertical % so the preview lands
+     exactly where libass will place the subtitle. */
+  position: relative;
+  background:
+    repeating-linear-gradient(45deg, #0e1017 0 12px, #0b0d12 12px 24px);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 9 / 16;
+  margin: 0 auto;
+  overflow: hidden;
+}
+.font-preview-stage.has-poster {
+  background-color: #000;
+}
+.font-preview-stage::before,
+.font-preview-stage::after {
+  /* Faint guide bands at the top/bottom 10% so it's obvious where the
+     vertical-position slider's extremes (10 and 95) sit on the frame. */
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  height: 10%;
+  background: linear-gradient(rgba(255,255,255,0.04), transparent);
+  pointer-events: none;
+}
+.font-preview-stage::after {
+  bottom: 0;
+  background: linear-gradient(transparent, rgba(255,255,255,0.04));
+}
+/* Words flagged by the punchword heuristic — color is set inline from JS so
+   it always matches the live Accent picker. Subtle weight bump separates
+   them from regular phrase text without screaming. */
+.phrase-text .punchword { font-weight: 700; }
+
+.font-preview-word {
+  /* Positioned at posY% from top via JS; transform keeps the text vertically
+     centered on that line, matching how libass aligns subtitles. We do NOT
+     constrain width or set word-break — the JS hyphenator is the only
+     authority on where text breaks. Letting CSS auto-wrap mid-word would
+     show breaks the renderer never produces (it leaves ≤15-char words
+     intact even if they brush the safe area).
+     IMPORTANT: no font-weight override. Heavy display fonts (Alfa Slab One,
+     Anton, Bebas Neue, Bagel Fat One...) ship a single weight. Forcing
+     900 makes the browser fake-bold by stroking each glyph, which widens
+     letters ~25–30% — so the JS measureText() sees overflow that the
+     real ASS render never produces. */
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  line-height: 1.1;
+  letter-spacing: 0.5px;
+  white-space: pre-line;
 }
