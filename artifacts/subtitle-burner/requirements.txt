@@ -6,5 +6,15 @@ gunicorn>=21.0.0
 # Interview-reframe pipeline (optional — feature is gated to lazy imports
 # so the app still boots without these installed). pyannote.audio pulls
 # torch (~2 GB) so install only if you want the reframe feature.
+#
+# IMPORTANT — on minimal Linux sandboxes (Replit, Docker slim), after
+# `pip install -r requirements.txt` you must also:
+#   pip uninstall -y opencv-contrib-python
+#   pip install opencv-python-headless
+# mediapipe pulls in `opencv-contrib-python` which dynamic-links against
+# libxcb/libGL — those aren't present on most server sandboxes. Headless
+# OpenCV has no X11 deps and mediapipe will use it transparently via the
+# shared `cv2` module name.
 pyannote.audio>=3.1.0
 mediapipe>=0.10.0
+opencv-python-headless>=4.10.0
