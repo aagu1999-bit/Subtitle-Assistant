@@ -433,15 +433,25 @@ HUGGINGFACE_TOKEN_ENV = "HF_TOKEN"
 
 def _reframe_deps_available() -> tuple[bool, str]:
     """Return (ok, msg). Tries to import the heavy deps without crashing the
-    app if they're missing — the reframe feature is opt-in."""
+    app if they're missing — the reframe feature is opt-in.
+
+    Reports the actual ImportError reason (e.g. missing libGL.so.1) instead
+    of pretending the package isn't installed. mediapipe in particular
+    installs cleanly but fails to import on minimal Linux sandboxes (Replit,
+    Docker slim) because its native module links against libGL at runtime.
+    """
     try:
         import mediapipe  # noqa: F401
-    except ImportError:
-        return False, "mediapipe not installed. Run: pip install mediapipe"
+    except ImportError as e:
+        return False, f"mediapipe failed to import: {e}"
+    except Exception as e:
+        return False, f"mediapipe import raised {type(e).__name__}: {e}"
     try:
         import pyannote.audio  # noqa: F401
-    except ImportError:
-        return False, "pyannote.audio not installed. Run: pip install pyannote.audio"
+    except ImportError as e:
+        return False, f"pyannote.audio failed to import: {e}"
+    except Exception as e:
+        return False, f"pyannote.audio import raised {type(e).__name__}: {e}"
     if not os.environ.get(HUGGINGFACE_TOKEN_ENV):
         return False, (
             f"{HUGGINGFACE_TOKEN_ENV} env var missing. Get a free token at "
