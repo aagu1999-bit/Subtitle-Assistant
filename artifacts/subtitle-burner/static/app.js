@@ -1,3 +1,69 @@
+// ---- Filler-word detection ----
+// Single-word fillers + the start tokens of two-word fillers ("you" needs a
+// trailing "know", "i" needs a trailing "mean"). The detector handles the
+// multi-word cases by peeking at the next word.
+const _FILLER_SINGLE = new Set([
+  "um", "uh", "uhh", "uhm", "umm", "er", "erm",
+  "ah", "ahh", "hm", "hmm", "mm", "mhm",
+  "like", "basically", "literally", "actually",
+  "kinda", "sorta", "anyway", "anyways",
+  "okay", "ok", "right", "well",
+]);
+const _FILLER_PAIRS = [
+  // [first, second]  → "you know", "i mean", "sort of", "kind of"
+  ["you", "know"],
+  ["i", "mean"],
+  ["sort", "of"],
+  ["kind", "of"],
+];
+function _stripWord(s) {
+  return (s || "").toLowerCase().replace(/[^a-z']/g, "");
+}
+function _detectFillerIndices(words) {
+  // Returns a Set of indices into *words* that the user could safely cut.
+  // Two-word fillers contribute BOTH indices.
+  const flagged = new Set();
+  if (!words || !words.length) return flagged;
+  for (let i = 0; i < words.length; i++) {
+    const w = _stripWord(words[i].word);
+    if (!w) continue;
+    if (_FILLER_SINGLE.has(w)) {
+      // Filler-only when it stands on its own — guard against false positives
+      // like "I like that" by checking word duration and surrounding gap. A
+      // real filler "like" usually clocks <300 ms; semantic "like" is longer.
+      // For an MVP we just flag all matches and let the user review.
+      flagged.add(i);
+      continue;
+    }
+    if (i + 1 < words.length) {
+      const next = _stripWord(words[i + 1].word);
+      for (const [a, b] of _FILLER_PAIRS) {
+        if (w === a && next === b) {
+          flagged.add(i);
+          flagged.add(i + 1);
+          break;
+        }
+      }
+    }
+  }
+  return flagged;
+}
+function _updateFillerBanner(words) {
+  const banner = $("fillerBanner");
+  const countEl = $("fillerCount");
+  if (!banner || !countEl) return;
+  const flagged = _detectFillerIndices(words);
+  if (flagged.size === 0) {
+    banner.classList.add("hidden");
+    return;
+  }
+  banner.classList.remove("hidden");
+  countEl.textContent = `${flagged.size} filler word${flagged.size === 1 ? "" : "s"} detected`;
+}
+
+// Hook the filler banner update into the existing phrase-list render path.
+// The button itself is wired below renderPhraseList.
+
 // ---- Punchword heuristic (mirrors _is_punchword_candidate in app.py) ----
 // Used by the transcript editor to mark which words will be auto-emphasised
 // in the burn. Keep this list in sync with _PUNCHWORD_STOPLIST in app.py.
@@ -86,6 +152,8 @@ const result = $("result"), player = $("player"), dl = $("dl");
 const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
 const retranscribeBtn = $("retranscribeBtn");
+const exportSrtBtn = $("exportSrtBtn");
+const exportVttBtn = $("exportVttBtn");
 const emojiRulesList = $("emojiRulesList"), addRuleBtn = $("addRuleBtn");
 const emojiPresetsDiv = $("emojiPresets");
 const previewWrap = $("audioPreviewWrap"), previewBtn = $("previewAudio");
@@ -247,7 +315,7 @@ groupEl.oninput = () => {
   scheduleDraftSave();
 };
 
-["font", "primary", "highlight", "accent", "outlineColor", "allCaps", "shadow", "smoothTimings", "punchwordEmphasis"].forEach(id => {
+["font", "primary", "highlight", "accent", "outlineColor", "allCaps", "shadow", "smoothTimings", "punchwordEmphasis", "reframeEnabled"].forEach(id => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("input", scheduleDraftSave);
@@ -631,6 +699,9 @@ function getStyle() {
     smooth_timings:  $("smoothTimings") ? $("smoothTimings").checked : true,
     punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
+    reframe: {
+      enabled: $("reframeEnabled") ? $("reframeEnabled").checked : false,
+    },
     tighten_silences: {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
       max_gap:    $("tightenMaxGap") ? parseFloat($("tightenMaxGap").value) : 1.0,
@@ -803,6 +874,12 @@ function applyStyle(style = {}) {
   }
   if (style.punchword_emphasis !== undefined && $("punchwordEmphasis")) {
     $("punchwordEmphasis").checked = !!style.punchword_emphasis;
+  }
+  if (style.reframe && $("reframeEnabled")) {
+    // Only honor a saved enabled=true if the analysis cache still exists —
+    // refreshReframeStatus() may flip it off if /reframe-status returns
+    // not-ready. Until then, restore the user's previous choice.
+    $("reframeEnabled").checked = !!style.reframe.enabled;
   }
   if (style.quality_boost !== undefined && $("qualityBoost")) {
     $("qualityBoost").checked = !!style.quality_boost;
@@ -1095,6 +1172,7 @@ async function pollTranscription(jobId) {
 // ---- Phrase timeline / editable subtitle list ----
 function renderPhraseList(words) {
   phraseListEl.innerHTML = "";
+  _updateFillerBanner(words);
   if (!words || !words.length) return;
 
   // Pull the latest scan results so we can interleave gap markers inline.
@@ -1104,6 +1182,9 @@ function renderPhraseList(words) {
   let gapIdx = 0;
 
   const groupSize = parseInt(groupEl.value, 10) || 3;
+  const fillerIdxs = _detectFillerIndices(words);
+  // Re-key fillerIdxs from word-index → group-relative index per-group so the
+  // inner render loop can mark them cheaply without recomputing the heuristic.
 
   const insertGapsUpTo = (nextPhraseStart) => {
     // Insert every gap whose start time falls before this phrase begins.
@@ -1152,6 +1233,11 @@ function renderPhraseList(words) {
     }[c]));
     textEl.innerHTML = group.map((w, j) => {
       const safe = escapeHtml(w.word || "");
+      const absoluteIdx = i + j;
+      const isFiller = fillerIdxs.has(absoluteIdx);
+      if (isFiller) {
+        return `<span class="filler-word" title="Filler word — click 'Remove all' above to strip">${safe}</span>`;
+      }
       if (punchIdxs.has(j)) {
         return `<span class="punchword" style="color:${accentColor}">${safe}</span>`;
       }
@@ -1193,6 +1279,27 @@ function renderPhraseList(words) {
   while (gapIdx < gaps.length) {
     phraseListEl.appendChild(_buildInlineGapRow(gaps[gapIdx++]));
   }
+}
+
+// One-click filler cleanup: drop every flagged word from currentWords,
+// re-render, and persist. Pure caption edit — the underlying audio still
+// says "um", we just no longer caption it. If the user wants the audio
+// trimmed too, that's a follow-up (silence-tightening per-word).
+const fillerCleanBtn = $("fillerCleanBtn");
+if (fillerCleanBtn) {
+  fillerCleanBtn.onclick = () => {
+    if (!currentWords || !currentWords.length) return;
+    const flagged = _detectFillerIndices(currentWords);
+    if (flagged.size === 0) return;
+    if (!confirm(
+      `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"} from captions? ` +
+      `The audio in the video stays untouched; this just drops them from the burned subtitles.`
+    )) return;
+    currentWords = currentWords.filter((_, i) => !flagged.has(i));
+    renderPhraseList(currentWords);
+    updateRowCount();
+    if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+  };
 }
 
 function _buildInlineGapRow(g) {
@@ -1435,6 +1542,96 @@ if (retranscribeBtn) {
   };
 }
 
+// Caption export — backend builds the SRT/VTT from the latest stored words
+// in jobs.db. If the user has uncommitted transcript edits in the editor,
+// flush them via saveDraftNow first so the export reflects what's on
+// screen, not the last persisted state.
+async function _downloadCaptions(ext) {
+  if (!currentJobId) {
+    alert("Open a transcribed video first.");
+    return;
+  }
+  if (typeof saveDraftNow === "function") {
+    try { await saveDraftNow(); } catch { /* best-effort */ }
+  }
+  const url = `/export-captions/${currentJobId}.${ext}`;
+  // Use a hidden anchor click so the Content-Disposition header drives the
+  // filename instead of forcing one we'd guess wrong.
+  const a = document.createElement("a");
+  a.href = url;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+if (exportSrtBtn) exportSrtBtn.onclick = () => _downloadCaptions("srt");
+if (exportVttBtn) exportVttBtn.onclick = () => _downloadCaptions("vtt");
+
+// Interview-reframe analysis. POSTs to /analyze-reframe, then polls the
+// dedicated /reframe-status endpoint until ready. Once ready, the
+// "Apply 9:16 reframe on next render" checkbox enables.
+const reframeAnalyzeBtn = $("reframeAnalyzeBtn");
+const reframeEnabled = $("reframeEnabled");
+const reframeStatus = $("reframeStatus");
+let _reframePollTimer = null;
+
+async function refreshReframeStatus() {
+  if (!currentJobId || !reframeStatus) return;
+  try {
+    const res = await fetch(`/reframe-status/${currentJobId}`);
+    const data = await res.json();
+    if (data.ready && data.stats) {
+      reframeStatus.textContent =
+        `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples} face samples`;
+      if (reframeEnabled) reframeEnabled.disabled = false;
+      if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Re-analyze";
+    } else {
+      reframeStatus.textContent = "Not analysed yet";
+      if (reframeEnabled) {
+        reframeEnabled.disabled = true;
+        reframeEnabled.checked = false;
+      }
+      if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+    }
+  } catch { /* offline — silent */ }
+}
+
+if (reframeAnalyzeBtn) {
+  reframeAnalyzeBtn.onclick = async () => {
+    if (!currentJobId) { alert("Open a transcribed video first."); return; }
+    reframeAnalyzeBtn.disabled = true;
+    reframeStatus.textContent = "Starting…";
+    try {
+      const res = await fetch("/analyze-reframe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: currentJobId }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
+      if (_reframePollTimer) clearInterval(_reframePollTimer);
+      _reframePollTimer = setInterval(async () => {
+        const r = await fetch(`/reframe-status/${currentJobId}`).then(r => r.json());
+        if (r.ready) {
+          clearInterval(_reframePollTimer);
+          _reframePollTimer = null;
+          refreshReframeStatus();
+          reframeAnalyzeBtn.disabled = false;
+        }
+      }, 3000);
+    } catch (e) {
+      reframeStatus.textContent = "Error: " + e.message;
+      reframeAnalyzeBtn.disabled = false;
+    }
+  };
+}
+
+// Refresh reframe panel state whenever a job is switched in / out.
+if (typeof window !== "undefined") {
+  window.addEventListener("subtitleBurner:jobChanged", refreshReframeStatus);
+}
+
 // ---- Utilities ----
 function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -1601,6 +1798,7 @@ async function switchToJob(jobId) {
     currentJobId = jobId;
     localStorage.setItem("subtitleBurner:lastJobId", jobId);
     refreshPreviewCanvas(jobId);
+    window.dispatchEvent(new CustomEvent("subtitleBurner:jobChanged"));
     if (s.words && s.words.length) {
       currentWords = _sanitizeWords(s.words);
       showEditor(currentWords, s);

@@ -522,6 +522,11 @@
             <span id="rowCount" class="pill muted">0 phrases</span>
           </div>
           <p class="muted panel-desc" style="margin-bottom:8px">Click the timestamp to seek · edit text inline · × removes a phrase</p>
+          <div id="fillerBanner" class="filler-banner hidden">
+            <span id="fillerCount" class="filler-count">0 filler words</span>
+            <span class="muted" style="font-size:.78rem">um, uh, like, you know, kinda…</span>
+            <button id="fillerCleanBtn" class="btn btn-secondary" type="button">Remove all</button>
+          </div>
           <div id="phraseList" class="phrase-list"></div>
         </section>
 
@@ -610,9 +615,31 @@
       <div id="previewEditStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
     </section>
 
-    <div style="display:flex;gap:10px;align-items:center;margin-top:14px">
-      <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1">Render with Edits</button>
+    <section class="panel" style="margin-top:14px;border-color:#2a2f3a">
+      <div class="editor-header" style="margin-bottom:6px">
+        <h2 style="margin:0">📺 Interview reframe (9:16)</h2>
+        <span id="reframeStatus" class="muted" style="font-size:.78rem"></span>
+      </div>
+      <p class="muted panel-desc" style="margin-bottom:10px">
+        Auto-crop a multi-speaker recording so the active speaker fills the frame.
+        On overlapping speech we'll stack both faces vertically.
+        Requires <code>pyannote.audio</code> + <code>mediapipe</code> installed and a free
+        <code>HF_TOKEN</code> env var (Hugging Face).
+      </p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button id="reframeAnalyzeBtn" class="btn btn-secondary">Analyze speakers + faces</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.88rem">
+          <input type="checkbox" id="reframeEnabled" disabled>
+          Apply 9:16 reframe on next render
+        </label>
+      </div>
+    </section>
+
+    <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
+      <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1;min-width:240px">Render with Edits</button>
       <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
+      <button id="exportSrtBtn" class="btn btn-secondary" title="Download the current transcript as an SRT subtitle file (works with YouTube, Premiere, CapCut).">⬇ .srt</button>
+      <button id="exportVttBtn" class="btn btn-secondary" title="Download the current transcript as a WebVTT subtitle file (works with HTML5 video, web players).">⬇ .vtt</button>
     </div>
 
     </div>

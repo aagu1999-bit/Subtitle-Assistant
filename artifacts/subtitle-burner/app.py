@@ -416,6 +416,577 @@ def transcribe(video_path: Path, pre_clean: bool = False):
             _safe_unlink(cleaned)
 
 
+# ---- Interview reframe: speaker diarization + face tracking ----
+#
+# Two-pass analysis that lets the burner produce a 9:16 vertical edit where
+# the active speaker fills the frame. All heavyweight imports (pyannote,
+# mediapipe, torch) are lazy so the app boots even if the user hasn't
+# installed the optional deps. Results are cached to JSON per job so a
+# subsequent render reuses them without re-running the expensive analysis.
+
+# Frames-per-second we sample the source video at for face detection.
+# Face boxes change slowly (people don't teleport) so 4 fps is plenty —
+# we interpolate between samples at burn time. Lower fps = faster analysis.
+REFRAME_FACE_SAMPLE_FPS = 4
+HUGGINGFACE_TOKEN_ENV = "HF_TOKEN"
+
+
+def _reframe_deps_available() -> tuple[bool, str]:
+    """Return (ok, msg). Tries to import the heavy deps without crashing the
+    app if they're missing — the reframe feature is opt-in."""
+    try:
+        import mediapipe  # noqa: F401
+    except ImportError:
+        return False, "mediapipe not installed. Run: pip install mediapipe"
+    try:
+        import pyannote.audio  # noqa: F401
+    except ImportError:
+        return False, "pyannote.audio not installed. Run: pip install pyannote.audio"
+    if not os.environ.get(HUGGINGFACE_TOKEN_ENV):
+        return False, (
+            f"{HUGGINGFACE_TOKEN_ENV} env var missing. Get a free token at "
+            f"https://huggingface.co/settings/tokens and accept the model "
+            f"licence at https://huggingface.co/pyannote/speaker-diarization-3.1"
+        )
+    return True, ""
+
+
+def _extract_audio_for_diarization(video_path: Path, out_path: Path) -> None:
+    """16 kHz mono WAV is the standard input for pyannote."""
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(video_path),
+         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+         str(out_path)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Audio extract for diarization failed: {proc.stderr[-400:]}"
+        )
+
+
+def diarize_audio(video_path: Path) -> list[dict]:
+    """Run pyannote speaker diarization and return a list of segments:
+    [{start, end, speaker}]  where speaker is "SPEAKER_00", "SPEAKER_01", ...
+
+    Sorted by start. Skipping overlapped regions inside pyannote's output —
+    those are surfaced separately by ``find_overlap_regions``.
+    """
+    from pyannote.audio import Pipeline  # heavy, lazy import
+    import torch  # noqa: F401  pulled in by pyannote anyway
+
+    audio_path = video_path.with_suffix(".diar.wav")
+    try:
+        _extract_audio_for_diarization(video_path, audio_path)
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=os.environ.get(HUGGINGFACE_TOKEN_ENV),
+        )
+        diar = pipeline(str(audio_path))
+        segments = []
+        for turn, _, speaker in diar.itertracks(yield_label=True):
+            segments.append({
+                "start": round(float(turn.start), 3),
+                "end": round(float(turn.end), 3),
+                "speaker": str(speaker),
+            })
+        segments.sort(key=lambda s: s["start"])
+        return segments
+    finally:
+        _safe_unlink(audio_path)
+
+
+def find_overlap_regions(diar: list[dict]) -> list[dict]:
+    """Pairwise scan of diarization segments to surface windows where two or
+    more speakers are talking simultaneously — these are the moments the
+    compositor will render as a vertical split instead of single-speaker
+    crop.
+
+    Returns [{start, end, speakers: [labels]}] merged so adjacent overlap
+    windows with the same speaker set become one segment.
+    """
+    events: list[tuple[float, int, str]] = []  # (time, +1/-1, speaker)
+    for s in diar:
+        events.append((s["start"], +1, s["speaker"]))
+        events.append((s["end"], -1, s["speaker"]))
+    events.sort(key=lambda e: (e[0], -e[1]))
+
+    active: dict[str, int] = {}
+    overlaps: list[dict] = []
+    last_t = None
+    for t, delta, spk in events:
+        if last_t is not None and t > last_t and sum(active.values()) >= 2:
+            overlaps.append({
+                "start": last_t,
+                "end": t,
+                "speakers": sorted(k for k, v in active.items() if v > 0),
+            })
+        active[spk] = active.get(spk, 0) + delta
+        last_t = t
+
+    # Merge adjacent overlaps with identical speaker sets.
+    merged: list[dict] = []
+    for o in overlaps:
+        if merged and merged[-1]["end"] >= o["start"] - 0.01 and \
+                merged[-1]["speakers"] == o["speakers"]:
+            merged[-1]["end"] = o["end"]
+        else:
+            merged.append(o)
+    return merged
+
+
+def detect_face_tracks(video_path: Path,
+                        sample_fps: int = REFRAME_FACE_SAMPLE_FPS) -> list[dict]:
+    """Sample frames at *sample_fps* and run MediaPipe Face Detection.
+    Returns one entry per sampled frame:
+        {t: seconds, faces: [{cx, cy, w, h, score}, ...]}
+    Coordinates are normalised to [0..1] of frame width/height.
+    """
+    import cv2  # bundled with mediapipe install
+    import mediapipe as mp
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video for face detection: {video_path}")
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / src_fps if src_fps else 0
+    step = max(1, int(round(src_fps / sample_fps)))
+
+    detector = mp.solutions.face_detection.FaceDetection(
+        model_selection=1, min_detection_confidence=0.4,
+    )
+    samples: list[dict] = []
+    try:
+        for fi in range(0, total_frames, step):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = detector.process(rgb)
+            faces = []
+            for det in (res.detections or []):
+                bb = det.location_data.relative_bounding_box
+                cx = bb.xmin + bb.width / 2
+                cy = bb.ymin + bb.height / 2
+                faces.append({
+                    "cx": round(float(cx), 4),
+                    "cy": round(float(cy), 4),
+                    "w":  round(float(bb.width), 4),
+                    "h":  round(float(bb.height), 4),
+                    "score": round(float(det.score[0]) if det.score else 0.0, 3),
+                })
+            samples.append({
+                "t": round(fi / src_fps, 3),
+                "faces": faces,
+            })
+    finally:
+        cap.release()
+        detector.close()
+    return samples
+
+
+def analyze_reframe(video_path: Path) -> dict:
+    """End-to-end analysis: diarization + face tracking + overlap detection.
+
+    Returns a JSON-serializable payload that's cached per job for the
+    compositor to consume. Caller is responsible for spawning this in a
+    background thread — both passes are CPU-heavy.
+    """
+    ok, msg = _reframe_deps_available()
+    if not ok:
+        raise RuntimeError(msg)
+    diar = diarize_audio(video_path)
+    overlaps = find_overlap_regions(diar)
+    faces = detect_face_tracks(video_path)
+    speakers = sorted({s["speaker"] for s in diar})
+    return {
+        "diarization": diar,
+        "overlaps": overlaps,
+        "faces": faces,
+        "stats": {
+            "speakers": speakers,
+            "speaker_count": len(speakers),
+            "face_samples": len(faces),
+            "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
+        },
+    }
+
+
+# ---- Reframe compositor ----
+#
+# Takes the analysis payload from analyze_reframe + the source video, and
+# produces a 9:16 vertical edit where each segment is cropped onto the
+# active speaker's face. Overlap segments render as a vertical-stack split.
+#
+# Approach mirrors compile-clips / silence-tightening: write each segment
+# to its own file at uniform encoder params, then concat-demuxer them.
+# Single-pass filter_complex with conditional per-time crops works in
+# theory but is fragile in ffmpeg 8.x — the per-segment pattern has been
+# proven reliable in this codebase.
+
+REFRAME_TARGET_W = 1080
+REFRAME_TARGET_H = 1920  # 9:16 short-form canvas
+
+
+def _face_samples_at(faces: list[dict], t: float) -> list[dict]:
+    """Nearest-in-time face sample to *t*. Returns the `faces` array
+    (possibly empty) from that sample."""
+    if not faces:
+        return []
+    # Binary-search would be O(log n) — for typical short clips a linear
+    # scan is fine and avoids importing bisect.
+    nearest = min(faces, key=lambda s: abs(s.get("t", 0) - t))
+    return nearest.get("faces", []) or []
+
+
+def _assign_speakers_to_faces(diar: list[dict],
+                               faces: list[dict]) -> dict[str, tuple[float, float]]:
+    """Best-effort mapping speaker_label → (cx, cy) typical position.
+
+    For each speaker, sample face positions during that speaker's
+    *solo* talking time and average them. Without lip-movement
+    detection this is a spatial heuristic: assumes each speaker is
+    consistently in roughly the same part of the frame. Good enough
+    for the standard 2-person interview shot.
+
+    If no faces overlap a speaker's solo time at all (off-camera
+    speaker, or face detector missed them), they get the overall
+    average face position so the crop centres on *something*.
+    """
+    by_speaker: dict[str, list[tuple[float, float]]] = {}
+    # Build a per-speaker exclusivity timeline: only counts windows
+    # where this speaker alone is talking (so we don't double-attribute
+    # overlap moments).
+    intervals_by_speaker: dict[str, list[tuple[float, float]]] = {}
+    for seg in diar:
+        intervals_by_speaker.setdefault(seg["speaker"], []).append(
+            (seg["start"], seg["end"])
+        )
+
+    def speaker_alone_at(t: float, spk: str) -> bool:
+        for s in diar:
+            if s["speaker"] == spk:
+                if s["start"] <= t <= s["end"]:
+                    return True
+                continue
+            if s["start"] <= t <= s["end"]:
+                return False
+        return False
+
+    for sample in faces:
+        t = float(sample.get("t", 0))
+        face_list = sample.get("faces") or []
+        if not face_list:
+            continue
+        for spk in intervals_by_speaker:
+            if speaker_alone_at(t, spk):
+                # Pick the highest-confidence face at this time as that
+                # speaker's contribution. If multiple faces visible we
+                # later disambiguate by spatial cluster.
+                best = max(face_list, key=lambda f: f.get("score", 0))
+                by_speaker.setdefault(spk, []).append(
+                    (float(best["cx"]), float(best["cy"]))
+                )
+
+    out: dict[str, tuple[float, float]] = {}
+    all_positions: list[tuple[float, float]] = []
+    for sample in faces:
+        for f in (sample.get("faces") or []):
+            all_positions.append((float(f["cx"]), float(f["cy"])))
+    overall_centre = (
+        (sum(p[0] for p in all_positions) / len(all_positions),
+         sum(p[1] for p in all_positions) / len(all_positions))
+        if all_positions else (0.5, 0.5)
+    )
+
+    for spk in intervals_by_speaker:
+        positions = by_speaker.get(spk) or []
+        if positions:
+            out[spk] = (
+                sum(p[0] for p in positions) / len(positions),
+                sum(p[1] for p in positions) / len(positions),
+            )
+        else:
+            out[spk] = overall_centre
+
+    # If two or more speakers landed on the same cluster (face detector
+    # only saw one person), nudge them apart along x so they don't
+    # all crop to the same spot.
+    if len(out) >= 2:
+        xs = sorted(out.values(), key=lambda p: p[0])
+        if xs[-1][0] - xs[0][0] < 0.05:
+            speakers_ordered = sorted(out.keys())
+            for i, spk in enumerate(speakers_ordered):
+                cx, cy = out[spk]
+                offset = (i / max(1, len(speakers_ordered) - 1) - 0.5) * 0.3
+                out[spk] = (min(1.0, max(0.0, cx + offset)), cy)
+    return out
+
+
+def _active_speaker_at(diar: list[dict], t: float) -> str | None:
+    """First speaker whose interval contains *t*. Used during solo
+    segments — overlap windows are handled separately."""
+    for seg in diar:
+        if seg["start"] <= t < seg["end"]:
+            return seg["speaker"]
+    return None
+
+
+def _flatten_reframe_timeline(diar: list[dict], overlaps: list[dict],
+                               total_duration: float) -> list[dict]:
+    """Walk the source timeline and produce a contiguous list of segments:
+        [{start, end, mode: 'solo'|'split'|'empty', speakers: [...]}]
+
+    'empty' segments (no speaker active) hold the previous active
+    speaker's framing so the camera doesn't snap to centre during
+    pauses — they're rewritten in the caller to inherit framing.
+    """
+    # Time-boundary points: all diar starts/ends + overlap starts/ends.
+    points = {0.0, total_duration}
+    for s in diar:
+        points.add(s["start"]); points.add(s["end"])
+    for o in overlaps:
+        points.add(o["start"]); points.add(o["end"])
+    pts = sorted(p for p in points if 0 <= p <= total_duration)
+
+    overlap_set = sorted(overlaps, key=lambda o: o["start"])
+    segs: list[dict] = []
+    for a, b in zip(pts, pts[1:]):
+        if b - a < 0.04:  # below 1 frame at 24fps — skip
+            continue
+        mid = (a + b) / 2
+        # Overlap?
+        for o in overlap_set:
+            if o["start"] <= mid < o["end"]:
+                segs.append({
+                    "start": a, "end": b,
+                    "mode": "split", "speakers": list(o["speakers"]),
+                })
+                break
+        else:
+            spk = _active_speaker_at(diar, mid)
+            if spk is None:
+                segs.append({"start": a, "end": b, "mode": "empty", "speakers": []})
+            else:
+                segs.append({"start": a, "end": b, "mode": "solo", "speakers": [spk]})
+
+    # Merge adjacent same-mode segments with same speakers.
+    merged: list[dict] = []
+    for s in segs:
+        if merged and merged[-1]["mode"] == s["mode"] and \
+                merged[-1]["speakers"] == s["speakers"]:
+            merged[-1]["end"] = s["end"]
+        else:
+            merged.append(dict(s))
+    return merged
+
+
+def _solo_crop(src_w: int, src_h: int,
+                speaker_pos: tuple[float, float]) -> tuple[int, int, int, int]:
+    """Compute (x, y, w, h) for a 9:16 crop centred on *speaker_pos*
+    (normalised). The crop window is the largest 9:16 rectangle that
+    fits inside the source frame, anchored horizontally on the speaker
+    and vertically just above their centre so the eyes land near the
+    upper-third (cinematic rule of thirds).
+    """
+    src_aspect = src_w / src_h
+    target_aspect = REFRAME_TARGET_W / REFRAME_TARGET_H
+    if src_aspect > target_aspect:
+        # Source wider than 9:16 — crop horizontally.
+        crop_h = src_h
+        crop_w = int(round(crop_h * target_aspect))
+        cx_px = speaker_pos[0] * src_w
+        x = int(round(cx_px - crop_w / 2))
+        x = max(0, min(src_w - crop_w, x))
+        return x, 0, crop_w, crop_h
+    # Source narrower than 9:16 (rare — vertical phone footage already).
+    crop_w = src_w
+    crop_h = int(round(crop_w / target_aspect))
+    cy_px = speaker_pos[1] * src_h
+    # Bias face into upper third.
+    y = int(round(cy_px - crop_h * 0.4))
+    y = max(0, min(src_h - crop_h, y))
+    return 0, y, crop_w, crop_h
+
+
+def _split_crops(src_w: int, src_h: int,
+                  positions: list[tuple[float, float]]) -> list[tuple[int, int, int, int]]:
+    """Two crops for a vertical-stack overlap segment. Each crop fills
+    half the 9:16 canvas (1080×960) — output aspect 9:8 per crop. We
+    pick the widest crop the source can give us at that aspect, anchored
+    horizontally on each speaker."""
+    target_aspect = REFRAME_TARGET_W / (REFRAME_TARGET_H / 2)  # 9:8
+    crops = []
+    for cx, cy in positions[:2]:
+        src_aspect = src_w / src_h
+        if src_aspect > target_aspect:
+            crop_h = src_h
+            crop_w = int(round(crop_h * target_aspect))
+            cx_px = cx * src_w
+            x = int(round(cx_px - crop_w / 2))
+            x = max(0, min(src_w - crop_w, x))
+            crops.append((x, 0, crop_w, crop_h))
+        else:
+            crop_w = src_w
+            crop_h = int(round(crop_w / target_aspect))
+            cy_px = cy * src_h
+            y = int(round(cy_px - crop_h * 0.4))
+            y = max(0, min(src_h - crop_h, y))
+            crops.append((0, y, crop_w, crop_h))
+    return crops
+
+
+def compute_reframe_plan(reframe_data: dict, src_w: int, src_h: int,
+                          total_duration: float) -> list[dict]:
+    """Turn the analysis JSON into a list of compositor instructions.
+
+    Each entry:
+        { start, end, mode: 'solo'|'split',
+          # solo:
+          crop: (x, y, w, h)
+          # split:
+          crops: [(x, y, w, h), (x, y, w, h)]   # top, bottom
+        }
+    Empty (no-speaker) segments inherit framing from the previous
+    segment so the camera doesn't snap during pauses.
+    """
+    diar = reframe_data.get("diarization") or []
+    overlaps = reframe_data.get("overlaps") or []
+    faces = reframe_data.get("faces") or []
+    speaker_positions = _assign_speakers_to_faces(diar, faces)
+    segs = _flatten_reframe_timeline(diar, overlaps, total_duration)
+
+    plan: list[dict] = []
+    last_solo_crop = _solo_crop(src_w, src_h, (0.5, 0.5))  # fallback centre
+    for s in segs:
+        if s["mode"] == "solo":
+            pos = speaker_positions.get(s["speakers"][0], (0.5, 0.5))
+            crop = _solo_crop(src_w, src_h, pos)
+            last_solo_crop = crop
+            plan.append({
+                "start": s["start"], "end": s["end"], "mode": "solo", "crop": crop,
+            })
+        elif s["mode"] == "split":
+            positions = [speaker_positions.get(spk, (0.5, 0.5))
+                         for spk in s["speakers"]]
+            crops = _split_crops(src_w, src_h, positions)
+            if len(crops) == 1:
+                crops.append(crops[0])  # degenerate; same person twice
+            plan.append({
+                "start": s["start"], "end": s["end"], "mode": "split", "crops": crops,
+            })
+        else:  # empty
+            plan.append({
+                "start": s["start"], "end": s["end"], "mode": "solo",
+                "crop": last_solo_crop,
+            })
+    return plan
+
+
+def apply_reframe(video_path: Path, plan: list[dict], output_path: Path) -> None:
+    """Render the 9:16 reframed video. Per-segment encode + concat-demuxer
+    stream-copy — same pattern as compile_clips and silence-tightening."""
+    if not plan:
+        raise RuntimeError("Empty reframe plan — nothing to compose.")
+    seg_paths: list[Path] = []
+    list_path: Path | None = None
+    try:
+        for i, seg in enumerate(plan):
+            seg_path = output_path.with_name(
+                f"{output_path.stem}_rf{i:03d}.mp4"
+            )
+            duration = seg["end"] - seg["start"]
+            if duration <= 0:
+                continue
+            if seg["mode"] == "solo":
+                x, y, w, h = seg["crop"]
+                vf = (
+                    f"crop={w}:{h}:{x}:{y},"
+                    f"scale={REFRAME_TARGET_W}:{REFRAME_TARGET_H}:flags=lanczos,"
+                    f"fps=30,format=yuv420p,setsar=1"
+                )
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{seg['start']:.3f}",
+                    "-i", str(video_path),
+                    "-t", f"{duration:.3f}",
+                    "-vf", vf,
+                    "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+                    *_VIDEO_ENC_ARGS,
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                    "-avoid_negative_ts", "make_zero",
+                    str(seg_path),
+                ]
+            else:  # split — vertical stack via filter_complex
+                (x1, y1, w1, h1), (x2, y2, w2, h2) = seg["crops"]
+                half_h = REFRAME_TARGET_H // 2
+                fc = (
+                    f"[0:v]split=2[v1in][v2in];"
+                    f"[v1in]crop={w1}:{h1}:{x1}:{y1},"
+                    f"scale={REFRAME_TARGET_W}:{half_h}:flags=lanczos,"
+                    f"fps=30,format=yuv420p,setsar=1[v1];"
+                    f"[v2in]crop={w2}:{h2}:{x2}:{y2},"
+                    f"scale={REFRAME_TARGET_W}:{half_h}:flags=lanczos,"
+                    f"fps=30,format=yuv420p,setsar=1[v2];"
+                    f"[v1][v2]vstack=inputs=2[outv]"
+                )
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{seg['start']:.3f}",
+                    "-i", str(video_path),
+                    "-t", f"{duration:.3f}",
+                    "-filter_complex", fc,
+                    "-map", "[outv]", "-map", "0:a?",
+                    "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+                    *_VIDEO_ENC_ARGS,
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                    "-avoid_negative_ts", "make_zero",
+                    str(seg_path),
+                ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0 and VIDEO_ENC_NAME == "h264_videotoolbox":
+                fallback = list(cmd)
+                fb_v_idx = fallback.index("-c:v")
+                fallback[fb_v_idx:fb_v_idx + 4] = [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                ]
+                proc = subprocess.run(fallback, capture_output=True, text=True)
+            if proc.returncode != 0:
+                err = proc.stderr or ""
+                diag = [
+                    ln for ln in err.splitlines()
+                    if any(t in ln for t in ("Error", "error", "Invalid", "failed", "Failed"))
+                ]
+                tail = "\n".join(diag[-12:]) if diag else err[-1500:]
+                raise RuntimeError(
+                    f"Reframe segment {i + 1}/{len(plan)} ({seg['mode']}) failed:\n{tail}"
+                )
+            seg_paths.append(seg_path)
+
+        list_path = output_path.with_name(f"{output_path.stem}_rf_concat.txt")
+        list_path.write_text(
+            "\n".join(f"file '{p.absolute()}'" for p in seg_paths) + "\n"
+        )
+        proc = subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(output_path),
+        ], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Reframe concat-demuxer failed: {proc.stderr[-1500:]}"
+            )
+    finally:
+        for p in seg_paths:
+            _safe_unlink(p)
+        if list_path is not None:
+            _safe_unlink(list_path)
+
+
 # ---- ASS subtitle generation ----
 def hex_to_ass_color(hex_color: str) -> str:
     """Convert #RRGGBB to ASS &HBBGGRR& format (ASS uses BGR, not RGB)."""
@@ -2226,6 +2797,28 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         _safe_unlink(video_path)
 
 
+def analyze_reframe_job(job_id: str, video_path: Path) -> None:
+    """Background worker that runs diarization + face tracking and caches
+    the result to uploads/<job>_reframe.json. Job status is reported via
+    the existing in-memory job dict so the UI's status poll picks it up.
+    """
+    try:
+        jobs[job_id]["status"] = "analysing speakers"
+        jobs[job_id]["progress"] = 20
+        _db_save_job(job_id)
+        result = analyze_reframe(video_path)
+        cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+        cache_path.write_text(json.dumps(result), encoding="utf-8")
+        jobs[job_id]["status"] = "awaiting_edit"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["reframe_ready"] = True
+        _db_save_job(job_id)
+    except Exception as e:
+        jobs[job_id]["status"] = "awaiting_edit"
+        jobs[job_id]["error"] = f"Reframe analysis failed: {e}"
+        _db_save_job(job_id)
+
+
 def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
     """Re-run Whisper on an existing job's video and overwrite its words.
 
@@ -2303,6 +2896,55 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 # timeline so subtitle timing stays correct.
                 video_path = tight_video_path
                 words = comp["words"]
+
+        # ---- Optional interview-reframe pre-step ----
+        # If style.reframe.enabled and the analysis cache exists, produce a
+        # 9:16 reframed video and feed that downstream. Word timestamps are
+        # NOT remapped (timeline is unchanged), only the frame composition.
+        reframe_video_path: Path | None = None
+        reframe_settings = (style or {}).get("reframe") or {}
+        if reframe_settings.get("enabled"):
+            cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+            if not cache_path.exists():
+                jobs[job_id]["error"] = (
+                    "Reframe enabled but no analysis cache found — "
+                    "click 'Analyze speakers + faces' first."
+                )
+                _db_save_job(job_id)
+            else:
+                jobs[job_id]["status"] = "reframing video"
+                jobs[job_id]["progress"] = 52
+                _db_save_job(job_id)
+                try:
+                    reframe_data = json.loads(cache_path.read_text(encoding="utf-8"))
+                    src_w, src_h = get_video_dimensions(video_path)
+                    src_duration = float(words[-1].get("end", 0)) if words else 0
+                    if src_duration <= 0:
+                        # Probe the actual file as a fallback.
+                        proc = subprocess.run(
+                            ["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of", "csv=p=0",
+                             str(video_path)],
+                            capture_output=True, text=True,
+                        )
+                        try:
+                            src_duration = float((proc.stdout or "0").strip())
+                        except ValueError:
+                            src_duration = 0
+                    plan = compute_reframe_plan(
+                        reframe_data, src_w, src_h, src_duration
+                    )
+                    reframe_video_path = UPLOAD_DIR / f"{job_id}_reframed.mp4"
+                    apply_reframe(video_path, plan, reframe_video_path)
+                    video_path = reframe_video_path
+                except Exception as e:
+                    # Don't abort the whole render — fall through with the
+                    # un-reframed source and surface the error to the UI.
+                    jobs[job_id]["error"] = f"Reframe failed: {e}"
+                    _db_save_job(job_id)
+                    if reframe_video_path:
+                        _safe_unlink(reframe_video_path)
+                        reframe_video_path = None
 
         jobs[job_id]["status"] = "building subtitles"
         jobs[job_id]["progress"] = 55
@@ -2515,6 +3157,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         # already reflect the tighten settings via their cache keys, so the
         # tightened mp4 only needs to live for the duration of this render.
         _safe_unlink(tight_video_path) if tight_video_path else None
+        _safe_unlink(reframe_video_path) if reframe_video_path else None
 
 
 def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None = None):
@@ -3092,6 +3735,49 @@ def transcribe_only():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/analyze-reframe", methods=["POST"])
+def analyze_reframe_endpoint():
+    """Kick off diarization + face tracking for *job_id*. Returns 200 with
+    {status: 'started'} immediately; poll /status/<job_id> for completion.
+    On completion the result lives in uploads/<job>_reframe.json and the
+    job's `reframe_ready` flag flips True.
+
+    Returns 400 with a helpful message if the optional reframe deps aren't
+    installed yet — better than a stack trace in the user's face.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Source video missing for this job"}), 404
+    ok, msg = _reframe_deps_available()
+    if not ok:
+        return jsonify({"error": msg}), 400
+    t = threading.Thread(target=analyze_reframe_job, args=(job_id, video_path))
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id, "status": "started"})
+
+
+@app.route("/reframe-status/<job_id>")
+def reframe_status(job_id: str):
+    """Return cached reframe analysis summary if it exists, otherwise 404.
+    The full faces array can get large so we surface just the stats here;
+    full payload is fetched at burn time, not over the wire."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache_path.exists():
+        return jsonify({"ready": False}), 200
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"ready": False, "error": str(e)}), 200
+    return jsonify({"ready": True, "stats": data.get("stats", {})})
+
+
 @app.route("/retranscribe", methods=["POST"])
 def retranscribe():
     """Re-run Whisper on an existing job's video file. Returns 200 immediately;
@@ -3236,6 +3922,96 @@ def status(job_id):
     payload = dict(job)
     payload["video_available"] = find_video_path(job_id) is not None
     return jsonify(payload)
+
+
+def _format_srt_timestamp(seconds: float) -> str:
+    """SRT format: HH:MM:SS,mmm (comma decimal separator)."""
+    if seconds < 0:
+        seconds = 0
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    if ms >= 1000:  # rounding edge: 999.6 → 1000
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _format_vtt_timestamp(seconds: float) -> str:
+    """VTT format: HH:MM:SS.mmm (period decimal separator)."""
+    return _format_srt_timestamp(seconds).replace(",", ".")
+
+
+def _words_to_caption_text(words: list, group_size: int, fmt: str) -> str:
+    """Build SRT or VTT text from the job's words list.
+
+    Groups follow the same chunking the renderer uses so the exported file
+    matches the burned video's caption blocks 1:1. *fmt* is 'srt' or 'vtt'.
+    """
+    if fmt not in ("srt", "vtt"):
+        raise ValueError(f"Unsupported caption format: {fmt}")
+    is_vtt = (fmt == "vtt")
+    ts = _format_vtt_timestamp if is_vtt else _format_srt_timestamp
+
+    out: list[str] = []
+    if is_vtt:
+        out.append("WEBVTT\n")
+
+    groups = group_words(words, group_size=max(1, group_size))
+    cue_num = 0
+    for group in groups:
+        if not group:
+            continue
+        try:
+            start = float(group[0]["start"])
+            end = float(group[-1]["end"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if end <= start:
+            continue
+        text = " ".join(str(w.get("word", "")).strip() for w in group if w.get("word"))
+        if not text:
+            continue
+        cue_num += 1
+        block = []
+        if not is_vtt:
+            block.append(str(cue_num))
+        block.append(f"{ts(start)} --> {ts(end)}")
+        block.append(text)
+        out.append("\n".join(block))
+    return ("\n\n".join(out) + "\n") if out else (("WEBVTT\n" if is_vtt else ""))
+
+
+@app.route("/export-captions/<job_id>.<ext>")
+def export_captions(job_id: str, ext: str):
+    """Stream the active transcript as SRT or VTT.
+
+    Groups are built from the job's stored *words* using the current style's
+    group_size (default 3) so the exported file matches the burned video's
+    caption cadence. The download filename uses the job's display label
+    when present so users get sensible defaults.
+    """
+    ext = (ext or "").lower()
+    if ext not in ("srt", "vtt"):
+        return jsonify({"error": "Format must be srt or vtt"}), 400
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    job = jobs[job_id]
+    words = job.get("words") or []
+    if not words:
+        return jsonify({"error": "Job has no transcript yet"}), 400
+    style = job.get("style") or {}
+    group_size = int(style.get("group_size", 3) or 3)
+    body = _words_to_caption_text(words, group_size, ext)
+    label = (job.get("filename") or job_id).rsplit(".", 1)[0]
+    download_name = f"{label}.{ext}"
+    mimetype = "text/vtt" if ext == "vtt" else "application/x-subrip"
+    return Response(
+        body,
+        mimetype=mimetype,
+        headers={"Content-Disposition": f"attachment; filename=\"{download_name}\""},
+    )
 
 
 @app.route("/download/<path:filename>")
