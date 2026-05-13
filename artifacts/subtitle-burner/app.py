@@ -3773,19 +3773,26 @@ def analyze_reframe_endpoint():
 
 @app.route("/reframe-status/<job_id>")
 def reframe_status(job_id: str):
-    """Return cached reframe analysis summary if it exists, otherwise 404.
-    The full faces array can get large so we surface just the stats here;
-    full payload is fetched at burn time, not over the wire."""
+    """Return cached reframe analysis summary if it exists, plus any
+    worker error so the UI can stop polling on a silent crash. The full
+    faces array can get large so we surface just the stats here; full
+    payload is fetched at burn time, not over the wire."""
     if job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
+    job = jobs[job_id]
     cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
-    if not cache_path.exists():
-        return jsonify({"ready": False}), 200
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"ready": False, "error": str(e)}), 200
-    return jsonify({"ready": True, "stats": data.get("stats", {})})
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return jsonify({"ready": True, "stats": data.get("stats", {})})
+        except (json.JSONDecodeError, OSError) as e:
+            return jsonify({"ready": False, "error": str(e)}), 200
+    # No cache yet — surface the most recent job-level error so the user
+    # isn't left staring at "Analysing…" after a silent worker crash.
+    err = job.get("error") or ""
+    if "Reframe" in err or "reframe" in err:
+        return jsonify({"ready": False, "error": err}), 200
+    return jsonify({"ready": False}), 200
 
 
 @app.route("/retranscribe", methods=["POST"])

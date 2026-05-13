@@ -1618,6 +1618,13 @@ if (reframeAnalyzeBtn) {
           _reframePollTimer = null;
           refreshReframeStatus();
           reframeAnalyzeBtn.disabled = false;
+        } else if (r.error) {
+          // Worker died — stop polling and tell the user what went wrong.
+          clearInterval(_reframePollTimer);
+          _reframePollTimer = null;
+          reframeStatus.textContent = `❌ ${r.error}`;
+          reframeStatus.style.color = "#ff8a8a";
+          reframeAnalyzeBtn.disabled = false;
         }
       }, 3000);
     } catch (e) {
