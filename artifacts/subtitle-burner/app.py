@@ -488,10 +488,20 @@ def diarize_audio(video_path: Path) -> list[dict]:
     audio_path = video_path.with_suffix(".diar.wav")
     try:
         _extract_audio_for_diarization(video_path, audio_path)
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=os.environ.get(HUGGINGFACE_TOKEN_ENV),
-        )
+        token = os.environ.get(HUGGINGFACE_TOKEN_ENV)
+        # pyannote.audio renamed `use_auth_token` → `token` somewhere between
+        # 3.0 and 3.1. Try the new name first; fall back so older installs
+        # still work without forcing a pin.
+        try:
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=token,
+            )
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=token,
+            )
         diar = pipeline(str(audio_path))
         segments = []
         for turn, _, speaker in diar.itertracks(yield_label=True):
