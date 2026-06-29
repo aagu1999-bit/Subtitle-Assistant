@@ -776,18 +776,29 @@
       </div>
 
       <div class="tl-body">
-        <!-- Left: media library -->
-        <aside class="tl-library">
-          <h3>Your videos</h3>
-          <p class="muted tl-hint">Click ➕ to drop a clip on the main track.</p>
-          <div id="tlSourceList" class="tl-source-list"></div>
-
-          <h3 style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>
-          <div class="tl-asset-upload">
-            <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" hidden>
-            <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
+        <!-- Left: Transcript / Media tabs -->
+        <aside class="tl-left">
+          <div class="tl-lefttabs">
+            <button class="tl-lefttab active" data-ltab="transcript">📝 Transcript</button>
+            <button class="tl-lefttab" data-ltab="media">📁 Media</button>
           </div>
-          <div id="tlAssetList" class="tl-source-list"></div>
+
+          <div class="tl-leftpanel" data-lpanel="transcript">
+            <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit its words. Click a word to strike it out — struck words are cut from the video.</p>
+            <div id="tlTranscriptDoc" class="tl-transcript-doc"></div>
+          </div>
+
+          <div class="tl-leftpanel hidden" data-lpanel="media">
+            <h3>Your videos</h3>
+            <p class="muted tl-hint">Click ➕ to add a clip to the main track.</p>
+            <div id="tlSourceList" class="tl-source-list"></div>
+            <h3 style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>
+            <div class="tl-asset-upload">
+              <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" hidden>
+              <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
+            </div>
+            <div id="tlAssetList" class="tl-source-list"></div>
+          </div>
         </aside>
 
         <!-- Center: preview + timeline -->
@@ -798,7 +809,7 @@
               <div id="tlOverlayLayer" class="tl-overlay-layer"></div>
             </div>
             <div id="tlPreviewEmpty" class="tl-preview-empty">
-              <p>Select a clip to scrub it here, or press <strong>Render</strong> to see the full edit.</p>
+              <p>Add a clip from <strong>📁 Media</strong>, or press <strong>Render</strong> to see the full edit.</p>
             </div>
           </div>
           <div class="tl-scrubrow">
@@ -807,8 +818,20 @@
             <span id="tlScrubTime" class="muted" style="font-size:.75rem;min-width:84px;text-align:right">0:00 / 0:00</span>
           </div>
 
+          <!-- Timeline toolbar: Split + zoom + time readout -->
+          <div class="tl-tltoolbar">
+            <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead">✂ Split</button>
+            <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
+            <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
+            <span style="flex:1"></span>
+            <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
+            <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out">−</button>
+            <button id="tlZoomIn" class="tl-chip-btn" title="Zoom in">+</button>
+          </div>
+
           <div class="tl-timeline" id="tlTimeline">
             <div class="tl-ruler" id="tlRuler"></div>
+            <div class="tl-playhead" id="tlPlayhead"></div>
             <div class="tl-tracks" id="tlTracks">
               <div class="tl-track" data-track="main">
                 <div class="tl-track-label">🎬 Main</div>
@@ -829,8 +852,6 @@
             </div>
           </div>
           <div class="tl-actions">
-            <button id="tlAddTitleBtn" class="btn btn-secondary">+ Title / lower-third</button>
-            <button id="tlProjectBtn" class="btn btn-secondary">🏷 Logo / project</button>
             <span id="tlRenderStatus" class="muted"></span>
           </div>
         </section>

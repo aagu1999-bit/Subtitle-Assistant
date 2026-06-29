@@ -7,7 +7,7 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const PPS = 14;          // pixels per second on the timeline
+  let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
 
@@ -20,6 +20,9 @@
   let saveTimer = null;
   let pollTimer = null;
   let initialized = false;
+  let leftTab = "media";   // "media" | "transcript"
+  let previewingOutput = false;  // true while the rendered result is in preview
+  let transcriptWords = null;    // cached words for the open transcript clip
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -103,6 +106,7 @@
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
           cuts: c.cuts || [], ken_burns: c.ken_burns || null, split: c.split || null,
+          color: c.color || null, burn_captions: c.burn_captions,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         text: tl.tracks.text.map((c) => ({ ...c })),
@@ -221,6 +225,93 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
+  // ---- Left column tabs (Transcript / Media) ----
+  function setLeftTab(name) {
+    leftTab = name;
+    document.querySelectorAll(".tl-lefttab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.ltab === name));
+    document.querySelectorAll(".tl-leftpanel").forEach((p) =>
+      p.classList.toggle("hidden", p.dataset.lpanel !== name));
+  }
+
+  // ---- Transcript-first editing (inline strike-to-cut) ----
+  async function renderTranscript(clip) {
+    const doc = $("tlTranscriptDoc");
+    const hint = $("tlTranscriptHint");
+    if (!doc) return;
+    transcriptWords = null;
+    if (!clip || !clip.source_job_id) {
+      doc.innerHTML = "";
+      if (hint) hint.textContent = "Select a Main clip to edit its words.";
+      return;
+    }
+    doc.innerHTML = '<p class="muted">Loading transcript…</p>';
+    let words = [];
+    try {
+      const s = await api("/status/" + clip.source_job_id);
+      words = (s.words || []).filter((w) =>
+        Number(w.end) > (clip.in || 0) && Number(w.start) < (clip.out || 1e9));
+    } catch (e) { doc.innerHTML = '<p class="muted">Could not load transcript.</p>'; return; }
+    if (!words.length) {
+      doc.innerHTML = '<p class="muted">No transcript words in this clip\'s range. Transcribe the source video to enable text editing.</p>';
+      return;
+    }
+    transcriptWords = words;
+    if (hint) hint.textContent = "Click a word to strike it (cut from video). Click again to restore.";
+    renderTranscriptWords(clip);
+  }
+
+  function isWordCut(clip, w) {
+    return (clip.cuts || []).some(([cs, ce]) =>
+      Number(w.start) >= cs - 0.01 && Number(w.end) <= ce + 0.01);
+  }
+
+  function renderTranscriptWords(clip) {
+    const doc = $("tlTranscriptDoc");
+    if (!doc || !transcriptWords) return;
+    doc.innerHTML = "";
+    transcriptWords.forEach((w) => {
+      const sp = document.createElement("span");
+      sp.className = "tl-tword" + (isWordCut(clip, w) ? " cut" : "");
+      sp.textContent = w.word + " ";
+      sp.dataset.start = w.start;
+      sp.onclick = () => toggleWordCut(clip, w);
+      doc.appendChild(sp);
+    });
+  }
+
+  function highlightTranscriptAt(t) {
+    const doc = $("tlTranscriptDoc");
+    if (!doc) return;
+    const spans = doc.querySelectorAll(".tl-tword");
+    let best = -1;
+    spans.forEach((sp, i) => { if (parseFloat(sp.dataset.start) <= t) best = i; });
+    spans.forEach((sp, i) => sp.classList.toggle("playing", i === best));
+  }
+
+  function toggleWordCut(clip, w) {
+    const cuts = (clip.cuts || []).slice();
+    if (isWordCut(clip, w)) {
+      // Remove any cut covering this word.
+      clip.cuts = cuts.filter(([cs, ce]) =>
+        !(Number(w.start) >= cs - 0.01 && Number(w.end) <= ce + 0.01));
+    } else {
+      cuts.push([Number(w.start), Number(w.end)]);
+      // Merge overlapping/adjacent cuts.
+      cuts.sort((a, b) => a[0] - b[0]);
+      const merged = [];
+      cuts.forEach((r) => {
+        const last = merged[merged.length - 1];
+        if (last && r[0] <= last[1] + 0.05) last[1] = Math.max(last[1], r[1]);
+        else merged.push(r.slice());
+      });
+      clip.cuts = merged;
+    }
+    renderTranscriptWords(clip);
+    renderTracks();
+    scheduleSave();
+  }
+
   // ---- Add clips ----
   async function addMainClip(jobId, inS, outS) {
     try {
@@ -323,6 +414,9 @@
         el.dataset.track = track;
         el.dataset.id = c.id;
 
+        // Filmstrip + waveform backgrounds (sliced to the clip's in/out).
+        addClipMedia(el, track, c);
+
         const label = document.createElement("div");
         label.className = "tl-clip-label";
         label.textContent = clipLabel(track, c, idx);
@@ -339,6 +433,36 @@
         lane.appendChild(el);
       });
     });
+    updatePlayhead();
+  }
+
+  // Slice a full-source filmstrip/waveform image to the clip's [in,out] window
+  // via background-size + position (see CSS comment in the render engine notes).
+  function bgSlice(el, cls, url, srcMax, cIn, cDur) {
+    const node = document.createElement("div");
+    node.className = cls;
+    node.style.backgroundImage = `url("${url}")`;
+    if (srcMax && srcMax > cDur + 0.01) {
+      node.style.backgroundSize = `${(srcMax / cDur) * 100}% 100%`;
+      const overflow = srcMax - cDur;
+      node.style.backgroundPositionX = `${(cIn / overflow) * 100}%`;
+    } else {
+      node.style.backgroundSize = "100% 100%";
+      node.style.backgroundPositionX = "0%";
+    }
+    el.appendChild(node);
+  }
+
+  function addClipMedia(el, track, c) {
+    const cIn = c.in || 0, cDur = clipDuration(c), srcMax = c._max || 0;
+    if (track === "main" && c.source_job_id) {
+      bgSlice(el, "tl-clip-film", "/filmstrip/" + c.source_job_id + ".jpg", srcMax, cIn, cDur);
+      bgSlice(el, "tl-clip-wave", "/waveform/" + c.source_job_id + ".png", srcMax, cIn, cDur);
+    } else if (track === "music" && c.asset_id) {
+      bgSlice(el, "tl-clip-wave", "/asset-waveform/" + c.asset_id + ".png", srcMax, cIn, cDur);
+    } else if (track === "overlay" && c.source_job_id) {
+      bgSlice(el, "tl-clip-film", "/filmstrip/" + c.source_job_id + ".jpg", srcMax, cIn, cDur);
+    }
   }
 
   function clipLabel(track, c, idx) {
@@ -373,10 +497,12 @@
     if (src) {
       const v = $("tlPreviewVideo");
       const wrap = v.closest(".tl-preview");
-      if (v.getAttribute("src") !== src) v.src = src;
+      if (v.getAttribute("src") !== src) { v.src = src; previewingOutput = false; }
       wrap.classList.add("has-video");
       if (seekTo != null) { try { v.currentTime = seekTo; } catch (e) {} }
     }
+    // Selecting a Main clip surfaces its transcript for text-based editing.
+    if (track === "main" && c) { setLeftTab("transcript"); renderTranscript(c); }
     applyStage();
     renderTimeline();   // renderProps() (inside) redraws the preview boxes
   }
@@ -387,6 +513,65 @@
     if (!st || !tl) return;
     st.style.aspectRatio = CANVAS_AR[tl.canvas] || "9 / 16";
     st.classList.toggle("fit-contain", tl.fit === "contain");
+  }
+
+  // ---- Playhead ----
+  // Map the preview's current time onto the output timeline. After a full
+  // render the preview IS the output (1:1). While editing a single clip, the
+  // preview is that source clip, so map source-time into the clip's slot.
+  function playheadOutputTime() {
+    const v = $("tlPreviewVideo");
+    if (!v) return null;
+    const t = v.currentTime || 0;
+    if (previewingOutput) return t;
+    if (selected && selected.track === "main") {
+      const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
+      if (idx < 0) return null;
+      const c = tl.tracks.main[idx];
+      return mainStart(idx) + Math.max(0, Math.min(clipDuration(c), t - (c.in || 0)));
+    }
+    return null;
+  }
+
+  function updatePlayhead() {
+    const ph = $("tlPlayhead");
+    if (!ph) return;
+    const ot = playheadOutputTime();
+    if (ot == null) { ph.style.display = "none"; return; }
+    ph.style.display = "block";
+    ph.style.left = (70 + 8 + ot * PPS) + "px";  // 70 label + 8 padding
+    const lab = $("tlPlayheadTime");
+    if (lab) lab.textContent = fmtTime(ot);
+  }
+
+  // ---- Split the selected Main clip at the playhead ----
+  function splitAtPlayhead() {
+    if (!selected || selected.track !== "main") { alert("Select a Main clip first."); return; }
+    const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
+    if (idx < 0) return;
+    const c = tl.tracks.main[idx];
+    const t = ($("tlPreviewVideo").currentTime) || 0;  // source time
+    if (t <= (c.in || 0) + 0.1 || t >= (c.out || 0) - 0.1) {
+      alert("Move the playhead to somewhere inside the clip first.");
+      return;
+    }
+    const second = JSON.parse(JSON.stringify(c));
+    second.id = uid();
+    c.out = t;
+    second.in = t;
+    second.transition = null;  // internal split is a hard cut
+    // Split cuts between the two halves by source time.
+    c.cuts = (c.cuts || []).filter((r) => r[0] < t);
+    second.cuts = (second.cuts || []).filter((r) => r[1] > t);
+    tl.tracks.main.splice(idx + 1, 0, second);
+    renderTimeline();
+    scheduleSave();
+  }
+
+  function setZoom(delta) {
+    PPS = Math.max(4, Math.min(60, PPS + delta));
+    renderTracks();
+    updatePlayhead();
   }
 
   // ---- Live preview boxes (drag to position titles / overlays / logo) ----
@@ -490,6 +675,9 @@
       if (scrub && document.activeElement !== scrub) scrub.value = d ? (v.currentTime / d * 100) : 0;
       $("tlScrubTime").textContent = `${fmtTime(v.currentTime)} / ${fmtTime(d)}`;
       playBtn.textContent = v.paused ? "▶" : "❚❚";
+      updatePlayhead();
+      // Highlight the word under the playhead in the transcript doc.
+      if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
     v.addEventListener("timeupdate", upd);
     v.addEventListener("loadedmetadata", upd);
@@ -567,13 +755,36 @@
         html += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
         html += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "auto", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
       }
+
+      // --- Color grade (per clip) ---
+      const col = c.color || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Color</label>`;
+      html += `<div class="tl-swatches" id="tlSwatches">` +
+        COLOR_PRESETS.map(([v, t2]) =>
+          `<div class="tl-swatch tl-swatch-${v} ${ (col.preset || "none") === v ? "active" : ""}" data-preset="${v}" title="${t2}">${t2}</div>`
+        ).join("") + `</div>`;
+      html += `<div class="tl-prop-grid" style="margin-top:8px">${propRange("color.brightness", "Brightness", col.brightness != null ? col.brightness : 0, -0.3, 0.3, 0.02)}${propRange("color.contrast", "Contrast", col.contrast != null ? col.contrast : 1, 0.5, 1.5, 0.02)}</div>`;
+      html += propRange("color.saturation", "Saturation", col.saturation != null ? col.saturation : 1, 0, 2, 0.05);
     }
 
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+    // Color swatch clicks (not a generic data-key control).
+    wrap.querySelectorAll(".tl-swatch").forEach((sw) => {
+      sw.onclick = () => {
+        if (!c.color) c.color = {};
+        c.color.preset = sw.dataset.preset;
+        renderProps(); renderTracks(); scheduleSave();
+      };
+    });
     renderPreviewBoxes();
   }
+
+  const COLOR_PRESETS = [
+    ["none", "None"], ["neutral", "Neutral"], ["warm", "Warm"],
+    ["cool", "Cool"], ["vivid", "Vivid"], ["bw", "B&W"],
+  ];
 
   // Project-level settings (shown when no clip is selected): persistent logo.
   function renderProjectProps(wrap) {
@@ -692,7 +903,7 @@
     const del = wrap.querySelector('[data-act="del"]');
     if (del) del.onclick = () => deleteClip(track, c.id);
     const et = wrap.querySelector('[data-act="edittext"]');
-    if (et) et.onclick = () => openTextEditor(c);
+    if (et) et.onclick = () => { setLeftTab("transcript"); renderTranscript(c); };
     const setin = wrap.querySelector('[data-act="setin"]');
     if (setin) setin.onclick = () => {
       const t = $("tlPreviewVideo").currentTime || 0;
@@ -967,7 +1178,8 @@
           setRenderStatus("Done ✓");
           $("tlRenderBtn").disabled = false;
           const v = $("tlPreviewVideo");
-          v.src = "/preview/" + s.output;
+          v.src = "/preview/" + s.output + "?t=" + Date.now();
+          previewingOutput = true;   // preview is now the full output (1:1 playhead)
           v.closest(".tl-preview").classList.add("has-video");
           v.load();
           v.play().catch(() => {});
@@ -1026,6 +1238,11 @@
     $("tlProjectBtn").onclick = () => { selected = null; renderTimeline(); };
     $("tlAssetBtn").onclick = () => $("tlAssetFile").click();
     $("tlAssetFile").onchange = (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; };
+    $("tlSplitBtn").onclick = splitAtPlayhead;
+    $("tlZoomIn").onclick = () => setZoom(4);
+    $("tlZoomOut").onclick = () => setZoom(-4);
+    document.querySelectorAll(".tl-lefttab").forEach((b) =>
+      b.onclick = () => setLeftTab(b.dataset.ltab));
 
     const timeline = $("tlTimeline");
     timeline.addEventListener("mousedown", onTimelineMouseDown);
@@ -1034,6 +1251,7 @@
     document.addEventListener("pointermove", onBoxMove);
     document.addEventListener("pointerup", onBoxUp);
     wireScrub();
+    setLeftTab("media");
 
     await loadSources();
     await loadAssets();

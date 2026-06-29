@@ -4322,6 +4322,44 @@ def _tl_run(cmd: list, what: str) -> None:
         raise RuntimeError(f"{what} failed: {proc.stderr[-800:]}")
 
 
+# Color-grade presets (ffmpeg filter fragments). Mirrors the Descript-style
+# None / Neutral / Warm / Cool swatches, plus a couple extras.
+_TL_COLOR_PRESETS = {
+    "none": "",
+    "neutral": "eq=contrast=1.04:saturation=1.06",
+    "warm": "colorbalance=rs=0.06:rm=0.04:gs=0.01:bs=-0.06:bm=-0.05,eq=saturation=1.08",
+    "cool": "colorbalance=rs=-0.05:rm=-0.03:bs=0.07:bm=0.05,eq=saturation=1.04",
+    "vivid": "eq=contrast=1.10:saturation=1.28",
+    "bw": "hue=s=0,eq=contrast=1.05",
+}
+
+
+def _tl_color_filter(color: dict | None) -> str:
+    """Build a color-grade filter chain from a clip's color settings.
+
+    {preset, brightness(-0.3..0.3), contrast(0.5..1.5), saturation(0..2)}.
+    Returns "" when nothing is set.
+    """
+    if not color:
+        return ""
+    parts = []
+    preset = _TL_COLOR_PRESETS.get(color.get("preset", "none"), "")
+    if preset:
+        parts.append(preset)
+    try:
+        b = float(color.get("brightness", 0) or 0)
+        c = float(color.get("contrast", 1) or 1)
+        s = float(color.get("saturation", 1) or 1)
+    except (TypeError, ValueError):
+        b, c, s = 0.0, 1.0, 1.0
+    if abs(b) > 1e-3 or abs(c - 1) > 1e-3 or abs(s - 1) > 1e-3:
+        b = max(-1.0, min(1.0, b))
+        c = max(0.0, min(3.0, c))
+        s = max(0.0, min(3.0, s))
+        parts.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s:.3f}")
+    return ",".join(parts)
+
+
 _KENBURNS_INTENSITY = {"low": 0.12, "med": 0.22, "high": 0.35}
 
 
@@ -4352,13 +4390,14 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
 
 def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
                           W: int, H: int, fps: int, fit: str, bg: str,
-                          out_path: Path, ken: dict | None = None) -> float:
+                          out_path: Path, ken: dict | None = None,
+                          color: dict | None = None) -> float:
     """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
 
     'cover' fills the frame (center-crop); 'contain' letterboxes onto *bg*.
     A silent stereo track is synthesized when the source has no audio so every
-    segment is concat-compatible. Optional *ken* applies a Ken Burns move.
-    Returns the segment duration.
+    segment is concat-compatible. Optional *ken* applies a Ken Burns move and
+    *color* applies a color grade. Returns the segment duration.
     """
     dur = max(0.05, t_out - t_in)
     if fit == "contain":
@@ -4371,6 +4410,9 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     kb = _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
         vf += "," + kb
+    cf = _tl_color_filter(color)
+    if cf:
+        vf += "," + cf
     vf += ",format=yuv420p"
 
     has_audio = _has_audio_stream(src)
@@ -4389,12 +4431,13 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
 
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                       dur: float, layout: str, W: int, H: int, fps: int,
-                      out_path: Path) -> float:
+                      out_path: Path, color: dict | None = None) -> float:
     """Render a split-screen segment: two sources shown at once.
 
     layout 'side' = left/right halves; 'stack' = top/bottom halves; 'auto'
     picks stack for portrait/square canvases and side for landscape. Audio is
-    taken from source A. Each half is center-cropped to fill its panel.
+    taken from source A. Each half is center-cropped to fill its panel. An
+    optional *color* grade is applied to the combined frame.
     """
     if layout == "auto":
         layout = "stack" if H >= W else "side"
@@ -4412,8 +4455,10 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                 f"crop={pw}:{ph},setsar=1,fps={fps}[p{idx}]")
 
     hasA = _has_audio_stream(srcA)
+    cf = _tl_color_filter(color)
+    post = ("," + cf) if cf else ""
     fc = (f"{panel(0)};{panel(1)};"
-          f"[p0][p1]{stack}=inputs=2,format=yuv420p[v]")
+          f"[p0][p1]{stack}=inputs=2{post},format=yuv420p[v]")
     cmd = ["ffmpeg", "-y",
            "-ss", f"{inA:.3f}", "-i", str(srcA),
            "-ss", f"{inB:.3f}", "-i", str(srcB)]
@@ -4903,6 +4948,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                 continue  # entire clip was cut away via text editing
 
             ken = c.get("ken_burns")
+            color = c.get("color")
             split = c.get("split") or {}
             split_src = _timeline_clip_source(split) if split.get("enabled") else None
 
@@ -4919,10 +4965,10 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     s_in = max(0.0, float(split.get("in", 0))) + (ks - t_in)
                     dur = _tl_split_segment(src, ks, split_src, s_in, kdur,
                                             split.get("layout", "auto"),
-                                            W, H, fps, seg_path)
+                                            W, H, fps, seg_path, color=color)
                 else:
                     dur = _tl_normalize_segment(src, ks, ke, W, H, fps, fit, bg,
-                                                seg_path, ken=ken)
+                                                seg_path, ken=ken, color=color)
                 segments.append((seg_path, dur))
                 seg_meta.append({
                     "source_job_id": c.get("source_job_id"),
@@ -5093,6 +5139,85 @@ def serve_asset(asset_id: str):
     if not path:
         return jsonify({"error": "Asset not found"}), 404
     return send_from_directory(ASSET_DIR, path.name)
+
+
+def _make_waveform(src: Path, out: Path) -> bool:
+    """Render a waveform PNG of *src*'s audio (cached). False if no audio."""
+    if not _has_audio_stream(src):
+        return False
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(src), "-filter_complex",
+         "showwavespic=s=1600x120:colors=#8b7bff|#6c5cff", "-frames:v", "1", str(out)],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0 and out.exists()
+
+
+def _make_filmstrip(src: Path, out: Path, frames: int = 24) -> bool:
+    """Render a horizontal filmstrip JPG (N evenly-spaced frames) of *src*."""
+    dur = _media_duration(src)
+    if dur <= 0:
+        return False
+    rate = max(0.01, frames / dur)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(src), "-vf",
+         f"fps={rate:.5f},scale=-1:80,tile={frames}x1", "-frames:v", "1",
+         "-qscale:v", "5", str(out)],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0 and out.exists()
+
+
+def _cached_render(cache: Path, src: Path, maker) -> Path | None:
+    """Return *cache*, (re)building it via *maker* if missing/stale."""
+    if cache.exists() and cache.stat().st_mtime >= src.stat().st_mtime:
+        return cache
+    try:
+        if maker(src, cache):
+            return cache
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+@app.route("/waveform/<job_id>.png")
+def waveform(job_id: str):
+    """Audio waveform strip for a source job (cached)."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src = find_video_path(job_id)
+    if not src:
+        return jsonify({"error": "Source missing"}), 404
+    cache = _cached_render(UPLOAD_DIR / f"{job_id}_wave.png", src, _make_waveform)
+    if not cache:
+        return jsonify({"error": "No audio / waveform unavailable"}), 404
+    return send_from_directory(cache.parent, cache.name)
+
+
+@app.route("/filmstrip/<job_id>.jpg")
+def filmstrip(job_id: str):
+    """Filmstrip thumbnail strip for a source job (cached)."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src = find_video_path(job_id)
+    if not src:
+        return jsonify({"error": "Source missing"}), 404
+    cache = _cached_render(UPLOAD_DIR / f"{job_id}_strip.jpg", src, _make_filmstrip)
+    if not cache:
+        return jsonify({"error": "Filmstrip unavailable"}), 404
+    return send_from_directory(cache.parent, cache.name)
+
+
+@app.route("/asset-waveform/<asset_id>.png")
+def asset_waveform(asset_id: str):
+    """Audio waveform strip for an uploaded asset (music/video)."""
+    src = _find_asset_path(asset_id)
+    if not src:
+        return jsonify({"error": "Asset not found"}), 404
+    cache = _cached_render(ASSET_DIR / f"{asset_id}_wave.png", src, _make_waveform)
+    if not cache:
+        return jsonify({"error": "No audio"}), 404
+    return send_from_directory(cache.parent, cache.name)
 
 
 @app.route("/source-info/<job_id>")

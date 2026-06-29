@@ -65,6 +65,14 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
   - **Live preview** — canvas-aspect stage (matches the output ratio + fit) with
     a scrub bar; drag title / overlay / logo boxes directly on the frame to
     position them, and ⤓ Set IN/OUT buttons trim a clip at the playhead.
+  - **Descript-style editing surface:** left column toggles **📝 Transcript**
+    (click words to strike → cut from the video, with the playing word
+    highlighted during preview) and **📁 Media**. Timeline has a **playhead**
+    synced to the preview, **✂ Split** at the playhead, and **zoom**. Clips show
+    **filmstrip thumbnails + audio waveforms** (`/filmstrip`, `/waveform`,
+    `/asset-waveform` — cached ffmpeg). Per-clip **color grade** presets (None /
+    Neutral / Warm / Cool / Vivid / B&W) + brightness/contrast/saturation
+    (ffmpeg `eq`/`colorbalance`).
   - Canvas presets (9:16, 16:9, 1:1, 4:5) with cover/contain fit. Projects are
     persisted in the `timeline` column of `jobs.db` and survive restarts.
   - Renders in four passes (main → music → overlays → titles); output lands in
