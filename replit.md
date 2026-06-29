@@ -47,6 +47,14 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
     opaque box, fade / slide-up animation).
   - **Music track** — background music with per-clip gain and optional ducking
     (sidechain-compressed under the voice).
+  - **Per-clip effects** (Main track): **Ken Burns** slow zoom (push-in /
+    pull-out, 3 strengths, via zoompan); **split-screen** (two sources at once,
+    side-by-side or top/bottom, via hstack/vstack); **text-based editing** —
+    strike out transcript words and those spans are cut from the clip
+    (keep-ranges stitched back together). Each effect is toggled per clip, with
+    a badge on the timeline block (🔍 / ⬓ / ✂️).
+  - **Persistent logo / watermark** — project-level image/video overlay across
+    the whole render (set via the 🏷 Logo / project panel).
   - Canvas presets (9:16, 16:9, 1:1, 4:5) with cover/contain fit. Projects are
     persisted in the `timeline` column of `jobs.db` and survive restarts.
   - Renders in four passes (main → music → overlays → titles); output lands in

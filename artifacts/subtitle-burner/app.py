@@ -4322,14 +4322,43 @@ def _tl_run(cmd: list, what: str) -> None:
         raise RuntimeError(f"{what} failed: {proc.stderr[-800:]}")
 
 
+_KENBURNS_INTENSITY = {"low": 0.12, "med": 0.22, "high": 0.35}
+
+
+def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
+    """Build a zoompan expression for a slow Ken Burns push-in / pull-out.
+
+    Returns "" when disabled. The zoom ramps over the clip's frame count so the
+    move always finishes on time regardless of clip length. Centered crop.
+    """
+    if not ken or not ken.get("enabled"):
+        return ""
+    amount = _KENBURNS_INTENSITY.get(ken.get("intensity", "med"), 0.22)
+    direction = ken.get("direction", "in")
+    frames = max(2, int(dur * fps))
+    inc = amount / frames
+    maxz = 1.0 + amount
+    if direction == "out":
+        # Start zoomed in (first frame, zoom var still 1.0), then ease back out.
+        zexpr = f"if(lte(zoom,1.0),{maxz:.4f},max(zoom-{inc:.6f},1.0))"
+    else:  # in
+        zexpr = f"min(zoom+{inc:.6f},{maxz:.4f})"
+    return (
+        f"zoompan=z='{zexpr}':d=1:"
+        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"s={W}x{H}:fps={fps}"
+    )
+
+
 def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
                           W: int, H: int, fps: int, fit: str, bg: str,
-                          out_path: Path) -> float:
+                          out_path: Path, ken: dict | None = None) -> float:
     """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
 
     'cover' fills the frame (center-crop); 'contain' letterboxes onto *bg*.
     A silent stereo track is synthesized when the source has no audio so every
-    segment is concat-compatible. Returns the segment duration.
+    segment is concat-compatible. Optional *ken* applies a Ken Burns move.
+    Returns the segment duration.
     """
     dur = max(0.05, t_out - t_in)
     if fit == "contain":
@@ -4338,7 +4367,11 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     else:  # cover
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},setsar=1")
-    vf += f",fps={fps},format=yuv420p"
+    vf += f",fps={fps}"
+    kb = _tl_kenburns_filter(ken, W, H, fps, dur)
+    if kb:
+        vf += "," + kb
+    vf += ",format=yuv420p"
 
     has_audio = _has_audio_stream(src)
     cmd = ["ffmpeg", "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
@@ -4352,6 +4385,76 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     cmd += [str(out_path)]
     _tl_run(cmd, "Clip trim")
     return dur
+
+
+def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
+                      dur: float, layout: str, W: int, H: int, fps: int,
+                      out_path: Path) -> float:
+    """Render a split-screen segment: two sources shown at once.
+
+    layout 'side' = left/right halves; 'stack' = top/bottom halves; 'auto'
+    picks stack for portrait/square canvases and side for landscape. Audio is
+    taken from source A. Each half is center-cropped to fill its panel.
+    """
+    if layout == "auto":
+        layout = "stack" if H >= W else "side"
+    if layout == "side":
+        pw, ph = W // 2, H
+        stack = "hstack"
+    else:
+        pw, ph = W, H // 2
+        stack = "vstack"
+    pw -= pw % 2
+    ph -= ph % 2
+
+    def panel(idx):
+        return (f"[{idx}:v]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+                f"crop={pw}:{ph},setsar=1,fps={fps}[p{idx}]")
+
+    hasA = _has_audio_stream(srcA)
+    fc = (f"{panel(0)};{panel(1)};"
+          f"[p0][p1]{stack}=inputs=2,format=yuv420p[v]")
+    cmd = ["ffmpeg", "-y",
+           "-ss", f"{inA:.3f}", "-i", str(srcA),
+           "-ss", f"{inB:.3f}", "-i", str(srcB)]
+    if not hasA:
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    audio_idx = "2:a:0" if not hasA else "0:a:0"
+    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+            "-map", "[v]", "-map", audio_idx,
+            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2", "-shortest", str(out_path)]
+    _tl_run(cmd, "Split-screen")
+    return dur
+
+
+def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> None:
+    """Overlay a persistent logo/watermark across the whole video."""
+    path = _find_asset_path(logo.get("asset_id", "")) if logo else None
+    if not path:
+        _tl_run(["ffmpeg", "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "Logo passthrough")
+        return
+    wfrac = min(1.0, max(0.03, float(logo.get("w", 0.18))))
+    lw = max(2, int(W * wfrac) // 2 * 2)
+    x = int(W * float(logo.get("x", 0.04)))
+    y = int(H * float(logo.get("y", 0.04)))
+    opacity = min(1.0, max(0.0, float(logo.get("opacity", 0.9))))
+    is_video = path.suffix.lower().lstrip(".") in ASSET_EXT_VIDEO
+    inputs = ["-i", str(base)]
+    if is_video:
+        inputs += ["-stream_loop", "-1", "-i", str(path)]
+    else:
+        inputs += ["-i", str(path)]
+    prep = f"[1:v]scale={lw}:-2,setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
+    fc = f"{prep};[0:v][lg]overlay=x={x}:y={y}:shortest=1[v]"
+    _tl_run(
+        ["ffmpeg", "-y", *inputs, "-filter_complex", fc,
+         "-map", "[v]", "-map", "0:a?", *_VIDEO_ENC_ARGS,
+         "-c:a", "copy", str(out_path)],
+        "Logo overlay",
+    )
 
 
 def _tl_concat(paths: list, out_path: Path) -> None:
@@ -4637,6 +4740,39 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
     return header + "\n".join(events) + "\n"
 
 
+def _tl_keep_ranges(t_in: float, t_out: float, cuts: list) -> list:
+    """Subtract *cuts* from [t_in, t_out], returning the kept (start, end) spans.
+
+    Used by text-based editing: cut spans (in source seconds) are removed and
+    the surviving pieces are stitched back together. Tiny (<0.1s) survivors are
+    dropped so we don't emit degenerate segments.
+    """
+    if not cuts:
+        return [(t_in, t_out)]
+    # Clamp + sort cuts that intersect the clip window.
+    norm = []
+    for cut in cuts:
+        try:
+            cs = max(t_in, float(cut[0]))
+            ce = min(t_out, float(cut[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if ce > cs:
+            norm.append((cs, ce))
+    if not norm:
+        return [(t_in, t_out)]
+    norm.sort()
+    keep = []
+    cursor = t_in
+    for cs, ce in norm:
+        if cs > cursor:
+            keep.append((cursor, cs))
+        cursor = max(cursor, ce)
+    if cursor < t_out:
+        keep.append((cursor, t_out))
+    return [(s, e) for s, e in keep if e - s >= 0.1]
+
+
 def _normalize_timeline(timeline: dict) -> dict:
     """Validate + coerce a timeline doc to a safe canonical form."""
     tl = dict(timeline or {})
@@ -4652,6 +4788,9 @@ def _normalize_timeline(timeline: dict) -> dict:
         tl["fit"] = "cover"
     if not isinstance(tl.get("bg"), str):
         tl["bg"] = "#000000"
+    # Persistent logo / watermark (applies across the whole render).
+    logo = tl.get("logo")
+    tl["logo"] = logo if (isinstance(logo, dict) and logo.get("asset_id")) else None
     tracks = tl.get("tracks")
     if not isinstance(tracks, dict):
         tracks = {}
@@ -4684,8 +4823,14 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             raise RuntimeError("Add at least one clip to the main track before rendering.")
 
         # ---- Pass 1: normalize + stitch the main video track ----
+        # Each main clip may expand into several segments: text-based editing
+        # cuts split it into keep-ranges, and split-screen / Ken Burns change how
+        # each piece is rendered. Transitions live on clip *boundaries* only;
+        # cut-internal boundaries are hard cuts.
         _stage("building main track", 10)
-        segments = []
+        segments = []        # [(path, dur)]
+        transitions = []     # len == len(segments) - 1
+        seg_counter = 0
         for i, c in enumerate(main_clips):
             src = _timeline_clip_source(c)
             if not src:
@@ -4694,21 +4839,54 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             t_out = float(c.get("out", t_in + 2))
             if t_out <= t_in:
                 raise RuntimeError(f"Main clip {i + 1}: end must be after start.")
-            seg_path = UPLOAD_DIR / f"{job_id}_tlseg{i:03d}.mp4"
-            dur = _tl_normalize_segment(src, t_in, t_out, W, H, fps, fit, bg, seg_path)
-            segments.append((seg_path, dur))
-            work.append(seg_path)
+
+            keeps = _tl_keep_ranges(t_in, t_out, c.get("cuts") or [])
+            if not keeps:
+                continue  # entire clip was cut away via text editing
+
+            ken = c.get("ken_burns")
+            split = c.get("split") or {}
+            split_src = _timeline_clip_source(split) if split.get("enabled") else None
+
+            clip_tr = c.get("transition") or {}
+            clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
+
+            for k, (ks, ke) in enumerate(keeps):
+                seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
+                kdur = ke - ks
+                if split_src:
+                    s_in = max(0.0, float(split.get("in", 0))) + (ks - t_in)
+                    dur = _tl_split_segment(src, ks, split_src, s_in, kdur,
+                                            split.get("layout", "auto"),
+                                            W, H, fps, seg_path)
+                else:
+                    dur = _tl_normalize_segment(src, ks, ke, W, H, fps, fit, bg,
+                                                seg_path, ken=ken)
+                segments.append((seg_path, dur))
+                work.append(seg_path)
+                # Boundary transition only at the START of a new clip's first
+                # kept piece (not the very first segment overall).
+                if segments and len(segments) > 1:
+                    transitions.append(clip_tr if k == 0 else 0)
+                seg_counter += 1
+
             jobs[job_id]["progress"] = 10 + int(25 * (i + 1) / len(main_clips))
             _db_save_job(job_id)
 
-        transitions = []
-        for i in range(len(main_clips) - 1):
-            tr = (main_clips[i + 1].get("transition") or {})
-            transitions.append(tr.get("type") if isinstance(tr, dict) and tr.get("type") else 0)
+        if not segments:
+            raise RuntimeError("Every main clip was cut away — nothing left to render.")
 
         base = UPLOAD_DIR / f"{job_id}_tlbase.mp4"
         work.append(base)
         _tl_build_main_track(segments, transitions, base, job_id)
+
+        # ---- Persistent logo / watermark (whole-video overlay) ----
+        if tl.get("logo"):
+            _stage("adding logo", 48)
+            logod = UPLOAD_DIR / f"{job_id}_tllogo.mp4"
+            work.append(logod)
+            _tl_apply_logo(base, tl["logo"], W, H, logod)
+            base = logod
 
         # ---- Pass 2: background music ----
         if tracks["music"]:

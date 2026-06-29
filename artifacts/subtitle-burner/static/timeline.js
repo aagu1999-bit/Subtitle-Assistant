@@ -97,10 +97,12 @@
       fit: tl.fit,
       fps: tl.fps,
       bg: tl.bg || "#000000",
+      logo: tl.logo || null,
       tracks: {
         main: tl.tracks.main.map((c) => ({
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
+          cuts: c.cuts || [], ken_burns: c.ken_burns || null, split: c.split || null,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         text: tl.tracks.text.map((c) => ({ ...c })),
@@ -275,7 +277,15 @@
   }
 
   // ---- Timeline rendering ----
+  // renderTimeline = redraw lanes AND rebuild the props panel (use on
+  // selection / add / delete). renderTracks = redraw only the lanes (use during
+  // slider/number edits so the props panel keeps focus).
   function renderTimeline() {
+    renderTracks();
+    renderProps();
+  }
+
+  function renderTracks() {
     const total = totalDuration();
     const width = Math.max(300, total * PPS);
 
@@ -326,14 +336,17 @@
         lane.appendChild(el);
       });
     });
-    renderProps();
   }
 
   function clipLabel(track, c, idx) {
     if (track === "main") {
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const name = s ? (s.filename || "clip") : "clip";
-      return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")} (${fmtTime(clipDuration(c))})`;
+      let badges = "";
+      if (c.ken_burns && c.ken_burns.enabled) badges += " 🔍";
+      if (c.split && c.split.enabled) badges += " ⬓";
+      if (c.cuts && c.cuts.length) badges += " ✂️";
+      return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")}${badges}`;
     }
     if (track === "text") return (c.text || "Title").split("\n")[0];
     if (track === "music") return `🎵 music ${fmtTime(clipDuration(c))}`;
@@ -366,7 +379,7 @@
     const wrap = $("tlProps");
     if (!wrap) return;
     if (!selected) {
-      wrap.innerHTML = '<div class="tl-props-empty muted">Select a clip on the timeline to edit its properties.</div>';
+      renderProjectProps(wrap);
       return;
     }
     const c = findClip(selected.track, selected.id);
@@ -398,12 +411,79 @@
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       const trType = (c.transition && c.transition.type) || "";
       html += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
-      html += `<p class="muted" style="font-size:.72rem">Applies a crossfade from the previous clip. The first clip ignores this.</p>`;
+      html += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this.</p>`;
+
+      // --- Text-based editing ---
+      const cutCount = (c.cuts || []).length;
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">✂️ Text-based editing</label>`;
+      html += `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
+      html += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
+
+      // --- Ken Burns (per clip) ---
+      const kb = c.ken_burns || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (motion)</label>`;
+      html += propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
+      if (kb.enabled) {
+        html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+      }
+
+      // --- Split-screen (per clip) ---
+      const sp = c.split || {};
+      const splitOpts = [["", "— pick second video —"]].concat(
+        sources.filter((s) => s.job_id !== c.source_job_id).map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⬓ Split-screen</label>`;
+      html += propCheck("split.enabled", "Enable on this clip", sp.enabled);
+      if (sp.enabled) {
+        html += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
+        html += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "auto", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
+      }
     }
 
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+  }
+
+  // Project-level settings (shown when no clip is selected): persistent logo.
+  function renderProjectProps(wrap) {
+    if (!tl) {
+      wrap.innerHTML = '<div class="tl-props-empty muted">Create or open a project to start.</div>';
+      return;
+    }
+    const imgVid = assets.filter((a) => a.kind === "image" || a.kind === "video");
+    const lg = tl.logo || {};
+    const opts = [["", "— no logo —"]].concat(imgVid.map((a) => [a.asset_id, `${a.kind} · ${a.ext}`]));
+    let html = `<h3>⚙ Project</h3>`;
+    html += `<p class="muted" style="font-size:.74rem">Select a clip for its settings, or set a logo that stays on the whole video.</p>`;
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🏷 Persistent logo / watermark</label>`;
+    if (!imgVid.length) {
+      html += `<p class="muted" style="font-size:.74rem">Upload a logo image first (Assets → Upload asset).</p>`;
+    }
+    html += propSelect("__logo_asset", "Logo image", lg.asset_id || "", opts);
+    if (lg.asset_id) {
+      html += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
+      html += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
+    }
+    wrap.innerHTML = html;
+
+    wrap.querySelectorAll("[data-key]").forEach((inp) => {
+      const key = inp.dataset.key;
+      const ev = inp.tagName === "SELECT" ? "change" : "input";
+      inp.addEventListener(ev, () => {
+        if (key === "__logo_asset") {
+          if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
+          else tl.logo = null;
+          renderProps();
+        } else {
+          if (!tl.logo) return;
+          const field = key.replace("__logo_", "");
+          tl.logo[field] = parseFloat(inp.value);
+          const outSpan = wrap.querySelector(`[data-out="${key}"]`);
+          if (outSpan) outSpan.textContent = (+inp.value).toFixed(2);
+        }
+        scheduleSave();
+      });
+    });
   }
 
   const FONT_OPTS = [
@@ -455,6 +535,11 @@
           c.out = (c.in || 0) + Math.max(0.2, v);
         } else if (key === "__transition") {
           c.transition = v ? { type: v } : null;
+        } else if (key.indexOf(".") >= 0) {
+          // Nested key like "ken_burns.enabled" — create the object if needed.
+          const [obj, field] = key.split(".");
+          if (!c[obj] || typeof c[obj] !== "object") c[obj] = {};
+          c[obj][field] = v;
         } else {
           c[key] = v;
         }
@@ -464,13 +549,102 @@
 
         const outSpan = wrap.querySelector(`[data-out="${key}"]`);
         if (outSpan) outSpan.textContent = (+v).toFixed(2);
-        renderTimeline();
+        // Checkboxes / selects can add or remove sub-controls, so rebuild the
+        // whole panel. Text/number/range edits only redraw the lanes so the
+        // focused control isn't torn out mid-edit.
+        const structural = inp.type === "checkbox" || inp.tagName === "SELECT";
+        if (structural) renderTimeline(); else renderTracks();
         scheduleSave();
       };
       inp.addEventListener(inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input", handler);
     });
     const del = wrap.querySelector('[data-act="del"]');
     if (del) del.onclick = () => deleteClip(track, c.id);
+    const et = wrap.querySelector('[data-act="edittext"]');
+    if (et) et.onclick = () => openTextEditor(c);
+  }
+
+  // ---- Text-based editing: strike out words to cut them from the clip ----
+  async function openTextEditor(clip) {
+    if (!clip.source_job_id) {
+      alert("Text editing only works on clips from a transcribed video.");
+      return;
+    }
+    let words = [];
+    try {
+      const s = await api("/status/" + clip.source_job_id);
+      words = (s.words || []).filter((w) =>
+        Number(w.end) > (clip.in || 0) && Number(w.start) < (clip.out || 1e9));
+    } catch (e) {
+      alert("Couldn't load transcript: " + e.message);
+      return;
+    }
+    if (!words.length) {
+      alert("No transcript words found in this clip's range. Transcribe the source video first.");
+      return;
+    }
+
+    // Which words are currently cut, derived from existing clip.cuts.
+    const cut = new Set();
+    (clip.cuts || []).forEach(([cs, ce]) => {
+      words.forEach((w, i) => {
+        if (Number(w.start) >= cs - 0.01 && Number(w.end) <= ce + 0.01) cut.add(i);
+      });
+    });
+
+    const back = document.createElement("div");
+    back.className = "tl-modal-back";
+    back.innerHTML = `
+      <div class="tl-modal">
+        <div class="tl-modal-head">
+          <strong>✂️ Edit transcript</strong>
+          <span class="muted">Click a word to strike it out — struck words are removed from the video.</span>
+        </div>
+        <div class="tl-modal-words" id="tlWords"></div>
+        <div class="tl-modal-foot">
+          <span class="muted" id="tlCutInfo"></span>
+          <span style="flex:1"></span>
+          <button class="btn btn-secondary" data-x="cancel">Cancel</button>
+          <button class="btn btn-primary" data-x="apply" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Apply cuts</button>
+        </div>
+      </div>`;
+    document.body.appendChild(back);
+    const wordsEl = back.querySelector("#tlWords");
+    const info = back.querySelector("#tlCutInfo");
+
+    function draw() {
+      wordsEl.innerHTML = "";
+      words.forEach((w, i) => {
+        const sp = document.createElement("span");
+        sp.className = "tl-word" + (cut.has(i) ? " cut" : "");
+        sp.textContent = w.word;
+        sp.onclick = () => { cut.has(i) ? cut.delete(i) : cut.add(i); draw(); };
+        wordsEl.appendChild(sp);
+      });
+      const secs = [...cut].reduce((a, i) => a + (Number(words[i].end) - Number(words[i].start)), 0);
+      info.textContent = `${cut.size} word(s) struck · ~${secs.toFixed(1)}s removed`;
+    }
+    draw();
+
+    function close() { back.remove(); }
+    back.querySelector('[data-x="cancel"]').onclick = close;
+    back.onclick = (e) => { if (e.target === back) close(); };
+    back.querySelector('[data-x="apply"]').onclick = () => {
+      // Merge contiguous struck words into [start,end] cut ranges.
+      const ranges = [];
+      let run = null;
+      words.forEach((w, i) => {
+        if (cut.has(i)) {
+          if (!run) run = [Number(w.start), Number(w.end)];
+          else run[1] = Number(w.end);
+        } else if (run) { ranges.push(run); run = null; }
+      });
+      if (run) ranges.push(run);
+      clip.cuts = ranges;
+      close();
+      renderTimeline();
+      scheduleSave();
+    };
   }
 
   function deleteClip(track, id) {
@@ -529,7 +703,7 @@
       if (drag.track !== "text") no = Math.min(no, max);
       c.out = no;
     }
-    renderTimeline();
+    renderTracks();
   }
 
   function reorderMainByX(id, leftPx) {
@@ -554,6 +728,7 @@
   function onMouseUp() {
     if (drag) {
       drag = null;
+      renderProps();   // reflect final trim/position values in the panel
       scheduleSave();
     }
   }
@@ -583,6 +758,7 @@
       fit: d.fit || "cover",
       fps: d.fps || 30,
       bg: d.bg || "#000000",
+      logo: d.logo || null,
       tracks: {
         main: (d.tracks && d.tracks.main) || [],
         overlay: (d.tracks && d.tracks.overlay) || [],
@@ -703,6 +879,7 @@
     $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; scheduleSave(); } };
     $("tlRenderBtn").onclick = renderTimelineVideo;
     $("tlAddTitleBtn").onclick = () => { if (tl) addTitle(); else alert("Create or open a project first."); };
+    $("tlProjectBtn").onclick = () => { selected = null; renderTimeline(); };
     $("tlAssetBtn").onclick = () => $("tlAssetFile").click();
     $("tlAssetFile").onchange = (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; };
 
