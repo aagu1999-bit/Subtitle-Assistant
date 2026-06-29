@@ -1774,14 +1774,16 @@ function renderJobsList() {
     };
     div.appendChild(rename);
 
-    if (meta.video_available && typeof window.openTimelineEditor === "function") {
+    if (meta.video_available) {
       const toTl = document.createElement("button");
       toTl.className = "job-rename";
       toTl.textContent = "🎬";
       toTl.title = "Edit in timeline (open the multi-track editor with this clip)";
       toTl.onclick = (e) => {
         e.stopPropagation();
-        window.openTimelineEditor(jobId);
+        // timeline.js loads after app.js, so guard at click time, not render.
+        if (typeof window.openTimelineEditor === "function") window.openTimelineEditor(jobId);
+        else alert("Editor is still loading — try again in a second.");
       };
       div.appendChild(toTl);
     }
