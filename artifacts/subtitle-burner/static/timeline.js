@@ -312,9 +312,18 @@
     scheduleSave();
   }
 
+  // Make sure a project exists before adding anything (guards the race where
+  // the source list renders its + buttons before init finishes creating one).
+  async function ensureProject() {
+    if (tl) return true;
+    await newProject();
+    return !!tl;
+  }
+
   // ---- Add clips ----
   async function addMainClip(jobId, inS, outS) {
     try {
+      if (!(await ensureProject())) return;
       const dur = await getSourceDuration(jobId);
       const ci = inS != null ? Math.max(0, inS) : 0;
       const co = outS != null ? Math.min(dur, outS) : dur;
@@ -330,6 +339,7 @@
   }
 
   async function addOverlayClip(ref, asset) {
+    if (!(await ensureProject())) return;
     let max = 4;
     if (ref.source_job_id) {
       try { max = await getSourceDuration(ref.source_job_id); } catch (e) {}
@@ -346,7 +356,8 @@
     scheduleSave();
   }
 
-  function addMusicClip(asset) {
+  async function addMusicClip(asset) {
+    if (!(await ensureProject())) return;
     const max = asset.duration || 60;
     tl.tracks.music.push({
       id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
@@ -357,7 +368,8 @@
     scheduleSave();
   }
 
-  function addTitle() {
+  async function addTitle() {
+    if (!(await ensureProject())) return;
     tl.tracks.text.push({
       id: uid(), text: "Lower third\nName · Title", start: 0, out: 4,
       x: 0.5, y: 0.82, size: 56, color: "#FFFFFF", font: "Anton",
@@ -1234,7 +1246,7 @@
     $("tlCanvas").onchange = (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } };
     $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } };
     $("tlRenderBtn").onclick = renderTimelineVideo;
-    $("tlAddTitleBtn").onclick = () => { if (tl) addTitle(); else alert("Create or open a project first."); };
+    $("tlAddTitleBtn").onclick = () => addTitle();
     $("tlProjectBtn").onclick = () => { selected = null; renderTimeline(); };
     $("tlAssetBtn").onclick = () => $("tlAssetFile").click();
     $("tlAssetFile").onchange = (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; };
@@ -1253,11 +1265,8 @@
     wireScrub();
     setLeftTab("media");
 
-    await loadSources();
-    await loadAssets();
-    await loadProjects();
-
-    // Open the most recent project, or start a fresh one.
+    // Open/create the project FIRST so `tl` exists before the source list
+    // (with its + buttons) is rendered — otherwise an early click races a null tl.
     try {
       const data = await api("/timeline/list");
       if (data.timelines.length) await openProject(data.timelines[0].job_id);
@@ -1265,6 +1274,10 @@
     } catch (e) {
       await newProject();
     }
+
+    await loadSources();
+    await loadAssets();
+    await loadProjects();
   }
 
   // Hook the Editor tab button so we init on first open.
