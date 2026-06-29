@@ -73,6 +73,12 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
     `/asset-waveform` — cached ffmpeg). Per-clip **color grade** presets (None /
     Neutral / Warm / Cool / Vivid / B&W) + brightness/contrast/saturation
     (ffmpeg `eq`/`colorbalance`).
+  - **Reliability:** overlays/titles/music **anchor** to a Main clip (+offset),
+    so reordering/retrimming/cutting Main carries them along instead of
+    desyncing; 20 ms audio fades on every segment de-click cuts; source videos
+    referenced by a timeline are **exempt from cleanup** (won't be pruned while
+    in use); Split works after a full render (maps output time → clip + source
+    time); clip drag/resize works on touch (pointer events).
   - Canvas presets (9:16, 16:9, 1:1, 4:5) with cover/contain fit. Projects are
     persisted in the `timeline` column of `jobs.db` and survive restarts.
   - Renders in four passes (main → music → overlays → titles); output lands in

@@ -268,6 +268,28 @@ def _cleanup_temp_files(video_path: Path, ass_path: Path | None, audio_path: Pat
     _safe_unlink(audio_path)
 
 
+def _timeline_referenced_job_ids() -> set:
+    """Source job_ids referenced by any timeline project (main/overlay/split).
+
+    These must NOT be pruned while a timeline still points at them, otherwise the
+    editor loses the footage/transcript it needs to render or text-edit.
+    """
+    refs: set = set()
+    for job in list(jobs.values()):
+        tl = job.get("timeline")
+        if not tl:
+            continue
+        tracks = (tl.get("tracks") or {})
+        for key in ("main", "overlay"):
+            for c in (tracks.get(key) or []):
+                if c.get("source_job_id"):
+                    refs.add(c["source_job_id"])
+                sp = c.get("split") or {}
+                if sp.get("source_job_id"):
+                    refs.add(sp["source_job_id"])
+    return refs
+
+
 def _cleanup_loop() -> None:
     """Background thread: delete old output MP4s and prune the jobs dict."""
     while True:
@@ -275,6 +297,7 @@ def _cleanup_loop() -> None:
         now = time.time()
         output_cutoff = now - OUTPUT_TTL_SECONDS
         upload_cutoff = now - UPLOAD_TTL_SECONDS
+        referenced = _timeline_referenced_job_ids()
 
         # 1. Remove expired output files.
         for mp4 in list(OUTPUT_DIR.glob("*.mp4")):
@@ -303,6 +326,8 @@ def _cleanup_loop() -> None:
             jid for jid, job in list(jobs.items())
             if job.get("status") in _PENDING_STATUSES
             and job.get("created_at", 0) < upload_cutoff
+            # Keep sources a timeline still points at (footage + transcript).
+            and jid not in referenced
         ]
         for jid in stale_pending:
             # Best-effort: delete any upload file that may still be on disk.
@@ -320,7 +345,7 @@ def _cleanup_loop() -> None:
         # We extract the leading job_id prefix (32-char hex) from each filename
         # so any file like {job}.mp4, {job}.ass, {job}_audio.aac,
         # {job}_audiocache.aac, etc. is correctly tied to its parent job.
-        active_ids = set(jobs.keys())
+        active_ids = set(jobs.keys()) | referenced
         _job_id_re = re.compile(r"^([a-f0-9]{32})")
         for f in list(UPLOAD_DIR.glob("*")):
             if not f.is_file():
@@ -4422,11 +4447,20 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     cmd += ["-t", f"{dur:.3f}", "-vf", vf,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
+    if has_audio:
+        # 20ms in/out fade declicks every join (hard cuts + text-cut seams).
+        cmd += ["-af", _tl_declick_af(dur)]
     if not has_audio:
         cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
     cmd += [str(out_path)]
     _tl_run(cmd, "Clip trim")
     return dur
+
+
+def _tl_declick_af(dur: float, d: float = 0.02) -> str:
+    """Short fade-in + fade-out so segment joins don't pop."""
+    d = min(d, max(0.005, dur / 4))
+    return f"afade=t=in:st=0:d={d:.3f},afade=t=out:st={max(0.0, dur - d):.3f}:d={d:.3f}"
 
 
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
@@ -4469,7 +4503,10 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
             "-map", "[v]", "-map", audio_idx,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
-            "-ar", "44100", "-ac", "2", "-shortest", str(out_path)]
+            "-ar", "44100", "-ac", "2"]
+    if hasA:
+        cmd += ["-af", _tl_declick_af(dur)]
+    cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Split-screen")
     return dur
 

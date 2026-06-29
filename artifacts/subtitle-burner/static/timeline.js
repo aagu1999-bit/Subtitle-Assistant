@@ -58,6 +58,30 @@
     return max;
   }
 
+  // ---- Anchoring (Phase 3) ----
+  // Overlays / titles / music remember which Main clip they sit under (anchor)
+  // and how far into it (anchor_offset), so reordering/retrimming Main carries
+  // them along instead of leaving them stranded at an absolute second.
+  function reanchor(c) {
+    if (!tl.tracks.main.length) { c.anchor = null; return; }
+    let idx = 0;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      if ((c.start || 0) >= mainStart(i) - 0.001) idx = i;
+    }
+    c.anchor = tl.tracks.main[idx].id;
+    c.anchor_offset = Math.max(0, (c.start || 0) - mainStart(idx));
+  }
+
+  function applyAnchors() {
+    ["overlay", "text", "music"].forEach((k) => {
+      tl.tracks[k].forEach((c) => {
+        if (!c.anchor) return;
+        const idx = tl.tracks.main.findIndex((m) => m.id === c.anchor);
+        if (idx >= 0) c.start = Math.max(0, mainStart(idx) + (c.anchor_offset || 0));
+      });
+    });
+  }
+
   // ---- Networking ----
   async function api(url, opts) {
     const res = await fetch(url, opts);
@@ -308,6 +332,7 @@
       clip.cuts = merged;
     }
     renderTranscriptWords(clip);
+    applyAnchors();   // cuts change Main duration → reflow anchored items
     renderTracks();
     scheduleSave();
   }
@@ -347,11 +372,13 @@
       max = asset.duration || 4;
     }
     const out = ref.asset_id && asset && asset.kind === "image" ? 4 : Math.min(max, 5);
-    tl.tracks.overlay.push({
+    const oc = {
       id: uid(), ...ref, in: 0, out, _max: max,
       start: 0, x: 0.62, y: 0.06, w: 0.34, opacity: 1.0,
-    });
-    selectClip("overlay", tl.tracks.overlay[tl.tracks.overlay.length - 1].id);
+    };
+    reanchor(oc);
+    tl.tracks.overlay.push(oc);
+    selectClip("overlay", oc.id);
     renderTimeline();
     scheduleSave();
   }
@@ -359,25 +386,29 @@
   async function addMusicClip(asset) {
     if (!(await ensureProject())) return;
     const max = asset.duration || 60;
-    tl.tracks.music.push({
+    const mc = {
       id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
       start: 0, gain_db: -18, duck: true,
-    });
-    selectClip("music", tl.tracks.music[tl.tracks.music.length - 1].id);
+    };
+    reanchor(mc);
+    tl.tracks.music.push(mc);
+    selectClip("music", mc.id);
     renderTimeline();
     scheduleSave();
   }
 
   async function addTitle() {
     if (!(await ensureProject())) return;
-    tl.tracks.text.push({
+    const tc = {
       id: uid(), text: "Lower third\nName · Title", start: 0, out: 4,
       x: 0.5, y: 0.82, size: 56, color: "#FFFFFF", font: "Anton",
       bg_enabled: true, bg_color: "#000000", bg_opacity: 0.55,
       outline_color: "#000000", outline_width: 0, shadow: 0,
       bold: true, align: 2, anim: "fade",
-    });
-    selectClip("text", tl.tracks.text[tl.tracks.text.length - 1].id);
+    };
+    reanchor(tc);
+    tl.tracks.text.push(tc);
+    selectClip("text", tc.id);
     renderTimeline();
     scheduleSave();
   }
@@ -387,6 +418,7 @@
   // selection / add / delete). renderTracks = redraw only the lanes (use during
   // slider/number edits so the props panel keeps focus).
   function renderTimeline() {
+    applyAnchors();   // keep anchored overlays/titles/music attached to Main
     renderTracks();
     renderProps();
   }
@@ -558,11 +590,24 @@
 
   // ---- Split the selected Main clip at the playhead ----
   function splitAtPlayhead() {
-    if (!selected || selected.track !== "main") { alert("Select a Main clip first."); return; }
-    const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
-    if (idx < 0) return;
+    const cur = ($("tlPreviewVideo").currentTime) || 0;
+    let idx, t;
+    if (previewingOutput) {
+      // Preview is the full render: map output time -> which Main clip + source time.
+      idx = -1;
+      for (let i = 0; i < tl.tracks.main.length; i++) {
+        const s = mainStart(i), e = s + clipDuration(tl.tracks.main[i]);
+        if (cur >= s && cur < e) { idx = i; t = (tl.tracks.main[i].in || 0) + (cur - s); break; }
+      }
+      if (idx < 0) { alert("Move the playhead over a Main clip first."); return; }
+      selectClip("main", tl.tracks.main[idx].id);
+    } else {
+      if (!selected || selected.track !== "main") { alert("Select a Main clip first."); return; }
+      idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
+      if (idx < 0) return;
+      t = cur;  // source time of the selected clip's preview
+    }
     const c = tl.tracks.main[idx];
-    const t = ($("tlPreviewVideo").currentTime) || 0;  // source time
     if (t <= (c.in || 0) + 0.1 || t >= (c.out || 0) - 0.1) {
       alert("Move the playhead to somewhere inside the clip first.");
       return;
@@ -1093,8 +1138,11 @@
 
   function onMouseUp() {
     if (drag) {
+      const tr = drag.track, c = drag.c;
       drag = null;
-      renderProps();   // reflect final trim/position values in the panel
+      if (tr === "main") applyAnchors();   // Main moved/trimmed → reflow anchored items
+      else if (c) reanchor(c);             // overlay/title/music → re-pin to where it landed
+      renderTimeline();                    // redraw lanes + props with final values
       scheduleSave();
     }
   }
@@ -1154,6 +1202,12 @@
         tl.tracks.overlay.forEach((c) => { if (c.source_job_id === j && !c._max) c._max = d; });
       } catch (e) {}
     }
+    // Music clips: fill _max from the asset list so the waveform slices right.
+    tl.tracks.music.forEach((c) => {
+      if (c._max || !c.asset_id) return;
+      const a = assets.find((x) => x.asset_id === c.asset_id);
+      if (a && a.duration) c._max = a.duration;
+    });
     renderTimeline();
   }
 
@@ -1257,9 +1311,11 @@
       b.onclick = () => setLeftTab(b.dataset.ltab));
 
     const timeline = $("tlTimeline");
-    timeline.addEventListener("mousedown", onTimelineMouseDown);
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    // Pointer events cover mouse + touch + pen, so clip drag/resize works on
+    // touch devices too. onMouseMove/onBoxMove each guard their own drag state.
+    timeline.addEventListener("pointerdown", onTimelineMouseDown);
+    document.addEventListener("pointermove", onMouseMove);
+    document.addEventListener("pointerup", onMouseUp);
     document.addEventListener("pointermove", onBoxMove);
     document.addEventListener("pointerup", onBoxUp);
     wireScrub();
