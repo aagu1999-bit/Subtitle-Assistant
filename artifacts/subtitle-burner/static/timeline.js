@@ -6,6 +6,9 @@
 (function () {
   "use strict";
 
+  const TL_BUILD = "editor-build-7";
+  console.log("[timeline] " + TL_BUILD + " script loaded");
+
   const $ = (id) => document.getElementById(id);
   let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
@@ -1284,56 +1287,69 @@
     }
   }
 
+  // Null-safe event binding so one missing/stale element can never abort the
+  // rest of the wiring (the old code threw on the first null and left the whole
+  // editor dead — no drag, no buttons, nothing).
+  function on(id, ev, fn) {
+    const el = $(id);
+    if (el) el[ev] = fn;
+    else console.warn("[timeline] missing element:", id, "(stale index.html? hard-refresh)");
+  }
+
   // ---- Init (lazy, when the Editor tab is first opened) ----
   async function ensureInit() {
     if (initialized) {
-      loadSources();
-      loadAssets();
-      loadProjects();
+      loadSources(); loadAssets(); loadProjects();
       return;
     }
     initialized = true;
+    console.log("[timeline] " + TL_BUILD + " initializing");
 
-    $("tlNewBtn").onclick = newProject;
-    $("tlProjectSelect").onchange = (e) => { if (e.target.value) openProject(e.target.value); };
-    $("tlLabel").oninput = (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } };
-    $("tlCanvas").onchange = (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } };
-    $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } };
-    $("tlRenderBtn").onclick = renderTimelineVideo;
-    $("tlAddTitleBtn").onclick = () => addTitle();
-    $("tlProjectBtn").onclick = () => { selected = null; renderTimeline(); };
-    $("tlAssetBtn").onclick = () => $("tlAssetFile").click();
-    $("tlAssetFile").onchange = (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; };
-    $("tlSplitBtn").onclick = splitAtPlayhead;
-    $("tlZoomIn").onclick = () => setZoom(4);
-    $("tlZoomOut").onclick = () => setZoom(-4);
-    document.querySelectorAll(".tl-lefttab").forEach((b) =>
-      b.onclick = () => setLeftTab(b.dataset.ltab));
+    try {
+      on("tlNewBtn", "onclick", newProject);
+      on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
+      on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
+      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } });
+      on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
+      on("tlRenderBtn", "onclick", renderTimelineVideo);
+      on("tlAddTitleBtn", "onclick", () => addTitle());
+      on("tlProjectBtn", "onclick", () => { selected = null; renderTimeline(); });
+      on("tlAssetBtn", "onclick", () => { const f = $("tlAssetFile"); if (f) f.click(); });
+      on("tlAssetFile", "onchange", (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; });
+      on("tlSplitBtn", "onclick", splitAtPlayhead);
+      on("tlZoomIn", "onclick", () => setZoom(4));
+      on("tlZoomOut", "onclick", () => setZoom(-4));
+      document.querySelectorAll(".tl-lefttab").forEach((b) =>
+        b.onclick = () => setLeftTab(b.dataset.ltab));
 
-    const timeline = $("tlTimeline");
-    // Pointer events cover mouse + touch + pen, so clip drag/resize works on
-    // touch devices too. onMouseMove/onBoxMove each guard their own drag state.
-    timeline.addEventListener("pointerdown", onTimelineMouseDown);
-    document.addEventListener("pointermove", onMouseMove);
-    document.addEventListener("pointerup", onMouseUp);
-    document.addEventListener("pointermove", onBoxMove);
-    document.addEventListener("pointerup", onBoxUp);
-    wireScrub();
-    setLeftTab("media");
+      const timeline = $("tlTimeline");
+      if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
+      document.addEventListener("pointermove", onMouseMove);
+      document.addEventListener("pointerup", onMouseUp);
+      document.addEventListener("pointermove", onBoxMove);
+      document.addEventListener("pointerup", onBoxUp);
+      wireScrub();
+      setLeftTab("media");
+      setSaveState(TL_BUILD);
+    } catch (e) {
+      console.error("[timeline] wiring failed", e);
+      alert("Editor failed to start (" + TL_BUILD + "): " + e.message + "\nTry a hard refresh (Cmd/Ctrl+Shift+R).");
+    }
 
     // Open/create the project FIRST so `tl` exists before the source list
-    // (with its + buttons) is rendered — otherwise an early click races a null tl.
+    // (with its + buttons) renders — otherwise an early click races a null tl.
     try {
       const data = await api("/timeline/list");
       if (data.timelines.length) await openProject(data.timelines[0].job_id);
       else await newProject();
     } catch (e) {
-      await newProject();
+      try { await newProject(); } catch (e2) { console.error("[timeline] project init failed", e2); }
     }
 
     await loadSources();
     await loadAssets();
     await loadProjects();
+    console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
   }
 
   // Hook the Editor tab button so we init on first open.
