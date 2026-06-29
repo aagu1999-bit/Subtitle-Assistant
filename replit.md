@@ -55,6 +55,16 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
     a badge on the timeline block (🔍 / ⬓ / ✂️).
   - **Persistent logo / watermark** — project-level image/video overlay across
     the whole render (set via the 🏷 Logo / project panel).
+  - **Captions in the timeline** — each Main clip can burn its source
+    transcript as word-by-word karaoke captions (per-clip toggle, default on).
+    Word timestamps are remapped through trims / text-cuts / transitions onto
+    the output timeline and merged with titles into a single libass pass.
+  - **Send to timeline** — 🎬 button on each sidebar video and each Highlights
+    result opens the editor with that clip (or highlight range) on the Main
+    track (`window.openTimelineEditor(jobId, {in, out})`).
+  - **Live preview** — canvas-aspect stage (matches the output ratio + fit) with
+    a scrub bar; drag title / overlay / logo boxes directly on the frame to
+    position them, and ⤓ Set IN/OUT buttons trim a clip at the playhead.
   - Canvas presets (9:16, 16:9, 1:1, 4:5) with cover/contain fit. Projects are
     persisted in the `timeline` column of `jobs.db` and survive restarts.
   - Renders in four passes (main → music → overlays → titles); output lands in

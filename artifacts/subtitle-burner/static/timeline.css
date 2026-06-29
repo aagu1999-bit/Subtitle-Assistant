@@ -118,15 +118,62 @@
   justify-content: center;
   overflow: hidden;
 }
-.tl-preview video {
-  max-height: 46vh;
-  max-width: 100%;
+/* Canvas-aspect stage: video fills it (object-fit matches render fit) so
+   overlay boxes placed by % map 1:1 to the rendered output. */
+.tl-stage {
+  position: relative;
+  height: 46vh;
+  aspect-ratio: 9 / 16;
+  background: #000;
   border-radius: 8px;
+  overflow: hidden;
   display: none;
 }
-.tl-preview.has-video video { display: block; }
+.tl-preview.has-video .tl-stage { display: block; }
 .tl-preview.has-video .tl-preview-empty { display: none; }
+.tl-stage video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.tl-stage.fit-contain video { object-fit: contain; }
+.tl-overlay-layer { position: absolute; inset: 0; pointer-events: none; }
+.tl-pbox {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  border: 1.5px dashed rgba(255,255,255,.85);
+  background: rgba(108,92,255,.14);
+  box-sizing: border-box;
+  border-radius: 4px;
+  font-size: .7rem;
+  color: #fff;
+  text-shadow: 0 1px 2px #000;
+}
+.tl-pbox.title {
+  border-style: solid;
+  background: rgba(224,153,42,.25);
+  transform: translate(-50%, -50%);
+  white-space: pre;
+  padding: 3px 6px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+}
+.tl-pbox-label { padding: 2px 4px; pointer-events: none; }
+.tl-pbox-handle {
+  position: absolute;
+  right: -5px; bottom: -5px;
+  width: 12px; height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  cursor: nwse-resize;
+}
 .tl-preview-empty { color: #8b91a0; text-align: center; padding: 30px; font-size: .9rem; }
+
+.tl-scrubrow { display: flex; align-items: center; gap: 8px; }
+.tl-scrub { flex: 1; }
 
 /* ---- Timeline ---- */
 .tl-timeline {

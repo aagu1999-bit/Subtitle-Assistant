@@ -222,11 +222,14 @@
   }
 
   // ---- Add clips ----
-  async function addMainClip(jobId) {
+  async function addMainClip(jobId, inS, outS) {
     try {
       const dur = await getSourceDuration(jobId);
+      const ci = inS != null ? Math.max(0, inS) : 0;
+      const co = outS != null ? Math.min(dur, outS) : dur;
       tl.tracks.main.push({
-        id: uid(), source_job_id: jobId, in: 0, out: dur, _max: dur, transition: null,
+        id: uid(), source_job_id: jobId, in: ci, out: co > ci ? co : dur,
+        _max: dur, transition: null, burn_captions: true,
       });
       renderTimeline();
       scheduleSave();
@@ -356,19 +359,143 @@
   // ---- Selection + properties ----
   function selectClip(track, id) {
     selected = { track, id };
-    renderTimeline();
-    // Scrub the source clip into the preview if it has video.
     const c = findClip(track, id);
-    if (c && (c.source_job_id || (c.asset_id && track !== "music"))) {
-      const src = c.source_job_id ? "/raw-upload/" + c.source_job_id : "/asset/" + c.asset_id;
-      const v = $("tlPreviewVideo");
-      const wrap = $("tlPreviewVideo").closest(".tl-preview");
-      if (v) {
-        v.src = src;
-        wrap.classList.add("has-video");
-        v.currentTime = c.in || 0;
-      }
+    // Choose what the preview shows: the clip's own video, or — for titles /
+    // image overlays with no video — the first Main clip as a backdrop so you
+    // can still position boxes against real framing.
+    let src = null, seekTo = null;
+    if (c && c.source_job_id) { src = "/raw-upload/" + c.source_job_id; seekTo = c.in || 0; }
+    else if (c && c.asset_id && track !== "music") src = "/asset/" + c.asset_id;
+    if (!src) {
+      const fm = tl.tracks.main.find((m) => m.source_job_id);
+      if (fm) src = "/raw-upload/" + fm.source_job_id;
     }
+    if (src) {
+      const v = $("tlPreviewVideo");
+      const wrap = v.closest(".tl-preview");
+      if (v.getAttribute("src") !== src) v.src = src;
+      wrap.classList.add("has-video");
+      if (seekTo != null) { try { v.currentTime = seekTo; } catch (e) {} }
+    }
+    applyStage();
+    renderTimeline();   // renderProps() (inside) redraws the preview boxes
+  }
+
+  const CANVAS_AR = { "9x16": "9 / 16", "16x9": "16 / 9", "1x1": "1 / 1", "4x5": "4 / 5" };
+  function applyStage() {
+    const st = $("tlStage");
+    if (!st || !tl) return;
+    st.style.aspectRatio = CANVAS_AR[tl.canvas] || "9 / 16";
+    st.classList.toggle("fit-contain", tl.fit === "contain");
+  }
+
+  // ---- Live preview boxes (drag to position titles / overlays / logo) ----
+  function renderPreviewBoxes() {
+    const layer = $("tlOverlayLayer");
+    if (!layer || !tl) return;
+    layer.innerHTML = "";
+    if (!selected) {
+      if (tl.logo && tl.logo.asset_id) addPreviewBox("logo", tl.logo, "Logo");
+      return;
+    }
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
+    else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
+    else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
+  }
+
+  function addPreviewBox(kind, obj, labelText) {
+    const layer = $("tlOverlayLayer");
+    const box = document.createElement("div");
+    if (kind === "title") {
+      box.className = "tl-pbox title";
+      box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
+      box.style.top = (obj.y != null ? obj.y : 0.85) * 100 + "%";
+      box.textContent = labelText;
+    } else {
+      box.className = "tl-pbox";
+      box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
+      box.style.top = (obj.y != null ? obj.y : 0.1) * 100 + "%";
+      box.style.width = (obj.w != null ? obj.w : 0.3) * 100 + "%";
+      box.style.aspectRatio = "16 / 9";
+      const lbl = document.createElement("div");
+      lbl.className = "tl-pbox-label";
+      lbl.textContent = labelText;
+      box.appendChild(lbl);
+      const h = document.createElement("div");
+      h.className = "tl-pbox-handle";
+      box.appendChild(h);
+    }
+    box.addEventListener("pointerdown", (e) => startBoxDrag(e, kind, obj, box));
+    layer.appendChild(box);
+  }
+
+  function addSplitGuide(c) {
+    const layer = $("tlOverlayLayer");
+    let layout = (c.split && c.split.layout) || "auto";
+    if (layout === "auto") layout = (tl.canvas === "16x9") ? "side" : "stack";
+    const line = document.createElement("div");
+    line.style.position = "absolute";
+    line.style.background = "rgba(255,255,255,.6)";
+    if (layout === "side") { line.style.left = "50%"; line.style.top = "0"; line.style.bottom = "0"; line.style.width = "2px"; }
+    else { line.style.top = "50%"; line.style.left = "0"; line.style.right = "0"; line.style.height = "2px"; }
+    layer.appendChild(line);
+  }
+
+  let boxDrag = null;
+  function startBoxDrag(e, kind, obj, box) {
+    const rect = $("tlStage").getBoundingClientRect();
+    boxDrag = {
+      kind, obj, box, rect,
+      isHandle: e.target.classList.contains("tl-pbox-handle"),
+      sx: e.clientX, sy: e.clientY,
+      ox: obj.x != null ? obj.x : 0.5, oy: obj.y != null ? obj.y : 0.5,
+      ow: obj.w != null ? obj.w : 0.3,
+    };
+    try { box.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  function onBoxMove(e) {
+    if (!boxDrag) return;
+    const { rect, obj, box, isHandle } = boxDrag;
+    if (isHandle) {
+      const w = boxDrag.ow + (e.clientX - boxDrag.sx) / rect.width;
+      obj.w = Math.min(1, Math.max(0.05, w));
+      box.style.width = obj.w * 100 + "%";
+    } else {
+      obj.x = Math.min(1, Math.max(0, boxDrag.ox + (e.clientX - boxDrag.sx) / rect.width));
+      obj.y = Math.min(1, Math.max(0, boxDrag.oy + (e.clientY - boxDrag.sy) / rect.height));
+      box.style.left = obj.x * 100 + "%";
+      box.style.top = obj.y * 100 + "%";
+    }
+  }
+  function onBoxUp() {
+    if (!boxDrag) return;
+    boxDrag = null;
+    renderProps();   // refresh the X/Y/size sliders to the dragged values
+    scheduleSave();
+  }
+
+  // ---- Scrub bar ----
+  function wireScrub() {
+    const v = $("tlPreviewVideo");
+    const scrub = $("tlScrub");
+    const playBtn = $("tlPlayBtn");
+    if (!v) return;
+    playBtn.onclick = () => { v.paused ? v.play().catch(() => {}) : v.pause(); };
+    const upd = () => {
+      const d = v.duration || 0;
+      if (scrub && document.activeElement !== scrub) scrub.value = d ? (v.currentTime / d * 100) : 0;
+      $("tlScrubTime").textContent = `${fmtTime(v.currentTime)} / ${fmtTime(d)}`;
+      playBtn.textContent = v.paused ? "▶" : "❚❚";
+    };
+    v.addEventListener("timeupdate", upd);
+    v.addEventListener("loadedmetadata", upd);
+    v.addEventListener("play", upd);
+    v.addEventListener("pause", upd);
+    scrub.addEventListener("input", (e) => { if (v.duration) v.currentTime = (e.target.value / 100) * v.duration; });
   }
 
   function findClip(track, id) {
@@ -380,6 +507,7 @@
     if (!wrap) return;
     if (!selected) {
       renderProjectProps(wrap);
+      renderPreviewBoxes();
       return;
     }
     const c = findClip(selected.track, selected.id);
@@ -409,6 +537,8 @@
       html += propRange("w", "Size (width %)", c.w, 0.05, 1, 0.01);
     } else { // main
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
+      html += propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
       const trType = (c.transition && c.transition.type) || "";
       html += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
       html += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this.</p>`;
@@ -442,6 +572,7 @@
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+    renderPreviewBoxes();
   }
 
   // Project-level settings (shown when no clip is selected): persistent logo.
@@ -562,6 +693,18 @@
     if (del) del.onclick = () => deleteClip(track, c.id);
     const et = wrap.querySelector('[data-act="edittext"]');
     if (et) et.onclick = () => openTextEditor(c);
+    const setin = wrap.querySelector('[data-act="setin"]');
+    if (setin) setin.onclick = () => {
+      const t = $("tlPreviewVideo").currentTime || 0;
+      c.in = Math.max(0, Math.min(t, (c.out || 0) - 0.2));
+      renderTimeline(); scheduleSave();
+    };
+    const setout = wrap.querySelector('[data-act="setout"]');
+    if (setout) setout.onclick = () => {
+      const t = $("tlPreviewVideo").currentTime || 0;
+      c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
+      renderTimeline(); scheduleSave();
+    };
   }
 
   // ---- Text-based editing: strike out words to cut them from the clip ----
@@ -772,6 +915,7 @@
     $("tlCanvas").value = tl.canvas;
     $("tlFit").value = tl.fit;
     setSaveState("Saved ✓");
+    applyStage();
     renderTimeline();
     refreshMaxTrims();
   }
@@ -875,8 +1019,8 @@
     $("tlNewBtn").onclick = newProject;
     $("tlProjectSelect").onchange = (e) => { if (e.target.value) openProject(e.target.value); };
     $("tlLabel").oninput = (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } };
-    $("tlCanvas").onchange = (e) => { if (tl) { tl.canvas = e.target.value; scheduleSave(); } };
-    $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; scheduleSave(); } };
+    $("tlCanvas").onchange = (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } };
+    $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } };
     $("tlRenderBtn").onclick = renderTimelineVideo;
     $("tlAddTitleBtn").onclick = () => { if (tl) addTitle(); else alert("Create or open a project first."); };
     $("tlProjectBtn").onclick = () => { selected = null; renderTimeline(); };
@@ -887,6 +1031,9 @@
     timeline.addEventListener("mousedown", onTimelineMouseDown);
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("pointermove", onBoxMove);
+    document.addEventListener("pointerup", onBoxUp);
+    wireScrub();
 
     await loadSources();
     await loadAssets();
@@ -910,10 +1057,13 @@
 
   // Expose an entry point so other parts of the app could open the editor
   // seeded from a specific job in the future.
-  window.openTimelineEditor = async function (seedJobId) {
+  window.openTimelineEditor = async function (seedJobId, opts) {
+    opts = opts || {};
     const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
     if (tabBtn) tabBtn.click();
     await ensureInit();
-    if (seedJobId && tl) await addMainClip(seedJobId);
+    // Make sure this newly-added source is in the library list.
+    if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
+    if (seedJobId && tl) await addMainClip(seedJobId, opts.in, opts.out);
   };
 })();

@@ -4472,14 +4472,16 @@ def _tl_concat(paths: list, out_path: Path) -> None:
 
 
 def _tl_build_main_track(segments: list, transitions: list,
-                         out_path: Path, job_id: str) -> float:
+                         out_path: Path, job_id: str) -> tuple[float, list]:
     """Stitch normalized *segments* into one clip.
 
     *segments* is [(path, duration)]; *transitions[i]* is the crossfade
     duration (seconds) between segment i and i+1, or 0 for a hard cut. When no
     crossfades are requested we use the cheap concat demuxer; otherwise we fold
     the clips together pairwise (xfade for crossfades, filter-concat for cuts).
-    Returns the total duration of the stitched track.
+    Returns (total_duration, seg_output_starts) where seg_output_starts[i] is
+    the time on the final timeline where segment i begins — used to place
+    captions through the same trims/cuts/transitions.
     """
     if not segments:
         raise RuntimeError("Main track has no clips")
@@ -4488,16 +4490,21 @@ def _tl_build_main_track(segments: list, transitions: list,
         # Copy the lone segment to the expected output name.
         _tl_run(["ffmpeg", "-y", "-i", str(seg_path), "-c", "copy",
                  "-movflags", "+faststart", str(out_path)], "Finalize main")
-        return dur
+        return dur, [0.0]
 
     # transitions[i] is a transition-type string (truthy) or 0/None for a cut.
     if not any(transitions):
         _tl_concat([p for p, _ in segments], out_path)
-        return sum(d for _, d in segments)
+        starts, acc = [], 0.0
+        for _, d in segments:
+            starts.append(acc)
+            acc += d
+        return acc, starts
 
     intermediates: list[Path] = []
     try:
         cur_path, cur_dur = segments[0]
+        seg_starts = [0.0]
         for i in range(1, len(segments)):
             nxt_path, nxt_dur = segments[i]
             tname = transitions[i - 1] if i - 1 < len(transitions) else 0
@@ -4512,9 +4519,11 @@ def _tl_build_main_track(segments: list, transitions: list,
                     f"offset={offset:.3f},format=yuv420p[v];"
                     f"[0:a][1:a]acrossfade=d={tdur:.3f}[a]"
                 )
+                seg_starts.append(offset)
                 cur_dur = cur_dur + nxt_dur - tdur
             else:
                 fc = "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
+                seg_starts.append(cur_dur)
                 cur_dur = cur_dur + nxt_dur
             _tl_run(
                 ["ffmpeg", "-y", "-i", str(cur_path), "-i", str(nxt_path),
@@ -4526,7 +4535,7 @@ def _tl_build_main_track(segments: list, transitions: list,
             cur_path = step_out
         _tl_run(["ffmpeg", "-y", "-i", str(cur_path), "-c", "copy",
                  "-movflags", "+faststart", str(out_path)], "Finalize main")
-        return cur_dur
+        return cur_dur, seg_starts
     finally:
         for p in intermediates:
             _safe_unlink(p)
@@ -4740,6 +4749,54 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
     return header + "\n".join(events) + "\n"
 
 
+_TL_DEFAULT_CAPTION_STYLE = {
+    "font_name": "Montserrat Thin Black", "font_size": 64,
+    "primary_color": "#FFFFFF", "highlight_color": "#FFD60A",
+    "accent_color": "#FF6B35", "outline_color": "#000000",
+    "outline_width": 3, "shadow": 1, "position_y": 82,
+    "all_caps": True, "group_size": 3,
+    "smooth_timings": True, "punchword_emphasis": True,
+}
+
+
+def _tl_compose_ass(W: int, H: int, *ass_docs: str) -> str:
+    """Merge several ASS docs into one (single libass burn pass).
+
+    Pulls every ``Style:`` and ``Dialogue:`` line out of each input doc and
+    rebuilds a single document with one header. Robust to ordering because it
+    matches on line prefixes, not positions. Style names are assumed unique
+    across docs (captions use ``Default``; titles use ``T0..Tn``).
+    """
+    styles, events = [], []
+    for doc in ass_docs:
+        if not doc:
+            continue
+        for line in doc.splitlines():
+            if line.startswith("Style:"):
+                styles.append(line)
+            elif line.startswith("Dialogue:"):
+                events.append(line)
+    header = (
+        "[Script Info]\n"
+        "Title: Timeline Captions+Titles\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {W}\n"
+        f"PlayResY: {H}\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+        "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+        "MarginL, MarginR, MarginV, Encoding\n"
+        + "\n".join(styles) + "\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
+    return header + "\n".join(events) + "\n"
+
+
 def _tl_keep_ranges(t_in: float, t_out: float, cuts: list) -> list:
     """Subtract *cuts* from [t_in, t_out], returning the kept (start, end) spans.
 
@@ -4830,6 +4887,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         _stage("building main track", 10)
         segments = []        # [(path, dur)]
         transitions = []     # len == len(segments) - 1
+        seg_meta = []        # per-segment caption source info, aligned to segments
         seg_counter = 0
         for i, c in enumerate(main_clips):
             src = _timeline_clip_source(c)
@@ -4851,6 +4909,9 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             clip_tr = c.get("transition") or {}
             clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
 
+            # Captions default ON; the source job supplies the words + style.
+            burn_caps = c.get("burn_captions", True) and bool(c.get("source_job_id"))
+
             for k, (ks, ke) in enumerate(keeps):
                 seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
                 kdur = ke - ks
@@ -4863,6 +4924,10 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     dur = _tl_normalize_segment(src, ks, ke, W, H, fps, fit, bg,
                                                 seg_path, ken=ken)
                 segments.append((seg_path, dur))
+                seg_meta.append({
+                    "source_job_id": c.get("source_job_id"),
+                    "src_in": ks, "src_out": ke, "burn_captions": burn_caps,
+                })
                 work.append(seg_path)
                 # Boundary transition only at the START of a new clip's first
                 # kept piece (not the very first segment overall).
@@ -4878,7 +4943,38 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         base = UPLOAD_DIR / f"{job_id}_tlbase.mp4"
         work.append(base)
-        _tl_build_main_track(segments, transitions, base, job_id)
+        _total_dur, seg_starts = _tl_build_main_track(segments, transitions, base, job_id)
+
+        # ---- Remap each captioned segment's words onto the output timeline ----
+        caption_words = []
+        caption_style = None
+        caption_emoji = None
+        for idx, meta in enumerate(seg_meta):
+            if not meta["burn_captions"]:
+                continue
+            sjob = jobs.get(meta["source_job_id"]) or {}
+            words = sjob.get("words") or []
+            if not words:
+                continue
+            if caption_style is None:
+                caption_style = sjob.get("style") or _TL_DEFAULT_CAPTION_STYLE
+                caption_emoji = sjob.get("emoji_rules") or {}
+            seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+            for w in words:
+                try:
+                    ws = float(w.get("start", 0))
+                    we = float(w.get("end", 0))
+                except (TypeError, ValueError):
+                    continue
+                if we <= meta["src_in"] or ws >= meta["src_out"]:
+                    continue
+                local_s = max(0.0, ws - meta["src_in"])
+                local_e = max(local_s, min(meta["src_out"], we) - meta["src_in"])
+                caption_words.append({
+                    "word": w.get("word", ""),
+                    "start": seg_start + local_s,
+                    "end": seg_start + local_e,
+                })
 
         # ---- Persistent logo / watermark (whole-video overlay) ----
         if tl.get("logo"):
@@ -4904,17 +5000,23 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _tl_composite_overlays(base, tracks["overlay"], W, H, comp)
             base = comp
 
-        # ---- Pass 4: titles / lower-thirds ----
+        # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
-        if tracks["text"]:
-            _stage("adding titles", 85)
-            ass_text = _tl_build_titles_ass(tracks["text"], W, H)
-            ass_path = UPLOAD_DIR / f"{job_id}_tltitles.ass"
+        caption_ass = None
+        if caption_words:
+            caption_ass = build_ass(caption_words, caption_style or _TL_DEFAULT_CAPTION_STYLE,
+                                    W, H, caption_emoji or {})
+        titles_ass = _tl_build_titles_ass(tracks["text"], W, H) if tracks["text"] else None
+
+        if caption_ass or titles_ass:
+            _stage("adding captions & titles", 85)
+            ass_text = _tl_compose_ass(W, H, caption_ass or "", titles_ass or "")
+            ass_path = UPLOAD_DIR / f"{job_id}_tltext.ass"
             ass_path.write_text(ass_text, encoding="utf-8")
             work.append(ass_path)
             burn_subtitles(base, ass_path, output_path)
         else:
-            # No titles — just finalize (stream copy is enough).
+            # Nothing to burn — just finalize (stream copy is enough).
             _stage("finalizing", 90)
             _tl_run(["ffmpeg", "-y", "-i", str(base), "-c", "copy",
                      "-movflags", "+faststart", str(output_path)], "Finalize")

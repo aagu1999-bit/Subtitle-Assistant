@@ -1774,6 +1774,18 @@ function renderJobsList() {
     };
     div.appendChild(rename);
 
+    if (meta.video_available && typeof window.openTimelineEditor === "function") {
+      const toTl = document.createElement("button");
+      toTl.className = "job-rename";
+      toTl.textContent = "🎬";
+      toTl.title = "Edit in timeline (open the multi-track editor with this clip)";
+      toTl.onclick = (e) => {
+        e.stopPropagation();
+        window.openTimelineEditor(jobId);
+      };
+      div.appendChild(toTl);
+    }
+
     const del = document.createElement("button");
     del.className = "job-delete";
     del.textContent = "✕";
@@ -2158,6 +2170,20 @@ function renderHighlights(clips, format) {
       }
     };
     actions.appendChild(makeBtn);
+
+    if (typeof window.openTimelineEditor === "function") {
+      const tlBtn = document.createElement("button");
+      tlBtn.textContent = "🎬 To timeline";
+      tlBtn.title = "Open the timeline editor with this highlight as a clip";
+      tlBtn.onclick = () => {
+        if (editedEnd <= editedStart) {
+          alert("End time must be greater than start time.");
+          return;
+        }
+        window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd });
+      };
+      actions.appendChild(tlBtn);
+    }
 
     card.appendChild(actions);
     hlResults.appendChild(card);
