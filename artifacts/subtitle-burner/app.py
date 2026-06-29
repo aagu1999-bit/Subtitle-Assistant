@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import threading
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, make_response
 
 # ---- Local env auto-load ----
 # Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
@@ -3751,7 +3751,7 @@ def index():
         asset_version = str(int(latest_mtime))
     except OSError:
         asset_version = str(int(time.time()))
-    return render_template(
+    html = render_template(
         "index.html",
         auphonic_enabled=auphonic_enabled,
         elevenlabs_enabled=elevenlabs_enabled,
@@ -3759,6 +3759,14 @@ def index():
         gemini_enabled=gemini_enabled,
         asset_version=asset_version,
     )
+    # Never let the browser cache the HTML shell. The ?v=asset_version on the
+    # CSS/JS only busts those files if the *page* itself is fresh — a cached
+    # index.html keeps pointing at old ?v= and re-loads stale JS, which is how
+    # version skew (new JS wiring buttons a stale page lacks) crept in.
+    resp = make_response(html)
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/transcribe-only", methods=["POST"])
