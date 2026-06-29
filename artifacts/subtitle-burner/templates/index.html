@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Subtitle Burner</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_version }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='timeline.css') }}?v={{ asset_version }}">
 </head>
 <body>
 
@@ -64,6 +65,7 @@
       <button type="button" class="main-tab active" data-tab="edit">Edit</button>
       {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="highlights">✨ Highlights</button>{% endif %}
       {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>{% endif %}
+      <button type="button" class="main-tab" data-tab="editor">🎬 Editor</button>
       <button type="button" class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
     </nav>
 
@@ -742,6 +744,97 @@
   <!-- /Tab: Compilation -->
   {% endif %}
 
+  <!-- Tab: Editor (multi-track timeline) -->
+  <div class="tab-content hidden" data-tab-group="editor">
+    <div id="tlEditor" class="tl-editor">
+
+      <!-- Top toolbar -->
+      <div class="tl-toolbar">
+        <div class="tl-toolbar-left">
+          <select id="tlProjectSelect" class="tl-select" title="Open an existing timeline project"></select>
+          <button id="tlNewBtn" class="btn btn-secondary">+ New project</button>
+          <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
+        </div>
+        <div class="tl-toolbar-right">
+          <label class="tl-inline">Canvas
+            <select id="tlCanvas" class="tl-select">
+              <option value="9x16">9:16 (Reels/TikTok)</option>
+              <option value="16x9">16:9 (YouTube)</option>
+              <option value="1x1">1:1 (Square)</option>
+              <option value="4x5">4:5 (Feed)</option>
+            </select>
+          </label>
+          <label class="tl-inline">Fit
+            <select id="tlFit" class="tl-select">
+              <option value="cover">Cover (crop)</option>
+              <option value="contain">Contain (letterbox)</option>
+            </select>
+          </label>
+          <span id="tlSaveState" class="muted tl-savestate"></span>
+          <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
+        </div>
+      </div>
+
+      <div class="tl-body">
+        <!-- Left: media library -->
+        <aside class="tl-library">
+          <h3>Your videos</h3>
+          <p class="muted tl-hint">Click ➕ to drop a clip on the main track.</p>
+          <div id="tlSourceList" class="tl-source-list"></div>
+
+          <h3 style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>
+          <div class="tl-asset-upload">
+            <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" hidden>
+            <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
+          </div>
+          <div id="tlAssetList" class="tl-source-list"></div>
+        </aside>
+
+        <!-- Center: preview + timeline -->
+        <section class="tl-stage-wrap">
+          <div class="tl-preview">
+            <video id="tlPreviewVideo" controls preload="metadata"></video>
+            <div id="tlPreviewEmpty" class="tl-preview-empty">
+              <p>Select a clip to scrub it here, or press <strong>Render</strong> to see the full edit.</p>
+            </div>
+          </div>
+
+          <div class="tl-timeline" id="tlTimeline">
+            <div class="tl-ruler" id="tlRuler"></div>
+            <div class="tl-tracks" id="tlTracks">
+              <div class="tl-track" data-track="main">
+                <div class="tl-track-label">🎬 Main</div>
+                <div class="tl-track-lane" data-lane="main"></div>
+              </div>
+              <div class="tl-track" data-track="overlay">
+                <div class="tl-track-label">🖼 Overlay</div>
+                <div class="tl-track-lane" data-lane="overlay"></div>
+              </div>
+              <div class="tl-track" data-track="text">
+                <div class="tl-track-label">🔤 Titles</div>
+                <div class="tl-track-lane" data-lane="text"></div>
+              </div>
+              <div class="tl-track" data-track="music">
+                <div class="tl-track-label">🎵 Music</div>
+                <div class="tl-track-lane" data-lane="music"></div>
+              </div>
+            </div>
+          </div>
+          <div class="tl-actions">
+            <button id="tlAddTitleBtn" class="btn btn-secondary">+ Title / lower-third</button>
+            <span id="tlRenderStatus" class="muted"></span>
+          </div>
+        </section>
+
+        <!-- Right: properties -->
+        <aside class="tl-props" id="tlProps">
+          <div class="tl-props-empty muted">Select a clip on the timeline to edit its properties.</div>
+        </aside>
+      </div>
+    </div>
+  </div>
+  <!-- /Tab: Editor -->
+
   <!-- Tab: Result -->
   <div class="tab-content hidden" data-tab-group="result">
     <div id="result" class="result hidden">
@@ -763,5 +856,6 @@
 <!-- /app-shell -->
 
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='timeline.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>

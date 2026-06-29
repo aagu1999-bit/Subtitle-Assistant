@@ -36,17 +36,35 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
 - Supports FFmpeg audio enhancement and optional Auphonic AI enhancement
 - Persists job state, edited subtitle words, style settings, audio settings, and emoji rules in SQLite (`jobs.db`)
 - Auto-saves subtitle/style drafts from the browser while editing and restores the latest job after reload
+- **Timeline Editor** (Editor tab): a multi-track video editor built on the same
+  FFmpeg backend. Tailored to interview / red-carpet edits:
+  - **Main track** — trim & arrange sequential clips from any uploaded video,
+    with per-boundary transitions (crossfade, fade-to-black, dissolve, slide,
+    wipe, etc.).
+  - **Overlay track** — B-roll / picture-in-picture / image overlays, positioned
+    and sized over the main footage, gated to a time window.
+  - **Titles track** — titles & lower-thirds burned via libass (fonts, colors,
+    opaque box, fade / slide-up animation).
+  - **Music track** — background music with per-clip gain and optional ducking
+    (sidechain-compressed under the voice).
+  - Canvas presets (9:16, 16:9, 1:1, 4:5) with cover/contain fit. Projects are
+    persisted in the `timeline` column of `jobs.db` and survive restarts.
+  - Renders in four passes (main → music → overlays → titles); output lands in
+    `outputs/` and plays back in the Editor preview.
 - Runs on port 8081 (local), served at `/` via external port 80 (no port suffix in URL)
 
 ### Structure
 ```
 artifacts/subtitle-burner/
-├── app.py                 # Flask server, Whisper, ASS generation, FFmpeg
+├── app.py                 # Flask server, Whisper, ASS generation, FFmpeg, Timeline engine
 ├── templates/index.html   # Frontend UI
 ├── static/style.css       # Styles
-├── static/app.js          # Frontend JavaScript
-├── jobs.db                # SQLite job/draft persistence
+├── static/app.js          # Frontend JavaScript (caption editor)
+├── static/timeline.css    # Timeline Editor styles
+├── static/timeline.js     # Timeline Editor (multi-track) front-end
+├── jobs.db                # SQLite job/draft/timeline persistence
 ├── fonts/                 # Add .ttf/.otf font files here
+├── assets/                # Uploaded B-roll / images / music for the editor (auto-created)
 ├── uploads/               # Temp uploads (auto-created)
 └── outputs/               # Rendered videos (auto-created)
 ```

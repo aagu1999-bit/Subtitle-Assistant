@@ -1,0 +1,742 @@
+/* ============================================================
+   Timeline Editor — multi-track video editor (front-end)
+   Talks to the /timeline/* + /upload-asset + /source-info routes.
+   Self-contained: manages its own state, fetches its own data.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const PPS = 14;          // pixels per second on the timeline
+  const MIN_TL_SECONDS = 30;
+  const LANE_OFFSET = 0;   // lanes start at x=0 within their container
+
+  // ---- State ----
+  let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
+  let selected = null;     // { track, id }
+  let sources = [];        // [{job_id, filename, ...}]
+  let assets = [];         // [{asset_id, kind, duration, ext}]
+  const srcDur = {};       // job_id -> duration cache
+  let saveTimer = null;
+  let pollTimer = null;
+  let initialized = false;
+
+  const uid = () => Math.random().toString(36).slice(2, 10);
+
+  // ---- Helpers ----
+  function fmtTime(s) {
+    s = Math.max(0, s || 0);
+    const m = Math.floor(s / 60);
+    const sec = (s % 60).toFixed(1);
+    return `${m}:${sec.padStart(4, "0")}`;
+  }
+
+  function clipDuration(c) {
+    return Math.max(0.1, (c.out || 0) - (c.in || 0));
+  }
+
+  // Main clips are sequential; compute each clip's start by cumulative duration.
+  function mainStart(idx) {
+    let t = 0;
+    for (let i = 0; i < idx; i++) t += clipDuration(tl.tracks.main[i]);
+    return t;
+  }
+
+  function totalDuration() {
+    let max = MIN_TL_SECONDS;
+    let mainTotal = 0;
+    tl.tracks.main.forEach((c) => (mainTotal += clipDuration(c)));
+    max = Math.max(max, mainTotal);
+    ["overlay", "text", "music"].forEach((k) => {
+      tl.tracks[k].forEach((c) => {
+        max = Math.max(max, (c.start || 0) + clipDuration(c));
+      });
+    });
+    return max;
+  }
+
+  // ---- Networking ----
+  async function api(url, opts) {
+    const res = await fetch(url, opts);
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* non-json */ }
+    if (!res.ok) throw new Error((data && data.error) || res.statusText);
+    return data;
+  }
+
+  function scheduleSave() {
+    setSaveState("Editing…");
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveNow, 800);
+  }
+
+  async function saveNow() {
+    if (!tl) return;
+    try {
+      await api("/timeline/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: tl.job_id, timeline: serialize(), label: tl.label }),
+      });
+      setSaveState("Saved ✓");
+    } catch (e) {
+      setSaveState("Save failed");
+    }
+  }
+
+  function setSaveState(s) {
+    const el = $("tlSaveState");
+    if (el) el.textContent = s;
+  }
+
+  // Build the timeline doc to persist/render. Main clips carry no `start`
+  // (it's derived); everything else keeps its explicit start.
+  function serialize() {
+    return {
+      canvas: tl.canvas,
+      fit: tl.fit,
+      fps: tl.fps,
+      bg: tl.bg || "#000000",
+      tracks: {
+        main: tl.tracks.main.map((c) => ({
+          id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
+          in: c.in, out: c.out, transition: c.transition || null,
+        })),
+        overlay: tl.tracks.overlay.map((c) => ({ ...c })),
+        text: tl.tracks.text.map((c) => ({ ...c })),
+        music: tl.tracks.music.map((c) => ({ ...c })),
+      },
+    };
+  }
+
+  // ---- Loaders ----
+  async function loadProjects() {
+    try {
+      const data = await api("/timeline/list");
+      const sel = $("tlProjectSelect");
+      if (!sel) return;
+      sel.innerHTML = "";
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = data.timelines.length ? "— Open project —" : "No projects yet";
+      sel.appendChild(blank);
+      data.timelines.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.job_id;
+        o.textContent = `${(p.filename || "Untitled").replace(/\.mp4$/, "")} (${p.clip_count} clips)`;
+        if (tl && p.job_id === tl.job_id) o.selected = true;
+        sel.appendChild(o);
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  async function loadSources() {
+    try {
+      const data = await api("/jobs");
+      sources = (data.jobs || []).filter((j) => j.video_available);
+      renderSourceList();
+    } catch (e) { /* ignore */ }
+  }
+
+  async function loadAssets() {
+    try {
+      const data = await api("/list-assets");
+      assets = data.assets || [];
+      renderAssetList();
+    } catch (e) { /* ignore */ }
+  }
+
+  async function getSourceDuration(jobId) {
+    if (srcDur[jobId] != null) return srcDur[jobId];
+    const info = await api("/source-info/" + jobId);
+    srcDur[jobId] = info.duration || 10;
+    return srcDur[jobId];
+  }
+
+  // ---- Library rendering ----
+  function renderSourceList() {
+    const wrap = $("tlSourceList");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    if (!sources.length) {
+      wrap.innerHTML = '<p class="muted tl-hint">Upload &amp; transcribe a video first — it\'ll show up here.</p>';
+      return;
+    }
+    sources.forEach((s) => {
+      const div = document.createElement("div");
+      div.className = "tl-source-item";
+      div.innerHTML =
+        `<span class="tl-source-name" title="${esc(s.filename || "")}">${esc(s.filename || s.job_id.slice(0, 8))}</span>`;
+      const add = document.createElement("button");
+      add.className = "tl-chip-btn";
+      add.textContent = "➕ Main";
+      add.title = "Add full clip to the main track";
+      add.onclick = () => addMainClip(s.job_id);
+      const ov = document.createElement("button");
+      ov.className = "tl-chip-btn";
+      ov.textContent = "🖼";
+      ov.title = "Add as overlay / picture-in-picture";
+      ov.onclick = () => addOverlayClip({ source_job_id: s.job_id });
+      div.appendChild(add);
+      div.appendChild(ov);
+      wrap.appendChild(div);
+    });
+  }
+
+  function renderAssetList() {
+    const wrap = $("tlAssetList");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    if (!assets.length) {
+      wrap.innerHTML = '<p class="muted tl-hint">No assets yet.</p>';
+      return;
+    }
+    assets.forEach((a) => {
+      const div = document.createElement("div");
+      div.className = "tl-source-item";
+      const icon = a.kind === "audio" ? "🎵" : a.kind === "image" ? "🖼" : "🎞";
+      div.innerHTML =
+        `<span class="tl-source-name">${icon} ${esc(a.ext)} ${a.duration ? fmtTime(a.duration) : ""}</span>`;
+      if (a.kind === "audio") {
+        const m = document.createElement("button");
+        m.className = "tl-chip-btn";
+        m.textContent = "🎵 Music";
+        m.onclick = () => addMusicClip(a);
+        div.appendChild(m);
+      } else {
+        const o = document.createElement("button");
+        o.className = "tl-chip-btn";
+        o.textContent = "🖼 Overlay";
+        o.onclick = () => addOverlayClip({ asset_id: a.asset_id }, a);
+        div.appendChild(o);
+      }
+      wrap.appendChild(div);
+    });
+  }
+
+  function esc(s) {
+    return String(s || "").replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  // ---- Add clips ----
+  async function addMainClip(jobId) {
+    try {
+      const dur = await getSourceDuration(jobId);
+      tl.tracks.main.push({
+        id: uid(), source_job_id: jobId, in: 0, out: dur, _max: dur, transition: null,
+      });
+      renderTimeline();
+      scheduleSave();
+    } catch (e) {
+      alert("Couldn't add clip: " + e.message);
+    }
+  }
+
+  async function addOverlayClip(ref, asset) {
+    let max = 4;
+    if (ref.source_job_id) {
+      try { max = await getSourceDuration(ref.source_job_id); } catch (e) {}
+    } else if (asset && asset.duration) {
+      max = asset.duration || 4;
+    }
+    const out = ref.asset_id && asset && asset.kind === "image" ? 4 : Math.min(max, 5);
+    tl.tracks.overlay.push({
+      id: uid(), ...ref, in: 0, out, _max: max,
+      start: 0, x: 0.62, y: 0.06, w: 0.34, opacity: 1.0,
+    });
+    selectClip("overlay", tl.tracks.overlay[tl.tracks.overlay.length - 1].id);
+    renderTimeline();
+    scheduleSave();
+  }
+
+  function addMusicClip(asset) {
+    const max = asset.duration || 60;
+    tl.tracks.music.push({
+      id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
+      start: 0, gain_db: -18, duck: true,
+    });
+    selectClip("music", tl.tracks.music[tl.tracks.music.length - 1].id);
+    renderTimeline();
+    scheduleSave();
+  }
+
+  function addTitle() {
+    tl.tracks.text.push({
+      id: uid(), text: "Lower third\nName · Title", start: 0, out: 4,
+      x: 0.5, y: 0.82, size: 56, color: "#FFFFFF", font: "Anton",
+      bg_enabled: true, bg_color: "#000000", bg_opacity: 0.55,
+      outline_color: "#000000", outline_width: 0, shadow: 0,
+      bold: true, align: 2, anim: "fade",
+    });
+    selectClip("text", tl.tracks.text[tl.tracks.text.length - 1].id);
+    renderTimeline();
+    scheduleSave();
+  }
+
+  // ---- Timeline rendering ----
+  function renderTimeline() {
+    const total = totalDuration();
+    const width = Math.max(300, total * PPS);
+
+    // Ruler
+    const ruler = $("tlRuler");
+    if (ruler) {
+      ruler.innerHTML = "";
+      ruler.style.width = width + "px";
+      const step = total > 120 ? 30 : total > 60 ? 15 : total > 20 ? 5 : 2;
+      for (let t = 0; t <= total; t += step) {
+        const tick = document.createElement("span");
+        tick.className = "tl-tick";
+        tick.style.left = t * PPS + "px";
+        tick.textContent = fmtTime(t);
+        ruler.appendChild(tick);
+      }
+    }
+
+    ["main", "overlay", "text", "music"].forEach((track) => {
+      const lane = document.querySelector(`.tl-track-lane[data-lane="${track}"]`);
+      if (!lane) return;
+      lane.innerHTML = "";
+      lane.style.minWidth = width + "px";
+      tl.tracks[track].forEach((c, idx) => {
+        const start = track === "main" ? mainStart(idx) : (c.start || 0);
+        const dur = clipDuration(c);
+        const el = document.createElement("div");
+        el.className = `tl-clip tl-clip-${track}` +
+          (selected && selected.track === track && selected.id === c.id ? " selected" : "");
+        el.style.left = (LANE_OFFSET + start * PPS) + "px";
+        el.style.width = Math.max(20, dur * PPS) + "px";
+        el.dataset.track = track;
+        el.dataset.id = c.id;
+
+        const label = document.createElement("div");
+        label.className = "tl-clip-label";
+        label.textContent = clipLabel(track, c, idx);
+        el.appendChild(label);
+
+        // Resize handles
+        ["left", "right"].forEach((side) => {
+          const h = document.createElement("div");
+          h.className = "tl-clip-handle " + side;
+          h.dataset.side = side;
+          el.appendChild(h);
+        });
+
+        lane.appendChild(el);
+      });
+    });
+    renderProps();
+  }
+
+  function clipLabel(track, c, idx) {
+    if (track === "main") {
+      const s = sources.find((x) => x.job_id === c.source_job_id);
+      const name = s ? (s.filename || "clip") : "clip";
+      return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")} (${fmtTime(clipDuration(c))})`;
+    }
+    if (track === "text") return (c.text || "Title").split("\n")[0];
+    if (track === "music") return `🎵 music ${fmtTime(clipDuration(c))}`;
+    return `🖼 overlay ${fmtTime(clipDuration(c))}`;
+  }
+
+  // ---- Selection + properties ----
+  function selectClip(track, id) {
+    selected = { track, id };
+    renderTimeline();
+    // Scrub the source clip into the preview if it has video.
+    const c = findClip(track, id);
+    if (c && (c.source_job_id || (c.asset_id && track !== "music"))) {
+      const src = c.source_job_id ? "/raw-upload/" + c.source_job_id : "/asset/" + c.asset_id;
+      const v = $("tlPreviewVideo");
+      const wrap = $("tlPreviewVideo").closest(".tl-preview");
+      if (v) {
+        v.src = src;
+        wrap.classList.add("has-video");
+        v.currentTime = c.in || 0;
+      }
+    }
+  }
+
+  function findClip(track, id) {
+    return tl.tracks[track].find((c) => c.id === id);
+  }
+
+  function renderProps() {
+    const wrap = $("tlProps");
+    if (!wrap) return;
+    if (!selected) {
+      wrap.innerHTML = '<div class="tl-props-empty muted">Select a clip on the timeline to edit its properties.</div>';
+      return;
+    }
+    const c = findClip(selected.track, selected.id);
+    if (!c) {
+      wrap.innerHTML = '<div class="tl-props-empty muted">Clip removed.</div>';
+      return;
+    }
+    const t = selected.track;
+    let html = `<h3>${({ main: "🎬 Main clip", overlay: "🖼 Overlay", text: "🔤 Title", music: "🎵 Music" })[t]}</h3>`;
+
+    if (t === "text") {
+      html += propTextarea("text", "Text (use line breaks)", c.text);
+      html += `<div class="tl-prop-grid">${propNum("size", "Font size", c.size, 10, 200)}${propSelect("font", "Font", c.font, FONT_OPTS)}</div>`;
+      html += `<div class="tl-prop-grid">${propColor("color", "Text color", c.color)}${propSelect("anim", "Animation", c.anim, [["fade", "Fade"], ["slideup", "Slide up"], ["none", "None"]])}</div>`;
+      html += propCheck("bg_enabled", "Background box (lower-third)", c.bg_enabled);
+      html += `<div class="tl-prop-grid">${propColor("bg_color", "Box color", c.bg_color)}${propRange("bg_opacity", "Box opacity", c.bg_opacity, 0, 1, 0.05)}</div>`;
+      html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
+      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", clipDuration(c), 0.2, 99999, 0.1)}</div>`;
+    } else if (t === "music") {
+      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propNum("gain_db", "Volume (dB)", c.gain_db, -40, 10, 1)}</div>`;
+      html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      html += propCheck("duck", "Duck under voice (auto-lower during speech)", c.duck);
+    } else if (t === "overlay") {
+      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity, 0, 1, 0.05)}</div>`;
+      html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
+      html += propRange("w", "Size (width %)", c.w, 0.05, 1, 0.01);
+    } else { // main
+      html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      const trType = (c.transition && c.transition.type) || "";
+      html += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
+      html += `<p class="muted" style="font-size:.72rem">Applies a crossfade from the previous clip. The first clip ignores this.</p>`;
+    }
+
+    html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
+    wrap.innerHTML = html;
+    wireProps(wrap, t, c);
+  }
+
+  const FONT_OPTS = [
+    ["Anton", "Anton"], ["Bebas Neue", "Bebas Neue"], ["Oswald", "Oswald"],
+    ["Archivo Black", "Archivo Black"], ["Montserrat Thin Black", "Montserrat Black"],
+    ["Alfa Slab One", "Alfa Slab One"], ["Staatliches", "Staatliches"],
+    ["Passion One", "Passion One"], ["DM Sans", "DM Sans"],
+  ];
+  const TRANSITION_OPTS = [
+    ["", "Hard cut"], ["fade", "Crossfade"], ["fadeblack", "Fade through black"],
+    ["dissolve", "Dissolve"], ["slideleft", "Slide left"], ["slideright", "Slide right"],
+    ["wipeleft", "Wipe left"], ["circleopen", "Circle open"], ["radial", "Radial"],
+  ];
+
+  // ---- Property control builders ----
+  function propText(key, label, val) {
+    return `<div class="tl-prop-row"><label>${label}</label><input type="text" data-key="${key}" value="${esc(val)}"></div>`;
+  }
+  function propTextarea(key, label, val) {
+    return `<div class="tl-prop-row"><label>${label}</label><textarea data-key="${key}">${esc(val)}</textarea></div>`;
+  }
+  function propNum(key, label, val, min, max, step) {
+    return `<div class="tl-prop-row"><label>${label}</label><input type="number" data-key="${key}" value="${val}" min="${min}" max="${max}" step="${step || 1}"></div>`;
+  }
+  function propRange(key, label, val, min, max, step) {
+    return `<div class="tl-prop-row"><label>${label}: <span data-out="${key}">${(+val).toFixed(2)}</span></label><input type="range" data-key="${key}" value="${val}" min="${min}" max="${max}" step="${step}"></div>`;
+  }
+  function propColor(key, label, val) {
+    return `<div class="tl-prop-row"><label>${label}</label><input type="color" data-key="${key}" value="${val}"></div>`;
+  }
+  function propCheck(key, label, val) {
+    return `<div class="tl-prop-row"><label class="tl-prop-inline"><input type="checkbox" data-key="${key}" ${val ? "checked" : ""}> ${label}</label></div>`;
+  }
+  function propSelect(key, label, val, opts) {
+    const o = opts.map(([v, t]) => `<option value="${v}" ${v === val ? "selected" : ""}>${t}</option>`).join("");
+    return `<div class="tl-prop-row"><label>${label}</label><select data-key="${key}">${o}</select></div>`;
+  }
+
+  function wireProps(wrap, track, c) {
+    wrap.querySelectorAll("[data-key]").forEach((inp) => {
+      const key = inp.dataset.key;
+      const handler = () => {
+        let v;
+        if (inp.type === "checkbox") v = inp.checked;
+        else if (inp.type === "number" || inp.type === "range") v = parseFloat(inp.value);
+        else v = inp.value;
+
+        if (key === "dur") {
+          c.out = (c.in || 0) + Math.max(0.2, v);
+        } else if (key === "__transition") {
+          c.transition = v ? { type: v } : null;
+        } else {
+          c[key] = v;
+        }
+        // Keep trims sane.
+        if (key === "in" && c.out <= c.in) c.out = c.in + 0.2;
+        if (key === "out" && c.out <= (c.in || 0)) c.out = (c.in || 0) + 0.2;
+
+        const outSpan = wrap.querySelector(`[data-out="${key}"]`);
+        if (outSpan) outSpan.textContent = (+v).toFixed(2);
+        renderTimeline();
+        scheduleSave();
+      };
+      inp.addEventListener(inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input", handler);
+    });
+    const del = wrap.querySelector('[data-act="del"]');
+    if (del) del.onclick = () => deleteClip(track, c.id);
+  }
+
+  function deleteClip(track, id) {
+    tl.tracks[track] = tl.tracks[track].filter((c) => c.id !== id);
+    if (selected && selected.id === id) selected = null;
+    renderTimeline();
+    scheduleSave();
+  }
+
+  // ---- Drag (move + resize) on the timeline ----
+  let drag = null;
+
+  function onTimelineMouseDown(e) {
+    const clipEl = e.target.closest(".tl-clip");
+    if (!clipEl) return;
+    const track = clipEl.dataset.track;
+    const id = clipEl.dataset.id;
+    selectClip(track, id);
+    const handle = e.target.closest(".tl-clip-handle");
+    const c = findClip(track, id);
+    if (!c) return;
+    drag = {
+      track, id, c,
+      startX: e.clientX,
+      mode: handle ? ("resize-" + handle.dataset.side) : "move",
+      origIn: c.in || 0, origOut: c.out || 0, origStart: c.start || 0,
+      origLeft: parseFloat(clipEl.style.left) || 0,
+    };
+    e.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!drag) return;
+    const dx = e.clientX - drag.startX;
+    const dt = dx / PPS;
+    const c = drag.c;
+    const max = c._max || 1e9;
+
+    if (drag.mode === "move") {
+      if (drag.track === "main") {
+        // Reorder by where the cursor lands among main clips.
+        reorderMainByX(drag.id, drag.origLeft + dx);
+      } else {
+        c.start = Math.max(0, drag.origStart + dt);
+      }
+    } else if (drag.mode === "resize-left") {
+      let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
+      if (ni < 0) ni = 0;
+      c.in = ni;
+      if (drag.track !== "main" && drag.track !== "text") {
+        // overlay/music: trimming the head shifts visible start too
+        c.start = Math.max(0, drag.origStart + (ni - drag.origIn));
+      }
+    } else if (drag.mode === "resize-right") {
+      let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
+      if (drag.track !== "text") no = Math.min(no, max);
+      c.out = no;
+    }
+    renderTimeline();
+  }
+
+  function reorderMainByX(id, leftPx) {
+    const arr = tl.tracks.main;
+    const idx = arr.findIndex((c) => c.id === id);
+    if (idx < 0) return;
+    const centerT = (leftPx + clipDuration(arr[idx]) * PPS / 2) / PPS;
+    // Determine target index by cumulative durations.
+    let acc = 0, target = 0;
+    for (let i = 0; i < arr.length; i++) {
+      if (i === idx) continue;
+      const d = clipDuration(arr[i]);
+      if (centerT > acc + d / 2) target = (i < idx ? i + 1 : i);
+      acc += d;
+    }
+    if (target !== idx) {
+      const [moved] = arr.splice(idx, 1);
+      arr.splice(target, 0, moved);
+    }
+  }
+
+  function onMouseUp() {
+    if (drag) {
+      drag = null;
+      scheduleSave();
+    }
+  }
+
+  // ---- Project lifecycle ----
+  async function newProject() {
+    try {
+      const data = await api("/timeline/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "Timeline edit" }),
+      });
+      await openProject(data.job_id);
+      await loadProjects();
+    } catch (e) {
+      alert("Could not create project: " + e.message);
+    }
+  }
+
+  async function openProject(jobId) {
+    const data = await api("/timeline/" + jobId);
+    const d = data.timeline || {};
+    tl = {
+      job_id: jobId,
+      label: (data.filename || "Timeline edit").replace(/\.mp4$/, ""),
+      canvas: d.canvas || "9x16",
+      fit: d.fit || "cover",
+      fps: d.fps || 30,
+      bg: d.bg || "#000000",
+      tracks: {
+        main: (d.tracks && d.tracks.main) || [],
+        overlay: (d.tracks && d.tracks.overlay) || [],
+        text: (d.tracks && d.tracks.text) || [],
+        music: (d.tracks && d.tracks.music) || [],
+      },
+    };
+    // Restore _max trims by probing main/overlay sources lazily.
+    selected = null;
+    $("tlLabel").value = tl.label;
+    $("tlCanvas").value = tl.canvas;
+    $("tlFit").value = tl.fit;
+    setSaveState("Saved ✓");
+    renderTimeline();
+    refreshMaxTrims();
+  }
+
+  async function refreshMaxTrims() {
+    const jobs = new Set();
+    tl.tracks.main.forEach((c) => c.source_job_id && jobs.add(c.source_job_id));
+    tl.tracks.overlay.forEach((c) => c.source_job_id && jobs.add(c.source_job_id));
+    for (const j of jobs) {
+      try {
+        const d = await getSourceDuration(j);
+        tl.tracks.main.forEach((c) => { if (c.source_job_id === j && !c._max) c._max = d; });
+        tl.tracks.overlay.forEach((c) => { if (c.source_job_id === j && !c._max) c._max = d; });
+      } catch (e) {}
+    }
+    renderTimeline();
+  }
+
+  // ---- Render ----
+  async function renderTimelineVideo() {
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one clip to the Main track first.");
+      return;
+    }
+    const btn = $("tlRenderBtn");
+    btn.disabled = true;
+    setRenderStatus("Queued…");
+    try {
+      await saveNow();
+      await api("/timeline/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: tl.job_id, timeline: serialize() }),
+      });
+      pollRender();
+    } catch (e) {
+      setRenderStatus("Error: " + e.message);
+      btn.disabled = false;
+    }
+  }
+
+  function pollRender() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        const s = await api("/status/" + tl.job_id);
+        if (s.status === "done" && s.output) {
+          clearInterval(pollTimer);
+          setRenderStatus("Done ✓");
+          $("tlRenderBtn").disabled = false;
+          const v = $("tlPreviewVideo");
+          v.src = "/preview/" + s.output;
+          v.closest(".tl-preview").classList.add("has-video");
+          v.load();
+          v.play().catch(() => {});
+        } else if (s.status === "error") {
+          clearInterval(pollTimer);
+          setRenderStatus("Error: " + (s.error || "render failed"));
+          $("tlRenderBtn").disabled = false;
+        } else {
+          setRenderStatus(`${s.status || "working"}… ${s.progress || 0}%`);
+        }
+      } catch (e) {
+        clearInterval(pollTimer);
+        setRenderStatus("Error: " + e.message);
+        $("tlRenderBtn").disabled = false;
+      }
+    }, 1500);
+  }
+
+  function setRenderStatus(s) {
+    const el = $("tlRenderStatus");
+    if (el) el.textContent = s;
+  }
+
+  // ---- Asset upload ----
+  async function uploadAsset(file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    setSaveState("Uploading asset…");
+    try {
+      await api("/upload-asset", { method: "POST", body: fd });
+      await loadAssets();
+      setSaveState("Saved ✓");
+    } catch (e) {
+      alert("Asset upload failed: " + e.message);
+      setSaveState("");
+    }
+  }
+
+  // ---- Init (lazy, when the Editor tab is first opened) ----
+  async function ensureInit() {
+    if (initialized) {
+      loadSources();
+      loadAssets();
+      loadProjects();
+      return;
+    }
+    initialized = true;
+
+    $("tlNewBtn").onclick = newProject;
+    $("tlProjectSelect").onchange = (e) => { if (e.target.value) openProject(e.target.value); };
+    $("tlLabel").oninput = (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } };
+    $("tlCanvas").onchange = (e) => { if (tl) { tl.canvas = e.target.value; scheduleSave(); } };
+    $("tlFit").onchange = (e) => { if (tl) { tl.fit = e.target.value; scheduleSave(); } };
+    $("tlRenderBtn").onclick = renderTimelineVideo;
+    $("tlAddTitleBtn").onclick = () => { if (tl) addTitle(); else alert("Create or open a project first."); };
+    $("tlAssetBtn").onclick = () => $("tlAssetFile").click();
+    $("tlAssetFile").onchange = (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; };
+
+    const timeline = $("tlTimeline");
+    timeline.addEventListener("mousedown", onTimelineMouseDown);
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+
+    await loadSources();
+    await loadAssets();
+    await loadProjects();
+
+    // Open the most recent project, or start a fresh one.
+    try {
+      const data = await api("/timeline/list");
+      if (data.timelines.length) await openProject(data.timelines[0].job_id);
+      else await newProject();
+    } catch (e) {
+      await newProject();
+    }
+  }
+
+  // Hook the Editor tab button so we init on first open.
+  document.addEventListener("DOMContentLoaded", () => {
+    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
+    if (tabBtn) tabBtn.addEventListener("click", ensureInit);
+  });
+
+  // Expose an entry point so other parts of the app could open the editor
+  // seeded from a specific job in the future.
+  window.openTimelineEditor = async function (seedJobId) {
+    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
+    if (tabBtn) tabBtn.click();
+    await ensureInit();
+    if (seedJobId && tl) await addMainClip(seedJobId);
+  };
+})();

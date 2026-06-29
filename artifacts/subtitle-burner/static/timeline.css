@@ -1,0 +1,264 @@
+/* ============================================================
+   Timeline Editor — multi-track video editing UI
+   Palette matches the main app (dark, #6c5cff accent).
+   ============================================================ */
+
+.tl-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 70vh;
+}
+
+/* ---- Toolbar ---- */
+.tl-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #161a24;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.tl-toolbar-left, .tl-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tl-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .82rem;
+  color: #aeb4c0;
+}
+.tl-select, .tl-text {
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  color: #e8eaee;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: .88rem;
+}
+.tl-text { min-width: 160px; }
+.tl-savestate { font-size: .78rem; min-width: 70px; }
+
+/* ---- Body: 3-column layout ---- */
+.tl-body {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  gap: 12px;
+  align-items: stretch;
+}
+@media (max-width: 1100px) {
+  .tl-body { grid-template-columns: 1fr; }
+}
+
+/* ---- Library (left) ---- */
+.tl-library {
+  background: #161a24;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 78vh;
+}
+.tl-library h3 {
+  margin: 0 0 6px;
+  font-size: .82rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #aeb4c0;
+}
+.tl-hint { font-size: .74rem; margin: 0 0 10px; }
+.tl-source-list { display: flex; flex-direction: column; gap: 6px; }
+.tl-source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: .82rem;
+}
+.tl-source-item .tl-source-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-source-item .tl-source-meta { color: #8b91a0; font-size: .72rem; }
+.tl-chip-btn {
+  background: #2a2f3a;
+  border: none;
+  color: #e8eaee;
+  border-radius: 6px;
+  padding: 3px 7px;
+  cursor: pointer;
+  font-size: .8rem;
+}
+.tl-chip-btn:hover { background: #6c5cff; }
+.tl-asset-upload { margin: 6px 0 10px; }
+.btn-block { width: 100%; }
+
+/* ---- Stage (center) ---- */
+.tl-stage-wrap { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tl-preview {
+  position: relative;
+  background: #0c0e14;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.tl-preview video {
+  max-height: 46vh;
+  max-width: 100%;
+  border-radius: 8px;
+  display: none;
+}
+.tl-preview.has-video video { display: block; }
+.tl-preview.has-video .tl-preview-empty { display: none; }
+.tl-preview-empty { color: #8b91a0; text-align: center; padding: 30px; font-size: .9rem; }
+
+/* ---- Timeline ---- */
+.tl-timeline {
+  background: #12151d;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  padding: 8px;
+  overflow-x: auto;
+}
+.tl-ruler {
+  position: relative;
+  height: 18px;
+  margin-left: 70px;
+  border-bottom: 1px solid #2a2f3a;
+  color: #6b7280;
+  font-size: .65rem;
+}
+.tl-ruler .tl-tick {
+  position: absolute;
+  top: 0;
+  border-left: 1px solid #2a2f3a;
+  padding-left: 3px;
+  height: 100%;
+}
+.tl-tracks { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.tl-track { display: flex; align-items: stretch; gap: 0; height: 52px; }
+.tl-track-label {
+  width: 70px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  font-size: .76rem;
+  color: #aeb4c0;
+}
+.tl-track-lane {
+  position: relative;
+  flex: 1;
+  background: #1a1e2a;
+  border: 1px dashed #2a2f3a;
+  border-radius: 6px;
+  min-height: 52px;
+  overflow: hidden;
+}
+.tl-track-lane.drag-over { border-color: #6c5cff; background: #1e2230; }
+
+/* ---- Clip blocks ---- */
+.tl-clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 6px;
+  cursor: grab;
+  overflow: hidden;
+  user-select: none;
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  font-size: .72rem;
+}
+.tl-clip:active { cursor: grabbing; }
+.tl-clip.selected { outline: 2px solid #fff; z-index: 5; }
+.tl-clip-main    { background: linear-gradient(135deg,#3a6df0,#2b53c0); }
+.tl-clip-overlay { background: linear-gradient(135deg,#19a974,#0f7a54); }
+.tl-clip-text    { background: linear-gradient(135deg,#e0992a,#bd7610); }
+.tl-clip-music   { background: linear-gradient(135deg,#9785ff,#6c5cff); }
+.tl-clip-label {
+  padding: 4px 6px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.tl-clip-handle {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  background: rgba(255,255,255,.18);
+}
+.tl-clip-handle.left { left: 0; }
+.tl-clip-handle.right { right: 0; }
+
+.tl-actions { display: flex; align-items: center; gap: 10px; }
+
+/* ---- Properties (right) ---- */
+.tl-props {
+  background: #161a24;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 78vh;
+}
+.tl-props h3 {
+  margin: 0 0 10px;
+  font-size: .9rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tl-props-empty { font-size: .85rem; padding: 20px 4px; }
+.tl-prop-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.tl-prop-row label { font-size: .76rem; color: #aeb4c0; }
+.tl-prop-row input[type=text],
+.tl-prop-row input[type=number],
+.tl-prop-row textarea,
+.tl-prop-row select {
+  background: #1a1e2a;
+  border: 1px solid #2a2f3a;
+  color: #e8eaee;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: .85rem;
+  width: 100%;
+}
+.tl-prop-row textarea { resize: vertical; min-height: 54px; font-family: inherit; }
+.tl-prop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tl-prop-inline { display: flex; align-items: center; gap: 8px; }
+.tl-del-btn {
+  background: #3a1e24;
+  border: 1px solid #6e2b34;
+  color: #ff8a9b;
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: .82rem;
+  width: 100%;
+  margin-top: 6px;
+}
+.tl-del-btn:hover { background: #5a2530; }

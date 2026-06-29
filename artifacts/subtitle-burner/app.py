@@ -116,7 +116,7 @@ def _db_init() -> None:
             existing_cols = {
                 row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
             }
-            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe"):
+            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe", "timeline"):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
             conn.commit()
@@ -132,13 +132,14 @@ def _db_save_job(job_id: str) -> None:
     audio_json = json.dumps(job.get("audio")) if job.get("audio") is not None else None
     emoji_rules_json = json.dumps(job.get("emoji_rules")) if job.get("emoji_rules") is not None else None
     compile_recipe_json = json.dumps(job.get("compile_recipe")) if job.get("compile_recipe") is not None else None
+    timeline_json = json.dumps(job.get("timeline")) if job.get("timeline") is not None else None
     with _db_lock:
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO jobs
-                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename, compile_recipe)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename, compile_recipe, timeline)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -156,6 +157,7 @@ def _db_save_job(job_id: str) -> None:
                     job.get("burn_cache_key"),
                     job.get("filename"),
                     compile_recipe_json,
+                    timeline_json,
                 ),
             )
             conn.commit()
@@ -195,6 +197,12 @@ def _load_jobs_from_db() -> None:
                 compile_recipe = json.loads(row["compile_recipe"])
         except (IndexError, KeyError, json.JSONDecodeError, TypeError):
             compile_recipe = None
+        timeline = None
+        try:
+            if row["timeline"]:
+                timeline = json.loads(row["timeline"])
+        except (IndexError, KeyError, json.JSONDecodeError, TypeError):
+            timeline = None
         cache_key = None
         burn_key = None
         filename = None
@@ -225,6 +233,11 @@ def _load_jobs_from_db() -> None:
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
             "compile_recipe": compile_recipe,
+            "timeline": timeline,
+            # is_timeline isn't its own column — a job is a timeline editor
+            # project iff it carries a timeline doc. Derive it on load so the
+            # editor list + cleanup exemption survive a server restart.
+            "is_timeline": timeline is not None,
         }
 
 
@@ -276,6 +289,9 @@ def _cleanup_loop() -> None:
             jid for jid, job in list(jobs.items())
             if job.get("status") in ("done", "error")
             and job.get("completed_at", 0) < output_cutoff
+            # Timeline editor jobs are re-editable drafts — keep them so the
+            # user can tweak and re-render even after the output MP4 expires.
+            and not job.get("is_timeline")
         ]
         for jid in stale_done:
             jobs.pop(jid, None)
@@ -4178,6 +4194,761 @@ def preview_audio():
         return jsonify({"error": str(exc)[:500]}), 500
     finally:
         _safe_unlink(audio_path)
+
+
+# ============================================================================
+# TIMELINE EDITOR
+# ----------------------------------------------------------------------------
+# A multi-track video compositor built on top of the same FFmpeg primitives the
+# rest of the app uses. A "timeline" is a JSON document with four track kinds:
+#
+#   main    — sequential video clips (trimmed slices of existing jobs/assets).
+#             Each boundary may carry a crossfade transition.
+#   overlay — B-roll / picture-in-picture / image overlays composited on top of
+#             the main track at a position + size, gated to a time window.
+#   text    — titles / lower-thirds, burned via libass (reuses the caption path).
+#   music   — background audio tracks, gain-staged, with optional ducking under
+#             the main voice.
+#
+# Rendering runs in four passes (base → music → overlays → titles) rather than
+# one mega filter_complex. Passes are slower (re-encodes) but far easier to
+# reason about and debug, and interview/red-carpet edits are rarely more than a
+# handful of clips. Output lands in OUTPUT_DIR/{job_id}.mp4 like every other
+# render, so the existing Result tab / preview / download all work unchanged.
+# ============================================================================
+
+ASSET_DIR = BASE_DIR / "assets"
+ASSET_DIR.mkdir(exist_ok=True)
+
+ASSET_EXT_VIDEO = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
+ASSET_EXT_IMAGE = {"jpg", "jpeg", "png", "webp", "gif", "bmp"}
+ASSET_EXT_AUDIO = {"mp3", "wav", "m4a", "aac", "ogg", "flac"}
+
+# Canvas presets the UI offers. Keys are sent by the client.
+TIMELINE_CANVASES = {
+    "9x16": (1080, 1920),
+    "16x9": (1920, 1080),
+    "1x1": (1080, 1080),
+    "4x5": (1080, 1350),
+}
+
+# xfade transition names we expose in the UI -> the ffmpeg `transition=` value.
+TIMELINE_TRANSITIONS = {
+    "fade": "fade",
+    "fadeblack": "fadeblack",
+    "dissolve": "dissolve",
+    "slideleft": "slideleft",
+    "slideright": "slideright",
+    "slideup": "slideup",
+    "slidedown": "slidedown",
+    "wipeleft": "wipeleft",
+    "wiperight": "wiperight",
+    "circleopen": "circleopen",
+    "radial": "radial",
+}
+
+
+def _asset_kind(ext: str) -> str | None:
+    ext = ext.lower().lstrip(".")
+    if ext in ASSET_EXT_VIDEO:
+        return "video"
+    if ext in ASSET_EXT_IMAGE:
+        return "image"
+    if ext in ASSET_EXT_AUDIO:
+        return "audio"
+    return None
+
+
+def _find_asset_path(asset_id: str) -> Path | None:
+    """Resolve an uploaded asset id to its file on disk (extension agnostic)."""
+    if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
+        return None
+    for p in ASSET_DIR.glob(f"{asset_id}.*"):
+        if p.is_file():
+            return p
+    return None
+
+
+def _ff_color(hex_color: str, default: str = "black") -> str:
+    """Convert '#RRGGBB' to ffmpeg's '0xRRGGBB' color form for filter args."""
+    if not hex_color:
+        return default
+    s = hex_color.strip().lstrip("#")
+    if len(s) == 6 and re.fullmatch(r"[0-9a-fA-F]{6}", s):
+        return "0x" + s.upper()
+    return default
+
+
+def _has_audio_stream(path: Path) -> bool:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        return bool(out)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _media_duration(path: Path) -> float:
+    """Best-effort container duration in seconds (0.0 on failure)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        return max(0.0, float(out)) if out and out != "N/A" else 0.0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0.0
+
+
+def _timeline_clip_source(clip: dict) -> Path | None:
+    """Resolve a timeline clip's media: either a source job's video or an asset."""
+    sid = clip.get("source_job_id")
+    if sid and sid in jobs:
+        return find_video_path(sid)
+    aid = clip.get("asset_id")
+    if aid:
+        return _find_asset_path(aid)
+    return None
+
+
+def _tl_run(cmd: list, what: str) -> None:
+    """Run an ffmpeg command, raising a trimmed error on failure."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{what} failed: {proc.stderr[-800:]}")
+
+
+def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
+                          W: int, H: int, fps: int, fit: str, bg: str,
+                          out_path: Path) -> float:
+    """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
+
+    'cover' fills the frame (center-crop); 'contain' letterboxes onto *bg*.
+    A silent stereo track is synthesized when the source has no audio so every
+    segment is concat-compatible. Returns the segment duration.
+    """
+    dur = max(0.05, t_out - t_in)
+    if fit == "contain":
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={_ff_color(bg)},setsar=1")
+    else:  # cover
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H},setsar=1")
+    vf += f",fps={fps},format=yuv420p"
+
+    has_audio = _has_audio_stream(src)
+    cmd = ["ffmpeg", "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+    if not has_audio:
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    cmd += ["-t", f"{dur:.3f}", "-vf", vf,
+            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
+    if not has_audio:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    cmd += [str(out_path)]
+    _tl_run(cmd, "Clip trim")
+    return dur
+
+
+def _tl_concat(paths: list, out_path: Path) -> None:
+    """Concatenate identically-formatted segments with the concat demuxer."""
+    list_path = out_path.with_suffix(".concat.txt")
+    list_path.write_text("\n".join(f"file '{p.absolute()}'" for p in paths) + "\n")
+    try:
+        _tl_run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+             "-c", "copy", "-movflags", "+faststart", str(out_path)],
+            "Concat",
+        )
+    finally:
+        _safe_unlink(list_path)
+
+
+def _tl_build_main_track(segments: list, transitions: list,
+                         out_path: Path, job_id: str) -> float:
+    """Stitch normalized *segments* into one clip.
+
+    *segments* is [(path, duration)]; *transitions[i]* is the crossfade
+    duration (seconds) between segment i and i+1, or 0 for a hard cut. When no
+    crossfades are requested we use the cheap concat demuxer; otherwise we fold
+    the clips together pairwise (xfade for crossfades, filter-concat for cuts).
+    Returns the total duration of the stitched track.
+    """
+    if not segments:
+        raise RuntimeError("Main track has no clips")
+    if len(segments) == 1:
+        seg_path, dur = segments[0]
+        # Copy the lone segment to the expected output name.
+        _tl_run(["ffmpeg", "-y", "-i", str(seg_path), "-c", "copy",
+                 "-movflags", "+faststart", str(out_path)], "Finalize main")
+        return dur
+
+    # transitions[i] is a transition-type string (truthy) or 0/None for a cut.
+    if not any(transitions):
+        _tl_concat([p for p, _ in segments], out_path)
+        return sum(d for _, d in segments)
+
+    intermediates: list[Path] = []
+    try:
+        cur_path, cur_dur = segments[0]
+        for i in range(1, len(segments)):
+            nxt_path, nxt_dur = segments[i]
+            tname = transitions[i - 1] if i - 1 < len(transitions) else 0
+            step_out = UPLOAD_DIR / f"{job_id}_tlmix{i:03d}.mp4"
+            if tname:
+                xfade = TIMELINE_TRANSITIONS.get(str(tname), "fade")
+                tdur = min(0.8, cur_dur * 0.45, nxt_dur * 0.45)
+                tdur = max(0.2, tdur)
+                offset = max(0.0, cur_dur - tdur)
+                fc = (
+                    f"[0:v][1:v]xfade=transition={xfade}:duration={tdur:.3f}:"
+                    f"offset={offset:.3f},format=yuv420p[v];"
+                    f"[0:a][1:a]acrossfade=d={tdur:.3f}[a]"
+                )
+                cur_dur = cur_dur + nxt_dur - tdur
+            else:
+                fc = "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
+                cur_dur = cur_dur + nxt_dur
+            _tl_run(
+                ["ffmpeg", "-y", "-i", str(cur_path), "-i", str(nxt_path),
+                 "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
+                f"Transition {i}",
+            )
+            intermediates.append(step_out)
+            cur_path = step_out
+        _tl_run(["ffmpeg", "-y", "-i", str(cur_path), "-c", "copy",
+                 "-movflags", "+faststart", str(out_path)], "Finalize main")
+        return cur_dur
+    finally:
+        for p in intermediates:
+            _safe_unlink(p)
+
+
+def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
+    """Mix background music tracks into *base*'s audio (video stream copied).
+
+    Each clip is trimmed, gain-staged and time-shifted to its start. If any
+    clip requests ducking, all music is side-chain compressed against the main
+    voice so speech stays on top.
+    """
+    resolved = []
+    for m in music_clips:
+        path = _timeline_clip_source(m)
+        if path:
+            resolved.append((m, path))
+    if not resolved:
+        # Nothing usable — just pass the base through.
+        _tl_run(["ffmpeg", "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "Music passthrough")
+        return
+
+    inputs = ["-i", str(base)]
+    filt = ["[0:a]asplit=2[voice][key]"]
+    music_labels = []
+    duck = False
+    for idx, (m, path) in enumerate(resolved, start=1):
+        inputs += ["-i", str(path)]
+        m_in = max(0.0, float(m.get("in", 0)))
+        m_out = float(m.get("out", m_in + 30))
+        if m_out <= m_in:
+            m_out = m_in + 30
+        start = max(0.0, float(m.get("start", 0)))
+        gain = float(m.get("gain_db", -18))
+        delay = int(start * 1000)
+        if m.get("duck"):
+            duck = True
+        filt.append(
+            f"[{idx}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
+            f"channel_layouts=stereo,"
+            f"atrim=start={m_in:.3f}:end={m_out:.3f},"
+            f"asetpts=PTS-STARTPTS,volume={gain:.2f}dB,"
+            f"adelay={delay}|{delay}[m{idx}]"
+        )
+        music_labels.append(f"[m{idx}]")
+
+    if len(music_labels) == 1:
+        filt.append(f"{music_labels[0]}anull[musicall]")
+    else:
+        filt.append(f"{''.join(music_labels)}amix=inputs={len(music_labels)}:"
+                    f"duration=longest:normalize=0[musicall]")
+
+    if duck:
+        filt.append("[musicall][key]sidechaincompress=threshold=0.03:ratio=8:"
+                    "attack=20:release=400[musicfinal]")
+    else:
+        filt.append("[musicall]anull[musicfinal]")
+
+    filt.append("[voice][musicfinal]amix=inputs=2:duration=first:normalize=0[aout]")
+
+    _tl_run(
+        ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filt),
+         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
+         "-c:a", "aac", "-b:a", "192k", "-shortest", str(out_path)],
+        "Music mix",
+    )
+
+
+def _tl_composite_overlays(base: Path, overlay_clips: list,
+                           W: int, H: int, out_path: Path) -> None:
+    """Composite B-roll / PiP / image overlays onto *base* (audio copied)."""
+    resolved = []
+    for ov in overlay_clips:
+        path = _timeline_clip_source(ov)
+        if not path:
+            continue
+        kind = "image" if path.suffix.lower().lstrip(".") in ASSET_EXT_IMAGE else "video"
+        resolved.append((ov, path, kind))
+    if not resolved:
+        _tl_run(["ffmpeg", "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "Overlay passthrough")
+        return
+
+    inputs = ["-i", str(base)]
+    filt = []
+    cur = "[0:v]"
+    in_idx = 1
+    for n, (ov, path, kind) in enumerate(resolved, start=1):
+        start = max(0.0, float(ov.get("start", 0)))
+        o_in = max(0.0, float(ov.get("in", 0)))
+        o_out = float(ov.get("out", o_in + 4))
+        length = max(0.2, o_out - o_in)
+        wfrac = min(1.0, max(0.05, float(ov.get("w", 0.4))))
+        ow = max(2, int(W * wfrac) // 2 * 2)
+        x = int(W * float(ov.get("x", 0.5)))
+        y = int(H * float(ov.get("y", 0.5)))
+        opacity = min(1.0, max(0.0, float(ov.get("opacity", 1.0))))
+
+        if kind == "image":
+            inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
+            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1"
+        else:
+            inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
+            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1,setpts=PTS-STARTPTS"
+        if opacity < 1.0:
+            prep += f",format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+        # Delay the overlay so it lands at `start` on the timeline.
+        prep += f",tpad=start_duration={start:.3f}"
+        prep += f"[ov{n}]"
+        filt.append(prep)
+        filt.append(
+            f"{cur}[ov{n}]overlay=x={x}:y={y}:"
+            f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
+        )
+        cur = f"[bg{n}]"
+        in_idx += 1
+
+    _tl_run(
+        ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filt),
+         "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
+         "-c:a", "copy", str(out_path)],
+        "Overlay composite",
+    )
+
+
+def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
+    """Build an ASS file for the text track (titles / lower-thirds).
+
+    Each clip gets its own [V4+] style so per-clip font/size/color/box settings
+    can coexist. Positioning is via \\pos; lower-thirds use an opaque box
+    (BorderStyle 4). Animation is a fade by default, optional slide-up via
+    \\move.
+    """
+    styles = []
+    events = []
+    for i, c in enumerate(text_clips):
+        text = str(c.get("text", "")).strip()
+        if not text:
+            continue
+        try:
+            start = float(c.get("start", 0))
+            end = float(c.get("out", start + 3))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+
+        font = c.get("font", "Anton")
+        size = int(c.get("size", 64))
+        primary = hex_to_ass_color(c.get("color", "#FFFFFF"))
+        outline_col = hex_to_ass_color(c.get("outline_color", "#000000"))
+        has_box = bool(c.get("bg_enabled"))
+        back = hex_to_ass_color(c.get("bg_color", "#000000"))
+        if has_box:
+            # Apply box opacity (0..1) to the BackColour alpha byte.
+            try:
+                op = min(1.0, max(0.0, float(c.get("bg_opacity", 0.6))))
+            except (TypeError, ValueError):
+                op = 0.6
+            alpha = int((1.0 - op) * 255)
+            back = f"&H{alpha:02X}{back[4:]}"  # splice alpha into &HAABBGGRR
+        # BorderStyle 3 = opaque box (libass-standard); the Outline field then
+        # controls the box padding around the text. BorderStyle 1 = outline.
+        border_style = 3 if has_box else 1
+        outline_w = 10 if has_box else int(c.get("outline_width", 3))
+        shadow = int(c.get("shadow", 0))
+        bold = 1 if c.get("bold", True) else 0
+        align = int(c.get("align", 2))  # numpad alignment, 2 = bottom-center
+
+        styles.append(
+            f"Style: T{i},{font},{size},{primary},{primary},{outline_col},{back},"
+            f"{bold},0,0,0,100,100,0,0,{border_style},{outline_w},{shadow},"
+            f"{align},40,40,40,1"
+        )
+
+        px = int(W * float(c.get("x", 0.5)))
+        py = int(H * float(c.get("y", 0.85)))
+        anim = c.get("anim", "fade")
+        if anim == "slideup":
+            pos = f"\\move({px},{py + 60},{px},{py},0,400)"
+        elif anim == "none":
+            pos = f"\\pos({px},{py})"
+        else:
+            pos = f"\\pos({px},{py})"
+        fade = "" if anim == "none" else "\\fad(300,300)"
+        body = text.replace("\n", "\\N").replace("{", "").replace("}", "")
+        events.append(
+            f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},T{i},,0,0,0,,"
+            f"{{{pos}{fade}}}{body}"
+        )
+
+    header = (
+        "[Script Info]\n"
+        "Title: Timeline Titles\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {W}\n"
+        f"PlayResY: {H}\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+        "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+        "MarginL, MarginR, MarginV, Encoding\n"
+        + "\n".join(styles) + "\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
+    return header + "\n".join(events) + "\n"
+
+
+def _normalize_timeline(timeline: dict) -> dict:
+    """Validate + coerce a timeline doc to a safe canonical form."""
+    tl = dict(timeline or {})
+    canvas = tl.get("canvas", "9x16")
+    if canvas not in TIMELINE_CANVASES:
+        canvas = "9x16"
+    tl["canvas"] = canvas
+    try:
+        tl["fps"] = max(15, min(60, int(tl.get("fps", 30))))
+    except (TypeError, ValueError):
+        tl["fps"] = 30
+    if tl.get("fit") not in ("cover", "contain"):
+        tl["fit"] = "cover"
+    if not isinstance(tl.get("bg"), str):
+        tl["bg"] = "#000000"
+    tracks = tl.get("tracks")
+    if not isinstance(tracks, dict):
+        tracks = {}
+    for key in ("main", "overlay", "text", "music"):
+        clips = tracks.get(key)
+        tracks[key] = clips if isinstance(clips, list) else []
+    tl["tracks"] = tracks
+    return tl
+
+
+def render_timeline_job(job_id: str, timeline: dict) -> None:
+    """Background worker: composite a timeline into OUTPUT_DIR/{job_id}.mp4."""
+    work: list[Path] = []
+
+    def _stage(label: str, pct: int) -> None:
+        jobs[job_id]["status"] = label
+        jobs[job_id]["progress"] = pct
+        _db_save_job(job_id)
+
+    try:
+        tl = _normalize_timeline(timeline)
+        W, H = TIMELINE_CANVASES[tl["canvas"]]
+        fps = tl["fps"]
+        fit = tl["fit"]
+        bg = tl["bg"]
+        tracks = tl["tracks"]
+
+        main_clips = tracks["main"]
+        if not main_clips:
+            raise RuntimeError("Add at least one clip to the main track before rendering.")
+
+        # ---- Pass 1: normalize + stitch the main video track ----
+        _stage("building main track", 10)
+        segments = []
+        for i, c in enumerate(main_clips):
+            src = _timeline_clip_source(c)
+            if not src:
+                raise RuntimeError(f"Main clip {i + 1}: source video is no longer available.")
+            t_in = max(0.0, float(c.get("in", 0)))
+            t_out = float(c.get("out", t_in + 2))
+            if t_out <= t_in:
+                raise RuntimeError(f"Main clip {i + 1}: end must be after start.")
+            seg_path = UPLOAD_DIR / f"{job_id}_tlseg{i:03d}.mp4"
+            dur = _tl_normalize_segment(src, t_in, t_out, W, H, fps, fit, bg, seg_path)
+            segments.append((seg_path, dur))
+            work.append(seg_path)
+            jobs[job_id]["progress"] = 10 + int(25 * (i + 1) / len(main_clips))
+            _db_save_job(job_id)
+
+        transitions = []
+        for i in range(len(main_clips) - 1):
+            tr = (main_clips[i + 1].get("transition") or {})
+            transitions.append(tr.get("type") if isinstance(tr, dict) and tr.get("type") else 0)
+
+        base = UPLOAD_DIR / f"{job_id}_tlbase.mp4"
+        work.append(base)
+        _tl_build_main_track(segments, transitions, base, job_id)
+
+        # ---- Pass 2: background music ----
+        if tracks["music"]:
+            _stage("mixing music", 55)
+            mixed = UPLOAD_DIR / f"{job_id}_tlmusic.mp4"
+            work.append(mixed)
+            _tl_mix_music(base, tracks["music"], mixed)
+            base = mixed
+
+        # ---- Pass 3: overlays / B-roll / PiP ----
+        if tracks["overlay"]:
+            _stage("compositing overlays", 70)
+            comp = UPLOAD_DIR / f"{job_id}_tlovl.mp4"
+            work.append(comp)
+            _tl_composite_overlays(base, tracks["overlay"], W, H, comp)
+            base = comp
+
+        # ---- Pass 4: titles / lower-thirds ----
+        output_path = OUTPUT_DIR / f"{job_id}.mp4"
+        if tracks["text"]:
+            _stage("adding titles", 85)
+            ass_text = _tl_build_titles_ass(tracks["text"], W, H)
+            ass_path = UPLOAD_DIR / f"{job_id}_tltitles.ass"
+            ass_path.write_text(ass_text, encoding="utf-8")
+            work.append(ass_path)
+            burn_subtitles(base, ass_path, output_path)
+        else:
+            # No titles — just finalize (stream copy is enough).
+            _stage("finalizing", 90)
+            _tl_run(["ffmpeg", "-y", "-i", str(base), "-c", "copy",
+                     "-movflags", "+faststart", str(output_path)], "Finalize")
+
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise RuntimeError("Render produced an empty or missing output file.")
+        output_path.touch()
+
+        jobs[job_id]["status"] = "done"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["output"] = output_path.name
+        jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        jobs[job_id]["completed_at"] = time.time()
+        _db_save_job(job_id)
+    finally:
+        for p in work:
+            _safe_unlink(p)
+
+
+# ---- Timeline routes ----
+
+@app.route("/upload-asset", methods=["POST"])
+def upload_asset():
+    """Store an uploaded B-roll / image / music asset for use on the timeline."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Empty filename"}), 400
+    ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    kind = _asset_kind(ext)
+    if not kind:
+        return jsonify({"error": f"Unsupported asset type: .{ext}"}), 400
+    asset_id = uuid.uuid4().hex
+    dest = ASSET_DIR / f"{asset_id}.{ext}"
+    f.save(str(dest))
+    return jsonify({
+        "asset_id": asset_id,
+        "kind": kind,
+        "filename": f.filename,
+        "duration": _media_duration(dest) if kind in ("video", "audio") else 0.0,
+    })
+
+
+@app.route("/list-assets", methods=["GET"])
+def list_assets():
+    """List uploaded timeline assets, newest first."""
+    out = []
+    for p in ASSET_DIR.glob("*"):
+        if not p.is_file():
+            continue
+        kind = _asset_kind(p.suffix)
+        if not kind:
+            continue
+        out.append({
+            "asset_id": p.stem,
+            "kind": kind,
+            "ext": p.suffix.lstrip("."),
+            "duration": _media_duration(p) if kind in ("video", "audio") else 0.0,
+            "mtime": p.stat().st_mtime,
+        })
+    out.sort(key=lambda a: a["mtime"], reverse=True)
+    return jsonify({"assets": out})
+
+
+@app.route("/asset/<asset_id>")
+def serve_asset(asset_id: str):
+    """Serve an asset file for in-browser preview."""
+    path = _find_asset_path(asset_id)
+    if not path:
+        return jsonify({"error": "Asset not found"}), 404
+    return send_from_directory(ASSET_DIR, path.name)
+
+
+@app.route("/source-info/<job_id>")
+def source_info(job_id: str):
+    """Return a source job's video duration + display dimensions so the editor
+    can place and trim clips against a real length."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Source video missing"}), 404
+    try:
+        w, h = get_video_dimensions(video_path)
+    except Exception as exc:
+        w, h = 0, 0
+    return jsonify({
+        "duration": _media_duration(video_path),
+        "width": w,
+        "height": h,
+        "filename": jobs[job_id].get("filename"),
+    })
+
+
+@app.route("/timeline/create", methods=["POST"])
+def timeline_create():
+    """Create a new (empty) timeline editor job.
+
+    Optionally seed the main track with the calling job's full clip via
+    {seed_job_id}. Returns {job_id}.
+    """
+    data = request.get_json(force=True) or {}
+    seed_job_id = data.get("seed_job_id")
+    label = (data.get("label") or "Timeline edit").strip()[:80] or "Timeline edit"
+
+    job_id = uuid.uuid4().hex
+    tracks = {"main": [], "overlay": [], "text": [], "music": []}
+    if seed_job_id and seed_job_id in jobs:
+        seed_video = find_video_path(seed_job_id)
+        if seed_video:
+            dur = _media_duration(seed_video)
+            tracks["main"].append({
+                "id": uuid.uuid4().hex[:8],
+                "source_job_id": seed_job_id,
+                "in": 0.0,
+                "out": dur or 10.0,
+            })
+    timeline = _normalize_timeline({"tracks": tracks})
+
+    jobs[job_id] = {
+        "status": "timeline_edit",
+        "progress": 0,
+        "output": None,
+        "error": None,
+        "words": None,
+        "style": None,
+        "audio": None,
+        "emoji_rules": None,
+        "created_at": time.time(),
+        "filename": f"{label}.mp4",
+        "timeline": timeline,
+        "is_timeline": True,
+    }
+    _db_save_job(job_id)
+    return jsonify({"job_id": job_id, "timeline": timeline})
+
+
+@app.route("/timeline/<job_id>", methods=["GET"])
+def timeline_get(job_id: str):
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    job = jobs[job_id]
+    return jsonify({
+        "job_id": job_id,
+        "timeline": job.get("timeline") or _normalize_timeline({}),
+        "filename": job.get("filename"),
+        "status": job.get("status"),
+        "output": job.get("output"),
+    })
+
+
+@app.route("/timeline/save", methods=["POST"])
+def timeline_save():
+    """Persist a timeline document (autosave from the editor)."""
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    timeline = _normalize_timeline(data.get("timeline") or {})
+    jobs[job_id]["timeline"] = timeline
+    if data.get("label"):
+        jobs[job_id]["filename"] = f"{str(data['label']).strip()[:80]}.mp4"
+    _db_save_job(job_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/timeline/render", methods=["POST"])
+def timeline_render():
+    """Kick off a background timeline render. Poll progress via /status."""
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    timeline = _normalize_timeline(data.get("timeline") or jobs[job_id].get("timeline") or {})
+    if not timeline["tracks"]["main"]:
+        return jsonify({"error": "Add at least one clip to the main track first."}), 400
+
+    jobs[job_id]["timeline"] = timeline
+    jobs[job_id]["status"] = "queued"
+    jobs[job_id]["progress"] = 0
+    jobs[job_id]["output"] = None
+    jobs[job_id]["error"] = None
+    _db_save_job(job_id)
+
+    t = threading.Thread(target=render_timeline_job, args=(job_id, timeline))
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/timeline/list", methods=["GET"])
+def timeline_list():
+    """List timeline editor jobs, newest first."""
+    out = []
+    for jid, job in jobs.items():
+        if not job.get("is_timeline"):
+            continue
+        out.append({
+            "job_id": jid,
+            "filename": job.get("filename"),
+            "status": job.get("status"),
+            "output": job.get("output"),
+            "created_at": job.get("created_at"),
+            "clip_count": len((job.get("timeline") or {}).get("tracks", {}).get("main", [])),
+        })
+    out.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
+    return jsonify({"timelines": out})
 
 
 if __name__ == "__main__":
