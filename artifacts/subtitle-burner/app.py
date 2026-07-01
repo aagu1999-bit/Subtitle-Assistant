@@ -5198,16 +5198,16 @@ def _make_waveform(src: Path, out: Path) -> bool:
     return proc.returncode == 0 and out.exists()
 
 
-def _make_filmstrip(src: Path, out: Path, frames: int = 24) -> bool:
+def _make_filmstrip(src: Path, out: Path, frames: int = 12) -> bool:
     """Render a horizontal filmstrip JPG (N evenly-spaced frames) of *src*."""
     dur = _media_duration(src)
     if dur <= 0:
         return False
     rate = max(0.01, frames / dur)
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-vf",
-         f"fps={rate:.5f},scale=-1:80,tile={frames}x1", "-frames:v", "1",
-         "-qscale:v", "5", str(out)],
+        ["ffmpeg", "-y", "-i", str(src), "-an", "-vf",
+         f"fps={rate:.5f},scale=-1:64,tile={frames}x1", "-frames:v", "1",
+         "-qscale:v", "6", str(out)],
         capture_output=True, text=True,
     )
     return proc.returncode == 0 and out.exists()
@@ -5402,4 +5402,9 @@ def timeline_list():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    # threaded=True is essential: the preview streams large source videos and
+    # ffmpeg builds filmstrips/waveforms on demand. Single-threaded, those long
+    # requests block seeking, saving, and status polling — making the editor
+    # feel frozen. Concurrent workers keep the UI responsive.
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)),
+            debug=False, threaded=True)

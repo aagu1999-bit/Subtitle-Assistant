@@ -805,17 +805,12 @@
         <section class="tl-stage-wrap">
           <div class="tl-preview">
             <div id="tlStage" class="tl-stage">
-              <video id="tlPreviewVideo" preload="metadata"></video>
+              <video id="tlPreviewVideo" controls playsinline preload="metadata"></video>
               <div id="tlOverlayLayer" class="tl-overlay-layer"></div>
             </div>
             <div id="tlPreviewEmpty" class="tl-preview-empty">
               <p>Add a clip from <strong>📁 Media</strong>, or press <strong>Render</strong> to see the full edit.</p>
             </div>
-          </div>
-          <div class="tl-scrubrow">
-            <button id="tlPlayBtn" class="tl-chip-btn" title="Play / pause preview">▶</button>
-            <input type="range" id="tlScrub" class="tl-scrub" min="0" max="100" value="0" step="0.1">
-            <span id="tlScrubTime" class="muted" style="font-size:.75rem;min-width:84px;text-align:right">0:00 / 0:00</span>
           </div>
 
           <!-- Timeline toolbar: Split + zoom + time readout -->

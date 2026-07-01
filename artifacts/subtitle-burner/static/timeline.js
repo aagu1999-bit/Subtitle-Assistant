@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-7";
+  const TL_BUILD = "editor-build-8";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -462,7 +462,8 @@
         el.dataset.id = c.id;
 
         // Filmstrip + waveform backgrounds (sliced to the clip's in/out).
-        addClipMedia(el, track, c);
+        // Skip while dragging so we don't rebuild image layers ~60x/second.
+        if (!drag) addClipMedia(el, track, c);
 
         const label = document.createElement("div");
         label.className = "tl-clip-label";
@@ -723,27 +724,20 @@
     scheduleSave();
   }
 
-  // ---- Scrub bar ----
+  // ---- Preview <-> playhead sync (native <video controls> does the seeking) ----
   function wireScrub() {
     const v = $("tlPreviewVideo");
-    const scrub = $("tlScrub");
-    const playBtn = $("tlPlayBtn");
     if (!v) return;
-    playBtn.onclick = () => { v.paused ? v.play().catch(() => {}) : v.pause(); };
     const upd = () => {
-      const d = v.duration || 0;
-      if (scrub && document.activeElement !== scrub) scrub.value = d ? (v.currentTime / d * 100) : 0;
-      $("tlScrubTime").textContent = `${fmtTime(v.currentTime)} / ${fmtTime(d)}`;
-      playBtn.textContent = v.paused ? "▶" : "❚❚";
       updatePlayhead();
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
     v.addEventListener("timeupdate", upd);
     v.addEventListener("loadedmetadata", upd);
+    v.addEventListener("seeked", upd);
     v.addEventListener("play", upd);
     v.addEventListener("pause", upd);
-    scrub.addEventListener("input", (e) => { if (v.duration) v.currentTime = (e.target.value / 100) * v.duration; });
   }
 
   function findClip(track, id) {
