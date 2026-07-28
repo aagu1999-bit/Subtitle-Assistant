@@ -4396,10 +4396,24 @@ def index():
 def transcribe_only():
     """Phase 1: upload video and transcribe. Returns job_id; poll /status for words."""
     if "video" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        # Behind a proxy this usually means the multipart body never arrived
+        # intact (size limit, or a stripped Content-Type) rather than a UI
+        # mistake, so log what did arrive instead of returning a bare 400.
+        print(f"[upload] rejected: no 'video' part. "
+              f"form_keys={list(request.form.keys())} "
+              f"file_keys={list(request.files.keys())} "
+              f"content_length={request.content_length} "
+              f"content_type={request.content_type!r}", flush=True)
+        return jsonify({"error": "No file uploaded (it did not reach the server intact)"}), 400
     f = request.files["video"]
-    if f.filename == "" or not allowed_file(f.filename):
-        return jsonify({"error": "Invalid file type"}), 400
+    if f.filename == "":
+        print("[upload] rejected: empty filename", flush=True)
+        return jsonify({"error": "No file selected"}), 400
+    if not allowed_file(f.filename):
+        print(f"[upload] rejected: unsupported extension for {f.filename!r}", flush=True)
+        return jsonify({
+            "error": f"Unsupported file type: {f.filename}. Allowed: {', '.join(sorted(ALLOWED_EXT))}"
+        }), 400
 
     job_id = uuid.uuid4().hex
     ext = f.filename.rsplit(".", 1)[1].lower()
