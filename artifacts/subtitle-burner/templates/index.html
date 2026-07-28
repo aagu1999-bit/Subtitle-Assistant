@@ -63,7 +63,7 @@
     <!-- Tab navigation -->
     <nav class="main-tabs" id="mainTabs">
       <button type="button" class="main-tab active" data-tab="edit">Edit</button>
-      {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="highlights">✨ Highlights</button>{% endif %}
+      <button type="button" class="main-tab" data-tab="highlights">✨ Highlights</button>
       {% if gemini_enabled %}<button type="button" class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>{% endif %}
       <button type="button" class="main-tab" data-tab="editor">🎬 Editor</button>
       <button type="button" class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
@@ -648,9 +648,9 @@
     </div>
     <!-- /Tab: Edit -->
 
-    {% if gemini_enabled %}
     <!-- Tab: Highlights -->
     <div class="tab-content hidden" data-tab-group="highlights">
+    {% if gemini_enabled %}
     <section id="highlightsPanel" class="panel" style="margin-top:0">
       <h2 style="display:flex;align-items:center;gap:10px">
         <span>✨ Find highlights</span>
@@ -705,9 +705,31 @@
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
       <div id="hlResults" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
     </section>
+    {% else %}
+    <!-- Feature-disabled placeholder: shown when GEMINI_API_KEY is not configured,
+         so the tab explains how to turn the feature on instead of silently vanishing. -->
+    <section class="panel" style="margin-top:0">
+      <h2 style="display:flex;align-items:center;gap:10px">
+        <span>✨ Find highlights</span>
+        <span class="muted" style="font-size:.78rem;font-weight:normal">AI clip suggestions</span>
+      </h2>
+      <div style="border:1px dashed #2c3240;border-radius:12px;padding:22px;margin-top:6px;background:#12151d">
+        <p style="font-weight:600;margin:0 0 6px;color:#e8eaed">🔒 This feature is turned off</p>
+        <p class="muted" style="margin:0">
+          AI clip suggestions need a Google <strong>Gemini</strong> API key. This tab stays
+          empty until one is configured — nothing is broken.
+        </p>
+        <p class="muted" style="margin:14px 0 4px;color:#c7cbd1">To enable it:</p>
+        <ol class="muted" style="margin:0;padding-left:20px;line-height:1.75">
+          <li>Get a free key from <strong>Google AI Studio</strong> (aistudio.google.com).</li>
+          <li>Add <code style="color:#9785ff">GEMINI_API_KEY=your_key</code> to <code style="color:#9785ff">.env.local</code> in the project root.</li>
+          <li>Restart the app — this tab fills in with the highlight finder.</li>
+        </ol>
+      </div>
+    </section>
+    {% endif %}
     </div>
     <!-- /Tab: Highlights -->
-    {% endif %}
 
   {% if gemini_enabled %}
   <!-- Tab: Compilation -->
