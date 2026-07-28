@@ -2805,7 +2805,7 @@ async function previewCompileAll() {
     alert("Queue is empty (or all clips have missing sources).");
     return;
   }
-  setActiveTab("edit");
+  setActiveTab("compilation");
   await new Promise(r => requestAnimationFrame(r));
   _compileSequenceActive = true;
   const btn = $("compilePreviewAllBtn");
@@ -3083,6 +3083,10 @@ if (mainTabs) {
 const workflowSteps = document.getElementById("workflowSteps");
 if (workflowSteps) {
   workflowSteps.addEventListener("click", (e) => {
+    // The header row is built from .main-tab buttons (data-tab); an older build
+    // used .step-badge (data-step). Support both so the top nav actually works.
+    const tabBtn = e.target.closest(".main-tab");
+    if (tabBtn && tabBtn.dataset.tab) { setActiveTab(tabBtn.dataset.tab); return; }
     const badge = e.target.closest(".step-badge");
     if (!badge || !badge.dataset.step) return;
     const stepToTab = {
@@ -3216,7 +3220,7 @@ function openPreviewEditor(clip) {
   _peUpdateDur();
   panel.classList.remove("hidden");
 
-  setActiveTab("edit");
+  setActiveTab("highlights");
   // Defer play+scroll until the tab switch's display change has applied.
   requestAnimationFrame(() => _pePlay());
 }
