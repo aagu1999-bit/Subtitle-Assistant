@@ -690,6 +690,121 @@
     updatePlayhead();
   }
 
+  // ---- Preview animation parity ----------------------------------------
+  // The renderer animates titles with ASS tags (app.py _tl_build_titles_ass):
+  // \fad(300,300) and, for slideup, \move(x, y+60, x, y, 0, 400). Mirror those
+  // exact numbers here so what plays in the preview is what gets burned in.
+  const FADE_MS = 300;
+  const SLIDE_MS = 400;
+  const SLIDE_PX = 60;   // in *output* pixels, as in the \move tag
+  const CANVAS_DIMS = {  // mirrors TIMELINE_CANVASES in app.py
+    "9x16": [1080, 1920], "16x9": [1920, 1080],
+    "1x1": [1080, 1080], "4x5": [1080, 1350],
+  };
+
+  // Titles currently on screen, so the rAF loop can animate them in place
+  // instead of rebuilding the layer (rebuilding would restart overlay <video>
+  // playback and re-request every <img> each frame).
+  let animEntries = [];
+  let ovEntries = [];
+  let visSig = null;
+  let rafId = null;
+
+  // Keep B-roll <video> overlays running with the main preview. Only correct
+  // the time on real drift — reassigning currentTime every frame re-seeks the
+  // decoder and makes the overlay stutter.
+  function syncOverlayVideos(ot, playing) {
+    for (const o of ovEntries) {
+      const want = o.srcIn + Math.max(0, ot - o.start);
+      if (Math.abs((o.el.currentTime || 0) - want) > 0.30) {
+        try { o.el.currentTime = want; } catch (e) {}
+      }
+      if (playing && o.el.paused) { o.el.play().catch(() => {}); }
+      else if (!playing && !o.el.paused) { o.el.pause(); }
+    }
+  }
+
+  function outputHeight() {
+    const d = CANVAS_DIMS[(tl && tl.canvas) || "9x16"] || CANVAS_DIMS["9x16"];
+    return d[1];
+  }
+
+  // Which items are on screen at `ot`. When this changes the layer needs a
+  // structural rebuild; while it holds steady we only touch styles.
+  function visibleSignature(ot) {
+    if (!tl) return "";
+    const ids = [];
+    const scan = (arr) => (arr || []).forEach((it) => {
+      const s = it.start || 0;
+      if (ot >= s && ot <= s + clipDuration(it)) ids.push(it.id);
+    });
+    scan(tl.tracks.text);
+    scan(tl.tracks.overlay);
+    let mainId = "";
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const s = mainStart(i);
+      if (ot >= s && ot < s + clipDuration(tl.tracks.main[i])) {
+        mainId = tl.tracks.main[i].id; break;
+      }
+    }
+    return ids.join(",") + "|" + mainId + "|" + (selected ? selected.id : "");
+  }
+
+  function applyTitleAnim(entry, ot) {
+    const t = ot - entry.start;                  // seconds since it appeared
+    const remain = (entry.start + entry.dur) - ot;
+    let opacity = 1, dy = 0;
+
+    if (entry.anim !== "none") {
+      const fade = FADE_MS / 1000;
+      if (t < fade) opacity = t / fade;
+      else if (remain < fade) opacity = remain / fade;
+      opacity = Math.max(0, Math.min(1, opacity));
+    }
+    if (entry.anim === "slideup") {
+      const slide = SLIDE_MS / 1000;
+      if (t < slide) dy = SLIDE_PX * (1 - Math.max(0, Math.min(1, t / slide)));
+    }
+
+    entry.el.style.opacity = opacity;
+    // Scale the output-space slide into stage pixels so it reads the same at
+    // any preview size.
+    const stagePx = dy * ((entry.el.parentNode ? entry.el.parentNode.clientHeight : 0) || 640) / outputHeight();
+    entry.el.style.transform = assAnchorTransform(entry.align) +
+      (stagePx ? ` translateY(${stagePx.toFixed(2)}px)` : "");
+  }
+
+  // Drive the preview from requestAnimationFrame while the video plays.
+  // `timeupdate` only fires ~4x/second, which is why placed elements used to
+  // lag and stutter behind the picture. Editing stays live: dragging updates
+  // the model and the next frame reflects it, with nothing paused.
+  function previewFrame() {
+    const v = $("tlPreviewVideo");
+    if (!v || !tl) { rafId = null; return; }
+
+    let ot = playheadOutputTime();
+    if (ot == null) ot = v.currentTime || 0;
+
+    const sig = visibleSignature(ot);
+    if (sig !== visSig) {
+      updateStageCompositor();          // items entered/left: rebuild
+    } else {
+      for (const e of animEntries) applyTitleAnim(e, ot);
+    }
+    syncOverlayVideos(ot, !v.paused && !v.ended);
+    updatePlayhead();
+    if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
+
+    rafId = (!v.paused && !v.ended) ? requestAnimationFrame(previewFrame) : null;
+  }
+
+  function startPreviewLoop() {
+    if (rafId == null) rafId = requestAnimationFrame(previewFrame);
+  }
+  function stopPreviewLoop() {
+    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
   // ---- Live preview boxes (drag to position titles / overlays / logo) ----
   function updateStageCompositor() {
     const layer = $("tlOverlayLayer");
@@ -699,9 +814,12 @@
     if (boxDrag) return;
 
     layer.innerHTML = "";
+    animEntries = [];
+    ovEntries = [];
 
     let ot = playheadOutputTime();
     if (ot == null) ot = v.currentTime || 0;
+    visSig = visibleSignature(ot);
 
     let activeMainClip = null;
     for (let i = 0; i < tl.tracks.main.length; i++) {
@@ -758,6 +876,11 @@
         }
 
         layer.appendChild(el);
+        // Register for the rAF loop and apply this frame's state immediately,
+        // so a title that is mid-fade doesn't flash at full opacity on rebuild.
+        const entry = { el, start, dur, anim: item.anim || "fade", align: item.align };
+        animEntries.push(entry);
+        applyTitleAnim(entry, ot);
       }
     });
 
@@ -792,6 +915,12 @@
         });
 
         layer.appendChild(el);
+        // B-roll video: the layer is no longer rebuilt every frame, so keep the
+        // element playing in step with the main preview instead of freezing on
+        // the frame it was created at.
+        if (el.tagName === "VIDEO") {
+          ovEntries.push({ el, start, srcIn: item.in || 0 });
+        }
       }
     });
 
@@ -924,11 +1053,15 @@
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
-    v.addEventListener("timeupdate", upd);
+    // timeupdate stays as a coarse fallback (~4 Hz) for browsers that throttle
+    // rAF in background tabs; the rAF loop is what drives smooth playback.
+    v.addEventListener("timeupdate", () => { if (rafId == null) upd(); });
     v.addEventListener("loadedmetadata", upd);
     v.addEventListener("seeked", upd);
-    v.addEventListener("play", upd);
-    v.addEventListener("pause", upd);
+    v.addEventListener("play", () => { upd(); startPreviewLoop(); });
+    v.addEventListener("playing", startPreviewLoop);
+    v.addEventListener("pause", () => { stopPreviewLoop(); upd(); });
+    v.addEventListener("ended", () => { stopPreviewLoop(); upd(); });
   }
 
   function findClip(track, id) {
