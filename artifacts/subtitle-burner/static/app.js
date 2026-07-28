@@ -1171,7 +1171,17 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
 }
 
 go.onclick = async () => {
-  if (!currentFile) return;
+  // No staged file: the video was auto-queued on drop or restored from a
+  // previous session. Silently returning made the button look dead, so tell
+  // the user what to do instead.
+  if (!currentFile) {
+    if (currentJobId) {
+      alert("This video is already transcribed. Pick it under \"Your videos\" to edit it, or use Re-transcribe to run Whisper again.");
+    } else {
+      alert("Drop a video first, then click Transcribe.");
+    }
+    return;
+  }
   go.disabled = true;
   await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
 };
