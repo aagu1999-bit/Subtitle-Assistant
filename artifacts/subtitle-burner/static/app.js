@@ -302,6 +302,37 @@ THEMES.forEach((t, i) => {
   themesDiv.appendChild(b);
 });
 
+// ---- Viral Presets click handler ----
+const VIRAL_PRESETS = {
+  hormozi: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", outline: "#000000", outlineWidth: 4, allCaps: true, shadow: 2 },
+  mrbeast: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", outline: "#000000", outlineWidth: 5, allCaps: true, shadow: 3 },
+  neon:    { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", outline: "#110022", outlineWidth: 3, allCaps: true, shadow: 2 },
+  karaoke: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", outline: "#0F172A", outlineWidth: 2, allCaps: false, shadow: 1 },
+};
+
+document.querySelectorAll("#viralPresets .theme").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#viralPresets .theme").forEach(x => x.classList.remove("active"));
+    btn.classList.add("active");
+    const presetKey = btn.dataset.preset;
+    const p = VIRAL_PRESETS[presetKey];
+    if (!p) return;
+    const fontEl = $("font");
+    if (fontEl) fontEl.value = p.font;
+    if (sizeEl) { sizeEl.value = p.size; sizeVal.textContent = p.size; }
+    if (primaryEl) primaryEl.value = p.primary;
+    if (highlightEl) highlightEl.value = p.highlight;
+    if (accentEl) accentEl.value = p.accent;
+    if (outlineEl) outlineEl.value = p.outline;
+    if (owEl) { owEl.value = p.outlineWidth; owVal.textContent = p.outlineWidth; }
+    const capsEl = $("allCaps");
+    if (capsEl) capsEl.checked = p.allCaps;
+    const shadowEl = $("shadow");
+    if (shadowEl) shadowEl.value = p.shadow;
+    scheduleDraftSave();
+  });
+});
+
 // ---- Live labels ----
 sizeEl.oninput  = () => { sizeVal.textContent = sizeEl.value; scheduleDraftSave(); };
 owEl.oninput    = () => { owVal.textContent = owEl.value; scheduleDraftSave(); };
@@ -684,6 +715,10 @@ function getPreCleanFlag() {
 
 // ---- Helpers: collect style / audio ----
 function getStyle() {
+  const speakerColorsEnabled = $("speakerColorsEnabled") && $("speakerColorsEnabled").checked;
+  const bgMusicDuck = $("bgMusicDuck") ? $("bgMusicDuck").checked : false;
+  const bgMusicIntensity = $("bgMusicDuckIntensity") ? $("bgMusicDuckIntensity").value : "medium";
+  const duckRatioMap = { gentle: 4, medium: 8, aggressive: 16 };
   return {
     font_name:       $("font").value,
     font_size:       parseInt(sizeEl.value, 10),
@@ -699,8 +734,19 @@ function getStyle() {
     smooth_timings:  $("smoothTimings") ? $("smoothTimings").checked : true,
     punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
+    headline_banner: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
+    speaker_colors: speakerColorsEnabled ? {
+      SPEAKER_00: $("hostColor") ? $("hostColor").value : "#FFD700",
+      SPEAKER_01: $("guestColor") ? $("guestColor").value : "#00E5FF",
+    } : {},
     reframe: {
-      enabled: $("reframeEnabled") ? $("reframeEnabled").checked : false,
+      enabled:      $("reframeEnabled") ? $("reframeEnabled").checked : false,
+      top_panel:    $("reframeTopSelect") ? $("reframeTopSelect").value : "active",
+      bottom_panel: $("reframeBottomSelect") ? $("reframeBottomSelect").value : "full",
+    },
+    punch_zoom: {
+      enabled: $("punchZoomEnabled") ? $("punchZoomEnabled").checked : false,
+      intensity: $("punchZoomIntensity") ? $("punchZoomIntensity").value : "med",
     },
     tighten_silences: {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
@@ -708,6 +754,12 @@ function getStyle() {
       target_gap: $("tightenTargetGap") ? parseFloat($("tightenTargetGap").value) : 0.3,
       crossfade:  $("tightenCrossfade") ? $("tightenCrossfade").checked : false,
       preserved_gap_starts: (typeof _tPreservedCache !== "undefined") ? _tPreservedCache.slice() : [],
+    },
+    bg_music: {
+      enabled:   !!window._bgMusicUploaded,
+      volume_db: $("bgMusicVolume") ? parseInt($("bgMusicVolume").value, 10) : -12,
+      duck:      bgMusicDuck,
+      duck_ratio: duckRatioMap[bgMusicIntensity] || 8,
     },
   };
 }
@@ -1373,7 +1425,7 @@ function highlightPhraseRow(target) {
   if (target) target.classList.add("active");
 }
 
-// Sync phrase list highlight as the source video plays
+// Sync phrase list highlight and live WYSIWYG overlay as the source video plays
 sourcePlayer.addEventListener("timeupdate", () => {
   const t = sourcePlayer.currentTime;
   const rows = Array.from(phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)"));
@@ -1386,6 +1438,27 @@ sourcePlayer.addEventListener("timeupdate", () => {
   if (activeRow && !activeRow.classList.contains("active")) {
     highlightPhraseRow(activeRow);
     activeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  // Render Live WYSIWYG Subtitle Overlay on video stage
+  const overlay = $("liveCaptionOverlay");
+  if (overlay && currentWords && currentWords.length) {
+    const currentWord = currentWords.find(w => t >= w.start && t <= w.end);
+    if (currentWord) {
+      const activeText = currentWord.word;
+      const highlightColor = highlightEl ? highlightEl.value : "#FFD60A";
+      const fontVal = $("font") ? $("font").value : "Outfit";
+      overlay.style.fontFamily = `'${fontVal}', sans-serif`;
+      overlay.innerHTML = `<span>${activeText.replace(/</g, "&lt;")}</span>`;
+      overlay.style.display = "block";
+      const span = overlay.querySelector("span");
+      if (span) {
+        span.className = "word-active";
+        span.style.color = highlightColor;
+      }
+    } else {
+      overlay.style.display = "none";
+    }
   }
 });
 
@@ -1571,8 +1644,9 @@ if (exportVttBtn) exportVttBtn.onclick = () => _downloadCaptions("vtt");
 // dedicated /reframe-status endpoint until ready. Once ready, the
 // "Apply 9:16 reframe on next render" checkbox enables.
 const reframeAnalyzeBtn = $("reframeAnalyzeBtn");
-const reframeEnabled = $("reframeEnabled");
-const reframeStatus = $("reframeStatus");
+const reframeSwapBtn    = $("reframeSwapBtn");
+const reframeEnabled    = $("reframeEnabled");
+const reframeStatus     = $("reframeStatus");
 let _reframePollTimer = null;
 
 async function refreshReframeStatus() {
@@ -1583,8 +1657,13 @@ async function refreshReframeStatus() {
     if (data.ready && data.stats) {
       reframeStatus.textContent =
         `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples} face samples`;
-      if (reframeEnabled) reframeEnabled.disabled = false;
+      if (reframeEnabled) {
+        reframeEnabled.disabled = false;
+        reframeEnabled.checked = true; // Auto-check when analysis is ready!
+      }
       if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Re-analyze";
+      refreshReframePreview();
+      refreshSpeakerAvatars();
     } else {
       reframeStatus.textContent = "Not analysed yet";
       if (reframeEnabled) {
@@ -1592,6 +1671,10 @@ async function refreshReframeStatus() {
         reframeEnabled.checked = false;
       }
       if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+      const box = $("reframePreviewBox");
+      if (box) box.style.display = "none";
+      const spkBox = $("reframeSpeakerBox");
+      if (spkBox) spkBox.style.display = "none";
     }
   } catch { /* offline — silent */ }
 }
@@ -1600,6 +1683,7 @@ if (reframeAnalyzeBtn) {
   reframeAnalyzeBtn.onclick = async () => {
     if (!currentJobId) { alert("Open a transcribed video first."); return; }
     reframeAnalyzeBtn.disabled = true;
+    if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
     reframeStatus.textContent = "Starting…";
     try {
       const res = await fetch("/analyze-reframe", {
@@ -1618,6 +1702,10 @@ if (reframeAnalyzeBtn) {
           _reframePollTimer = null;
           refreshReframeStatus();
           reframeAnalyzeBtn.disabled = false;
+          if (reframeEnabled) {
+            reframeEnabled.disabled = false;
+            reframeEnabled.checked = true;
+          }
         } else if (r.error) {
           // Worker died — stop polling and tell the user what went wrong.
           clearInterval(_reframePollTimer);
@@ -1633,6 +1721,86 @@ if (reframeAnalyzeBtn) {
     }
   };
 }
+
+function refreshSpeakerAvatars() {
+  const spkBox = $("reframeSpeakerBox");
+  if (!currentJobId || !spkBox) return;
+  const ts = Date.now();
+  const spk0 = $("spk0Avatar");
+  const spk1 = $("spk1Avatar");
+  if (spk0) spk0.src = `/reframe-speaker-avatar/${currentJobId}/SPEAKER_00?t=${ts}`;
+  if (spk1) spk1.src = `/reframe-speaker-avatar/${currentJobId}/SPEAKER_01?t=${ts}`;
+  spkBox.style.display = "block";
+}
+
+async function handleSwapSpeakerVoices() {
+  if (!currentJobId) return;
+  const btn = $("reframeSwapDiarBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Swapping…"; }
+  try {
+    const res = await fetch("/reframe-swap-speakers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: currentJobId }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (reframeStatus) reframeStatus.textContent = "✓ Speaker voices swapped";
+    refreshSpeakerAvatars();
+    refreshReframePreview();
+  } catch (e) {
+    if (reframeStatus) reframeStatus.textContent = "❌ Swap failed: " + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⇄ Swap Speaker Voices"; }
+  }
+}
+
+const reframeSwapDiarBtn = $("reframeSwapDiarBtn");
+if (reframeSwapDiarBtn) reframeSwapDiarBtn.onclick = handleSwapSpeakerVoices;
+
+function refreshReframePreview() {
+  const box = $("reframePreviewBox");
+  if (!currentJobId || !box) return;
+  const topVal = $("reframeTopSelect") ? $("reframeTopSelect").value : "active";
+  const botVal = $("reframeBottomSelect") ? $("reframeBottomSelect").value : "full";
+  const ts = Date.now();
+  const topImg = $("reframeTopImg");
+  const botImg = $("reframeBottomImg");
+  if (topImg) topImg.src = `/reframe-preview-crop/${currentJobId}/top?top=${topVal}&bottom=${botVal}&t=${ts}`;
+  if (botImg) botImg.src = `/reframe-preview-crop/${currentJobId}/bottom?top=${topVal}&bottom=${botVal}&t=${ts}`;
+  
+  const labels = {
+    active: "🗣️ Active Speaker (Auto Zoom)",
+    left:   "👤 Speaker 1 (Left Person)",
+    right:  "👤 Speaker 2 (Right Person)",
+    full:   "📹 Original Wide Video",
+  };
+  const topDesc = $("reframeTopDesc");
+  const botDesc = $("reframeBottomDesc");
+  if (topDesc) topDesc.textContent = labels[topVal] || topVal;
+  if (botDesc) botDesc.textContent = labels[botVal] || botVal;
+  box.style.display = "block";
+}
+
+function handleReframeSwap() {
+  const topEl = $("reframeTopSelect");
+  const botEl = $("reframeBottomSelect");
+  if (topEl && botEl) {
+    const tmp = topEl.value;
+    topEl.value = botEl.value;
+    botEl.value = tmp;
+    refreshReframePreview();
+  }
+}
+
+const reframeSwapBtnCard = $("reframeSwapBtnCard");
+if (reframeSwapBtnCard) reframeSwapBtnCard.onclick = handleReframeSwap;
+
+const reframeTopSelect = $("reframeTopSelect");
+if (reframeTopSelect) reframeTopSelect.onchange = () => refreshReframePreview();
+
+const reframeBottomSelect = $("reframeBottomSelect");
+if (reframeBottomSelect) reframeBottomSelect.onchange = () => refreshReframePreview();
 
 // Refresh reframe panel state whenever a job is switched in / out.
 if (typeof window !== "undefined") {
@@ -2011,6 +2179,37 @@ function renderHighlights(clips, format) {
     }
     card.appendChild(title);
 
+    // ---- Viral Score Badge + Category Tag (from enhanced Gemini response) ----
+    if (c.viral_score || c.category || c.suggested_headline) {
+      const metaRow = document.createElement("div");
+      metaRow.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 2px";
+      if (c.viral_score != null) {
+        const scoreBadge = document.createElement("span");
+        const score = parseInt(c.viral_score, 10);
+        const scoreColor = score >= 80 ? "#ff4444" : score >= 60 ? "#ff9500" : score >= 40 ? "#ffd60a" : "#8892b0";
+        scoreBadge.style.cssText = `display:inline-flex;align-items:center;gap:4px;font-size:.76rem;font-weight:700;color:${scoreColor};background:${scoreColor}18;padding:2px 8px;border-radius:12px;border:1px solid ${scoreColor}44`;
+        scoreBadge.textContent = `🔥 ${score}`;
+        scoreBadge.title = "Viral potential score (0-100)";
+        metaRow.appendChild(scoreBadge);
+      }
+      if (c.category) {
+        const catBadge = document.createElement("span");
+        const catIcons = { founder_story: "📖", product_spotlight: "🎯", business_advice: "💡", festival_vibe: "🎪" };
+        const catLabels = { founder_story: "Founder Story", product_spotlight: "Product Spotlight", business_advice: "Business Advice", festival_vibe: "Festival Vibe" };
+        catBadge.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:.76rem;color:#a0b0c8;background:#1e2535;padding:2px 8px;border-radius:12px;border:1px solid #2d3a50";
+        catBadge.textContent = `${catIcons[c.category] || "🏷"} ${catLabels[c.category] || c.category}`;
+        metaRow.appendChild(catBadge);
+      }
+      if (c.suggested_headline) {
+        const headlineBadge = document.createElement("span");
+        headlineBadge.style.cssText = "font-size:.76rem;color:#8892b0;font-style:italic";
+        headlineBadge.textContent = `💬 "${c.suggested_headline}"`;
+        headlineBadge.title = "AI-suggested headline for this clip";
+        metaRow.appendChild(headlineBadge);
+      }
+      card.appendChild(metaRow);
+    }
+
     // Hook quote — editable too. Always render the row so the user can add
     // a quote even when Gemini didn't supply one.
     const quote = document.createElement("div");
@@ -2115,6 +2314,19 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(previewBtn);
 
+    const addSegBtn = document.createElement("button");
+    addSegBtn.textContent = "🔗 Add to assembly";
+    addSegBtn.title = "Add this clip as a segment in the assembly bar";
+    addSegBtn.onclick = () => {
+      if (editedEnd <= editedStart) { alert("End time must be greater than start time."); return; }
+      _addClipToAssembly({ title: editedTitle, start: editedStart, end: editedEnd, quote: editedQuote });
+      addSegBtn.textContent = "✓ Added";
+      addSegBtn.disabled = true;
+      setTimeout(() => { addSegBtn.disabled = false; addSegBtn.textContent = "🔗 Add to assembly"; }, 1500);
+      if (window.StudioLogger) StudioLogger.clip("segment_added", `"${editedTitle}" ${editedStart.toFixed(1)}-${editedEnd.toFixed(1)}s`);
+    };
+    actions.appendChild(addSegBtn);
+
     const addBtn = document.createElement("button");
     addBtn.textContent = "+ Add to compilation";
     addBtn.onclick = () => {
@@ -2173,19 +2385,21 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(makeBtn);
 
-    if (typeof window.openTimelineEditor === "function") {
-      const tlBtn = document.createElement("button");
-      tlBtn.textContent = "🎬 To timeline";
-      tlBtn.title = "Open the timeline editor with this highlight as a clip";
-      tlBtn.onclick = () => {
-        if (editedEnd <= editedStart) {
-          alert("End time must be greater than start time.");
-          return;
-        }
+    const tlBtn = document.createElement("button");
+    tlBtn.textContent = "🎬 Open in Timeline";
+    tlBtn.title = "Open the timeline editor with this highlight as a clip";
+    tlBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      if (typeof window.openTimelineEditor === "function") {
         window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd });
-      };
-      actions.appendChild(tlBtn);
-    }
+      } else {
+        alert("Timeline Editor is not available.");
+      }
+    };
+    actions.appendChild(tlBtn);
 
     card.appendChild(actions);
     hlResults.appendChild(card);
@@ -2821,28 +3035,65 @@ const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
 
 function setActiveTab(tab) {
-  if (!mainTabs) {
-    console.warn("[tabs] setActiveTab called but #mainTabs not found");
-    return;
-  }
-  // Re-query tab content nodes every call so we don't depend on a snapshot
-  // taken before the DOM was fully parsed (defensive against script timing).
-  const contents = document.querySelectorAll("[data-tab-group]");
-  console.log("[tabs] setActiveTab", tab, "found", contents.length, "tab-content elements");
-  mainTabs.querySelectorAll(".main-tab").forEach(b => {
+  const stepMap = {
+    ingest: "1",
+    transcript: "2",
+    highlights: "3",
+    branding: "4",
+    editor: "5"
+  };
+  const step = stepMap[tab];
+
+  document.querySelectorAll(".main-tab").forEach(b => {
     b.classList.toggle("active", b.dataset.tab === tab);
   });
-  contents.forEach(c => {
-    const match = c.dataset.tabGroup === tab;
-    c.classList.toggle("hidden", !match);
+
+  document.querySelectorAll(".step-badge").forEach(b => {
+    b.classList.toggle("active", b.dataset.step === step);
   });
+
+  document.querySelectorAll(".tab-content, [data-tab-group]").forEach(c => {
+    if (c.dataset.tabGroup) {
+      const isMatch = c.dataset.tabGroup === tab;
+      c.classList.toggle("hidden", !isMatch);
+      c.classList.toggle("active", isMatch);
+      c.style.display = isMatch ? "block" : "none";
+      if (isMatch) {
+        // Ensure inner panels & editor views within the matching tab are visible
+        c.querySelectorAll(".panel, section, #editor, #transcriptEditor, #highlightsPanel").forEach(p => {
+          if (p.id !== "jobsPanel") p.classList.remove("hidden");
+        });
+      }
+    }
+  });
+
+  if (tab === "editor" && window.ensureTimelineInit) {
+    window.ensureTimelineInit();
+  }
 }
 
 if (mainTabs) {
   mainTabs.addEventListener("click", (e) => {
     const btn = e.target.closest(".main-tab");
     if (!btn || btn.classList.contains("hidden")) return;
-    setActiveTab(btn.dataset.tab);
+    if (btn.dataset.tab) setActiveTab(btn.dataset.tab);
+  });
+}
+
+const workflowSteps = document.getElementById("workflowSteps");
+if (workflowSteps) {
+  workflowSteps.addEventListener("click", (e) => {
+    const badge = e.target.closest(".step-badge");
+    if (!badge || !badge.dataset.step) return;
+    const stepToTab = {
+      "1": "ingest",
+      "2": "transcript",
+      "3": "highlights",
+      "4": "branding",
+      "5": "editor"
+    };
+    const tab = stepToTab[badge.dataset.step];
+    if (tab) setActiveTab(tab);
   });
 }
 
@@ -3272,3 +3523,509 @@ function _tMaybeReScan() {
 }
 if (_tMaxGap) _tMaxGap.addEventListener("change", _tMaybeReScan);
 if (_tTargetGap) _tTargetGap.addEventListener("change", _tMaybeReScan);
+
+// ===========================================================================
+//  NEW FEATURES — Studio Logger, Bg Music, Speaker Colors, Clip Assembly
+// ===========================================================================
+
+// ---- StudioLogger initialisation ----
+if (window.StudioLogger) {
+  StudioLogger.init();
+  StudioLogger.enableFetchLogging();
+  // Attach to the source video player once the DOM is ready
+  const _slVideo = $("sourcePlayer");
+  if (_slVideo) StudioLogger.attachMediaElement(_slVideo);
+}
+
+// ---- Speaker Color Row: show when reframe analysis completes ----
+(function() {
+  const _scRow = $("speakerColorRow");
+  if (!_scRow) return;
+  // Watch for the reframe checkbox becoming enabled (analysis completed)
+  const _reframeCheck = $("reframeEnabled");
+  if (_reframeCheck) {
+    const _scObserver = new MutationObserver(() => {
+      if (!_reframeCheck.disabled) { _scRow.style.display = "flex"; }
+    });
+    _scObserver.observe(_reframeCheck, { attributes: true, attributeFilter: ["disabled"] });
+  }
+})();
+
+// ---- Headline Banner: live WYSIWYG preview ----
+(function() {
+  const bannerInput = $("headlineBanner");
+  const overlay = $("liveCaptionOverlay");
+  if (!bannerInput || !overlay) return;
+  let bannerDiv = document.createElement("div");
+  bannerDiv.id = "headlineBannerOverlay";
+  bannerDiv.style.cssText = "position:absolute;top:5%;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);color:#fff;font-weight:700;font-size:.78rem;padding:4px 14px;border-radius:14px;white-space:nowrap;display:none;z-index:20;backdrop-filter:blur(6px);letter-spacing:.02em";
+  overlay.parentElement.appendChild(bannerDiv);
+  bannerInput.addEventListener("input", () => {
+    const txt = bannerInput.value.trim();
+    if (txt) { bannerDiv.textContent = "📍 " + txt; bannerDiv.style.display = "block"; }
+    else { bannerDiv.style.display = "none"; }
+  });
+})();
+
+// ---- Background Music upload handler ----
+window._bgMusicUploaded = false;
+(function() {
+  const fileInput = $("bgMusicFile");
+  const uploadBtn = $("bgMusicUploadBtn");
+  const statusEl = $("bgMusicStatus");
+  const nameEl = $("bgMusicFileName");
+  const volSlider = $("bgMusicVolume");
+  const volVal = $("bgMusicVolVal");
+  if (!fileInput || !uploadBtn) return;
+
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files[0];
+    if (f) {
+      uploadBtn.disabled = false;
+      if (nameEl) nameEl.textContent = f.name;
+      if (window.StudioLogger) StudioLogger.action("bgMusicFile", "selected", f.name);
+    } else {
+      uploadBtn.disabled = true;
+      if (nameEl) nameEl.textContent = "";
+    }
+  });
+
+  if (volSlider && volVal) {
+    volSlider.addEventListener("input", () => { volVal.textContent = volSlider.value + " dB"; });
+  }
+
+  uploadBtn.addEventListener("click", async () => {
+    if (!currentJobId) { alert("No active job. Upload a video first."); return; }
+    const f = fileInput.files[0];
+    if (!f) return;
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = "Uploading…";
+    if (statusEl) statusEl.textContent = "";
+    try {
+      const fd = new FormData();
+      fd.append("job_id", currentJobId);
+      fd.append("music", f);
+      const res = await fetch("/upload-bg-music", { method: "POST", body: fd });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      window._bgMusicUploaded = true;
+      uploadBtn.textContent = "✓ Uploaded";
+      if (statusEl) statusEl.textContent = `Ready: ${j.path}`;
+      if (window.StudioLogger) StudioLogger.action("bgMusicUpload", "success", j.path);
+    } catch (e) {
+      uploadBtn.textContent = "⬆ Upload music";
+      uploadBtn.disabled = false;
+      if (statusEl) { statusEl.textContent = "Error: " + e.message; statusEl.style.color = "#ff8a8a"; }
+      if (window.StudioLogger) StudioLogger.error("bgMusicUpload", e, 0, "Music upload failed");
+    }
+  });
+})();
+
+// ---- Clip Assembly Bar (multi-segment editor) ----
+const _clipAssembly = [];
+
+function _addClipToAssembly(seg) {
+  _clipAssembly.push({ ...seg, id: Date.now() + Math.random() });
+  _renderAssemblyBar();
+}
+
+function _renderAssemblyBar() {
+  const bar = $("clipAssemblyBar");
+  const track = $("clipSegmentTrack");
+  const countEl = $("clipAssemblyCount");
+  if (!bar || !track) return;
+
+  if (_clipAssembly.length === 0) {
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  if (countEl) countEl.textContent = _clipAssembly.length + " segment" + (_clipAssembly.length !== 1 ? "s" : "");
+
+  track.innerHTML = "";
+  const segColors = ["#5e81ac", "#a3be8c", "#b48ead", "#d08770", "#88c0d0", "#ebcb8b"];
+  _clipAssembly.forEach((seg, i) => {
+    const block = document.createElement("div");
+    const dur = (seg.end - seg.start).toFixed(1);
+    const bg = segColors[i % segColors.length];
+    block.style.cssText = `display:flex;align-items:center;gap:6px;padding:6px 10px;background:${bg}22;border:1px solid ${bg};border-radius:6px;font-size:.78rem;color:${bg};cursor:grab;user-select:none;white-space:nowrap;flex-shrink:0`;
+    block.draggable = true;
+    block.dataset.idx = i;
+
+    // Drag-to-reorder
+    block.addEventListener("dragstart", e => { e.dataTransfer.setData("text/plain", String(i)); block.style.opacity = "0.5"; });
+    block.addEventListener("dragend", () => { block.style.opacity = "1"; });
+    block.addEventListener("dragover", e => e.preventDefault());
+    block.addEventListener("drop", e => {
+      e.preventDefault();
+      const fromIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
+      if (isNaN(fromIdx) || fromIdx === i) return;
+      const [moved] = _clipAssembly.splice(fromIdx, 1);
+      _clipAssembly.splice(i, 0, moved);
+      _renderAssemblyBar();
+      if (window.StudioLogger) StudioLogger.clip("reordered", `Moved segment ${fromIdx} → ${i}`);
+    });
+
+    const label = document.createElement("span");
+    label.innerHTML = `<strong>${String.fromCharCode(65 + i)}</strong> ${_fmtTimeFine(seg.start)}–${_fmtTimeFine(seg.end)} <span style="opacity:0.6">(${dur}s)</span>`;
+    block.appendChild(label);
+
+    // Remove button
+    const removeBtn = document.createElement("button");
+    removeBtn.textContent = "✕";
+    removeBtn.title = "Remove this segment";
+    removeBtn.style.cssText = "background:transparent;border:none;color:#bf616a;font-size:.82rem;cursor:pointer;padding:0 2px;line-height:1";
+    removeBtn.onclick = (e) => {
+      e.stopPropagation();
+      _clipAssembly.splice(i, 1);
+      _renderAssemblyBar();
+      if (window.StudioLogger) StudioLogger.clip("segment_removed", `Segment ${String.fromCharCode(65 + i)} removed`);
+    };
+    block.appendChild(removeBtn);
+
+    track.appendChild(block);
+  });
+}
+
+// Clip Assembly: Preview sequence (virtual playlist)
+(function() {
+  const previewBtn = $("clipAssemblyPreview");
+  const clearBtn = $("clipAssemblyClear");
+  const exportBtn = $("clipAssemblyExport");
+  if (!previewBtn || !clearBtn) return;
+
+  let _playingAssembly = false;
+  let _assemblyRaf = null;
+
+  previewBtn.addEventListener("click", () => {
+    const video = $("sourcePlayer");
+    if (!video || _clipAssembly.length === 0) return;
+    if (_playingAssembly) {
+      _playingAssembly = false;
+      video.pause();
+      if (_assemblyRaf) cancelAnimationFrame(_assemblyRaf);
+      previewBtn.textContent = "▶ Preview sequence";
+      return;
+    }
+
+    _playingAssembly = true;
+    previewBtn.textContent = "⏸ Stop preview";
+    let segIdx = 0;
+    video.currentTime = _clipAssembly[0].start;
+    video.play();
+
+    function tick() {
+      if (!_playingAssembly) return;
+      const seg = _clipAssembly[segIdx];
+      if (video.currentTime >= seg.end) {
+        segIdx++;
+        if (segIdx >= _clipAssembly.length) {
+          _playingAssembly = false;
+          video.pause();
+          previewBtn.textContent = "▶ Preview sequence";
+          return;
+        }
+        video.currentTime = _clipAssembly[segIdx].start;
+      }
+      _assemblyRaf = requestAnimationFrame(tick);
+    }
+    tick();
+    if (window.StudioLogger) StudioLogger.clip("assembly_preview", `${_clipAssembly.length} segments`);
+  });
+
+  clearBtn.addEventListener("click", () => {
+    _clipAssembly.length = 0;
+    _renderAssemblyBar();
+    if (window.StudioLogger) StudioLogger.clip("assembly_cleared", "all segments removed");
+  });
+
+  if (exportBtn) {
+    exportBtn.addEventListener("click", async () => {
+      if (_clipAssembly.length === 0) return;
+      if (!currentJobId) { alert("No active job."); return; }
+      exportBtn.disabled = true;
+      exportBtn.textContent = "Exporting…";
+      try {
+        const segments = _clipAssembly.map(s => ({ start_time: s.start, end_time: s.end, title: s.title }));
+        const res = await fetch("/compile-clips", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            clips: segments.map(s => ({
+              source_job_id: currentJobId,
+              source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+              start_time: s.start_time,
+              end_time: s.end_time,
+              title: s.title,
+            })),
+            label: "Assembled Short",
+          }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        await refreshJobsList();
+        await switchToJob(j.job_id);
+        if (window.StudioLogger) StudioLogger.clip("assembly_exported", `job: ${j.job_id}`);
+      } catch (e) {
+        alert("Export failed: " + e.message);
+        if (window.StudioLogger) StudioLogger.error("assembly_export", e, 0, "Export failed");
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.textContent = "🚀 Export assembled short";
+      }
+    });
+  }
+})();
+
+// ---- Smart Export Engine (Header Controller) ----
+(function() {
+  const headerBtn = $("headerExportBtn");
+  if (!headerBtn) return;
+
+  headerBtn.addEventListener("click", () => {
+    // Determine active tab
+    const activeTabBtn = document.querySelector(".main-tab.active");
+    const tabName = activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "edit";
+
+    if (window.StudioLogger) StudioLogger.action("headerExportBtn", "click", `tab:${tabName}`);
+
+    if (tabName === "highlights") {
+      const batchBtn = $("batchExportBtn");
+      if (batchBtn) { batchBtn.click(); return; }
+    }
+    if (tabName === "editor") {
+      const tlBtn = $("tlRenderBtn");
+      if (tlBtn) { tlBtn.click(); return; }
+    }
+    if ($("clipAssemblyBar") && !$("clipAssemblyBar").classList.contains("hidden")) {
+      const expAss = $("clipAssemblyExport");
+      if (expAss) { expAss.click(); return; }
+    }
+
+    // Default to main Edit Studio render
+    const rBtn = $("renderBtn");
+    const gBtn = $("go");
+    if (rBtn && !rBtn.disabled && rBtn.offsetParent !== null) {
+      rBtn.click();
+    } else if (gBtn && !gBtn.disabled) {
+      gBtn.click();
+    } else {
+      alert("No active video or edit to render. Upload a video to begin!");
+    }
+  });
+})();
+
+// ---- Batch Export All Shorts Handler ----
+(function() {
+  const batchBtn = $("batchExportBtn");
+  if (!batchBtn) return;
+
+  batchBtn.addEventListener("click", async () => {
+    if (!currentJobId) { alert("No active job. Upload a video first."); return; }
+    
+    // Collect highlight cards from DOM or state
+    const cards = document.querySelectorAll(".hl-card");
+    if (!cards || cards.length === 0) {
+      alert("No clip suggestions available yet. Click 'Find highlights' first!");
+      return;
+    }
+
+    batchBtn.disabled = true;
+    batchBtn.textContent = "⏳ Generating ZIP Batch…";
+
+    try {
+      const clipsToRender = [];
+      cards.forEach(card => {
+        const titleEl = card.querySelector(".hl-title strong");
+        const inputs = card.querySelectorAll(".hl-time-edit input");
+        let start = 0, end = 0;
+        if (inputs.length >= 2) {
+          start = _parseTime(inputs[0].value) || 0;
+          end = _parseTime(inputs[1].value) || 0;
+        }
+        if (end > start) {
+          clipsToRender.push({
+            start_time: start,
+            end_time: end,
+            title: titleEl ? titleEl.textContent.trim() : "Viral Short",
+            headline: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
+          });
+        }
+      });
+
+      if (clipsToRender.length === 0) throw new Error("No valid clips found to export.");
+
+      const style = getStyle();
+      const res = await fetch("/batch-render-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_job_id: currentJobId,
+          clips: clipsToRender,
+          style: style,
+          format_zip: true,
+        }),
+      });
+
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+
+      // Trigger automatic browser download of ZIP
+      if (j.download_url) {
+        const a = document.createElement("a");
+        a.href = j.download_url;
+        a.download = j.zip_filename || "viral_shorts_batch.zip";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+
+      batchBtn.textContent = "✓ Batch Exported (ZIP)!";
+      if (window.StudioLogger) StudioLogger.net("POST", "/batch-render-clips", 200, 0, clipsToRender.length);
+      setTimeout(() => {
+        batchBtn.disabled = false;
+        batchBtn.textContent = "🚀 Batch Export All Shorts (ZIP / MP4)";
+      }, 3000);
+    } catch (e) {
+      alert("Batch export failed: " + e.message);
+      batchBtn.disabled = false;
+      batchBtn.textContent = "🚀 Batch Export All Shorts (ZIP / MP4)";
+      if (window.StudioLogger) StudioLogger.error("batchExport", e, 0, "Batch export failed");
+    }
+  });
+})();
+
+// ---- CapCut Viral Templates ----
+const CAPCUT_TEMPLATES = {
+  podcast_interview: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", group: 2, headline: "Mind-Blowing Secret", speakerColors: true },
+  capcut_reels: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1, headline: "", speakerColors: false, punch_zoom: { enabled: true, intensity: "med" } },
+  product_spotlight: { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", group: 3, headline: "Must Have Product!", speakerColors: false },
+  cinematic_vlog: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", group: 4, headline: "", speakerColors: false },
+};
+
+const capcutTemplateEl = document.getElementById("capcutTemplate");
+if (capcutTemplateEl) {
+  capcutTemplateEl.addEventListener("change", () => {
+    const tKey = capcutTemplateEl.value;
+    const t = CAPCUT_TEMPLATES[tKey];
+    if (!t) return;
+    
+    if (document.getElementById("font")) document.getElementById("font").value = t.font;
+    if (document.getElementById("group")) { document.getElementById("group").value = t.group; if (document.getElementById("groupVal")) document.getElementById("groupVal").textContent = t.group; }
+    if (document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = t.headline;
+    if (document.getElementById("speakerColorsEnabled")) document.getElementById("speakerColorsEnabled").checked = t.speakerColors;
+    
+    if (t.punch_zoom) {
+      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = t.punch_zoom.enabled;
+      if (document.getElementById("punchZoomIntensity")) document.getElementById("punchZoomIntensity").value = t.punch_zoom.intensity;
+    } else {
+      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = false;
+    }
+    
+    const presetMap = {
+      podcast_interview: "hormozi",
+      capcut_reels: "mrbeast",
+      product_spotlight: "neon",
+      cinematic_vlog: "karaoke"
+    };
+    const presetBtn = document.querySelector(`#viralPresets .theme[data-preset="${presetMap[tKey]}"]`);
+    if (presetBtn) presetBtn.click();
+    else {
+      if (document.getElementById("size")) document.getElementById("size").value = t.size;
+      if (document.getElementById("primary")) document.getElementById("primary").value = t.primary;
+      if (document.getElementById("highlight")) document.getElementById("highlight").value = t.highlight;
+      if (document.getElementById("accent")) document.getElementById("accent").value = t.accent;
+      if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+      if (typeof updateFontPreview === "function") updateFontPreview();
+    }
+  });
+}
+
+// ---- Custom Brand Preset Saver ----
+window.saveCustomBrandPreset = function(name = "custom") {
+  try {
+    const style = typeof getStyle === "function" ? getStyle() : {};
+    localStorage.setItem("_customBrandPreset", JSON.stringify(style));
+    console.log("Custom brand preset saved:", name);
+    alert("Brand preset saved successfully!");
+  } catch (e) {
+    console.error("Failed to save preset", e);
+    alert("Failed to save brand preset.");
+  }
+};
+
+window.loadCustomBrandPreset = function() {
+  try {
+    const data = localStorage.getItem("_customBrandPreset");
+    if (!data) {
+      alert("No custom brand preset found.");
+      return;
+    }
+    const style = JSON.parse(data);
+    
+    if (style.font_name && document.getElementById("font")) document.getElementById("font").value = style.font_name;
+    if (style.font_size && document.getElementById("size")) { document.getElementById("size").value = style.font_size; if (document.getElementById("sizeVal")) document.getElementById("sizeVal").textContent = style.font_size; }
+    if (style.primary_color && document.getElementById("primary")) document.getElementById("primary").value = style.primary_color;
+    if (style.highlight_color && document.getElementById("highlight")) document.getElementById("highlight").value = style.highlight_color;
+    if (style.accent_color && document.getElementById("accent")) document.getElementById("accent").value = style.accent_color;
+    if (style.outline_color && document.getElementById("outlineColor")) document.getElementById("outlineColor").value = style.outline_color;
+    if (style.outline_width !== undefined && document.getElementById("outlineWidth")) { document.getElementById("outlineWidth").value = style.outline_width; if (document.getElementById("owVal")) document.getElementById("owVal").textContent = style.outline_width; }
+    
+    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = style.headline_banner;
+    
+    if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
+      document.getElementById("speakerColorsEnabled").checked = true;
+      if (style.speaker_colors.SPEAKER_00 && document.getElementById("hostColor")) document.getElementById("hostColor").value = style.speaker_colors.SPEAKER_00;
+      if (style.speaker_colors.SPEAKER_01 && document.getElementById("guestColor")) document.getElementById("guestColor").value = style.speaker_colors.SPEAKER_01;
+    }
+    
+    if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+    if (typeof updateFontPreview === "function") updateFontPreview();
+    
+    alert("Brand preset loaded successfully!");
+  } catch (e) {
+    console.error("Failed to load preset", e);
+    alert("Failed to load brand preset.");
+  }
+};
+
+// ---- Auto-Fetch B-Roll & Overlays Button Handler ----
+const autoFetchOverlaysBtn = document.getElementById("autoFetchOverlaysBtn");
+if (autoFetchOverlaysBtn) {
+  autoFetchOverlaysBtn.addEventListener("click", async () => {
+    try {
+      autoFetchOverlaysBtn.disabled = true;
+      autoFetchOverlaysBtn.textContent = "Fetching...";
+      
+      let wordsToUse = [];
+      if (typeof currentWords !== "undefined" && currentWords.length > 0) {
+        wordsToUse = currentWords;
+      }
+      
+      const res = await fetch("/fetch-auto-overlays", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ words: wordsToUse }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      
+      if (data.overlays && Array.isArray(data.overlays)) {
+        if (typeof window.addOverlayClip === "function") {
+          data.overlays.forEach(overlay => window.addOverlayClip(overlay));
+        } else if (typeof window.populateOverlaysList === "function") {
+          window.populateOverlaysList(data.overlays);
+        } else {
+          console.log("Fetched overlays:", data.overlays);
+          alert("Overlays fetched but no handler found to display them. Check console.");
+        }
+      }
+    } catch (e) {
+      alert("Failed to fetch overlays: " + e.message);
+    } finally {
+      autoFetchOverlaysBtn.disabled = false;
+      autoFetchOverlaysBtn.textContent = "Auto-Fetch B-Roll & Overlays";
+    }
+  });
+}
+

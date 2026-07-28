@@ -128,11 +128,14 @@
       fps: tl.fps,
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
+      speaker_colors: tl.speaker_colors || { Host: "#FFD700", Guest: "#00E5FF" },
+      headline_banner: tl.headline_banner || null,
+      track_states: tl.track_states || null,
       tracks: {
         main: tl.tracks.main.map((c) => ({
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
-          cuts: c.cuts || [], ken_burns: c.ken_burns || null, split: c.split || null,
+          cuts: c.cuts || [], ken_burns: c.ken_burns || null, punch_zoom: c.punch_zoom || null, split: c.split || null,
           color: c.color || null, burn_captions: c.burn_captions,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
@@ -445,11 +448,63 @@
       }
     }
 
+    if (!tl.track_states) {
+      tl.track_states = {
+        main: { mute: false, solo: false, lock: false },
+        overlay: { mute: false, solo: false, lock: false },
+        text: { mute: false, solo: false, lock: false },
+        music: { mute: false, solo: false, lock: false }
+      };
+    }
+
     ["main", "overlay", "text", "music"].forEach((track) => {
       const lane = document.querySelector(`.tl-track-lane[data-lane="${track}"]`);
       if (!lane) return;
+
+      const st = tl.track_states[track] || { mute: false, solo: false, lock: false };
+      const label = document.querySelector(`.tl-track[data-track="${track}"] .tl-track-label`);
+      if (label) {
+        let controls = label.querySelector(".tl-track-controls");
+        if (!controls) {
+          controls = document.createElement("div");
+          controls.className = "tl-track-controls";
+          controls.style.display = "flex";
+          controls.style.gap = "4px";
+          controls.style.marginTop = "4px";
+          label.appendChild(controls);
+        }
+        controls.innerHTML = `
+          <button class="tl-chip-btn ${st.mute ? 'active' : ''}" style="padding:2px 6px; ${st.mute ? 'background:#ff4444;color:#fff;' : ''}" data-act="mute" title="Mute track">M</button>
+          <button class="tl-chip-btn ${st.solo ? 'active' : ''}" style="padding:2px 6px; ${st.solo ? 'background:#fbbf24;color:#000;' : ''}" data-act="solo" title="Solo track">S</button>
+          <button class="tl-chip-btn ${st.lock ? 'active' : ''}" style="padding:2px 6px; ${st.lock ? 'background:#555;color:#fff;' : ''}" data-act="lock" title="Lock track">${st.lock ? '🔒' : '🔓'}</button>
+        `;
+        controls.querySelectorAll("button").forEach(b => {
+          b.onclick = (e) => {
+            e.stopPropagation();
+            const act = b.dataset.act;
+            if (act === "solo") {
+               const val = !st.solo;
+               ["main", "overlay", "text", "music"].forEach(t => {
+                 if (tl.track_states[t]) tl.track_states[t].solo = false;
+               });
+               st.solo = val;
+            } else {
+               st[act] = !st[act];
+            }
+            renderTracks();
+            scheduleSave();
+          };
+        });
+      }
+
       lane.innerHTML = "";
       lane.style.minWidth = width + "px";
+      lane.style.pointerEvents = st.lock ? "none" : "auto";
+
+      const anySolo = ["main", "overlay", "text", "music"].some(t => tl.track_states[t] && tl.track_states[t].solo);
+      const isMuted = st.mute || (anySolo && !st.solo);
+      lane.style.opacity = isMuted ? "0.4" : "1";
+
       tl.tracks[track].forEach((c, idx) => {
         const start = track === "main" ? mainStart(idx) : (c.start || 0);
         const dur = clipDuration(c);
@@ -636,19 +691,138 @@
   }
 
   // ---- Live preview boxes (drag to position titles / overlays / logo) ----
-  function renderPreviewBoxes() {
+  function updateStageCompositor() {
     const layer = $("tlOverlayLayer");
-    if (!layer || !tl) return;
+    const v = $("tlPreviewVideo");
+    if (!layer || !tl || !v) return;
+
+    if (boxDrag) return;
+
     layer.innerHTML = "";
-    if (!selected) {
-      if (tl.logo && tl.logo.asset_id) addPreviewBox("logo", tl.logo, "Logo");
-      return;
+
+    let ot = playheadOutputTime();
+    if (ot == null) ot = v.currentTime || 0;
+
+    let activeMainClip = null;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const start = mainStart(i);
+      const dur = clipDuration(tl.tracks.main[i]);
+      if (ot >= start && ot < start + dur) {
+        activeMainClip = tl.tracks.main[i];
+        break;
+      }
     }
-    const c = findClip(selected.track, selected.id);
-    if (!c) return;
-    if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
-    else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
-    else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
+
+    if (activeMainClip && activeMainClip.punch_zoom && activeMainClip.punch_zoom.enabled) {
+      const intensity = activeMainClip.punch_zoom.intensity || "med";
+      const scale = intensity === "low" ? 1.15 : (intensity === "strong" ? 1.40 : 1.25);
+      v.style.transform = `scale(${scale})`;
+    } else {
+      v.style.transform = "";
+    }
+
+    const stHeight = layer.clientHeight || 640;
+
+    tl.tracks.text.forEach(item => {
+      const start = item.start || 0;
+      const dur = clipDuration(item);
+      if (ot >= start && ot <= start + dur) {
+        const el = document.createElement("div");
+        el.style.position = "absolute";
+        el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+        el.style.top = (item.y != null ? item.y : 0.85) * 100 + "%";
+        el.style.transform = "translate(-50%, -50%)";
+        el.style.textAlign = item.align === 1 ? "left" : (item.align === 3 ? "right" : "center");
+        el.style.color = item.color || "#FFFFFF";
+        el.style.fontFamily = item.font || "Anton";
+        el.style.fontWeight = item.bold ? "bold" : "normal";
+        el.style.fontSize = ((item.size || 56) / 1000 * stHeight) + "px";
+        el.style.whiteSpace = "pre-wrap";
+        el.style.pointerEvents = "none";
+        
+        if (item.bg_enabled) {
+           const bg = document.createElement("div");
+           bg.style.position = "absolute";
+           bg.style.inset = "0";
+           bg.style.backgroundColor = item.bg_color || "#000000";
+           bg.style.opacity = item.bg_opacity != null ? item.bg_opacity : 0.55;
+           bg.style.zIndex = "-1";
+           el.appendChild(bg);
+           
+           const txt = document.createElement("div");
+           txt.innerText = item.text || "Title";
+           txt.style.padding = "0.2em 0.4em";
+           el.appendChild(txt);
+        } else {
+           el.innerText = item.text || "Title";
+        }
+
+        layer.appendChild(el);
+      }
+    });
+
+    tl.tracks.overlay.forEach(item => {
+      const start = item.start || 0;
+      const dur = clipDuration(item);
+      if (ot >= start && ot <= start + dur) {
+        let el;
+        if (item.source_job_id) {
+          el = document.createElement("video");
+          el.src = "/raw-upload/" + item.source_job_id;
+          el.muted = true;
+          el.playsInline = true;
+          try { el.currentTime = Math.max(0, (ot - start) + (item.in || 0)); } catch (e) {}
+        } else {
+          el = document.createElement("img");
+          if (item.asset_id) el.src = "/asset/" + item.asset_id;
+          else if (item.src) el.src = item.src;
+        }
+        el.style.position = "absolute";
+        el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+        el.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
+        el.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
+        el.style.opacity = item.opacity != null ? item.opacity : 1.0;
+        el.style.objectFit = "cover";
+        el.style.pointerEvents = "auto";
+        el.style.cursor = "move";
+        
+        el.addEventListener("pointerdown", (e) => {
+          selectClip("overlay", item.id);
+          startBoxDrag(e, "overlay", item, el);
+        });
+
+        layer.appendChild(el);
+      }
+    });
+
+    if (tl.logo && tl.logo.asset_id) {
+      const lg = tl.logo;
+      const el = document.createElement("img");
+      el.style.position = "absolute";
+      el.style.left = (lg.x != null ? lg.x : 0.04) * 100 + "%";
+      el.style.top = (lg.y != null ? lg.y : 0.04) * 100 + "%";
+      el.style.width = (lg.w != null ? lg.w : 0.18) * 100 + "%";
+      el.style.opacity = lg.opacity != null ? lg.opacity : 0.9;
+      el.style.pointerEvents = "auto";
+      el.style.cursor = "move";
+      el.src = "/asset/" + lg.asset_id;
+
+      el.addEventListener("pointerdown", (e) => {
+        startBoxDrag(e, "logo", lg, el);
+      });
+
+      layer.appendChild(el);
+    }
+
+    // Render interactive bounding boxes & resize handles for selected elements
+    if (selected) {
+      const c = findClip(selected.track, selected.id);
+      if (c) {
+        if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
+        else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
+        else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
+      }
+    }
   }
 
   function addPreviewBox(kind, obj, labelText) {
@@ -730,6 +904,7 @@
     if (!v) return;
     const upd = () => {
       updatePlayhead();
+      updateStageCompositor();
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
@@ -749,7 +924,7 @@
     if (!wrap) return;
     if (!selected) {
       renderProjectProps(wrap);
-      renderPreviewBoxes();
+      updateStageCompositor();
       return;
     }
     const c = findClip(selected.track, selected.id);
@@ -776,7 +951,9 @@
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity, 0, 1, 0.05)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
-      html += propRange("w", "Size (width %)", c.w, 0.05, 1, 0.01);
+      html += propRange("w", "Size (width %)", c.w, 0.05, 2.0, 0.01);
+      const fitOpts = [["cover", "Cover / Crop Fill"], ["contain", "Contain / Fit Aspect"], ["fill", "Stretch / Custom Box"]];
+      html += propSelect("fit", "Crop & Fit Mode", c.fit || "cover", fitOpts);
     } else { // main
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
@@ -791,12 +968,29 @@
       html += `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
       html += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
 
+      // --- Active Speaker Reframe (per clip) ---
+      const ref = c.reframe || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">📱 9:16 Active Speaker Reframe</label>`;
+      html += propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
+      if (ref.enabled) {
+        const pOpts = [["active", "Active Speaker"], ["left", "Left Person"], ["right", "Right Person"], ["full", "Wide Shot"]];
+        html += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
+      }
+
       // --- Ken Burns (per clip) ---
       const kb = c.ken_burns || {};
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (motion)</label>`;
       html += propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
       if (kb.enabled) {
         html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+      }
+
+      // --- Punch Zoom (per clip) ---
+      const pz = c.punch_zoom || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⚡ Punch Zoom</label>`;
+      html += propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
+      if (pz.enabled) {
+        html += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
       }
 
       // --- Split-screen (per clip) ---
@@ -832,7 +1026,7 @@
         renderProps(); renderTracks(); scheduleSave();
       };
     });
-    renderPreviewBoxes();
+    updateStageCompositor();
   }
 
   const COLOR_PRESETS = [
@@ -877,6 +1071,7 @@
           const outSpan = wrap.querySelector(`[data-out="${key}"]`);
           if (outSpan) outSpan.textContent = (+inp.value).toFixed(2);
         }
+        updateStageCompositor();
         scheduleSave();
       });
     });
@@ -950,6 +1145,7 @@
         // focused control isn't torn out mid-edit.
         const structural = inp.type === "checkbox" || inp.tagName === "SELECT";
         if (structural) renderTimeline(); else renderTracks();
+        updateStageCompositor();
         scheduleSave();
       };
       inp.addEventListener(inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input", handler);
@@ -1170,6 +1366,14 @@
       fps: d.fps || 30,
       bg: d.bg || "#000000",
       logo: d.logo || null,
+      speaker_colors: d.speaker_colors || { Host: "#FFD700", Guest: "#00E5FF" },
+      headline_banner: d.headline_banner || null,
+      track_states: d.track_states || {
+        main: { mute: false, solo: false, lock: false },
+        overlay: { mute: false, solo: false, lock: false },
+        text: { mute: false, solo: false, lock: false },
+        music: { mute: false, solo: false, lock: false },
+      },
       tracks: {
         main: (d.tracks && d.tracks.main) || [],
         overlay: (d.tracks && d.tracks.overlay) || [],
@@ -1290,6 +1494,66 @@
     else console.warn("[timeline] missing element:", id, "(stale index.html? hard-refresh)");
   }
 
+  // ---- Clipboard & Copy / Paste / Duplicate ----
+  let tlClipboard = null; // { track, data }
+
+  function copySelectedClip() {
+    if (!selected || !tl) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    tlClipboard = { track: selected.track, data: JSON.parse(JSON.stringify(c)) };
+    setSaveState("Copied clip");
+    if (window.StudioLogger) StudioLogger.clip("copied", `${selected.track}:${selected.id}`);
+  }
+
+  function pasteClip() {
+    if (!tlClipboard || !tl) return;
+    const track = tlClipboard.track;
+    const c = JSON.parse(JSON.stringify(tlClipboard.data));
+    c.id = uid();
+
+    // Paste position: at playhead time
+    const v = $("tlPreviewVideo");
+    const pTime = v ? (v.currentTime || 0) : 0;
+
+    if (track === "main") {
+      tl.tracks.main.push(c);
+    } else {
+      c.start = pTime;
+      reanchor(c);
+      tl.tracks[track].push(c);
+    }
+
+    selectClip(track, c.id);
+    renderTimeline();
+    scheduleSave();
+    if (window.StudioLogger) StudioLogger.clip("pasted", `${track}:${c.id}`);
+  }
+
+  function duplicateSelectedClip() {
+    if (!selected || !tl) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    const track = selected.track;
+    const dup = JSON.parse(JSON.stringify(c));
+    dup.id = uid();
+
+    if (track === "main") {
+      const idx = tl.tracks.main.findIndex((m) => m.id === selected.id);
+      if (idx >= 0) tl.tracks.main.splice(idx + 1, 0, dup);
+      else tl.tracks.main.push(dup);
+    } else {
+      dup.start = (c.start || 0) + clipDuration(c) + 0.3;
+      reanchor(dup);
+      tl.tracks[track].push(dup);
+    }
+
+    selectClip(track, dup.id);
+    renderTimeline();
+    scheduleSave();
+    if (window.StudioLogger) StudioLogger.clip("duplicated", `${track}:${dup.id}`);
+  }
+
   // ---- Init (lazy, when the Editor tab is first opened) ----
   async function ensureInit() {
     if (initialized) {
@@ -1303,18 +1567,58 @@
       on("tlNewBtn", "onclick", newProject);
       on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
       on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
-      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } });
+      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
       on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
       on("tlRenderBtn", "onclick", renderTimelineVideo);
       on("tlAddTitleBtn", "onclick", () => addTitle());
-      on("tlProjectBtn", "onclick", () => { selected = null; renderTimeline(); });
-      on("tlAssetBtn", "onclick", () => { const f = $("tlAssetFile"); if (f) f.click(); });
-      on("tlAssetFile", "onchange", (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; });
-      on("tlSplitBtn", "onclick", splitAtPlayhead);
-      on("tlZoomIn", "onclick", () => setZoom(4));
-      on("tlZoomOut", "onclick", () => setZoom(-4));
-      document.querySelectorAll(".tl-lefttab").forEach((b) =>
-        b.onclick = () => setLeftTab(b.dataset.ltab));
+      // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
+      document.addEventListener("keydown", (e) => {
+        // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
+        const isEditorTab = document.querySelector('.main-tab.active[data-tab="editor"]');
+        if (!isEditorTab || !tl) return;
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+        if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+
+        const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+        if (isCmdOrCtrl && e.key.toLowerCase() === "c") {
+          e.preventDefault(); copySelectedClip();
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "x") {
+          if (selected) {
+            e.preventDefault();
+            copySelectedClip();
+            deleteClip(selected.track, selected.id);
+            setSaveState("Cut clip");
+          }
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "v") {
+          e.preventDefault(); pasteClip();
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
+          e.preventDefault(); duplicateSelectedClip();
+        } else if (e.key === "Delete" || e.key === "Backspace") {
+          if (selected) {
+            e.preventDefault();
+            deleteClip(selected.track, selected.id);
+          }
+        }
+      });
+
+      // Click / scrub anywhere on ruler to seek playhead
+      const ruler = $("tlRuler");
+      if (ruler) {
+        ruler.addEventListener("pointerdown", (e) => {
+          const rect = ruler.getBoundingClientRect();
+          const clickX = e.clientX - rect.left;
+          const t = Math.max(0, clickX / PPS);
+          const v = $("tlPreviewVideo");
+          if (v) v.currentTime = t;
+          updatePlayhead();
+          updateStageCompositor();
+        });
+      }
+
+      on("tlProjectBtn", "onclick", () => {
+        const f = $("tlAssetFile");
+        if (f) f.click();
+      });
 
       const timeline = $("tlTimeline");
       if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
