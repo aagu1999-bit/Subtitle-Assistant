@@ -731,7 +731,7 @@
         el.style.position = "absolute";
         el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
         el.style.top = (item.y != null ? item.y : 0.85) * 100 + "%";
-        el.style.transform = "translate(-50%, -50%)";
+        el.style.transform = assAnchorTransform(item.align);
         el.style.textAlign = item.align === 1 ? "left" : (item.align === 3 ? "right" : "center");
         el.style.color = item.color || "#FFFFFF";
         el.style.fontFamily = item.font || "Anton";
@@ -825,6 +825,20 @@
     }
   }
 
+  // libass anchors a title at its numpad-alignment point, not its centre: with
+  // the default \an2 the stored (x, y) is the text's bottom-centre. The preview
+  // used a fixed translate(-50%, -50%), so titles previewed half a text-height
+  // above where they rendered (and half a box-width off for left/right aligns).
+  // Map the alignment to the matching CSS transform so both agree.
+  function assAnchorTransform(align) {
+    const a = (align >= 1 && align <= 9) ? align : 2;
+    const col = (a - 1) % 3;             // 0 left, 1 centre, 2 right
+    const row = Math.floor((a - 1) / 3); // 0 bottom, 1 middle, 2 top
+    const tx = col === 0 ? "0%" : (col === 1 ? "-50%" : "-100%");
+    const ty = row === 0 ? "-100%" : (row === 1 ? "-50%" : "0%");
+    return `translate(${tx}, ${ty})`;
+  }
+
   function addPreviewBox(kind, obj, labelText) {
     const layer = $("tlOverlayLayer");
     const box = document.createElement("div");
@@ -832,6 +846,8 @@
       box.className = "tl-pbox title";
       box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
       box.style.top = (obj.y != null ? obj.y : 0.85) * 100 + "%";
+      // Override the stylesheet's fixed centre transform to match libass.
+      box.style.transform = assAnchorTransform(obj.align);
       box.textContent = labelText;
     } else {
       box.className = "tl-pbox";
