@@ -683,9 +683,33 @@ drop.addEventListener("drop", e => {
 });
 fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
 
+// Mirrors ALLOWED_EXT in app.py. The server rejects anything else with a 400,
+// so screen for it here and say so rather than letting the upload fail.
+const ACCEPTED_VIDEO_EXT = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
+
+function isAcceptedVideo(f) {
+  const ext = (f.name.split(".").pop() || "").toLowerCase();
+  if (ACCEPTED_VIDEO_EXT.includes(ext)) return true;
+  // Browsers report an empty or generic MIME type for some containers (.mkv
+  // and .m4v especially), so the extension is the reliable signal; only fall
+  // back to sniffing when the name carries no usable extension.
+  return f.name.indexOf(".") === -1 && f.type.startsWith("video/");
+}
+
 function handleFiles(files) {
-  const videos = Array.from(files).filter(f => f.type.startsWith("video/"));
-  if (!videos.length) { alert("Please select video files."); return; }
+  const all = Array.from(files);
+  const videos = all.filter(isAcceptedVideo);
+  if (!videos.length) {
+    const names = all.map(f => f.name).join(", ");
+    alert(all.length
+      ? `Can't use ${names}.\n\nSupported formats: ${ACCEPTED_VIDEO_EXT.join(", ")}.`
+      : "Please select video files.");
+    return;
+  }
+  const skipped = all.filter(f => !isAcceptedVideo(f));
+  if (skipped.length) {
+    alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
+  }
 
   // In the empty state the Transcribe button isn't visible (it's in the
   // sidebar which is hidden). Auto-kick everything immediately and activate
@@ -701,11 +725,26 @@ function handleFiles(files) {
     currentFile = null;
     if (fn) {
       fn.textContent = videos.length === 1
-        ? `Queueing ${videos[0].name}…`
-        : `Queueing ${videos.length} videos…`;
+        ? `Uploading ${videos[0].name}…`
+        : `Uploading ${videos.length} videos…`;
     }
     if (go) go.disabled = true;
-    videos.forEach((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0));
+    // The label used to be set once and never touched again, so a finished
+    // upload still read "Queueing …" indefinitely and looked hung. Report the
+    // real outcome and hand the button back once the uploads settle.
+    Promise.all(videos.map((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0)))
+      .then(ids => {
+        const ok = ids.filter(Boolean).length;
+        const failed = ids.length - ok;
+        if (fn) {
+          if (!ok) fn.textContent = "Upload failed — see the error above.";
+          else if (failed) fn.textContent = `${ok} uploaded, ${failed} failed — transcribing…`;
+          else fn.textContent = ids.length === 1
+            ? `${videos[0].name} — transcribing…`
+            : `${ok} videos uploaded — transcribing…`;
+        }
+        if (go) go.disabled = false;
+      });
   }
 }
 
@@ -1211,6 +1250,7 @@ async function pollTranscription(jobId) {
   if (s.status === "awaiting_edit") {
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
+    if (fn) fn.textContent = "";   // clear the "…transcribing" upload label
     currentWords = _sanitizeWords(s.words);
     setTimeout(() => {
       if (currentJobId !== jobId) return;
