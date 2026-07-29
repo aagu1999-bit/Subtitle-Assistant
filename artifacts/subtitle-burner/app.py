@@ -4084,6 +4084,69 @@ def _create_clip_from_job(source_job_id: str, start: float, end: float, label: s
     _db_save_job(new_job_id)
     return new_job_id
 
+@app.route("/selftest")
+def selftest():
+    """A dependency-free page for isolating file-picker problems on a device.
+
+    The app's own picker sits behind its stylesheet, its scripts and whatever
+    frame it is being viewed in. This page has none of that: three ways of
+    opening a picker, side by side, so a device that fails can say which
+    mechanism failed rather than just "nothing happens".
+    """
+    return Response(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Picker self-test</title></head>
+<body style="font:16px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee">
+<h2 style="margin:0 0 4px">Picker self-test</h2>
+<p style="color:#9aa0a6;margin:0 0 16px;font-size:13px">
+  Server time {time.strftime('%H:%M:%S')} · app.py build {int(Path(__file__).stat().st_mtime)}
+</p>
+
+<div style="border:1px solid #333;border-radius:10px;padding:14px;margin-bottom:12px">
+  <b>1. Plain visible input</b><br>
+  <input id="a" type="file" accept="video/*" style="margin-top:8px">
+</div>
+
+<div style="border:1px solid #333;border-radius:10px;padding:14px;margin-bottom:12px">
+  <b>2. Label + hidden-but-rendered input</b> (what the app now uses)<br>
+  <input id="b" type="file" accept="video/*"
+         style="position:absolute;width:1px;height:1px;opacity:0">
+  <label for="b" style="display:inline-block;margin-top:8px;padding:10px 16px;
+         background:#6c5cff;color:#fff;border-radius:8px;cursor:pointer">Tap to choose</label>
+</div>
+
+<div style="border:1px solid #333;border-radius:10px;padding:14px;margin-bottom:12px">
+  <b>3. Scripted .click()</b> (what the app used before)<br>
+  <input id="c" type="file" accept="video/*" style="display:none">
+  <button onclick="document.getElementById('c').click()"
+          style="margin-top:8px;padding:10px 16px;background:#333;color:#fff;
+          border:1px solid #555;border-radius:8px">Tap to choose</button>
+</div>
+
+<pre id="out" style="background:#000;border:1px solid #333;border-radius:8px;
+     padding:12px;white-space:pre-wrap;word-break:break-all;font-size:12px">No file chosen yet.</pre>
+<p id="ua" style="color:#666;font-size:11px;word-break:break-all"></p>
+
+<script>
+var out = document.getElementById("out");
+document.getElementById("ua").textContent = navigator.userAgent;
+["a","b","c"].forEach(function (id) {{
+  document.getElementById(id).addEventListener("change", function (e) {{
+    var f = e.target.files && e.target.files[0];
+    out.textContent = f
+      ? ("WORKED via #" + id + "\\nname: " + f.name + "\\ntype: " + (f.type || "(none)") +
+         "\\nsize: " + (f.size / 1048576).toFixed(1) + " MB")
+      : ("#" + id + " fired but no file");
+  }});
+}});
+window.addEventListener("error", function (e) {{
+  out.textContent = "JS error: " + e.message;
+}});
+</script>
+</body></html>""", mimetype="text/html")
+
+
 @app.route("/suggest-effects", methods=["POST"])
 def suggest_effects():
     """Where camera moves belong in a job, as timed ranges.
