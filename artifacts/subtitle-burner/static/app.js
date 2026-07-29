@@ -1207,25 +1207,68 @@ EMOJI_PRESETS.forEach(p => {
 
 addRuleBtn.onclick = () => addEmojiRule();
 
+// XHR rather than fetch purely for upload progress — fetch cannot report how
+// much of a request body has been sent, and phone uploads are slow enough
+// that the difference between "working" and "frozen" has to be visible.
+function _uploadWithProgress(fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/transcribe-only");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch (err) {
+        // Flask serves HTML for errors; surface the status, not a parse error.
+        reject(new Error(`Server returned ${xhr.status} instead of JSON.`));
+        return;
+      }
+      if (xhr.status >= 400 || (data && data.error)) {
+        reject(new Error((data && data.error) || `Upload failed (${xhr.status}).`));
+      } else {
+        resolve(data);
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload — check the connection."));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(fd);
+  });
+}
+
 // ---- Phase 1: Transcribe ----
 async function uploadAndTranscribe(file, preClean, makeActive = false) {
   const fd = new FormData();
   fd.append("video", file);
   if (preClean) fd.append("pre_clean", "true");
 
+  // Show the bar before the request starts. fetch() reports no upload
+  // progress, so a phone video used to sit on a blank screen for the whole
+  // transfer with nothing to show it was working.
+  if (makeActive) {
+    result.classList.add("hidden");
+    editor.classList.add("hidden");
+    progress.classList.remove("hidden");
+    barFill.style.width = "2%";
+    statusText.textContent = "Uploading…";
+  }
+
   try {
-    const res = await fetch("/transcribe-only", { method: "POST", body: fd });
-    const job = await res.json();
-    if (job.error) throw new Error(job.error);
+    const job = await _uploadWithProgress(fd, (frac) => {
+      if (!makeActive) return;
+      barFill.style.width = Math.max(2, Math.round(frac * 100)) + "%";
+      statusText.textContent = frac >= 1
+        ? "Upload complete — starting…"
+        : `Uploading… ${Math.round(frac * 100)}%`;
+    });
 
     addJobToList(job.job_id);
     if (makeActive) {
       currentJobId = job.job_id;
-      result.classList.add("hidden");
-      editor.classList.add("hidden");
-      progress.classList.remove("hidden");
       barFill.style.width = "5%";
-      statusText.textContent = "Uploading…";
+      statusText.textContent = "Starting transcription…";
       pollTranscription(job.job_id);
     }
     refreshJobsList();

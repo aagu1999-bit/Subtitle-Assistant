@@ -51,6 +51,18 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
 .drop .icon { font-size: 3.2rem; margin-bottom: 12px; filter: drop-shadow(0 4px 10px rgba(99,102,241,0.3)); }
 .drop p { margin: 4px 0; }
 .muted { color: #94a3b8; font-size: .9rem; }
+/* File inputs opened from script have to stay in the layout: iOS Safari will
+   not open the picker for an input hidden with `hidden`/display:none, so
+   tapping the drop zone did nothing at all on a phone. Keep it rendered but
+   invisible instead. */
+.offscreen-file {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  border: 0; padding: 0; margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
 .filename { color: #818cf8; font-weight: 600; margin-top: 10px !important; }
 
 .panel {
