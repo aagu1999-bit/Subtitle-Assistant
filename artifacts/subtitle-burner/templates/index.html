@@ -15,7 +15,12 @@
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
     <p class="empty-tagline">Drop a video, transcribe it, edit the words, then burn captions.<br>AI audio enhancement, intelligent clip suggestions, and multi-video compilation built in.</p>
-    <button id="emptyDropBtn" class="btn btn-primary btn-lg">Choose a video to start</button>
+    <!-- Also a label, for the same reason as the drop zone above. The empty
+         state has its own file input because the main one lives inside the
+         app shell, which is hidden while this screen is up — and a label
+         cannot reach an input that is display:none. -->
+    <input type="file" id="emptyFile" accept="video/*" multiple class="offscreen-file">
+    <label for="emptyFile" id="emptyDropBtn" class="btn btn-primary btn-lg" style="cursor:pointer">Choose a video to start</label>
     <p class="muted" style="margin-top:14px">or drag &amp; drop a video anywhere on this page</p>
   </div>
 </div>
@@ -56,12 +61,15 @@
             <div class="section-title">📁 Project Files</div>
             <div id="drop" class="drop drop-compact">
               <input type="file" id="file" accept="video/*" multiple class="offscreen-file">
-              <div class="drop-inner">
+              <!-- A real <label for> opens the picker natively, with no
+                   script involved — it survives both iOS's restrictions on
+                   programmatic .click() and any JS error earlier on the page. -->
+              <label for="file" class="drop-inner drop-label">
                 <div class="icon">🎬</div>
                 <p><strong>Drag &amp; drop video(s)</strong></p>
-                <p class="muted">or click to browse</p>
+                <p class="muted">or tap to browse</p>
                 <p id="filename" class="filename"></p>
-              </div>
+              </label>
             </div>
             <div class="row toggle-row" style="margin-top:4px">
               <label class="toggle-label">

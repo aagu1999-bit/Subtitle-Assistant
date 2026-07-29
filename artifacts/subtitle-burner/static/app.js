@@ -673,7 +673,9 @@ if (audioOffsetEl) {
 });
 
 // ---- Drag & drop ----
-drop.onclick = () => fileInput.click();
+// No click handler here: the drop zone's inner element is a <label for="file">,
+// so the browser opens the picker itself. Calling fileInput.click() as well
+// would fire the picker twice.
 ["dragenter", "dragover"].forEach(ev =>
   drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
 ["dragleave", "drop"].forEach(ev =>
@@ -3227,8 +3229,16 @@ if (workflowSteps) {
 }
 
 // Trigger the file input from the empty-state hero button.
-if (emptyDropBtn) {
-  emptyDropBtn.onclick = () => fileInput.click();
+// The empty state has its own input (#emptyFile) because the main one sits
+// inside the app shell, which is hidden until a job exists. Its label opens
+// the picker; this just routes the chosen files into the same handler.
+const emptyFileInput = $("emptyFile");
+if (emptyFileInput) {
+  emptyFileInput.onchange = () => {
+    if (emptyFileInput.files && emptyFileInput.files.length) {
+      handleFiles(emptyFileInput.files);
+    }
+  };
 }
 
 // Allow drag-and-drop anywhere on the page in the empty state.

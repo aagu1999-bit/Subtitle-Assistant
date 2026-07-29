@@ -55,6 +55,7 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
    not open the picker for an input hidden with `hidden`/display:none, so
    tapping the drop zone did nothing at all on a phone. Keep it rendered but
    invisible instead. */
+.drop-label { display: block; cursor: pointer; }
 .offscreen-file {
   position: absolute;
   width: 1px; height: 1px;
