@@ -1381,6 +1381,13 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: clip.source_job_id, max_effects: 6 }),
       });
+      // A Flask error/404 page is HTML, and res.json() then fails on "<" with
+      // a parse error that says nothing about what went wrong.
+      if (!(res.headers.get("content-type") || "").includes("application/json")) {
+        throw new Error(res.status === 404
+          ? "The server doesn't have /suggest-effects — restart the app after pulling."
+          : `Server returned ${res.status} instead of JSON.`);
+      }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
