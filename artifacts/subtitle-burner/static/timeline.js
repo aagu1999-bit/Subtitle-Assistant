@@ -1117,6 +1117,12 @@
       html += `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
       html += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
 
+      // --- AI effect placement ---
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">✨ AI camera moves</label>`;
+      html += `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
+      html += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes push-ins and drifts timed to the line. Applying one splits the clip so the move covers only that moment.</p>`;
+      html += `<div id="tlFxList" style="margin-top:8px"></div>`;
+
       // --- Active Speaker Reframe (per clip) ---
       const ref = c.reframe || {};
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">📱 9:16 Active Speaker Reframe</label>`;
@@ -1315,6 +1321,107 @@
       c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
       renderTimeline(); scheduleSave();
     };
+    const sfx = wrap.querySelector('[data-act="suggestfx"]');
+    if (sfx) sfx.onclick = () => suggestEffectsFor(c, sfx);
+  }
+
+  // ---- AI camera moves -------------------------------------------------
+  const FX_LABEL = {
+    punch_zoom: "🔍 Punch zoom",
+    ken_burns: "🎞 Ken Burns",
+    split_screen: "⬓ Split screen",
+  };
+
+  async function suggestEffectsFor(clip, btn) {
+    const list = $("tlFxList");
+    if (!clip.source_job_id) {
+      if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem">This clip has no transcribed source to read.</p>`;
+      return;
+    }
+    btn.disabled = true;
+    if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem">Reading the transcript…</p>`;
+    try {
+      const res = await fetch("/suggest-effects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: clip.source_job_id, max_effects: 6 }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      // Suggestions are in source time; only those inside this clip's trim can
+      // be applied to it.
+      const cin = clip.in || 0, cout = clip.out || 0;
+      const usable = (data.effects || []).filter(
+        (e) => e.start_time >= cin - 0.01 && e.end_time <= cout + 0.01
+      );
+      renderFxSuggestions(clip, data.effects || [], usable);
+    } catch (e) {
+      if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem;color:#ff8a8a">${e.message}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderFxSuggestions(clip, all, usable) {
+    const list = $("tlFxList");
+    if (!list) return;
+    if (!all.length) {
+      list.innerHTML = `<p class="muted" style="font-size:.72rem">No moments stood out — the transcript may be too short.</p>`;
+      return;
+    }
+    const outside = all.length - usable.length;
+    let html = "";
+    usable.forEach((e, i) => {
+      const dur = (e.end_time - e.start_time).toFixed(1);
+      html += `<div class="tl-fx-sug" style="border:1px solid #2c3240;border-radius:8px;padding:8px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:6px;justify-content:space-between">
+          <strong style="font-size:.78rem">${FX_LABEL[e.type] || e.type}</strong>
+          <span class="muted" style="font-size:.7rem">${e.start_time.toFixed(1)}s · ${dur}s</span>
+        </div>
+        ${e.quote ? `<p class="muted" style="font-size:.7rem;margin:4px 0 0">“${e.quote}”</p>` : ""}
+        <p class="muted" style="font-size:.7rem;margin:4px 0 6px">${e.reason || ""}</p>
+        <button class="btn btn-secondary" data-fx="${i}" style="font-size:.74rem;padding:3px 8px">Apply</button>
+      </div>`;
+    });
+    if (outside) {
+      html += `<p class="muted" style="font-size:.7rem">${outside} more fall outside this clip's trim.</p>`;
+    }
+    list.innerHTML = html;
+    list.querySelectorAll("[data-fx]").forEach((b) => {
+      b.onclick = () => applyEffectSuggestion(clip, usable[parseInt(b.dataset.fx, 10)]);
+    });
+  }
+
+  // Effects are stored per clip, so a timed suggestion becomes: cut the clip at
+  // the effect's boundaries and switch the effect on for the middle piece only.
+  function applyEffectSuggestion(clip, fx) {
+    if (!fx) return;
+    const idx = tl.tracks.main.findIndex((m) => m.id === clip.id);
+    if (idx < 0) return;
+
+    const pieces = [];
+    const head = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: clip.in || 0, out: fx.start_time };
+    const mid = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: fx.start_time, out: fx.end_time };
+    const tail = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: fx.end_time, out: clip.out };
+
+    // A boundary sitting on the clip edge produces an empty piece — drop it.
+    if (head.out - head.in > 0.05) pieces.push(head);
+    mid.transition = head.out - head.in > 0.05 ? null : mid.transition;  // internal cuts are hard
+    if (fx.type === "punch_zoom") {
+      mid.punch_zoom = { enabled: true, intensity: fx.intensity || "med" };
+    } else if (fx.type === "ken_burns") {
+      mid.ken_burns = { enabled: true, intensity: fx.intensity || "med", direction: fx.direction || "in" };
+    } else if (fx.type === "split_screen") {
+      mid.split = Object.assign({}, mid.split, { enabled: true });
+    }
+    pieces.push(mid);
+    if (tail.out - tail.in > 0.05) { tail.transition = null; pieces.push(tail); }
+
+    tl.tracks.main.splice(idx, 1, ...pieces);
+    selectClip("main", mid.id);
+    renderTimeline();
+    scheduleSave();
   }
 
   // ---- Text-based editing: strike out words to cut them from the clip ----

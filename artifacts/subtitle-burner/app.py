@@ -3149,6 +3149,142 @@ def _snap_clip_to_target_durations(clips: list, words: list,
     return clips
 
 
+# ---- AI effect placement -------------------------------------------------
+# Effects are currently whole-clip flags, but a suggestion is only useful if it
+# says *when*. These carry in/out times so the UI can split a clip at those
+# boundaries and enable the effect on the middle piece — the same split the
+# editor already supports by hand.
+_EFFECT_LIMITS = {
+    # type: (min duration, max duration)
+    "punch_zoom": (0.6, 3.0),    # quick emphasis push-in
+    "ken_burns": (3.0, 12.0),    # slow drift over a longer stretch
+    "split_screen": (1.0, 15.0),  # both speakers framed together
+}
+
+
+def _build_effect_suggestion_prompt(transcript: str, total: float,
+                                    max_effects: int) -> str:
+    """Ask Gemini where camera moves would earn their keep."""
+    return f"""You are an expert short-form video editor deciding where camera moves belong in a talking-head edit. The transcript below has [mm:ss] timestamps. The video is {total:.1f} seconds long.
+
+Choose at most {max_effects} moments. Fewer is better — a move that isn't motivated is worse than no move at all. Never cover the whole video; these are accents.
+
+Effects you may place:
+- "punch_zoom": a fast push-in for emphasis. Use on a punchline, a strong claim, a reaction, a name drop, or an emotional beat. Duration {_EFFECT_LIMITS['punch_zoom'][0]}-{_EFFECT_LIMITS['punch_zoom'][1]}s, tight around the line itself.
+- "ken_burns": a slow drift that keeps a static shot alive. Use on longer explanation or storytelling stretches where nothing else is moving. Duration {_EFFECT_LIMITS['ken_burns'][0]}-{_EFFECT_LIMITS['ken_burns'][1]}s.
+
+Rules:
+- Effects must not overlap each other.
+- Anchor each one to what is actually said at that timestamp; quote it.
+- Keep every time within 0 and {total:.1f} seconds.
+- intensity is "low", "med" or "strong". Reserve "strong" for the single biggest beat.
+- For ken_burns, direction is "in" (push in) or "out" (pull back).
+
+Return JSON in exactly this shape:
+{{
+  "effects": [
+    {{
+      "type": "punch_zoom",
+      "start_time": 12.4,
+      "end_time": 13.9,
+      "intensity": "med",
+      "direction": "in",
+      "quote": "the exact words being emphasised",
+      "reason": "why this moment earns a camera move"
+    }}
+  ]
+}}
+
+TRANSCRIPT:
+{transcript}
+"""
+
+
+def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
+    """Split-screen ranges taken straight from diarization.
+
+    When two speakers talk over each other, framing both is the obvious call,
+    and the reframe analysis already computed exactly those windows — so this
+    needs no model, just the cached overlaps.
+    """
+    cache = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache.exists():
+        return []
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    lo, hi = _EFFECT_LIMITS["split_screen"]
+    out: list[dict] = []
+    for ov in (data.get("overlaps") or []):
+        try:
+            s = max(0.0, float(ov.get("start")))
+            e = min(total, float(ov.get("end")))
+        except (TypeError, ValueError):
+            continue
+        if e - s < lo:
+            continue
+        out.append({
+            "type": "split_screen",
+            "start_time": s,
+            "end_time": min(e, s + hi),
+            "intensity": "med",
+            "direction": "in",
+            "quote": "",
+            "reason": "Both speakers talking at once — frame them together.",
+            "source": "diarization",
+        })
+    return out
+
+
+def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
+    """Clamp to the video, enforce per-type durations, drop overlaps."""
+    cleaned: list[dict] = []
+    for e in raw or []:
+        kind = str(e.get("type", "")).strip()
+        if kind not in _EFFECT_LIMITS:
+            continue
+        try:
+            s = float(e.get("start_time"))
+            t = float(e.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        s = max(0.0, min(s, total))
+        t = max(0.0, min(t, total))
+        if t <= s:
+            continue
+        lo, hi = _EFFECT_LIMITS[kind]
+        if t - s < lo:
+            t = min(total, s + lo)      # too short to read: widen to the floor
+            if t - s < lo:
+                continue                 # not enough video left
+        if t - s > hi:
+            t = s + hi                   # too long to be an accent: trim
+        intensity = str(e.get("intensity", "med")).lower()
+        direction = str(e.get("direction", "in")).lower()
+        cleaned.append({
+            "type": kind,
+            "start_time": round(s, 3),
+            "end_time": round(t, 3),
+            "intensity": intensity if intensity in ("low", "med", "strong") else "med",
+            "direction": direction if direction in ("in", "out") else "in",
+            "quote": str(e.get("quote", ""))[:300],
+            "reason": str(e.get("reason", ""))[:500],
+            "source": str(e.get("source", "gemini")),
+        })
+
+    # Earliest first, then drop anything that collides with a kept effect —
+    # two camera moves running at once read as a glitch, not as emphasis.
+    cleaned.sort(key=lambda c: c["start_time"])
+    kept: list[dict] = []
+    for c in cleaned:
+        if any(c["start_time"] < k["end_time"] and k["start_time"] < c["end_time"]
+               for k in kept):
+            continue
+        kept.append(c)
+    return kept
+
+
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
     """Call Gemini and parse a JSON-mode response. Raises on failure."""
     import requests
@@ -3922,6 +4058,56 @@ def _create_clip_from_job(source_job_id: str, start: float, end: float, label: s
     }
     _db_save_job(new_job_id)
     return new_job_id
+
+@app.route("/suggest-effects", methods=["POST"])
+def suggest_effects():
+    """Where camera moves belong in a job, as timed ranges.
+
+    Punch-zoom and Ken Burns placements come from the transcript via Gemini;
+    split-screen comes free from the diarization overlaps the reframe analysis
+    already cached, so those are returned even when Gemini is unavailable.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words")
+    if not words:
+        return jsonify({"error": "Transcript not available for this job yet."}), 400
+
+    try:
+        max_effects = int(data.get("max_effects") or 6)
+    except (TypeError, ValueError):
+        max_effects = 6
+    max_effects = max(1, min(12, max_effects))
+
+    total = float(words[-1].get("end", 0) or 0)
+    if total <= 0:
+        return jsonify({"error": "Could not determine the video's length."}), 400
+
+    # Diarization overlaps need no model, so they stand on their own if the
+    # Gemini call fails or isn't configured.
+    suggestions = _overlap_split_suggestions(job_id, total)
+    gemini_error = None
+    try:
+        result = _gemini_generate_clip_suggestions(
+            _build_effect_suggestion_prompt(
+                _format_transcript_for_llm(words), total, max_effects
+            )
+        )
+        suggestions += (result.get("effects") or [])
+    except RuntimeError as exc:
+        gemini_error = str(exc)
+
+    cleaned = _sanitize_effect_suggestions(suggestions, total)[:max_effects]
+    if not cleaned and gemini_error:
+        return jsonify({"error": gemini_error}), 500
+    return jsonify({
+        "effects": cleaned,
+        "duration": total,
+        "warning": gemini_error,   # partial results still worth returning
+    })
+
 
 @app.route("/clip-from-job", methods=["POST"])
 def clip_from_job():
