@@ -724,6 +724,46 @@
     }
   }
 
+  // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
+  // The renderer snaps to the peak on the hit and eases out on a cubic, so the
+  // preview has to use the same numbers or the move previews wrong.
+  const PUNCH_PEAK = { low: 1.15, med: 1.25, high: 1.40, strong: 1.40 };
+  const PUNCH_DECAY = 0.45;
+
+  function punchScaleAt(cfg, tRel) {
+    const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
+    const amp = peak - 1;
+    if (amp <= 0) return 1;
+    const hit = Math.max(0, Number(cfg.hit) || 0);
+    if (tRel < hit) return 1;
+    const decay = Math.max(0.05, Number(cfg.decay) || PUNCH_DECAY);
+    const u = Math.min(1, Math.max(0, (tRel - hit) / decay));
+    return 1 + amp * Math.pow(1 - u, 3);
+  }
+
+  // Runs every frame so the punch actually animates; it used to be a constant
+  // scale applied for the clip's whole duration, which never moved.
+  function applyPunchZoom(v, ot) {
+    if (!v || !tl) return;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      const start = mainStart(i);
+      if (ot < start || ot >= start + clipDuration(c)) continue;
+      const pz = c.punch_zoom;
+      if (!pz || !pz.enabled) break;
+      const a = pz.anchor || {};
+      const ax = Math.min(1, Math.max(0, Number(a.x != null ? a.x : 0.5)));
+      const ay = Math.min(1, Math.max(0, Number(a.y != null ? a.y : 0.5)));
+      // zoompan pushes toward the anchor; transform-origin is the CSS
+      // equivalent, so the preview pushes toward the same point.
+      v.style.transformOrigin = `${(ax * 100).toFixed(2)}% ${(ay * 100).toFixed(2)}%`;
+      v.style.transform = `scale(${punchScaleAt(pz, ot - start).toFixed(4)})`;
+      return;
+    }
+    v.style.transform = "";
+    v.style.transformOrigin = "";
+  }
+
   function outputHeight() {
     const d = CANVAS_DIMS[(tl && tl.canvas) || "9x16"] || CANVAS_DIMS["9x16"];
     return d[1];
@@ -791,6 +831,7 @@
     } else {
       for (const e of animEntries) applyTitleAnim(e, ot);
     }
+    applyPunchZoom(v, ot);   // must run every frame, not only on rebuild
     syncOverlayVideos(ot, !v.paused && !v.ended);
     updatePlayhead();
     if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
@@ -831,13 +872,7 @@
       }
     }
 
-    if (activeMainClip && activeMainClip.punch_zoom && activeMainClip.punch_zoom.enabled) {
-      const intensity = activeMainClip.punch_zoom.intensity || "med";
-      const scale = intensity === "low" ? 1.15 : (intensity === "strong" ? 1.40 : 1.25);
-      v.style.transform = `scale(${scale})`;
-    } else {
-      v.style.transform = "";
-    }
+    applyPunchZoom(v, ot);
 
     const stHeight = layer.clientHeight || 640;
 
@@ -1410,6 +1445,7 @@
     mid.transition = head.out - head.in > 0.05 ? null : mid.transition;  // internal cuts are hard
     if (fx.type === "punch_zoom") {
       mid.punch_zoom = { enabled: true, intensity: fx.intensity || "med" };
+      if (fx.anchor) mid.punch_zoom.anchor = fx.anchor;   // push toward the face
     } else if (fx.type === "ken_burns") {
       mid.ken_burns = { enabled: true, intensity: fx.intensity || "med", direction: fx.direction || "in" };
     } else if (fx.type === "split_screen") {

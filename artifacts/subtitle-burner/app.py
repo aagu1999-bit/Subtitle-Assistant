@@ -3237,6 +3237,31 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
     return out
 
 
+def _face_anchor_at(job_id: str, t: float) -> dict | None:
+    """Normalised (x, y) of the most prominent face nearest time *t*.
+
+    Zooming into the middle of the frame is only right by accident; the
+    reframe analysis already tracked faces, so a punch can push toward the
+    person actually talking. Returns None when no analysis has been run.
+    """
+    cache = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache.exists():
+        return None
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    found = _face_samples_at(data.get("faces") or [], t)
+    if not found:
+        return None
+    # Biggest face wins — the speaker is normally nearest the camera.
+    face = max(found, key=lambda f: float(f.get("w", 0)) * float(f.get("h", 0)))
+    try:
+        return {"x": round(float(face["cx"]), 4), "y": round(float(face["cy"]), 4)}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
     """Clamp to the video, enforce per-type durations, drop overlaps."""
     cleaned: list[dict] = []
@@ -4100,6 +4125,13 @@ def suggest_effects():
         gemini_error = str(exc)
 
     cleaned = _sanitize_effect_suggestions(suggestions, total)[:max_effects]
+    # Aim each push at the speaker rather than the centre of the frame, when
+    # the reframe analysis has face data to aim with.
+    for fx in cleaned:
+        if fx["type"] == "punch_zoom":
+            anchor = _face_anchor_at(job_id, fx["start_time"])
+            if anchor:
+                fx["anchor"] = anchor
     if not cleaned and gemini_error:
         return jsonify({"error": gemini_error}), 500
     return jsonify({
@@ -5381,20 +5413,66 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
     )
 
 
-def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int) -> str:
-    """Build a static punch-zoom (crop + scale) filter.
-    
+_PUNCH_PEAK = {"low": 1.15, "med": 1.25, "high": 1.40, "strong": 1.40}
+PUNCH_DECAY_SECONDS = 0.45
+
+
+def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
+                          fps: int = 30) -> str:
+    """Build an animated punch zoom: hit the peak on the beat, ease back out.
+
     Returns "" when disabled.
+
+    The zoom snaps to its peak at `hit` seconds and decays to 1.0 over `decay`
+    seconds on a cubic ease-out, so the move lands hard and settles softly. A
+    linear decay reads mechanical, which is the whole difference between a
+    punch and a slow zoom.
+
+    `anchor` is a normalised (x, y) to zoom toward — pass the speaker's face
+    from the reframe analysis and the push lands on them rather than on the
+    middle of the frame. Defaults to centre.
+
+    crop can't do this: its w/h expressions are evaluated once at
+    configuration, so the window size cannot change per frame. zoompan
+    re-evaluates z every frame, which is why the zoom is built there.
     """
     if not punch_cfg or not punch_cfg.get("enabled"):
         return ""
-    intensity = punch_cfg.get("intensity", "med")
-    scale = 1.25
-    if intensity == "low":
-        scale = 1.15
-    elif intensity == "high":
-        scale = 1.40
-    return f"crop=w=iw/{scale}:h=ih/{scale}:x=(iw-iw/{scale})/2:y=(ih-ih/{scale})/2,scale={W}:{H}"
+    peak = _PUNCH_PEAK.get(punch_cfg.get("intensity", "med"), 1.25)
+    amp = peak - 1.0
+    if amp <= 0:
+        return ""
+
+    try:
+        hit = max(0.0, float(punch_cfg.get("hit", 0.0)))
+    except (TypeError, ValueError):
+        hit = 0.0
+    try:
+        decay = max(0.05, float(punch_cfg.get("decay", PUNCH_DECAY_SECONDS)))
+    except (TypeError, ValueError):
+        decay = PUNCH_DECAY_SECONDS
+
+    anchor = punch_cfg.get("anchor") or {}
+    try:
+        ax = min(1.0, max(0.0, float(anchor.get("x", 0.5))))
+        ay = min(1.0, max(0.0, float(anchor.get("y", 0.5))))
+    except (TypeError, ValueError):
+        ax = ay = 0.5
+
+    f0 = hit * max(1, fps)
+    fd = max(1.0, decay * max(1, fps))
+    # Progress through the decay, clamped so the frames before the hit read 0
+    # and everything after the settle reads 1.
+    u = f"min(1,max(0,(in-{f0:.3f})/{fd:.3f}))"
+    # gte() holds the zoom at 1.0 until the hit; without it the clamp above
+    # would park the frame at full zoom for the whole run-up.
+    z = f"1+{amp:.4f}*pow(1-{u},3)*gte(in,{f0:.3f})"
+    return (
+        f"zoompan=z='{z}':"
+        f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
+        f"y='clip(ih*{ay:.4f}-(ih/zoom)/2,0,ih-ih/zoom)':"
+        f"d=1:s={W}x{H}:fps={fps}"
+    )
 
 
 def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
@@ -5430,7 +5508,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     kb = _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
         vf += "," + kb
-    pz = _tl_punch_zoom_filter(punch, W, H)
+    pz = _tl_punch_zoom_filter(punch, W, H, fps)
     if pz:
         vf += "," + pz
     cf = _tl_color_filter(color)
