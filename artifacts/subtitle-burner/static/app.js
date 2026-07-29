@@ -1281,6 +1281,9 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       go.disabled = false;
     } else {
       console.error("Upload failed for", file.name, e);
+      if (window.__studioNote) {
+        window.__studioNote(`Upload failed for ${file.name}: ${e.message}`);
+      }
     }
     return null;
   }
@@ -1944,6 +1947,9 @@ function showError(msg) {
   statusText.textContent = msg;
   progress.classList.remove("hidden");
   barFill.style.width = "0%";
+  // The progress strip can sit off-screen on a phone; mirror the failure into
+  // the on-page banner so it is not silently missed.
+  if (window.__studioNote) window.__studioNote(msg);
 }
 
 // =====================================================================

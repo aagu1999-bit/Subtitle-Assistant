@@ -9,6 +9,42 @@
 </head>
 <body>
 
+<!-- On a phone there is no console to open, so a script error is invisible and
+     the page just appears to do nothing. Surface errors on the page itself.
+     This runs before any other script so it can catch their load failures. -->
+<div id="jsErrorBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#7f1d1d;color:#fff;font:12px/1.45 ui-monospace,Menlo,monospace;padding:10px 34px 10px 10px;white-space:pre-wrap;max-height:45vh;overflow:auto"></div>
+<script>
+(function () {
+  function show(msg) {
+    var el = document.getElementById("jsErrorBanner");
+    if (!el) return;
+    el.style.display = "block";
+    el.textContent = (el.textContent ? el.textContent + "\n" : "") + msg;
+    if (!el.dataset.dismiss) {
+      el.dataset.dismiss = "1";
+      var x = document.createElement("button");
+      x.textContent = "×";
+      x.setAttribute("style", "position:absolute;top:4px;right:8px;background:none;border:0;color:#fff;font-size:20px;line-height:1");
+      x.onclick = function () { el.style.display = "none"; };
+      el.appendChild(x);
+    }
+  }
+  window.addEventListener("error", function (e) {
+    if (e.target && e.target.tagName === "SCRIPT") {
+      show("Failed to load script: " + (e.target.src || "?"));
+      return;
+    }
+    show("JS error: " + (e.message || "?") +
+         "\n  at " + String(e.filename || "").split("/").pop() + ":" + (e.lineno || "?"));
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    show("Unhandled: " + ((r && (r.message || r.error)) || r));
+  });
+  window.__studioNote = show;
+})();
+</script>
+
 <!-- Empty state: hero welcome shown when there are no jobs yet -->
 <div id="emptyState" class="empty-state hidden">
   <div class="empty-hero">
