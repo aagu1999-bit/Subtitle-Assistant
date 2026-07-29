@@ -687,18 +687,50 @@ fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.f
 // so screen for it here and say so rather than letting the upload fail.
 const ACCEPTED_VIDEO_EXT = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
 
+// The server identifies uploads by extension too, so a phone file that
+// arrives without a usable one is refused at both ends. When the browser
+// tells us the MIME type we can supply the matching extension ourselves.
+const MIME_TO_EXT = {
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/x-quicktime": "mov",
+  "video/x-matroska": "mkv",
+  "video/webm": "webm",
+  "video/avi": "avi",
+  "video/x-msvideo": "avi",
+  "video/x-m4v": "m4v",
+  "video/m4v": "m4v",
+};
+
+function videoExtOf(f) {
+  const parts = (f.name || "").split(".");
+  return parts.length > 1 ? parts.pop().toLowerCase() : "";
+}
+
 function isAcceptedVideo(f) {
-  const ext = (f.name.split(".").pop() || "").toLowerCase();
-  if (ACCEPTED_VIDEO_EXT.includes(ext)) return true;
-  // Browsers report an empty or generic MIME type for some containers (.mkv
-  // and .m4v especially), so the extension is the reliable signal; only fall
-  // back to sniffing when the name carries no usable extension.
-  return f.name.indexOf(".") === -1 && f.type.startsWith("video/");
+  if (ACCEPTED_VIDEO_EXT.includes(videoExtOf(f))) return true;
+  // iOS and some Android pickers hand over names the server won't recognise
+  // ("capturedvideo", "image.mov" variants, or no extension at all), so trust
+  // the MIME type when it maps onto a format we support.
+  return !!MIME_TO_EXT[(f.type || "").toLowerCase()];
+}
+
+// Give the file a name the server will accept, without touching its bytes.
+function normalizeVideoFile(f) {
+  if (ACCEPTED_VIDEO_EXT.includes(videoExtOf(f))) return f;
+  const ext = MIME_TO_EXT[(f.type || "").toLowerCase()];
+  if (!ext) return f;
+  const base = (f.name || "video").replace(/\.[^.]*$/, "") || "video";
+  try {
+    return new File([f], `${base}.${ext}`, { type: f.type });
+  } catch (e) {
+    return f;   // very old browsers: send it as-is and let the server answer
+  }
 }
 
 function handleFiles(files) {
   const all = Array.from(files);
-  const videos = all.filter(isAcceptedVideo);
+  const videos = all.filter(isAcceptedVideo).map(normalizeVideoFile);
   if (!videos.length) {
     const names = all.map(f => f.name).join(", ");
     alert(all.length
