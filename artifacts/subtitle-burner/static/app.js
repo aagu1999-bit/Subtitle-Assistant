@@ -1142,17 +1142,24 @@ function collectEditedWords(options = {}) {
 
     if (words.length === origTimes.length) {
       words.forEach((word, i) => {
-        editedWords.push({ word, start: origTimes[i].s, end: origTimes[i].e });
+        const entry = { word, start: origTimes[i].s, end: origTimes[i].e };
+        if (origTimes[i].sp) entry.speaker = origTimes[i].sp;
+        editedWords.push(entry);
       });
     } else {
       const duration = Math.max(0, end - start);
       const wordDur  = duration / words.length;
+      // Preserve dominant speaker for the row when word count changes.
+      const rowSp = row.dataset.speaker || null;
       words.forEach((word, i) => {
-        editedWords.push({
+        const entry = {
           word,
           start: start + i * wordDur,
           end:   start + (i + 1) * wordDur,
-        });
+        };
+        if (rowSp) entry.speaker = rowSp;
+        else if (origTimes[i] && origTimes[i].sp) entry.speaker = origTimes[i].sp;
+        editedWords.push(entry);
       });
     }
   });
@@ -1390,13 +1397,33 @@ function renderPhraseList(words) {
     row.className = "phrase-row";
     row.dataset.start = group[0].start;
     row.dataset.end   = group[group.length - 1].end;
-    row.dataset.words = JSON.stringify(group.map(w => ({ s: w.start, e: w.end })));
+    row.dataset.words = JSON.stringify(group.map(w => ({
+      s: w.start, e: w.end, sp: w.speaker || null,
+    })));
+
+    // Dominant speaker for this phrase → left rail color (Host/Guest).
+    const spCounts = {};
+    group.forEach((w) => {
+      if (w.speaker) spCounts[w.speaker] = (spCounts[w.speaker] || 0) + 1;
+    });
+    const dominantSp = Object.keys(spCounts).sort((a, b) => spCounts[b] - spCounts[a])[0] || "";
+    if (dominantSp) {
+      row.dataset.speaker = dominantSp;
+      row.classList.add("has-speaker");
+      const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
+      const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
+      const rail = dominantSp === "SPEAKER_00" ? hostC
+        : (dominantSp === "SPEAKER_01" ? guestC : "#a3be8c");
+      row.style.borderLeftColor = rail;
+      row.style.boxShadow = `inset 3px 0 0 ${rail}`;
+    }
 
     // Timestamp label
     const timeEl = document.createElement("span");
     timeEl.className = "phrase-time";
     timeEl.textContent = fmtTime(group[0].start);
-    timeEl.title = "Seek to " + fmtTime(group[0].start);
+    timeEl.title = "Seek to " + fmtTime(group[0].start)
+      + (dominantSp ? ` · ${dominantSp === "SPEAKER_00" ? "Host" : (dominantSp === "SPEAKER_01" ? "Guest" : dominantSp)}` : "");
 
     // Editable text — punchwords (long words / numbers / proper nouns)
     // are wrapped in a span tinted with the user's accent color so the
@@ -1410,6 +1437,8 @@ function renderPhraseList(words) {
     const punchEnabled = $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true;
     const punchIdxs = punchEnabled ? _selectGroupPunchwordIndices(group) : new Set();
     const accentColor = accentEl ? accentEl.value : "#FF6B35";
+    const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
+    const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
     const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
     }[c]));
@@ -1422,6 +1451,12 @@ function renderPhraseList(words) {
       }
       if (punchIdxs.has(j)) {
         return `<span class="punchword" style="color:${accentColor}">${safe}</span>`;
+      }
+      if (w.speaker === "SPEAKER_00") {
+        return `<span class="speaker-word" style="color:${hostC}" title="Host">${safe}</span>`;
+      }
+      if (w.speaker === "SPEAKER_01") {
+        return `<span class="speaker-word" style="color:${guestC}" title="Guest">${safe}</span>`;
       }
       return safe;
     }).join(" ");
@@ -1901,6 +1936,18 @@ async function refreshReframeStatus() {
       renderIngestSpeakerCards(data.stats);
       const ingestBtn = $("ingestAnalyzeBtn");
       if (ingestBtn) ingestBtn.textContent = "Re-analyze";
+      // Stamp word.speaker + refresh Transcript Cut coloring.
+      try {
+        await fetch(`/stamp-speakers/${currentJobId}`, { method: "POST" });
+        const st = await fetch(`/status/${currentJobId}`).then((r) => r.json());
+        if (Array.isArray(st.words) && st.words.length) {
+          currentWords = _sanitizeWords(st.words);
+          if (phraseListEl && !phraseListEl.closest(".hidden")) {
+            renderPhraseList(currentWords);
+            updateRowCount();
+          }
+        }
+      } catch { /* optional */ }
     } else {
       if (reframeStatus) reframeStatus.textContent = "Not analysed yet";
       if (reframeEnabled) {
@@ -1979,13 +2026,12 @@ if (ingestAnalyzeBtn) {
   ingestAnalyzeBtn.onclick = () => startReframeAnalyze(ingestAnalyzeBtn);
 }
 
-// Live-tint Ingest speaker pills when Host/Guest colors change.
+// Live-tint Ingest speaker pills + Transcript phrase colors when Host/Guest change.
 ["hostColor", "guestColor"].forEach((id) => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("input", () => {
     const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
-    if (!cards.length) return;
     const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
     const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
     const palette = [hostC, guestC, "#a3be8c", "#b48ead", "#d08770"];
@@ -1998,6 +2044,9 @@ if (ingestAnalyzeBtn) {
         pill.style.borderColor = color + "88";
       }
     });
+    if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
+      renderPhraseList(currentWords);
+    }
   });
 });
 
@@ -4365,6 +4414,55 @@ if (loadBrandPresetBtn) {
   loadBrandPresetBtn.onclick = () => window.loadCustomBrandPreset();
 }
 
+// Brand logo (Branding tab) — upload once, apply with Apply → Timeline.
+window._brandLogoAssetId = window._brandLogoAssetId || null;
+
+(function wireBrandLogo() {
+  const input = $("brandLogoInput");
+  const clearBtn = $("brandLogoClearBtn");
+  const status = $("brandLogoStatus");
+  const preview = $("brandLogoPreview");
+  if (!input) return;
+
+  const setUi = (assetId, note) => {
+    window._brandLogoAssetId = assetId || null;
+    if (status) status.textContent = note || (assetId ? `Logo ready (${assetId.slice(0, 8)}…)` : "Optional — applied when you hit Apply → Timeline");
+    if (preview) {
+      if (assetId) {
+        preview.src = "/asset/" + assetId + "?t=" + Date.now();
+        preview.style.display = "inline-block";
+      } else {
+        preview.removeAttribute("src");
+        preview.style.display = "none";
+      }
+    }
+  };
+
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (status) status.textContent = "Uploading logo…";
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/upload-asset", { method: "POST", body: fd });
+      const j = await res.json();
+      if (!res.ok || j.error) throw new Error(j.error || res.statusText);
+      setUi(j.asset_id, "Logo uploaded — Apply → Timeline to place it");
+      if (window.StudioLogger) StudioLogger.clip("brand_logo_upload", j.asset_id);
+    } catch (e) {
+      setUi(null, "Logo upload failed: " + e.message);
+      alert("Logo upload failed: " + e.message);
+    } finally {
+      input.value = "";
+    }
+  });
+
+  if (clearBtn) {
+    clearBtn.onclick = () => setUi(null, "Logo cleared");
+  }
+})();
+
 async function applyBrandingToTimeline() {
   const style = typeof getStyle === "function" ? getStyle() : {};
   if (typeof window.ensureTimelineInit === "function") {
@@ -4374,9 +4472,16 @@ async function applyBrandingToTimeline() {
     alert("Timeline Editor is not available.");
     return;
   }
-  window.applyTimelineBranding(style);
+  const opts = {};
+  if (window._brandLogoAssetId) {
+    opts.logo = {
+      asset_id: window._brandLogoAssetId,
+      x: 0.04, y: 0.04, w: 0.18, opacity: 0.9,
+    };
+  }
+  window.applyTimelineBranding(style, opts);
   setActiveTab("editor");
-  if (window.StudioLogger) StudioLogger.clip("branding_to_timeline", "style + speaker colors applied");
+  if (window.StudioLogger) StudioLogger.clip("branding_to_timeline", "style + speaker colors" + (opts.logo ? " + logo" : ""));
 }
 
 const applyBrandingToTimelineBtn = $("applyBrandingToTimelineBtn");

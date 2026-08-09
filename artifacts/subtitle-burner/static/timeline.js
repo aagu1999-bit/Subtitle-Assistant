@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-11";
+  const TL_BUILD = "studio-editor-build-12";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -303,11 +303,17 @@
     const doc = $("tlTranscriptDoc");
     if (!doc || !transcriptWords) return;
     doc.innerHTML = "";
+    const sc = (tl && tl.speaker_colors) || {};
+    const hostC = sc.SPEAKER_00 || sc.Host || "#FFD700";
+    const guestC = sc.SPEAKER_01 || sc.Guest || "#00E5FF";
     transcriptWords.forEach((w) => {
       const sp = document.createElement("span");
       sp.className = "tl-tword" + (isWordCut(clip, w) ? " cut" : "");
       sp.textContent = w.word + " ";
       sp.dataset.start = w.start;
+      if (w.speaker === "SPEAKER_00") sp.style.color = hostC;
+      else if (w.speaker === "SPEAKER_01") sp.style.color = guestC;
+      if (w.speaker) sp.title = w.speaker === "SPEAKER_00" ? "Host" : (w.speaker === "SPEAKER_01" ? "Guest" : w.speaker);
       sp.onclick = () => toggleWordCut(clip, w);
       doc.appendChild(sp);
     });
@@ -866,12 +872,16 @@
           });
         }
         // Soft opacity dissolve into the next Main clip (approx — not ffmpeg xfade).
+        // Longer (~0.45s) when the outgoing clip has a fade-style transition.
         if (!cancelled && i < tl.tracks.main.length - 1) {
-          const steps = 6;
+          const tr = (c.transition && c.transition.type) || c.transition || "";
+          const soft = /fade|dissolve/i.test(String(tr));
+          const steps = soft ? 12 : 7;
+          const stepMs = soft ? 40 : 35;
           for (let s = 1; s <= steps; s++) {
             if (cancelled) break;
             v.style.opacity = String(1 - s / steps);
-            await new Promise((r) => setTimeout(r, 40));
+            await new Promise((r) => setTimeout(r, stepMs));
           }
           v.style.opacity = "0";
         }
@@ -941,23 +951,39 @@
     return 1 + amp * Math.pow(1 - u, 3);
   }
 
-  // Runs every frame so the punch actually animates; it used to be a constant
-  // scale applied for the clip's whole duration, which never moved.
+  // Mirrors _KENBURNS_INTENSITY in app.py — slow zoom ramp over the clip.
+  const KENBURNS_AMOUNT = { low: 0.12, med: 0.22, high: 0.35 };
+
+  function kenBurnsScaleAt(kb, tRel, dur) {
+    if (!kb || !kb.enabled) return 1;
+    const amount = KENBURNS_AMOUNT[kb.intensity] || KENBURNS_AMOUNT.med;
+    const u = Math.min(1, Math.max(0, tRel / Math.max(0.05, dur)));
+    if ((kb.direction || "in") === "out") return (1 + amount) - amount * u;
+    return 1 + amount * u;
+  }
+
+  // Runs every frame so punch + Ken Burns animate; compose both scales.
   function applyPunchZoom(v, ot) {
     if (!v || !tl) return;
     for (let i = 0; i < tl.tracks.main.length; i++) {
       const c = tl.tracks.main[i];
       const start = mainStart(i);
-      if (ot < start || ot >= start + clipDuration(c)) continue;
+      const dur = clipDuration(c);
+      if (ot < start || ot >= start + dur) continue;
+      const tRel = ot - start;
+      let scale = kenBurnsScaleAt(c.ken_burns, tRel, dur);
       const pz = c.punch_zoom;
-      if (!pz || !pz.enabled) break;
-      const a = pz.anchor || {};
+      if (pz && pz.enabled) scale *= punchScaleAt(pz, tRel);
+      const a = (pz && pz.anchor) || {};
       const ax = Math.min(1, Math.max(0, Number(a.x != null ? a.x : 0.5)));
       const ay = Math.min(1, Math.max(0, Number(a.y != null ? a.y : 0.5)));
-      // zoompan pushes toward the anchor; transform-origin is the CSS
-      // equivalent, so the preview pushes toward the same point.
       v.style.transformOrigin = `${(ax * 100).toFixed(2)}% ${(ay * 100).toFixed(2)}%`;
-      v.style.transform = `scale(${punchScaleAt(pz, ot - start).toFixed(4)})`;
+      if (Math.abs(scale - 1) > 0.001) {
+        v.style.transform = `scale(${scale.toFixed(4)})`;
+      } else {
+        v.style.transform = "";
+        v.style.transformOrigin = "";
+      }
       return;
     }
     v.style.transform = "";
@@ -2285,13 +2311,14 @@
   // Expose for setActiveTab("editor") — both header + main nav entry points.
   window.ensureTimelineInit = ensureInit;
 
-  // Branding tab → Timeline: caption style, speaker colors, headline banner.
-  window.applyTimelineBranding = function (style) {
+  // Branding tab → Timeline: caption style, speaker colors, headline, logo.
+  window.applyTimelineBranding = function (style, opts) {
     if (!tl) {
       alert("Open or create a Timeline project first.");
       return false;
     }
     style = style || {};
+    opts = opts || {};
     tl.style = Object.assign({}, tl.style || {}, style);
     const sc = style.speaker_colors || {};
     tl.speaker_colors = {
@@ -2301,10 +2328,19 @@
     const banner = style.headline_banner;
     if (banner) tl.headline_banner = { text: String(banner) };
     else if (banner === "") tl.headline_banner = null;
+    if (opts.logo && opts.logo.asset_id) {
+      tl.logo = Object.assign(
+        { x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 },
+        tl.logo || {},
+        opts.logo,
+      );
+    }
     selected = null;
     renderTimeline();
     scheduleSave();
     setSaveState("Branding applied ✓");
+    // Refresh media library so the new logo asset appears.
+    try { loadAssets(); } catch (e) {}
     return true;
   };
 

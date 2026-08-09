@@ -436,6 +436,12 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   border-left: 3px solid #ffd60a;
   padding-left: 11px;
 }
+.phrase-row.has-speaker {
+  padding-left: 11px;
+}
+.phrase-text .speaker-word {
+  font-weight: 500;
+}
 .phrase-time {
   font-size: .75rem;
   color: #636870;

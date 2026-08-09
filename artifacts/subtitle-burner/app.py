@@ -3378,7 +3378,11 @@ def analyze_reframe_job(job_id: str, video_path: Path) -> None:
         result = analyze_reframe(video_path)
         cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
         cache_path.write_text(json.dumps(result), encoding="utf-8")
-        ai_logger.info(f"[{job_id}] Reframe analysis done: {result['stats']['speaker_count']} speakers, {result['stats']['face_samples']} face samples")
+        n_spk = _stamp_job_speakers(job_id, result.get("diarization") or [])
+        ai_logger.info(
+            f"[{job_id}] Reframe analysis done: {result['stats']['speaker_count']} speakers, "
+            f"{result['stats']['face_samples']} face samples, {n_spk} words labeled"
+        )
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["reframe_ready"] = True
@@ -4773,6 +4777,64 @@ def _speaker_breakdown(diar: list) -> list:
     return out
 
 
+def assign_speakers_to_words(words: list, diarization: list) -> list:
+    """Stamp each word with the diarization speaker at its midpoint."""
+    if not words or not diarization:
+        return words or []
+    segs = sorted(
+        (s for s in diarization if s.get("speaker") is not None),
+        key=lambda s: float(s.get("start", 0) or 0),
+    )
+    if not segs:
+        return words
+    out = []
+    for w in words:
+        nw = dict(w) if isinstance(w, dict) else {"word": str(w)}
+        try:
+            mid = (float(nw.get("start", 0)) + float(nw.get("end", 0))) / 2.0
+        except (TypeError, ValueError):
+            out.append(nw)
+            continue
+        spk = None
+        for seg in segs:
+            try:
+                a = float(seg.get("start", 0))
+                b = float(seg.get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            if a <= mid <= b:
+                spk = seg.get("speaker")
+                break
+        if spk:
+            nw["speaker"] = spk
+        out.append(nw)
+    return out
+
+
+def _stamp_job_speakers(job_id: str, diarization: list | None = None) -> int:
+    """Persist speaker labels onto the job's words. Returns # words stamped."""
+    job = jobs.get(job_id)
+    if not job:
+        return 0
+    diar = diarization
+    if diar is None:
+        cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+        if not cache_path.exists():
+            return 0
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            diar = _effective_diar_for_words(data)
+        except (json.JSONDecodeError, OSError):
+            return 0
+    words = job.get("words") or []
+    if not words or not diar:
+        return 0
+    stamped = assign_speakers_to_words(words, diar)
+    job["words"] = stamped
+    _db_save_job(job_id)
+    return sum(1 for w in stamped if w.get("speaker"))
+
+
 @app.route("/reframe-status/<job_id>")
 def reframe_status(job_id: str):
     """Return cached reframe analysis summary if it exists, plus any
@@ -4829,7 +4891,42 @@ def reframe_swap_speakers():
 
     reframe_data["swap_speaker_voices"] = not reframe_data.get("swap_speaker_voices", False)
     cache_path.write_text(json.dumps(reframe_data, ensure_ascii=False), encoding="utf-8")
-    return jsonify({"ok": True, "swapped": reframe_data["swap_speaker_voices"]})
+    # Re-stamp words using the effective (post-swap) speaker mapping.
+    stamped = _stamp_job_speakers(job_id, _effective_diar_for_words(reframe_data))
+    return jsonify({"ok": True, "swapped": reframe_data["swap_speaker_voices"], "words_stamped": stamped})
+
+
+def _effective_diar_for_words(reframe_data: dict) -> list:
+    """Diarization segments with Host/Guest swap applied for word labeling."""
+    diar = reframe_data.get("diarization") or []
+    if not reframe_data.get("swap_speaker_voices"):
+        return diar
+    out = []
+    for seg in diar:
+        ns = dict(seg)
+        spk = ns.get("speaker")
+        if spk == "SPEAKER_00":
+            ns["speaker"] = "SPEAKER_01"
+        elif spk == "SPEAKER_01":
+            ns["speaker"] = "SPEAKER_00"
+        out.append(ns)
+    return out
+
+
+@app.route("/stamp-speakers/<job_id>", methods=["POST"])
+def stamp_speakers(job_id: str):
+    """Label each transcript word with its diarization speaker (idempotent)."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache_path.exists():
+        return jsonify({"error": "No diarization cache — run Analyze first"}), 400
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": str(e)}), 500
+    n = _stamp_job_speakers(job_id, _effective_diar_for_words(data))
+    return jsonify({"ok": True, "words_stamped": n})
 
 
 @app.route("/reframe-speaker-avatar/<job_id>/<speaker_id>")

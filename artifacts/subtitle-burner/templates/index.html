@@ -299,6 +299,15 @@
       <input type="text" id="headlineBanner" placeholder="e.g. Austin Craft Festival — @WildwoodCandles" style="flex:1;padding:8px 12px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.88rem" maxlength="120">
     </div>
 
+    <!-- Brand logo — uploads as a Timeline asset and is applied on Apply → Timeline -->
+    <div class="row" style="margin-bottom:12px;align-items:center;gap:10px;flex-wrap:wrap">
+      <label style="min-width:120px;font-weight:600;font-size:.85rem" title="PNG/JPG watermark applied to the Timeline project">🏷 Brand logo</label>
+      <input type="file" id="brandLogoInput" accept="image/png,image/jpeg,image/webp,image/gif" style="font-size:.78rem;color:#c8cdd3;max-width:220px">
+      <button id="brandLogoClearBtn" type="button" class="btn btn-secondary btn-sm" style="font-size:.72rem">Clear</button>
+      <span id="brandLogoStatus" class="muted" style="font-size:.76rem">Optional — applied when you hit Apply → Timeline</span>
+      <img id="brandLogoPreview" alt="" style="display:none;height:36px;width:auto;border-radius:6px;border:1px solid #2a2f3a;background:#10131d;padding:2px">
+    </div>
+
     <div class="row toggle-row">
       <label class="toggle-label">
         <input type="checkbox" id="qualityBoost">
