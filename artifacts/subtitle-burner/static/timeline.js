@@ -6,13 +6,14 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-8";
+  const TL_BUILD = "editor-build-9";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
   let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
+  const MAX_UNDO = 50;
 
   // ---- State ----
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
@@ -26,8 +27,85 @@
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
   let transcriptWords = null;    // cached words for the open transcript clip
+  let undoStack = [];
+  let redoStack = [];
+  let historySuspended = false;
+  let seqPreview = null;   // { running, cancel } for main-track cut preview
 
   const uid = () => Math.random().toString(36).slice(2, 10);
+
+  // ---- Undo / redo ----
+  function snapshotState() {
+    return JSON.stringify({
+      label: tl.label,
+      canvas: tl.canvas,
+      fit: tl.fit,
+      fps: tl.fps,
+      bg: tl.bg || "#000000",
+      logo: tl.logo || null,
+      tracks: tl.tracks,
+      selected,
+    });
+  }
+
+  function pushHistory() {
+    if (!tl || historySuspended) return;
+    undoStack.push(snapshotState());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  function clearHistory() {
+    undoStack = [];
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  function restoreSnapshot(snap) {
+    if (!tl || !snap) return;
+    const d = JSON.parse(snap);
+    historySuspended = true;
+    tl.label = d.label;
+    tl.canvas = d.canvas || "9x16";
+    tl.fit = d.fit || "cover";
+    tl.fps = d.fps || 30;
+    tl.bg = d.bg || "#000000";
+    tl.logo = d.logo || null;
+    tl.tracks = d.tracks || { main: [], overlay: [], text: [], music: [] };
+    selected = d.selected || null;
+    if ($("tlLabel")) $("tlLabel").value = tl.label;
+    if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+    if ($("tlFit")) $("tlFit").value = tl.fit;
+    applyStage();
+    renderTimeline();
+    if (selected && selected.track === "main") {
+      const c = findClip(selected.track, selected.id);
+      if (c) renderTranscript(c);
+    }
+    historySuspended = false;
+    scheduleSave();
+    updateHistoryButtons();
+  }
+
+  function undo() {
+    if (!tl || !undoStack.length) return;
+    redoStack.push(snapshotState());
+    restoreSnapshot(undoStack.pop());
+  }
+
+  function redo() {
+    if (!tl || !redoStack.length) return;
+    undoStack.push(snapshotState());
+    restoreSnapshot(redoStack.pop());
+  }
+
+  function updateHistoryButtons() {
+    const u = $("tlUndoBtn");
+    const r = $("tlRedoBtn");
+    if (u) u.disabled = !undoStack.length;
+    if (r) r.disabled = !redoStack.length;
+  }
 
   // ---- Helpers ----
   function fmtTime(s) {
@@ -317,6 +395,7 @@
   }
 
   function toggleWordCut(clip, w) {
+    pushHistory();
     const cuts = (clip.cuts || []).slice();
     if (isWordCut(clip, w)) {
       // Remove any cut covering this word.
@@ -349,9 +428,11 @@
   }
 
   // ---- Add clips ----
-  async function addMainClip(jobId, inS, outS) {
+  async function addMainClip(jobId, inS, outS, opts) {
+    opts = opts || {};
     try {
       if (!(await ensureProject())) return;
+      if (!opts.skipHistory) pushHistory();
       const dur = await getSourceDuration(jobId);
       const ci = inS != null ? Math.max(0, inS) : 0;
       const co = outS != null ? Math.min(dur, outS) : dur;
@@ -359,8 +440,10 @@
         id: uid(), source_job_id: jobId, in: ci, out: co > ci ? co : dur,
         _max: dur, transition: null, burn_captions: true,
       });
-      renderTimeline();
-      scheduleSave();
+      if (!opts.skipRender) {
+        renderTimeline();
+        scheduleSave();
+      }
     } catch (e) {
       alert("Couldn't add clip: " + e.message);
     }
@@ -368,6 +451,7 @@
 
   async function addOverlayClip(ref, asset) {
     if (!(await ensureProject())) return;
+    pushHistory();
     let max = 4;
     if (ref.source_job_id) {
       try { max = await getSourceDuration(ref.source_job_id); } catch (e) {}
@@ -388,6 +472,7 @@
 
   async function addMusicClip(asset) {
     if (!(await ensureProject())) return;
+    pushHistory();
     const max = asset.duration || 60;
     const mc = {
       id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
@@ -402,6 +487,7 @@
 
   async function addTitle() {
     if (!(await ensureProject())) return;
+    pushHistory();
     const tc = {
       id: uid(), text: "Lower third\nName · Title", start: 0, out: 4,
       x: 0.5, y: 0.82, size: 56, color: "#FFFFFF", font: "Anton",
@@ -594,6 +680,7 @@
 
   // ---- Split the selected Main clip at the playhead ----
   function splitAtPlayhead() {
+    if (!tl) return;
     const cur = ($("tlPreviewVideo").currentTime) || 0;
     let idx, t;
     if (previewingOutput) {
@@ -616,6 +703,7 @@
       alert("Move the playhead to somewhere inside the clip first.");
       return;
     }
+    pushHistory();
     const second = JSON.parse(JSON.stringify(c));
     second.id = uid();
     c.out = t;
@@ -627,6 +715,84 @@
     tl.tracks.main.splice(idx + 1, 0, second);
     renderTimeline();
     scheduleSave();
+  }
+
+  // Lightweight main-track cut preview — play clips in order without a full
+  // FFmpeg render so edit → see → tweak doesn't require waiting on a burn.
+  async function playSequencePreview() {
+    if (seqPreview && seqPreview.running) {
+      seqPreview.cancel();
+      return;
+    }
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one clip to the Main track first.");
+      return;
+    }
+    const v = $("tlPreviewVideo");
+    const btn = $("tlPlaySeqBtn");
+    if (!v) return;
+    let cancelled = false;
+    seqPreview = {
+      running: true,
+      cancel: () => {
+        cancelled = true;
+        try { v.pause(); } catch (e) {}
+      },
+    };
+    if (btn) btn.textContent = "⏹ Stop";
+    setRenderStatus("Previewing cut (Main track)…");
+    previewingOutput = false;
+    v.closest(".tl-preview").classList.add("has-video");
+
+    const waitEvent = (el, ev, timeoutMs) => new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        el.removeEventListener(ev, finish);
+        resolve();
+      };
+      el.addEventListener(ev, finish);
+      if (timeoutMs) setTimeout(finish, timeoutMs);
+    });
+
+    try {
+      for (let i = 0; i < tl.tracks.main.length; i++) {
+        if (cancelled) break;
+        const c = tl.tracks.main[i];
+        if (!c.source_job_id) continue;
+        selectClip("main", c.id);
+        const src = "/raw-upload/" + c.source_job_id;
+        if (v.getAttribute("src") !== src) {
+          v.src = src;
+          await waitEvent(v, "loadedmetadata", 8000);
+        }
+        if (cancelled) break;
+        const start = c.in || 0;
+        const end = Math.max(start + 0.05, c.out || start + 0.05);
+        try { v.currentTime = start; } catch (e) {}
+        await waitEvent(v, "seeked", 2000);
+        if (cancelled) break;
+        const playP = v.play();
+        if (playP && playP.catch) playP.catch(() => {});
+        await new Promise((resolve) => {
+          const onTime = () => {
+            updatePlayhead();
+            highlightTranscriptAt(v.currentTime || 0);
+            if (cancelled || v.ended || (v.currentTime || 0) >= end - 0.03) {
+              v.removeEventListener("timeupdate", onTime);
+              try { v.pause(); } catch (e) {}
+              resolve();
+            }
+          };
+          v.addEventListener("timeupdate", onTime);
+        });
+      }
+    } finally {
+      seqPreview = null;
+      if (btn) btn.textContent = "▶ Preview cut";
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for overlays / captions / grades");
+    }
   }
 
   function setZoom(delta) {
@@ -691,6 +857,7 @@
 
   let boxDrag = null;
   function startBoxDrag(e, kind, obj, box) {
+    pushHistory();
     const rect = $("tlStage").getBoundingClientRect();
     boxDrag = {
       kind, obj, box, rect,
@@ -921,7 +1088,10 @@
   function wireProps(wrap, track, c) {
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;
+      let histPushed = false;
+      inp.addEventListener("focus", () => { histPushed = false; });
       const handler = () => {
+        if (!histPushed) { pushHistory(); histPushed = true; }
         let v;
         if (inp.type === "checkbox") v = inp.checked;
         else if (inp.type === "number" || inp.type === "range") v = parseFloat(inp.value);
@@ -960,12 +1130,14 @@
     if (et) et.onclick = () => { setLeftTab("transcript"); renderTranscript(c); };
     const setin = wrap.querySelector('[data-act="setin"]');
     if (setin) setin.onclick = () => {
+      pushHistory();
       const t = $("tlPreviewVideo").currentTime || 0;
       c.in = Math.max(0, Math.min(t, (c.out || 0) - 0.2));
       renderTimeline(); scheduleSave();
     };
     const setout = wrap.querySelector('[data-act="setout"]');
     if (setout) setout.onclick = () => {
+      pushHistory();
       const t = $("tlPreviewVideo").currentTime || 0;
       c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
       renderTimeline(); scheduleSave();
@@ -1056,6 +1228,8 @@
   }
 
   function deleteClip(track, id) {
+    if (!tl) return;
+    pushHistory();
     tl.tracks[track] = tl.tracks[track].filter((c) => c.id !== id);
     if (selected && selected.id === id) selected = null;
     renderTimeline();
@@ -1074,6 +1248,7 @@
     const handle = e.target.closest(".tl-clip-handle");
     const c = findClip(track, id);
     if (!c) return;
+    pushHistory();
     drag = {
       track, id, c,
       startX: e.clientX,
@@ -1179,6 +1354,8 @@
     };
     // Restore _max trims by probing main/overlay sources lazily.
     selected = null;
+    clearHistory();
+    if (seqPreview && seqPreview.running) seqPreview.cancel();
     $("tlLabel").value = tl.label;
     $("tlCanvas").value = tl.canvas;
     $("tlFit").value = tl.fit;
@@ -1290,6 +1467,100 @@
     else console.warn("[timeline] missing element:", id, "(stale index.html? hard-refresh)");
   }
 
+  function editorTabActive() {
+    const btn = document.querySelector('.main-tab[data-tab="editor"]');
+    return !!(btn && btn.classList.contains("active"));
+  }
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    if (el.isContentEditable) return true;
+    return !!el.closest("[contenteditable='true']");
+  }
+
+  function nudgeSelected(dt) {
+    if (!tl || !selected) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    pushHistory();
+    if (selected.track === "main") {
+      const max = c._max || 1e9;
+      const dur = clipDuration(c);
+      let ni = Math.max(0, Math.min((c.in || 0) + dt, max - dur));
+      c.in = ni;
+      c.out = ni + dur;
+    } else {
+      c.start = Math.max(0, (c.start || 0) + dt);
+      reanchor(c);
+    }
+    renderTimeline();
+    scheduleSave();
+  }
+
+  function onEditorKeyDown(e) {
+    if (!initialized || !editorTabActive() || !tl) return;
+    if (isTypingTarget(e.target)) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key;
+
+    if (mod && key.toLowerCase() === "z") {
+      e.preventDefault();
+      if (e.shiftKey) redo(); else undo();
+      return;
+    }
+    if (mod && key.toLowerCase() === "y") {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if (key === " " || key === "Spacebar") {
+      e.preventDefault();
+      const v = $("tlPreviewVideo");
+      if (!v) return;
+      if (v.paused) v.play().catch(() => {});
+      else v.pause();
+      return;
+    }
+    if (key === "Delete" || key === "Backspace") {
+      if (selected) {
+        e.preventDefault();
+        deleteClip(selected.track, selected.id);
+      }
+      return;
+    }
+    if (key === "s" || key === "S") {
+      e.preventDefault();
+      splitAtPlayhead();
+      return;
+    }
+    if (key === "+" || key === "=") {
+      e.preventDefault();
+      setZoom(4);
+      return;
+    }
+    if (key === "-" || key === "_") {
+      e.preventDefault();
+      setZoom(-4);
+      return;
+    }
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      e.preventDefault();
+      const dir = key === "ArrowLeft" ? -1 : 1;
+      const step = e.shiftKey ? 1 : 0.1;
+      if (selected) nudgeSelected(dir * step);
+      else {
+        const v = $("tlPreviewVideo");
+        if (v) {
+          try { v.currentTime = Math.max(0, (v.currentTime || 0) + dir * step); } catch (err) {}
+          updatePlayhead();
+        }
+      }
+      return;
+    }
+  }
+
   // ---- Init (lazy, when the Editor tab is first opened) ----
   async function ensureInit() {
     if (initialized) {
@@ -1303,9 +1574,12 @@
       on("tlNewBtn", "onclick", newProject);
       on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
       on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
-      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } });
-      on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
+      on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } });
+      on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
       on("tlRenderBtn", "onclick", renderTimelineVideo);
+      on("tlPlaySeqBtn", "onclick", playSequencePreview);
+      on("tlUndoBtn", "onclick", undo);
+      on("tlRedoBtn", "onclick", redo);
       on("tlAddTitleBtn", "onclick", () => addTitle());
       on("tlProjectBtn", "onclick", () => { selected = null; renderTimeline(); });
       on("tlAssetBtn", "onclick", () => { const f = $("tlAssetFile"); if (f) f.click(); });
@@ -1322,9 +1596,11 @@
       document.addEventListener("pointerup", onMouseUp);
       document.addEventListener("pointermove", onBoxMove);
       document.addEventListener("pointerup", onBoxUp);
+      document.addEventListener("keydown", onEditorKeyDown);
       wireScrub();
       setLeftTab("media");
       setSaveState(TL_BUILD);
+      updateHistoryButtons();
     } catch (e) {
       console.error("[timeline] wiring failed", e);
       alert("Editor failed to start (" + TL_BUILD + "): " + e.message + "\nTry a hard refresh (Cmd/Ctrl+Shift+R).");
@@ -1352,15 +1628,40 @@
     if (tabBtn) tabBtn.addEventListener("click", ensureInit);
   });
 
-  // Expose an entry point so other parts of the app could open the editor
-  // seeded from a specific job in the future.
+  // Entry point used by Edit / Highlights / Compilation handoffs.
+  // opts: { in, out, clips:[{job_id|source_job_id, in|start_time, out|end_time}], replace, newProject }
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
     const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
     if (tabBtn) tabBtn.click();
     await ensureInit();
-    // Make sure this newly-added source is in the library list.
-    if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
+    await loadSources();
+
+    if (opts.newProject) {
+      await newProject();
+    }
+
+    if (opts.replace && tl) {
+      pushHistory();
+      tl.tracks.main = [];
+      selected = null;
+    }
+
+    if (Array.isArray(opts.clips) && opts.clips.length) {
+      pushHistory();
+      for (const c of opts.clips) {
+        const jid = c.job_id || c.source_job_id;
+        if (!jid) continue;
+        const cin = c.in != null ? c.in : c.start_time;
+        const cout = c.out != null ? c.out : c.end_time;
+        await addMainClip(jid, cin, cout, { skipHistory: true, skipRender: true });
+      }
+      renderTimeline();
+      scheduleSave();
+      setRenderStatus(`Added ${opts.clips.length} clip${opts.clips.length === 1 ? "" : "s"} — ▶ Preview cut to review`);
+      return;
+    }
+
     if (seedJobId && tl) await addMainClip(seedJobId, opts.in, opts.out);
   };
 })();

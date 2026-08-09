@@ -139,7 +139,17 @@
   cursor: pointer;
   font-size: .8rem;
 }
-.tl-chip-btn:hover { background: #6c5cff; }
+.tl-chip-btn:hover:not(:disabled) { background: #6c5cff; }
+.tl-chip-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tl-keys-hint {
+  font-size: .72rem;
+  white-space: nowrap;
+  opacity: 0.75;
+  padding: 0 4px;
+}
 .tl-asset-upload { margin: 6px 0 10px; }
 .btn-block { width: 100%; }
 

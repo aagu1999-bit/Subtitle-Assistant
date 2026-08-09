@@ -1776,8 +1776,8 @@ function renderJobsList() {
 
     if (meta.video_available) {
       const toTl = document.createElement("button");
-      toTl.className = "job-rename";
-      toTl.textContent = "🎬";
+      toTl.className = "job-rename job-to-timeline";
+      toTl.textContent = "🎬 Timeline";
       toTl.title = "Edit in timeline (open the multi-track editor with this clip)";
       toTl.onclick = (e) => {
         e.stopPropagation();
@@ -2318,6 +2318,8 @@ function renderCompileQueue() {
     : "0 clips";
   if (compileGoBtn) compileGoBtn.disabled = !q.length;
   if (compileClearBtn) compileClearBtn.disabled = !q.length;
+  const compileToTl = document.getElementById("compileToTimelineBtn");
+  if (compileToTl) compileToTl.disabled = !q.length;
 
   compileListEl.innerHTML = "";
   if (!q.length) {
@@ -2640,6 +2642,29 @@ async function previewCompileAll() {
 const compilePreviewAllBtn = $("compilePreviewAllBtn");
 if (compilePreviewAllBtn) {
   compilePreviewAllBtn.onclick = previewCompileAll;
+}
+
+function sendCompileQueueToTimeline() {
+  const q = loadCompileQueue().filter((it) => it.source_available !== false);
+  if (!q.length) {
+    alert("Queue is empty (or all clips have missing sources).");
+    return;
+  }
+  if (typeof window.openTimelineEditor !== "function") {
+    alert("Editor is still loading — try again in a second.");
+    return;
+  }
+  const clips = q.map((it) => ({
+    source_job_id: it.source_job_id,
+    start_time: it.start_time,
+    end_time: it.end_time,
+  }));
+  window.openTimelineEditor(null, { clips, replace: true, newProject: true });
+}
+
+const compileToTimelineBtn = $("compileToTimelineBtn");
+if (compileToTimelineBtn) {
+  compileToTimelineBtn.onclick = sendCompileQueueToTimeline;
 }
 
 if (compileGoBtn) {
@@ -3027,6 +3052,39 @@ if (_peAdd) {
       title: _activePreview.title || "",
     });
     _peSetStatus(`✓ Added to compilation queue (${(t.e - t.s).toFixed(1)}s).`);
+  };
+}
+
+const _peToTimeline = $("previewEditToTimeline");
+if (_peToTimeline) {
+  _peToTimeline.onclick = () => {
+    if (!_activePreview || !currentJobId) return;
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
+      return;
+    }
+    _peSyncToCard();
+    if (typeof window.openTimelineEditor !== "function") {
+      alert("Editor is still loading — try again in a second.");
+      return;
+    }
+    window.openTimelineEditor(currentJobId, { in: t.s, out: t.e });
+  };
+}
+
+const editToTimelineBtn = $("editToTimelineBtn");
+if (editToTimelineBtn) {
+  editToTimelineBtn.onclick = () => {
+    if (!currentJobId) {
+      alert("No active video. Transcribe a video first.");
+      return;
+    }
+    if (typeof window.openTimelineEditor !== "function") {
+      alert("Editor is still loading — try again in a second.");
+      return;
+    }
+    window.openTimelineEditor(currentJobId);
   };
 }
 

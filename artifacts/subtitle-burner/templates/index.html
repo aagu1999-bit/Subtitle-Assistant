@@ -611,6 +611,7 @@
       <div class="row" style="margin-bottom:0;gap:8px;flex-wrap:wrap">
         <button id="previewEditReplay" class="btn btn-secondary">▶ Replay</button>
         <button id="previewEditAdd" class="btn btn-secondary">+ Add to compilation</button>
+        <button id="previewEditToTimeline" class="btn btn-secondary" title="Open the multi-track editor with this range on the Main track">🎬 To timeline</button>
         <button id="previewEditMakeClip" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Make a clip</button>
         <button id="previewEditSave" class="btn btn-secondary" style="margin-left:auto">💾 Save &amp; back</button>
       </div>
@@ -639,6 +640,7 @@
 
     <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
       <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1;min-width:240px">Render with Edits</button>
+      <button id="editToTimelineBtn" class="btn btn-secondary" title="Open the multi-track Editor with this video on the Main track">🎬 Edit in timeline</button>
       <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
       <button id="exportSrtBtn" class="btn btn-secondary" title="Download the current transcript as an SRT subtitle file (works with YouTube, Premiere, CapCut).">⬇ .srt</button>
       <button id="exportVttBtn" class="btn btn-secondary" title="Download the current transcript as a WebVTT subtitle file (works with HTML5 video, web players).">⬇ .vtt</button>
@@ -722,9 +724,10 @@
       goes through the normal subtitle/audio pipeline. Style is inherited from the first source.
     </p>
     <div id="compileList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
-    <div class="row" style="gap:8px">
-      <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;min-width:180px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
       <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
+      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open the multi-track Editor with every queued clip on the Main track">🎬 Send to timeline</button>
       <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
@@ -756,6 +759,8 @@
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
+          <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
+          <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
           <label class="tl-inline">Canvas
             <select id="tlCanvas" class="tl-select">
               <option value="9x16">9:16 (Reels/TikTok)</option>
@@ -771,6 +776,7 @@
             </select>
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
+          <button id="tlPlaySeqBtn" class="btn btn-secondary" title="Play Main-track clips in order without a full FFmpeg render">▶ Preview cut</button>
           <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
         </div>
       </div>
@@ -815,13 +821,14 @@
 
           <!-- Timeline toolbar: Split + zoom + time readout -->
           <div class="tl-tltoolbar">
-            <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead">✂ Split</button>
+            <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
+            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo">⌨ Space · S · Del · ←→ · ⌘Z</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
-            <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out">−</button>
-            <button id="tlZoomIn" class="tl-chip-btn" title="Zoom in">+</button>
+            <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
+            <button id="tlZoomIn" class="tl-chip-btn" title="Zoom in (+)">+</button>
           </div>
 
           <div class="tl-timeline" id="tlTimeline">

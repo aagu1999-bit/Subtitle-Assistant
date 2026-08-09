@@ -65,6 +65,12 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
   - **Live preview** — canvas-aspect stage (matches the output ratio + fit) with
     a scrub bar; drag title / overlay / logo boxes directly on the frame to
     position them, and ⤓ Set IN/OUT buttons trim a clip at the playhead.
+  - **Preview cut** — play Main-track clips in order without a full FFmpeg
+    render so trims/splits can be reviewed immediately.
+  - **Undo / redo + keyboard** — Ctrl/⌘Z / Shift+Z, Space play/pause, S split,
+    Del delete, ←/→ nudge (Shift = 1s), +/- zoom.
+  - **Workflow handoffs** — Edit / Highlights / Compilation can send clips
+    straight into the Editor (`openTimelineEditor` supports ranges + queues).
   - **Descript-style editing surface:** left column toggles **📝 Transcript**
     (click words to strike → cut from the video, with the playing word
     highlighted during preview) and **📁 Media**. Timeline has a **playhead**
