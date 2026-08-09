@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-10";
+  const TL_BUILD = "studio-editor-build-11";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -130,7 +130,8 @@
       fps: tl.fps,
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
-      speaker_colors: tl.speaker_colors || { Host: "#FFD700", Guest: "#00E5FF" },
+      style: tl.style || null,
+      speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
       tracks: {
@@ -822,6 +823,15 @@
           v.src = src;
           await waitEvent(v, "loadedmetadata", 8000);
         }
+        // Fade in after soft dissolve from previous clip.
+        v.style.opacity = "0";
+        const fadeInSteps = 5;
+        for (let s = 1; s <= fadeInSteps; s++) {
+          if (cancelled) break;
+          v.style.opacity = String(s / fadeInSteps);
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        v.style.opacity = "1";
         if (cancelled) break;
         const ranges = keepRangesForClip(c);
         const baseOut = mainStart(i);
@@ -843,6 +853,7 @@
               if (lab) lab.textContent = fmtTime(ot);
               highlightTranscriptAt(srcT);
               syncMusicAt(ot);
+              updateLiveCaptions(ot);
               if (typeof updateStageCompositor === "function") updateStageCompositor();
               if (cancelled || v.ended || srcT >= end - 0.03) {
                 v.removeEventListener("timeupdate", onTime);
@@ -854,10 +865,23 @@
             v.addEventListener("timeupdate", onTime);
           });
         }
+        // Soft opacity dissolve into the next Main clip (approx — not ffmpeg xfade).
+        if (!cancelled && i < tl.tracks.main.length - 1) {
+          const steps = 6;
+          for (let s = 1; s <= steps; s++) {
+            if (cancelled) break;
+            v.style.opacity = String(1 - s / steps);
+            await new Promise((r) => setTimeout(r, 40));
+          }
+          v.style.opacity = "0";
+        }
       }
     } finally {
       stopMusicPreview();
-      if (v) v.style.filter = "";
+      if (v) {
+        v.style.filter = "";
+        v.style.opacity = "1";
+      }
       seqPreview = null;
       if (btn) btn.textContent = "▶ Preview cut";
       setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for exact xfade / captions burn");
@@ -884,6 +908,7 @@
   let ovEntries = [];
   let visSig = null;
   let rafId = null;
+  let liveCaptionEl = null;
 
   // Keep B-roll <video> overlays running with the main preview. Only correct
   // the time on real drift — reassigning currentTime every frame re-seeks the
@@ -993,6 +1018,16 @@
   // `timeupdate` only fires ~4x/second, which is why placed elements used to
   // lag and stutter behind the picture. Editing stays live: dragging updates
   // the model and the next frame reflects it, with nothing paused.
+  function activeMainAt(ot) {
+    if (!tl) return null;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const start = mainStart(i);
+      const dur = clipDuration(tl.tracks.main[i]);
+      if (ot >= start && ot < start + dur) return tl.tracks.main[i];
+    }
+    return null;
+  }
+
   function previewFrame() {
     const v = $("tlPreviewVideo");
     if (!v || !tl) { rafId = null; return; }
@@ -1005,7 +1040,11 @@
       updateStageCompositor();          // items entered/left: rebuild
     } else {
       for (const e of animEntries) applyTitleAnim(e, ot);
+      // Caption text changes every word — refresh karaoke layer cheaply.
+      updateLiveCaptions(ot);
     }
+    const active = activeMainAt(ot);
+    if (!(seqPreview && seqPreview.running)) applyLiveGrade(active);
     applyPunchZoom(v, ot);   // must run every frame, not only on rebuild
     syncOverlayVideos(ot, !v.paused && !v.ended);
     updatePlayhead();
@@ -1037,15 +1076,8 @@
     if (ot == null) ot = v.currentTime || 0;
     visSig = visibleSignature(ot);
 
-    let activeMainClip = null;
-    for (let i = 0; i < tl.tracks.main.length; i++) {
-      const start = mainStart(i);
-      const dur = clipDuration(tl.tracks.main[i]);
-      if (ot >= start && ot < start + dur) {
-        activeMainClip = tl.tracks.main[i];
-        break;
-      }
-    }
+    const activeMainClip = activeMainAt(ot);
+    if (!(seqPreview && seqPreview.running)) applyLiveGrade(activeMainClip);
 
     applyPunchZoom(v, ot);
 
@@ -1162,6 +1194,100 @@
         else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
       }
     }
+
+    // Karaoke caption approx from the open transcript + branding style.
+    liveCaptionEl = null;
+    updateLiveCaptions(ot);
+  }
+
+  function sourceTimeFromKeepRanges(ot, clip) {
+    const idx = tl.tracks.main.findIndex((c) => c.id === clip.id);
+    if (idx < 0) return null;
+    let local = ot - mainStart(idx);
+    const ranges = keepRangesForClip(clip);
+    let played = 0;
+    for (let r = 0; r < ranges.length; r++) {
+      const [a, b] = ranges[r];
+      const d = Math.max(0, b - a);
+      if (local <= played + d + 0.001) return a + Math.max(0, local - played);
+      played += d;
+    }
+    return null;
+  }
+
+  function updateLiveCaptions(ot) {
+    const layer = $("tlOverlayLayer");
+    if (!layer || !tl) return;
+    if (!liveCaptionEl || !liveCaptionEl.isConnected) {
+      liveCaptionEl = document.createElement("div");
+      liveCaptionEl.id = "tlLiveCaptions";
+      layer.appendChild(liveCaptionEl);
+    }
+    const clip = activeMainAt(ot);
+    if (!clip || clip.burn_captions === false || !transcriptWords || !transcriptWords.length) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    let srcT = null;
+    if (previewingOutput || (seqPreview && seqPreview.running)) {
+      srcT = sourceTimeFromKeepRanges(ot, clip);
+    } else {
+      const v = $("tlPreviewVideo");
+      srcT = v ? (v.currentTime || 0) : null;
+    }
+    if (srcT == null) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    const style = tl.style || {};
+    const groupSize = Math.max(1, Math.min(5, Number(style.group_size) || 3));
+    let wi = -1;
+    for (let i = 0; i < transcriptWords.length; i++) {
+      const w = transcriptWords[i];
+      const a = Number(w.start || 0);
+      const b = Number(w.end || a);
+      if (srcT >= a && srcT <= b + 0.08) { wi = i; break; }
+    }
+    if (wi < 0) {
+      for (let i = transcriptWords.length - 1; i >= 0; i--) {
+        if (Number(transcriptWords[i].start || 0) <= srcT) { wi = i; break; }
+      }
+    }
+    if (wi < 0) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    // Hide when the active word is outside this clip's keep-ranges.
+    const ranges = keepRangesForClip(clip);
+    const wordMid = (Number(transcriptWords[wi].start || 0) + Number(transcriptWords[wi].end || 0)) / 2;
+    if (!ranges.some(([a, b]) => wordMid >= a && wordMid <= b)) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    const g0 = Math.floor(wi / groupSize) * groupSize;
+    const group = transcriptWords.slice(g0, g0 + groupSize);
+    const primary = style.primary_color || "#FFFFFF";
+    const highlight = style.highlight_color || "#FFE566";
+    const font = style.font_name || "Anton";
+    const size = Number(style.font_size) || 64;
+    const posY = (style.position_y != null ? Number(style.position_y) : 75) / 100;
+    const stHeight = layer.clientHeight || 640;
+    const sc = tl.speaker_colors || style.speaker_colors || {};
+    liveCaptionEl.style.cssText =
+      `position:absolute;left:50%;top:${posY * 100}%;transform:translate(-50%,-50%);` +
+      `pointer-events:none;text-align:center;z-index:6;font-family:"${font}",sans-serif;` +
+      `font-weight:800;font-size:${(size / 1000) * stHeight}px;line-height:1.15;` +
+      `text-shadow:0 2px 8px rgba(0,0,0,.8);width:92%;display:block`;
+    liveCaptionEl.innerHTML = group.map((w, j) => {
+      const idx = g0 + j;
+      let col = idx === wi ? highlight : primary;
+      // Optional speaker tint for non-active words when branding is applied.
+      if (idx !== wi && sc.SPEAKER_00 && w.speaker === "SPEAKER_00") col = sc.SPEAKER_00;
+      if (idx !== wi && sc.SPEAKER_01 && w.speaker === "SPEAKER_01") col = sc.SPEAKER_01;
+      let t = String(w.word || "").replace(/[<>&]/g, "");
+      if (style.all_caps) t = t.toUpperCase();
+      return `<span style="color:${col};margin:0 .12em">${t}</span>`;
+    }).join("");
   }
 
   // libass anchors a title at its numpad-alignment point, not its centre: with
@@ -1419,6 +1545,14 @@
       html += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
       html += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
     }
+    const sc = tl.speaker_colors || {};
+    const hb = tl.headline_banner;
+    const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
+    html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>.</p>`;
+    html += `<div class="tl-prop-grid"><label>Host <input type="color" data-key="__sc0" value="${sc.SPEAKER_00 || "#FFD700"}"></label>`;
+    html += `<label>Guest <input type="color" data-key="__sc1" value="${sc.SPEAKER_01 || "#00E5FF"}"></label></div>`;
+    html += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
     wrap.innerHTML = html;
 
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
@@ -1429,6 +1563,14 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
+        } else if (key === "__sc0" || key === "__sc1") {
+          tl.speaker_colors = tl.speaker_colors || {};
+          if (key === "__sc0") tl.speaker_colors.SPEAKER_00 = inp.value;
+          else tl.speaker_colors.SPEAKER_01 = inp.value;
+        } else if (key === "__headline") {
+          const t = inp.value.trim();
+          tl.headline_banner = t ? { text: t } : null;
+          if (tl.style) tl.style.headline_banner = t;
         } else {
           if (!tl.logo) return;
           const field = key.replace("__logo_", "");
@@ -1840,7 +1982,15 @@
       fps: d.fps || 30,
       bg: d.bg || "#000000",
       logo: d.logo || null,
-      speaker_colors: d.speaker_colors || { Host: "#FFD700", Guest: "#00E5FF" },
+      style: d.style || null,
+      speaker_colors: (() => {
+        const sc = d.speaker_colors || {};
+        return {
+          SPEAKER_00: sc.SPEAKER_00 || sc.Host || "#FFD700",
+          SPEAKER_01: sc.SPEAKER_01 || sc.Guest || "#00E5FF",
+          ...sc,
+        };
+      })(),
       headline_banner: d.headline_banner || null,
       track_states: d.track_states || {
         main: { mute: false, solo: false, lock: false },
@@ -2134,6 +2284,29 @@
 
   // Expose for setActiveTab("editor") — both header + main nav entry points.
   window.ensureTimelineInit = ensureInit;
+
+  // Branding tab → Timeline: caption style, speaker colors, headline banner.
+  window.applyTimelineBranding = function (style) {
+    if (!tl) {
+      alert("Open or create a Timeline project first.");
+      return false;
+    }
+    style = style || {};
+    tl.style = Object.assign({}, tl.style || {}, style);
+    const sc = style.speaker_colors || {};
+    tl.speaker_colors = {
+      SPEAKER_00: sc.SPEAKER_00 || sc.Host || "#FFD700",
+      SPEAKER_01: sc.SPEAKER_01 || sc.Guest || "#00E5FF",
+    };
+    const banner = style.headline_banner;
+    if (banner) tl.headline_banner = { text: String(banner) };
+    else if (banner === "") tl.headline_banner = null;
+    selected = null;
+    renderTimeline();
+    scheduleSave();
+    setSaveState("Branding applied ✓");
+    return true;
+  };
 
   // Hook every Editor tab button (header workflow + mainTabs) so either works.
   document.addEventListener("DOMContentLoaded", () => {

@@ -1527,14 +1527,25 @@ header.app-header {
   padding: 12px 14px;
   display: flex;
   align-items: center;
+  gap: 12px;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+.speaker-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #1a1e2a;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  flex-shrink: 0;
 }
 .speaker-pill {
   padding: 4px 10px;
   border-radius: 12px;
   font-size: 0.75rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 .speaker-a { background: rgba(255, 215, 0, 0.2); color: #ffd700; border: 1px solid rgba(255, 215, 0, 0.4); }
 .speaker-b { background: rgba(0, 229, 255, 0.2); color: #00e5ff; border: 1px solid rgba(0, 229, 255, 0.4); }

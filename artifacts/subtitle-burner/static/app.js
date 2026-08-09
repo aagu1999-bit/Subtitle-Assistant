@@ -1670,6 +1670,8 @@ async function maybeAutoGenerateShorts(jobId) {
         ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Preview any card to trim.`
         : "Auto-generate returned no clips — try Find highlights with different lengths.";
     }
+    // Auto-process also runs diarization — refresh Ingest speaker cards.
+    try { await refreshReframeStatus(); } catch { /* optional */ }
   } catch (e) {
     if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
   } finally {
@@ -1831,14 +1833,64 @@ const reframeEnabled    = $("reframeEnabled");
 const reframeStatus     = $("reframeStatus");
 let _reframePollTimer = null;
 
+function renderIngestSpeakerCards(stats) {
+  const wrap = $("ingestSpeakerCards");
+  if (!wrap) return;
+  const breakdown = (stats && stats.speaker_breakdown) || [];
+  if (!breakdown.length) {
+    wrap.innerHTML =
+      `<p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">` +
+      `No speakers yet. Click <strong>Analyze</strong>, run Analyze on Transcript Cut, or enable Auto-Generate Shorts — live cards appear after diarization.` +
+      `</p>`;
+    return;
+  }
+  const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
+  const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
+  const palette = [hostC, guestC, "#a3be8c", "#b48ead", "#d08770"];
+  const ts = Date.now();
+  wrap.innerHTML = "";
+  breakdown.forEach((spk, i) => {
+    const color = palette[i % palette.length];
+    const card = document.createElement("div");
+    card.className = "speaker-card";
+    card.dataset.speakerId = spk.id;
+    const avatar = document.createElement("img");
+    avatar.className = "speaker-avatar";
+    avatar.alt = spk.label || spk.id;
+    avatar.src = currentJobId
+      ? `/reframe-speaker-avatar/${currentJobId}/${encodeURIComponent(spk.id)}?t=${ts}`
+      : "";
+    avatar.onerror = () => { avatar.style.display = "none"; };
+
+    const meta = document.createElement("div");
+    meta.style.cssText = "flex:1;min-width:0";
+    meta.innerHTML =
+      `<div style="font-weight:600;font-size:0.85rem">${spk.label || spk.id}</div>` +
+      `<div style="font-size:0.74rem;color:#94a3b8">${spk.speech_pct}% speech · ${spk.speech_sec}s · ${spk.id}</div>`;
+
+    const pill = document.createElement("span");
+    pill.className = "speaker-pill";
+    pill.textContent = spk.label || spk.id;
+    pill.style.cssText =
+      `background:${color}33;color:${color};border:1px solid ${color}88`;
+
+    card.appendChild(avatar);
+    card.appendChild(meta);
+    card.appendChild(pill);
+    wrap.appendChild(card);
+  });
+}
+
 async function refreshReframeStatus() {
-  if (!currentJobId || !reframeStatus) return;
+  if (!currentJobId) return;
   try {
     const res = await fetch(`/reframe-status/${currentJobId}`);
     const data = await res.json();
     if (data.ready && data.stats) {
-      reframeStatus.textContent =
-        `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples} face samples`;
+      if (reframeStatus) {
+        reframeStatus.textContent =
+          `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples || 0} face samples`;
+      }
       if (reframeEnabled) {
         reframeEnabled.disabled = false;
         reframeEnabled.checked = true; // Auto-check when analysis is ready!
@@ -1846,8 +1898,11 @@ async function refreshReframeStatus() {
       if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Re-analyze";
       refreshReframePreview();
       refreshSpeakerAvatars();
+      renderIngestSpeakerCards(data.stats);
+      const ingestBtn = $("ingestAnalyzeBtn");
+      if (ingestBtn) ingestBtn.textContent = "Re-analyze";
     } else {
-      reframeStatus.textContent = "Not analysed yet";
+      if (reframeStatus) reframeStatus.textContent = "Not analysed yet";
       if (reframeEnabled) {
         reframeEnabled.disabled = true;
         reframeEnabled.checked = false;
@@ -1857,52 +1912,94 @@ async function refreshReframeStatus() {
       if (box) box.style.display = "none";
       const spkBox = $("reframeSpeakerBox");
       if (spkBox) spkBox.style.display = "none";
+      renderIngestSpeakerCards(null);
+      const ingestBtn = $("ingestAnalyzeBtn");
+      if (ingestBtn) ingestBtn.textContent = "Analyze";
     }
   } catch { /* offline — silent */ }
 }
 
-if (reframeAnalyzeBtn) {
-  reframeAnalyzeBtn.onclick = async () => {
-    if (!currentJobId) { alert("Open a transcribed video first."); return; }
-    reframeAnalyzeBtn.disabled = true;
-    if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
-    reframeStatus.textContent = "Starting…";
-    try {
-      const res = await fetch("/analyze-reframe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: currentJobId }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
-      if (_reframePollTimer) clearInterval(_reframePollTimer);
-      _reframePollTimer = setInterval(async () => {
-        const r = await fetch(`/reframe-status/${currentJobId}`).then(r => r.json());
-        if (r.ready) {
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
-          refreshReframeStatus();
-          reframeAnalyzeBtn.disabled = false;
-          if (reframeEnabled) {
-            reframeEnabled.disabled = false;
-            reframeEnabled.checked = true;
-          }
-        } else if (r.error) {
-          // Worker died — stop polling and tell the user what went wrong.
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
+async function startReframeAnalyze(triggerBtn) {
+  if (!currentJobId) { alert("Open a transcribed video first."); return; }
+  if (triggerBtn) triggerBtn.disabled = true;
+  if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = true;
+  const ingestBtn = $("ingestAnalyzeBtn");
+  if (ingestBtn) ingestBtn.disabled = true;
+  if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
+  if (reframeStatus) reframeStatus.textContent = "Starting…";
+  const empty = $("ingestSpeakerEmpty");
+  if (empty) empty.textContent = "Analysing speakers… (1–3 min for 1 minute of video)";
+  try {
+    const res = await fetch("/analyze-reframe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: currentJobId }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (reframeStatus) reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
+    if (_reframePollTimer) clearInterval(_reframePollTimer);
+    _reframePollTimer = setInterval(async () => {
+      const r = await fetch(`/reframe-status/${currentJobId}`).then((x) => x.json());
+      if (r.ready) {
+        clearInterval(_reframePollTimer);
+        _reframePollTimer = null;
+        refreshReframeStatus();
+        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+        if (ingestBtn) ingestBtn.disabled = false;
+        if (reframeEnabled) {
+          reframeEnabled.disabled = false;
+          reframeEnabled.checked = true;
+        }
+      } else if (r.error) {
+        clearInterval(_reframePollTimer);
+        _reframePollTimer = null;
+        if (reframeStatus) {
           reframeStatus.textContent = `❌ ${r.error}`;
           reframeStatus.style.color = "#ff8a8a";
-          reframeAnalyzeBtn.disabled = false;
         }
-      }, 3000);
-    } catch (e) {
-      reframeStatus.textContent = "Error: " + e.message;
-      reframeAnalyzeBtn.disabled = false;
-    }
-  };
+        if (empty) empty.textContent = "Analyze failed: " + r.error;
+        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+        if (ingestBtn) ingestBtn.disabled = false;
+      }
+    }, 3000);
+  } catch (e) {
+    if (reframeStatus) reframeStatus.textContent = "Error: " + e.message;
+    if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+    if (ingestBtn) ingestBtn.disabled = false;
+    if (empty) empty.textContent = "Analyze failed: " + e.message;
+  }
 }
+
+if (reframeAnalyzeBtn) {
+  reframeAnalyzeBtn.onclick = () => startReframeAnalyze(reframeAnalyzeBtn);
+}
+const ingestAnalyzeBtn = $("ingestAnalyzeBtn");
+if (ingestAnalyzeBtn) {
+  ingestAnalyzeBtn.onclick = () => startReframeAnalyze(ingestAnalyzeBtn);
+}
+
+// Live-tint Ingest speaker pills when Host/Guest colors change.
+["hostColor", "guestColor"].forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
+    if (!cards.length) return;
+    const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
+    const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
+    const palette = [hostC, guestC, "#a3be8c", "#b48ead", "#d08770"];
+    cards.forEach((card, i) => {
+      const color = palette[i % palette.length];
+      const pill = card.querySelector(".speaker-pill");
+      if (pill) {
+        pill.style.background = color + "33";
+        pill.style.color = color;
+        pill.style.borderColor = color + "88";
+      }
+    });
+  });
+});
 
 function refreshSpeakerAvatars() {
   const spkBox = $("reframeSpeakerBox");
@@ -1930,6 +2027,7 @@ async function handleSwapSpeakerVoices() {
     if (reframeStatus) reframeStatus.textContent = "✓ Speaker voices swapped";
     refreshSpeakerAvatars();
     refreshReframePreview();
+    refreshReframeStatus();
   } catch (e) {
     if (reframeStatus) reframeStatus.textContent = "❌ Swap failed: " + e.message;
   } finally {
@@ -4257,6 +4355,36 @@ window.saveCustomBrandPreset = function(name = "custom") {
     alert("Failed to save brand preset.");
   }
 };
+
+const saveBrandPresetBtn = $("saveBrandPresetBtn");
+if (saveBrandPresetBtn) {
+  saveBrandPresetBtn.onclick = () => window.saveCustomBrandPreset("custom");
+}
+const loadBrandPresetBtn = $("loadBrandPresetBtn");
+if (loadBrandPresetBtn) {
+  loadBrandPresetBtn.onclick = () => window.loadCustomBrandPreset();
+}
+
+async function applyBrandingToTimeline() {
+  const style = typeof getStyle === "function" ? getStyle() : {};
+  if (typeof window.ensureTimelineInit === "function") {
+    await window.ensureTimelineInit();
+  }
+  if (typeof window.applyTimelineBranding !== "function") {
+    alert("Timeline Editor is not available.");
+    return;
+  }
+  window.applyTimelineBranding(style);
+  setActiveTab("editor");
+  if (window.StudioLogger) StudioLogger.clip("branding_to_timeline", "style + speaker colors applied");
+}
+
+const applyBrandingToTimelineBtn = $("applyBrandingToTimelineBtn");
+if (applyBrandingToTimelineBtn) {
+  applyBrandingToTimelineBtn.onclick = () => {
+    applyBrandingToTimeline().catch((e) => alert("Could not apply branding: " + e.message));
+  };
+}
 
 window.loadCustomBrandPreset = function() {
   try {

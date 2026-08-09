@@ -103,7 +103,7 @@ CAPCUT_TEMPLATES = {
     "podcast_interview": {
         "reframe": "9:16",
         "font": "Montserrat Black",
-        "speaker_colors": {"Host": "#FFD700", "Guest": "#00E5FF"},
+        "speaker_colors": {"SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"},
         "headline_banner": True
     },
     "capcut_reels": {
@@ -3530,11 +3530,12 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         if style.get("quality_boost"):
             w, h, _ = _quality_boost_scale(w, h)
             
-        speaker_colors = style.get('speaker_colors', {})
+        speaker_colors = style.get('speaker_colors', {}) or {}
         headline_banner = style.get('headline_banner', '')
-        # Only use diarization if reframe is actually enabled
-        diar = diarization_data if reframe_settings.get("enabled") else None
-        
+        # Color captions by speaker whenever colors are set — don't require
+        # the 9:16 reframe compositor to be on.
+        diar = diarization_data if (reframe_settings.get("enabled") or speaker_colors) else None
+
         ass_content = build_ass(
             words, style, w, h,
             emoji_rules=emoji_rules,
@@ -4748,6 +4749,30 @@ def analyze_reframe_endpoint():
     return jsonify({"job_id": job_id, "status": "started"})
 
 
+def _speaker_breakdown(diar: list) -> list:
+    """Per-speaker speech seconds + % for Ingest cards."""
+    totals: dict[str, float] = {}
+    for seg in diar or []:
+        spk = seg.get("speaker") or "UNKNOWN"
+        try:
+            dur = max(0.0, float(seg.get("end", 0)) - float(seg.get("start", 0)))
+        except (TypeError, ValueError):
+            dur = 0.0
+        totals[spk] = totals.get(spk, 0.0) + dur
+    total = sum(totals.values()) or 1.0
+    labels = ("Host", "Guest", "Speaker 3", "Speaker 4", "Speaker 5")
+    out = []
+    for i, spk in enumerate(sorted(totals.keys())):
+        sec = totals[spk]
+        out.append({
+            "id": spk,
+            "label": labels[i] if i < len(labels) else f"Speaker {i + 1}",
+            "speech_sec": round(sec, 1),
+            "speech_pct": round(100.0 * sec / total),
+        })
+    return out
+
+
 @app.route("/reframe-status/<job_id>")
 def reframe_status(job_id: str):
     """Return cached reframe analysis summary if it exists, plus any
@@ -4761,7 +4786,15 @@ def reframe_status(job_id: str):
     if cache_path.exists():
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
-            return jsonify({"ready": True, "stats": data.get("stats", {})})
+            stats = dict(data.get("stats") or {})
+            diar = data.get("diarization") or []
+            breakdown = _speaker_breakdown(diar)
+            if breakdown:
+                stats["speaker_breakdown"] = breakdown
+                # Keep speakers list in sync with diar (post-swap friendly).
+                stats["speakers"] = [s["id"] for s in breakdown]
+                stats["speaker_count"] = len(breakdown)
+            return jsonify({"ready": True, "stats": stats})
         except (json.JSONDecodeError, OSError) as e:
             return jsonify({"ready": False, "error": str(e)}), 200
     # No cache yet — surface the most recent job-level error so the user
@@ -6074,6 +6107,27 @@ def _normalize_timeline(timeline: dict) -> dict:
     # Persistent logo / watermark (applies across the whole render).
     logo = tl.get("logo")
     tl["logo"] = logo if (isinstance(logo, dict) and logo.get("asset_id")) else None
+    # Branding kit — keep these through save/render (were previously stripped).
+    sc = tl.get("speaker_colors")
+    if isinstance(sc, dict):
+        # Accept Host/Guest aliases from older docs / CapCut stubs.
+        normalized = dict(sc)
+        if "SPEAKER_00" not in normalized and "Host" in normalized:
+            normalized["SPEAKER_00"] = normalized["Host"]
+        if "SPEAKER_01" not in normalized and "Guest" in normalized:
+            normalized["SPEAKER_01"] = normalized["Guest"]
+        tl["speaker_colors"] = normalized
+    else:
+        tl["speaker_colors"] = {}
+    hb = tl.get("headline_banner")
+    if isinstance(hb, dict) or isinstance(hb, str) or hb is None:
+        tl["headline_banner"] = hb
+    else:
+        tl["headline_banner"] = None
+    style = tl.get("style")
+    tl["style"] = style if isinstance(style, dict) else {}
+    ts = tl.get("track_states")
+    tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
     if not isinstance(tracks, dict):
         tracks = {}
@@ -6250,8 +6304,47 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
         caption_ass = None
         if caption_words:
-            caption_ass = build_ass(caption_words, caption_style or _TL_DEFAULT_CAPTION_STYLE,
-                                    W, H, caption_emoji or {})
+            # Prefer timeline branding; fall back to caption style colors.
+            speaker_colors = tl.get("speaker_colors") or (caption_style or {}).get("speaker_colors") or {}
+            if isinstance(speaker_colors, dict):
+                speaker_colors = dict(speaker_colors)
+                if "SPEAKER_00" not in speaker_colors and "Host" in speaker_colors:
+                    speaker_colors["SPEAKER_00"] = speaker_colors["Host"]
+                if "SPEAKER_01" not in speaker_colors and "Guest" in speaker_colors:
+                    speaker_colors["SPEAKER_01"] = speaker_colors["Guest"]
+            else:
+                speaker_colors = {}
+            diar = None
+            if speaker_colors:
+                for meta in seg_meta:
+                    if not meta.get("source_job_id"):
+                        continue
+                    cache_path = UPLOAD_DIR / f"{meta['source_job_id']}_reframe.json"
+                    if not cache_path.exists():
+                        continue
+                    try:
+                        rd = json.loads(cache_path.read_text(encoding="utf-8"))
+                        diar = rd.get("diarization") or []
+                        if diar:
+                            break
+                    except (json.JSONDecodeError, OSError):
+                        continue
+            hb = tl.get("headline_banner")
+            if isinstance(hb, dict):
+                headline = hb.get("text") or ""
+            elif isinstance(hb, str):
+                headline = hb
+            else:
+                headline = (caption_style or {}).get("headline_banner") or ""
+            caption_ass = build_ass(
+                caption_words,
+                caption_style or _TL_DEFAULT_CAPTION_STYLE,
+                W, H,
+                caption_emoji or {},
+                speaker_colors=speaker_colors,
+                diarization=diar,
+                headline_banner=headline,
+            )
         titles_ass = _tl_build_titles_ass(tracks["text"], W, H) if tracks["text"] else None
 
         if caption_ass or titles_ass:

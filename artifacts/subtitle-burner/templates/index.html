@@ -142,20 +142,14 @@
         </div>
         <div style="flex:1;min-width:300px;">
           <section class="panel">
-            <div class="section-title">👥 Speaker Diarization (PyAnnote)</div>
-            <div class="speaker-card">
-              <div>
-                <div style="font-weight:600;font-size:0.85rem">Alex (Host)</div>
-                <div style="font-size:0.74rem;color:#94a3b8">Active Speaker · 54% speech</div>
-              </div>
-              <span class="speaker-pill speaker-a">Speaker A</span>
+            <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <span>👥 Speaker Diarization (PyAnnote)</span>
+              <button id="ingestAnalyzeBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.72rem" title="Run PyAnnote diarization + face samples for this job">Analyze</button>
             </div>
-            <div class="speaker-card">
-              <div>
-                <div style="font-weight:600;font-size:0.85rem">Sarah (Guest)</div>
-                <div style="font-size:0.74rem;color:#94a3b8">Guest Vendor · 46% speech</div>
-              </div>
-              <span class="speaker-pill speaker-b">Speaker B</span>
+            <div id="ingestSpeakerCards">
+              <p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
+                No speakers yet. Click <strong>Analyze</strong>, run Analyze on Transcript Cut, or enable Auto-Generate Shorts — live cards appear after diarization.
+              </p>
             </div>
             <div class="row" id="speakerColorRow" style="align-items:center;gap:12px;padding:10px 14px;background:#181c28;border:1px solid #2a2f3a;border-radius:10px;margin-top:14px">
               <label style="font-weight:600;font-size:.85rem;white-space:nowrap">🎤 Speaker Colors</label>
@@ -204,6 +198,8 @@
         <option value="cinematic_vlog">🎪 Cinematic Festival Vlog (Widescreen + Slow Pan/Zoom + Karaoke Flow)</option>
       </select>
       <button id="saveBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:8px;font-size:.78rem" title="Save your current style, colors, and banner as a reusable custom preset">💾 Save My Brand Preset</button>
+      <button id="loadBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Restore your saved custom brand preset">↩ Load</button>
+      <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Push caption style, speaker colors, and headline into the open Timeline project">🎬 Apply → Timeline</button>
     </div>
 
     <div class="row" style="margin-bottom:20px;">
