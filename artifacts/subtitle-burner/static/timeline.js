@@ -1220,6 +1220,7 @@
         } else if (run) { ranges.push(run); run = null; }
       });
       if (run) ranges.push(run);
+      pushHistory();
       clip.cuts = ranges;
       close();
       renderTimeline();
