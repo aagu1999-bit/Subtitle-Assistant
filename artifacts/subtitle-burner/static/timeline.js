@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-9";
+  const TL_BUILD = "studio-editor-build-10";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -26,6 +26,8 @@
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
   let transcriptWords = null;    // cached words for the open transcript clip
+  let seqPreview = null;         // { running, cancel } for Preview cut
+  let musicPlayers = [];         // music bed during Preview cut
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -352,7 +354,8 @@
   }
 
   // ---- Add clips ----
-  async function addMainClip(jobId, inS, outS) {
+  async function addMainClip(jobId, inS, outS, opts) {
+    opts = opts || {};
     try {
       if (!(await ensureProject())) return;
       const dur = await getSourceDuration(jobId);
@@ -362,8 +365,10 @@
         id: uid(), source_job_id: jobId, in: ci, out: co > ci ? co : dur,
         _max: dur, transition: null, burn_captions: true,
       });
-      renderTimeline();
-      scheduleSave();
+      if (!opts.skipRender) {
+        renderTimeline();
+        scheduleSave();
+      }
     } catch (e) {
       alert("Couldn't add clip: " + e.message);
     }
@@ -688,6 +693,176 @@
     PPS = Math.max(4, Math.min(60, PPS + delta));
     renderTracks();
     updatePlayhead();
+  }
+
+  // ---- Preview cut (Main keep-ranges + grade/music approx, no full Render) ----
+  function keepRangesForClip(clip) {
+    const cin = clip.in || 0;
+    const cout = Math.max(cin + 0.05, clip.out || cin + 0.05);
+    const cuts = (clip.cuts || [])
+      .map(([a, b]) => [Math.max(cin, Number(a)), Math.min(cout, Number(b))])
+      .filter(([a, b]) => b - a > 0.02)
+      .sort((a, b) => a[0] - b[0]);
+    const ranges = [];
+    let cursor = cin;
+    cuts.forEach(([a, b]) => {
+      if (a > cursor + 0.02) ranges.push([cursor, a]);
+      cursor = Math.max(cursor, b);
+    });
+    if (cout > cursor + 0.02) ranges.push([cursor, cout]);
+    return ranges.length ? ranges : [[cin, cout]];
+  }
+
+  function cssFilterForColor(color) {
+    if (!color) return "";
+    const parts = [];
+    switch (color.preset || "none") {
+      case "neutral": parts.push("contrast(1.04)", "saturate(1.06)"); break;
+      case "warm": parts.push("sepia(0.2)", "saturate(1.18)", "hue-rotate(-10deg)"); break;
+      case "cool": parts.push("saturate(1.06)", "hue-rotate(14deg)", "contrast(1.03)"); break;
+      case "vivid": parts.push("contrast(1.12)", "saturate(1.32)"); break;
+      case "bw": parts.push("grayscale(1)", "contrast(1.05)"); break;
+      default: break;
+    }
+    const b = Number(color.brightness || 0);
+    const c = color.contrast != null ? Number(color.contrast) : 1;
+    const s = color.saturation != null ? Number(color.saturation) : 1;
+    if (Math.abs(b) > 0.001) parts.push(`brightness(${Math.max(0.2, Math.min(1.8, 1 + b))})`);
+    if (Math.abs(c - 1) > 0.001) parts.push(`contrast(${Math.max(0.2, Math.min(2.5, c))})`);
+    if (Math.abs(s - 1) > 0.001) parts.push(`saturate(${Math.max(0, Math.min(2.5, s))})`);
+    return parts.join(" ");
+  }
+
+  function applyLiveGrade(clip) {
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+    v.style.filter = cssFilterForColor(clip && clip.color);
+  }
+
+  function stopMusicPreview() {
+    musicPlayers.forEach((p) => {
+      try { p.audio.pause(); } catch (e) {}
+    });
+    musicPlayers = [];
+  }
+
+  function dbToLinear(db) {
+    return Math.max(0, Math.min(1, Math.pow(10, (Number(db) || 0) / 20)));
+  }
+
+  function syncMusicAt(ot) {
+    if (!tl) return;
+    const active = new Set();
+    (tl.tracks.music || []).forEach((c) => {
+      if (!c.asset_id) return;
+      const start = c.start || 0;
+      const end = start + clipDuration(c);
+      if (ot < start || ot >= end) return;
+      active.add(c.id);
+      let player = musicPlayers.find((p) => p.id === c.id);
+      if (!player) {
+        const audio = new Audio("/asset/" + c.asset_id);
+        audio.volume = dbToLinear((c.gain_db != null ? c.gain_db : -18) + (c.duck ? -8 : 0));
+        player = { id: c.id, audio };
+        musicPlayers.push(player);
+      }
+      const srcT = (c.in || 0) + (ot - start);
+      if (Math.abs((player.audio.currentTime || 0) - srcT) > 0.4) {
+        try { player.audio.currentTime = Math.max(0, srcT); } catch (e) {}
+      }
+      if (player.audio.paused) player.audio.play().catch(() => {});
+    });
+    musicPlayers.forEach((p) => {
+      if (!active.has(p.id) && !p.audio.paused) {
+        try { p.audio.pause(); } catch (e) {}
+      }
+    });
+  }
+
+  async function playSequencePreview() {
+    if (seqPreview && seqPreview.running) {
+      seqPreview.cancel();
+      return;
+    }
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one clip to the Main track first.");
+      return;
+    }
+    const v = $("tlPreviewVideo");
+    const btn = $("tlPlaySeqBtn");
+    if (!v) return;
+    let cancelled = false;
+    seqPreview = {
+      running: true,
+      cancel: () => { cancelled = true; try { v.pause(); } catch (e) {} stopMusicPreview(); },
+    };
+    if (btn) btn.textContent = "⏹ Stop";
+    setRenderStatus("Previewing cut (keep-ranges + grades/music)…");
+    previewingOutput = false;
+    v.closest(".tl-preview").classList.add("has-video");
+
+    const waitEvent = (el, ev, timeoutMs) => new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; el.removeEventListener(ev, finish); resolve(); };
+      el.addEventListener(ev, finish);
+      if (timeoutMs) setTimeout(finish, timeoutMs);
+    });
+
+    try {
+      for (let i = 0; i < tl.tracks.main.length; i++) {
+        if (cancelled) break;
+        const c = tl.tracks.main[i];
+        if (!c.source_job_id) continue;
+        selected = { track: "main", id: c.id };
+        setLeftTab("transcript");
+        renderTranscript(c);
+        applyLiveGrade(c);
+        const src = "/raw-upload/" + c.source_job_id;
+        if (v.getAttribute("src") !== src) {
+          v.src = src;
+          await waitEvent(v, "loadedmetadata", 8000);
+        }
+        if (cancelled) break;
+        const ranges = keepRangesForClip(c);
+        const baseOut = mainStart(i);
+        let played = 0;
+        for (let r = 0; r < ranges.length; r++) {
+          if (cancelled) break;
+          const [start, end] = ranges[r];
+          try { v.currentTime = start; } catch (e) {}
+          await waitEvent(v, "seeked", 2000);
+          if (cancelled) break;
+          v.play().catch(() => {});
+          await new Promise((resolve) => {
+            const onTime = () => {
+              const srcT = v.currentTime || 0;
+              const ot = baseOut + played + Math.max(0, srcT - start);
+              const ph = $("tlPlayhead");
+              if (ph) { ph.style.display = "block"; ph.style.left = (70 + 8 + ot * PPS) + "px"; }
+              const lab = $("tlPlayheadTime");
+              if (lab) lab.textContent = fmtTime(ot);
+              highlightTranscriptAt(srcT);
+              syncMusicAt(ot);
+              if (typeof updateStageCompositor === "function") updateStageCompositor();
+              if (cancelled || v.ended || srcT >= end - 0.03) {
+                v.removeEventListener("timeupdate", onTime);
+                try { v.pause(); } catch (e) {}
+                played += Math.max(0, end - start);
+                resolve();
+              }
+            };
+            v.addEventListener("timeupdate", onTime);
+          });
+        }
+      }
+    } finally {
+      stopMusicPreview();
+      if (v) v.style.filter = "";
+      seqPreview = null;
+      if (btn) btn.textContent = "▶ Preview cut";
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for exact xfade / captions burn");
+      renderTimeline();
+    }
   }
 
   // ---- Preview animation parity ----------------------------------------
@@ -1870,6 +2045,13 @@
       on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
       on("tlRenderBtn", "onclick", renderTimelineVideo);
       on("tlAddTitleBtn", "onclick", () => addTitle());
+      on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
+      on("tlSplitBtn", "onclick", () => splitAtPlayhead());
+      on("tlCopyBtn", "onclick", () => copySelectedClip());
+      on("tlPasteBtn", "onclick", () => pasteClip());
+      on("tlDupBtn", "onclick", () => duplicateSelectedClip());
+      on("tlZoomIn", "onclick", () => setZoom(4));
+      on("tlZoomOut", "onclick", () => setZoom(-4));
       // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
       document.addEventListener("keydown", (e) => {
         // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
@@ -1960,8 +2142,8 @@
     });
   });
 
-  // Expose an entry point so Shorts / jobs list can open the editor seeded
-  // from a specific job.
+  // Expose an entry point so Shorts / Assembly / Compilation can open the
+  // editor seeded from one job or a multi-clip queue.
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
     if (typeof window.setActiveTab === "function") {
@@ -1971,8 +2153,41 @@
       if (tabBtn) tabBtn.click();
     }
     await ensureInit();
-    // Make sure this newly-added source is in the library list.
+
+    if (opts.newProject) {
+      await newProject();
+    }
+
+    const clips = Array.isArray(opts.clips) ? opts.clips : null;
+    if (clips && clips.length) {
+      if (!(await ensureProject())) return;
+      if (opts.replace) {
+        tl.tracks.main = [];
+        selected = null;
+      }
+      await loadSources();
+      for (const item of clips) {
+        const jid = item && (item.source_job_id || item.job_id);
+        if (!jid) continue;
+        const inS = item.start_time != null ? Number(item.start_time)
+          : (item.in != null ? Number(item.in) : null);
+        const outS = item.end_time != null ? Number(item.end_time)
+          : (item.out != null ? Number(item.out) : null);
+        await addMainClip(jid, inS, outS, { skipRender: true });
+      }
+      renderTimeline();
+      scheduleSave();
+      return;
+    }
+
+    // Single-job seed (Edit range / job row).
     if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
-    if (seedJobId && tl) await addMainClip(seedJobId, opts.in, opts.out);
+    if (seedJobId && tl) {
+      if (opts.replace) {
+        tl.tracks.main = [];
+        selected = null;
+      }
+      await addMainClip(seedJobId, opts.in, opts.out);
+    }
   };
 })();

@@ -996,12 +996,13 @@
           <h3 style="margin:0;font-size:.92rem;font-weight:600">🔗 Clip Assembly</h3>
           <span id="clipAssemblyCount" class="pill muted" style="font-size:.78rem">0 segments</span>
         </div>
-        <p class="muted" style="font-size:.78rem;margin-bottom:10px">Drag to reorder. Use trim handles on each block to adjust boundaries ±2s.</p>
+        <p class="muted" style="font-size:.78rem;margin-bottom:10px">Drag to reorder. Use <strong>−2s / +2s</strong> on each block to nudge in/out. Send the sequence to Timeline when ready.</p>
         <div id="clipSegmentTrack" style="display:flex;gap:4px;min-height:44px;padding:6px;background:#12151f;border-radius:8px;overflow-x:auto">
           <!-- Segment blocks inserted by JS -->
         </div>
         <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
           <button id="clipAssemblyPreview" class="btn btn-secondary" style="font-size:.84rem">▶ Preview sequence</button>
+          <button id="clipAssemblyToTimeline" class="btn btn-secondary" style="font-size:.84rem" title="Open Timeline with every assembly segment on the Main track">🎬 Send to timeline</button>
           <button id="clipAssemblyExport" class="btn btn-primary" style="font-size:.84rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🚀 Export assembled short</button>
           <button id="clipAssemblyClear" class="btn btn-secondary" style="font-size:.82rem;margin-left:auto;color:#bf616a">✕ Clear all</button>
         </div>
@@ -1025,6 +1026,7 @@
     <div class="row" style="gap:8px">
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
       <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
+      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track">🎬 Send to timeline</button>
       <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
@@ -1115,6 +1117,7 @@
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
           <div class="tl-tltoolbar">
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead">✂ Split</button>
+            <button id="tlPlaySeqBtn" class="tl-chip-btn" title="Play Main keep-ranges in order (skips text cuts) with grade approx — no full Render">▶ Preview cut</button>
             <button id="tlCopyBtn" class="tl-chip-btn" title="Copy selected clip (Cmd/Ctrl+C)">📋 Copy</button>
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>

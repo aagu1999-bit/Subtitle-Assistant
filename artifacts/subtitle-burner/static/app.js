@@ -2717,6 +2717,8 @@ function renderCompileQueue() {
     : "0 clips";
   if (compileGoBtn) compileGoBtn.disabled = !q.length;
   if (compileClearBtn) compileClearBtn.disabled = !q.length;
+  const compileToTl = $("compileToTimelineBtn");
+  if (compileToTl) compileToTl.disabled = !q.length;
 
   compileListEl.innerHTML = "";
   if (!q.length) {
@@ -3039,6 +3041,32 @@ async function previewCompileAll() {
 const compilePreviewAllBtn = $("compilePreviewAllBtn");
 if (compilePreviewAllBtn) {
   compilePreviewAllBtn.onclick = previewCompileAll;
+}
+
+function sendCompileQueueToTimeline() {
+  const q = loadCompileQueue().filter((it) => it.source_available !== false);
+  if (!q.length) {
+    alert("Queue is empty (or all clips have missing sources).");
+    return;
+  }
+  if (typeof window.openTimelineEditor !== "function") {
+    alert("Timeline Editor is not available.");
+    return;
+  }
+  window.openTimelineEditor(null, {
+    clips: q.map((it) => ({
+      source_job_id: it.source_job_id,
+      start_time: it.start_time,
+      end_time: it.end_time,
+    })),
+    replace: true,
+    newProject: true,
+  });
+}
+
+const compileToTimelineBtn = $("compileToTimelineBtn");
+if (compileToTimelineBtn) {
+  compileToTimelineBtn.onclick = sendCompileQueueToTimeline;
 }
 
 if (compileGoBtn) {
@@ -3842,6 +3870,24 @@ function _addClipToAssembly(seg) {
   _renderAssemblyBar();
 }
 
+function _nudgeAssemblySeg(i, which, delta) {
+  const seg = _clipAssembly[i];
+  if (!seg) return;
+  const minDur = 0.5;
+  if (which === "start") {
+    const next = Math.max(0, seg.start + delta);
+    if (seg.end - next < minDur) return;
+    seg.start = Math.round(next * 10) / 10;
+  } else {
+    const next = Math.max(seg.start + minDur, seg.end + delta);
+    seg.end = Math.round(next * 10) / 10;
+  }
+  _renderAssemblyBar();
+  if (window.StudioLogger) {
+    StudioLogger.clip("segment_trimmed", `${String.fromCharCode(65 + i)} ${seg.start.toFixed(1)}–${seg.end.toFixed(1)}s`);
+  }
+}
+
 function _renderAssemblyBar() {
   const bar = $("clipAssemblyBar");
   const track = $("clipSegmentTrack");
@@ -3857,11 +3903,12 @@ function _renderAssemblyBar() {
 
   track.innerHTML = "";
   const segColors = ["#5e81ac", "#a3be8c", "#b48ead", "#d08770", "#88c0d0", "#ebcb8b"];
+  const chipCss = "background:transparent;border:1px solid currentColor;border-radius:4px;color:inherit;font-size:.68rem;cursor:pointer;padding:1px 4px;line-height:1.2;opacity:0.85";
   _clipAssembly.forEach((seg, i) => {
     const block = document.createElement("div");
     const dur = (seg.end - seg.start).toFixed(1);
     const bg = segColors[i % segColors.length];
-    block.style.cssText = `display:flex;align-items:center;gap:6px;padding:6px 10px;background:${bg}22;border:1px solid ${bg};border-radius:6px;font-size:.78rem;color:${bg};cursor:grab;user-select:none;white-space:nowrap;flex-shrink:0`;
+    block.style.cssText = `display:flex;align-items:center;gap:5px;padding:6px 8px;background:${bg}22;border:1px solid ${bg};border-radius:6px;font-size:.78rem;color:${bg};cursor:grab;user-select:none;white-space:nowrap;flex-shrink:0`;
     block.draggable = true;
     block.dataset.idx = i;
 
@@ -3879,12 +3926,32 @@ function _renderAssemblyBar() {
       if (window.StudioLogger) StudioLogger.clip("reordered", `Moved segment ${fromIdx} → ${i}`);
     });
 
+    const mkTrim = (label, title, which, delta) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.style.cssText = chipCss;
+      b.onclick = (e) => { e.stopPropagation(); _nudgeAssemblySeg(i, which, delta); };
+      // Don't start a drag from trim chips.
+      b.addEventListener("mousedown", (e) => e.stopPropagation());
+      b.draggable = false;
+      return b;
+    };
+
+    block.appendChild(mkTrim("−2s", "Start 2s earlier", "start", -2));
+    block.appendChild(mkTrim("+2s", "Start 2s later", "start", 2));
+
     const label = document.createElement("span");
     label.innerHTML = `<strong>${String.fromCharCode(65 + i)}</strong> ${_fmtTimeFine(seg.start)}–${_fmtTimeFine(seg.end)} <span style="opacity:0.6">(${dur}s)</span>`;
     block.appendChild(label);
 
+    block.appendChild(mkTrim("−2s", "End 2s earlier", "end", -2));
+    block.appendChild(mkTrim("+2s", "End 2s later", "end", 2));
+
     // Remove button
     const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
     removeBtn.textContent = "✕";
     removeBtn.title = "Remove this segment";
     removeBtn.style.cssText = "background:transparent;border:none;color:#bf616a;font-size:.82rem;cursor:pointer;padding:0 2px;line-height:1";
@@ -3900,11 +3967,12 @@ function _renderAssemblyBar() {
   });
 }
 
-// Clip Assembly: Preview sequence (virtual playlist)
+// Clip Assembly: Preview sequence (virtual playlist) + Timeline handoff
 (function() {
   const previewBtn = $("clipAssemblyPreview");
   const clearBtn = $("clipAssemblyClear");
   const exportBtn = $("clipAssemblyExport");
+  const toTlBtn = $("clipAssemblyToTimeline");
   if (!previewBtn || !clearBtn) return;
 
   let _playingAssembly = false;
@@ -3921,15 +3989,20 @@ function _renderAssemblyBar() {
       return;
     }
 
+    // Player lives on Transcript — switch there so preview is visible.
+    setActiveTab("transcript");
     _playingAssembly = true;
     previewBtn.textContent = "⏸ Stop preview";
     let segIdx = 0;
-    video.currentTime = _clipAssembly[0].start;
-    video.play();
+    requestAnimationFrame(() => {
+      video.currentTime = _clipAssembly[0].start;
+      video.play().catch(() => {});
+    });
 
     function tick() {
       if (!_playingAssembly) return;
       const seg = _clipAssembly[segIdx];
+      if (!seg) { _playingAssembly = false; previewBtn.textContent = "▶ Preview sequence"; return; }
       if (video.currentTime >= seg.end) {
         segIdx++;
         if (segIdx >= _clipAssembly.length) {
@@ -3951,6 +4024,24 @@ function _renderAssemblyBar() {
     _renderAssemblyBar();
     if (window.StudioLogger) StudioLogger.clip("assembly_cleared", "all segments removed");
   });
+
+  if (toTlBtn) {
+    toTlBtn.addEventListener("click", () => {
+      if (_clipAssembly.length === 0) return;
+      if (!currentJobId) { alert("No active job."); return; }
+      if (typeof window.openTimelineEditor !== "function") {
+        alert("Timeline Editor is not available.");
+        return;
+      }
+      const clips = _clipAssembly.map((s) => ({
+        source_job_id: currentJobId,
+        start_time: s.start,
+        end_time: s.end,
+      }));
+      window.openTimelineEditor(null, { clips, replace: true, newProject: true });
+      if (window.StudioLogger) StudioLogger.clip("assembly_to_timeline", `${clips.length} segments`);
+    });
+  }
 
   if (exportBtn) {
     exportBtn.addEventListener("click", async () => {
