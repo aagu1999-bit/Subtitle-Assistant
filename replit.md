@@ -67,6 +67,8 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
     position them, and ⤓ Set IN/OUT buttons trim a clip at the playhead.
   - **Preview cut** — play Main-track keep-ranges (skips text cuts) and show
     timed overlays / titles / logo on the stage without a full FFmpeg render.
+    Also approximates color grades, Ken Burns, inter-clip transitions, and a
+    ducked music bed so edit → see no longer requires a full burn.
   - **Magnetic snap + ripple** — clip edges snap to nearby cuts / playhead;
     Main trims reflow anchored overlays/titles/music; deleting Main drops its
     anchored items and closes the gap.

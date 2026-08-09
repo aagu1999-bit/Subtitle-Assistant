@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-10";
+  const TL_BUILD = "editor-build-11";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -15,6 +15,7 @@
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
   const MAX_UNDO = 50;
   const SNAP_PX = 10;      // magnetic snap threshold in screen pixels
+  const KB_INTENSITY = { low: 0.08, med: 0.14, high: 0.22 };
 
   // ---- State ----
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
@@ -35,6 +36,8 @@
   let magnetic = true;     // snap clip edges to nearby cuts / playhead
   let liveComposite = true; // show timed overlays/titles while previewing
   let lastCompositeOt = null;
+  let musicPlayers = [];   // [{ id, audio, clip }] active during Preview cut
+  let liveGradeClipId = null;
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -640,7 +643,13 @@
       if (seekTo != null) { try { v.currentTime = seekTo; } catch (e) {} }
     }
     // Selecting a Main clip surfaces its transcript for text-based editing.
-    if (track === "main" && c) { setLeftTab("transcript"); renderTranscript(c); }
+    if (track === "main" && c) {
+      setLeftTab("transcript");
+      renderTranscript(c);
+      if (!(seqPreview && seqPreview.running)) applyLiveGrade(c);
+    } else if (!(seqPreview && seqPreview.running) && c && c.color) {
+      applyLiveGrade(c);
+    }
     applyStage();
     renderTimeline();   // renderProps() (inside) redraws the preview boxes
   }
@@ -777,7 +786,7 @@
       }
     });
 
-    // Music presence chip (no mixed audio in live preview).
+    // Music presence chip (audio itself is mixed during Preview cut).
     const musicOn = (tl.tracks.music || []).some((c) => {
       const start = c.start || 0;
       return ot >= start && ot < start + clipDuration(c);
@@ -785,7 +794,7 @@
     if (musicOn) {
       const chip = document.createElement("div");
       chip.className = "tl-music-chip";
-      chip.textContent = "🎵 music";
+      chip.textContent = (seqPreview && seqPreview.running) ? "🎵 music playing" : "🎵 music";
       layer.appendChild(chip);
     }
   }
@@ -895,7 +904,193 @@
     if (ot != null) updateLiveComposite(ot);
   }
 
-  // Lightweight multi-track cut preview — Main keep-ranges + timed overlays/titles.
+  // ---- Live grades / Ken Burns / transitions / music ----
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function dbToLinear(db) {
+    const lin = Math.pow(10, (Number(db) || 0) / 20);
+    return Math.max(0, Math.min(1, lin));
+  }
+
+  function cssFilterForColor(color) {
+    if (!color) return "";
+    const parts = [];
+    switch (color.preset || "none") {
+      case "neutral": parts.push("contrast(1.04)", "saturate(1.06)"); break;
+      case "warm": parts.push("sepia(0.2)", "saturate(1.18)", "hue-rotate(-10deg)"); break;
+      case "cool": parts.push("saturate(1.06)", "hue-rotate(14deg)", "contrast(1.03)"); break;
+      case "vivid": parts.push("contrast(1.12)", "saturate(1.32)"); break;
+      case "bw": parts.push("grayscale(1)", "contrast(1.05)"); break;
+      default: break;
+    }
+    const b = Number(color.brightness || 0);
+    const c = color.contrast != null ? Number(color.contrast) : 1;
+    const s = color.saturation != null ? Number(color.saturation) : 1;
+    if (Math.abs(b) > 0.001) parts.push(`brightness(${Math.max(0.2, Math.min(1.8, 1 + b))})`);
+    if (Math.abs(c - 1) > 0.001) parts.push(`contrast(${Math.max(0.2, Math.min(2.5, c))})`);
+    if (Math.abs(s - 1) > 0.001) parts.push(`saturate(${Math.max(0, Math.min(2.5, s))})`);
+    return parts.join(" ");
+  }
+
+  function applyLiveGrade(clip) {
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+    v.style.filter = cssFilterForColor(clip && clip.color);
+    liveGradeClipId = clip ? clip.id : null;
+  }
+
+  function updateKenBurnsProgress(clip, progress01) {
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+    const kb = clip && clip.ken_burns;
+    if (!kb || !kb.enabled) {
+      // Don't clear transform if a slide transition class is active.
+      const stage = $("tlStage");
+      if (stage && (stage.classList.contains("tl-slide-left") || stage.classList.contains("tl-slide-right"))) return;
+      v.style.transform = "";
+      return;
+    }
+    const intensity = KB_INTENSITY[kb.intensity || "med"] || KB_INTENSITY.med;
+    const p = Math.max(0, Math.min(1, progress01));
+    const scale = (kb.direction === "out")
+      ? (1 + intensity) * (1 - p) + 1 * p
+      : 1 * (1 - p) + (1 + intensity) * p;
+    v.style.transition = "none";
+    v.style.transform = `scale(${scale})`;
+  }
+
+  function clearLiveVideoFx() {
+    const v = $("tlPreviewVideo");
+    const stage = $("tlStage");
+    const tr = $("tlTransitionLayer");
+    if (v) {
+      v.style.filter = "";
+      v.style.opacity = "";
+      v.style.transform = "";
+      v.style.transition = "";
+    }
+    if (stage) stage.classList.remove("tl-slide-left", "tl-slide-right");
+    if (tr) {
+      tr.className = "tl-transition-layer";
+      tr.style.opacity = "";
+      tr.style.clipPath = "";
+    }
+    liveGradeClipId = null;
+  }
+
+  async function liveTransitionOut(type) {
+    const v = $("tlPreviewVideo");
+    const stage = $("tlStage");
+    const tr = $("tlTransitionLayer");
+    if (!v || !type) return;
+    const dur = 0.38;
+    if (type === "fade" || type === "dissolve") {
+      v.style.transition = `opacity ${dur}s linear`;
+      v.style.opacity = "0";
+      await sleep(dur * 1000);
+      return;
+    }
+    if (type === "fadeblack") {
+      if (tr) {
+        tr.className = "tl-transition-layer active";
+        await sleep(dur * 1000);
+      }
+      return;
+    }
+    if (type === "slideleft" || type === "slideright") {
+      if (stage) stage.classList.add(type === "slideleft" ? "tl-slide-left" : "tl-slide-right");
+      v.style.transition = `transform ${dur}s ease, opacity ${dur}s ease`;
+      await sleep(dur * 1000);
+      return;
+    }
+    if (type === "wipeleft" || type === "circleopen" || type === "radial") {
+      if (!tr) return;
+      const cls = type === "wipeleft" ? "tl-tr-wipeleft" : (type === "radial" ? "tl-tr-radial" : "tl-tr-circleopen");
+      tr.className = "tl-transition-layer " + cls;
+      // Force reflow then activate.
+      void tr.offsetWidth;
+      tr.classList.add("active");
+      await sleep(450);
+      return;
+    }
+    // Unknown → short fade
+    v.style.transition = `opacity ${dur}s linear`;
+    v.style.opacity = "0";
+    await sleep(dur * 1000);
+  }
+
+  async function liveTransitionIn(type) {
+    const v = $("tlPreviewVideo");
+    const stage = $("tlStage");
+    const tr = $("tlTransitionLayer");
+    if (!v) return;
+    const dur = 0.38;
+    if (stage) stage.classList.remove("tl-slide-left", "tl-slide-right");
+    if (type === "fadeblack" || type === "wipeleft" || type === "circleopen" || type === "radial") {
+      if (tr) {
+        tr.className = "tl-transition-layer active";
+        v.style.opacity = "1";
+        void tr.offsetWidth;
+        tr.classList.remove("active");
+        await sleep(dur * 1000);
+        tr.className = "tl-transition-layer";
+      }
+      return;
+    }
+    // fade / dissolve / slide / default: fade video back in
+    v.style.opacity = "0";
+    v.style.transition = `opacity ${dur}s linear`;
+    void v.offsetWidth;
+    v.style.opacity = "1";
+    await sleep(dur * 1000);
+    if (tr) tr.className = "tl-transition-layer";
+  }
+
+  function stopMusicPreview() {
+    musicPlayers.forEach((p) => {
+      try { p.audio.pause(); } catch (e) {}
+      try { p.audio.src = ""; } catch (e) {}
+    });
+    musicPlayers = [];
+  }
+
+  function syncMusicAt(ot) {
+    if (!tl) return;
+    const activeIds = new Set();
+    (tl.tracks.music || []).forEach((c) => {
+      if (!c.asset_id) return;
+      const start = c.start || 0;
+      const end = start + clipDuration(c);
+      if (ot < start || ot >= end) return;
+      activeIds.add(c.id);
+      let player = musicPlayers.find((p) => p.id === c.id);
+      if (!player) {
+        const audio = new Audio("/asset/" + c.asset_id);
+        audio.preload = "auto";
+        const gain = c.gain_db != null ? Number(c.gain_db) : -18;
+        // Duck ≈ extra attenuation under dialogue during live preview.
+        audio.volume = dbToLinear(gain + (c.duck ? -8 : 0));
+        player = { id: c.id, audio, clip: c };
+        musicPlayers.push(player);
+      }
+      const srcT = (c.in || 0) + (ot - start);
+      if (Math.abs((player.audio.currentTime || 0) - srcT) > 0.4) {
+        try { player.audio.currentTime = Math.max(0, srcT); } catch (e) {}
+      }
+      if (player.audio.paused) player.audio.play().catch(() => {});
+    });
+    // Pause players for clips that are no longer under the playhead.
+    musicPlayers.forEach((p) => {
+      if (!activeIds.has(p.id) && !p.audio.paused) {
+        try { p.audio.pause(); } catch (e) {}
+      }
+    });
+  }
+
+  // Lightweight multi-track cut preview — keep-ranges + overlays/titles +
+  // approximate grades / Ken Burns / transitions / music bed.
   async function playSequencePreview() {
     if (seqPreview && seqPreview.running) {
       seqPreview.cancel();
@@ -914,10 +1109,11 @@
       cancel: () => {
         cancelled = true;
         try { v.pause(); } catch (e) {}
+        stopMusicPreview();
       },
     };
     if (btn) btn.textContent = "⏹ Stop";
-    setRenderStatus("Previewing cut + overlays/titles…");
+    setRenderStatus("Previewing cut + grades / transitions / music…");
     previewingOutput = false;
     v.closest(".tl-preview").classList.add("has-video");
 
@@ -938,6 +1134,10 @@
         if (cancelled) break;
         const c = tl.tracks.main[i];
         if (!c.source_job_id) continue;
+
+        const trType = (i > 0 && c.transition && c.transition.type) ? c.transition.type : "";
+        if (trType && !cancelled) await liveTransitionOut(trType);
+
         selected = { track: "main", id: c.id };
         setLeftTab("transcript");
         renderTranscript(c);
@@ -947,7 +1147,17 @@
           await waitEvent(v, "loadedmetadata", 8000);
         }
         if (cancelled) break;
+
+        applyLiveGrade(c);
+        if (trType && !cancelled) await liveTransitionIn(trType);
+        else {
+          v.style.opacity = "1";
+          const tr = $("tlTransitionLayer");
+          if (tr) tr.className = "tl-transition-layer";
+        }
+
         const ranges = keepRangesForClip(c);
+        const totalKeep = ranges.reduce((a, [s, e]) => a + Math.max(0, e - s), 0) || clipDuration(c);
         const baseOut = mainStart(i);
         let played = 0;
         for (let r = 0; r < ranges.length; r++) {
@@ -961,7 +1171,8 @@
           await new Promise((resolve) => {
             const onTime = () => {
               const srcT = v.currentTime || 0;
-              const ot = baseOut + played + Math.max(0, srcT - start);
+              const into = played + Math.max(0, srcT - start);
+              const ot = baseOut + into;
               const ph = $("tlPlayhead");
               if (ph) {
                 ph.style.display = "block";
@@ -971,6 +1182,8 @@
               if (lab) lab.textContent = fmtTime(ot);
               highlightTranscriptAt(srcT);
               updateLiveComposite(ot);
+              updateKenBurnsProgress(c, into / totalKeep);
+              syncMusicAt(ot);
               if (cancelled || v.ended || srcT >= end - 0.03) {
                 v.removeEventListener("timeupdate", onTime);
                 try { v.pause(); } catch (e) {}
@@ -983,9 +1196,11 @@
         }
       }
     } finally {
+      stopMusicPreview();
+      clearLiveVideoFx();
       seqPreview = null;
       if (btn) btn.textContent = "▶ Preview cut";
-      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for grades / transitions / captions burn");
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for final captions burn / exact xfade");
       renderTimeline();
     }
   }
@@ -1644,6 +1859,8 @@
     selected = null;
     clearHistory();
     if (seqPreview && seqPreview.running) seqPreview.cancel();
+    stopMusicPreview();
+    clearLiveVideoFx();
     $("tlLabel").value = tl.label;
     $("tlCanvas").value = tl.canvas;
     $("tlFit").value = tl.fit;
