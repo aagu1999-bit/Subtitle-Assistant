@@ -84,6 +84,7 @@
       <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
       <button class="main-tab" data-tab="transcript">2. ✂️ Transcript Cut</button>
       <button class="main-tab" data-tab="highlights">3. 🔥 AI Shorts</button>
+      <button class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
       <button class="main-tab" data-tab="branding">4. 🎨 Branding &amp; Styles</button>
       <button class="main-tab" data-tab="editor">5. 🎬 Multitrack Timeline</button>
       <button class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
@@ -187,7 +188,7 @@
     <!-- /Tab: Ingest -->
 
     <!-- Tab 4: Branding -->
-    <div class="tab-content" data-tab-group="branding">
+    <div class="tab-content hidden" data-tab-group="branding">
 
   <!-- Style panel -->
   <section class="panel">
@@ -677,7 +678,7 @@
     <!-- /Tab: Branding -->
 
     <!-- Tab 2: Transcript Cut -->
-    <div class="tab-content" data-tab-group="transcript">
+    <div class="tab-content hidden" data-tab-group="transcript">
       <!-- Subtitle editor (shown after transcription) -->
       <div id="transcriptEditor" class="transcript-editor">
         <div id="editor">
@@ -923,15 +924,24 @@
     <!-- /Tab: Transcript Cut -->
 
     <!-- Tab 3: Highlights -->
-    <div class="tab-content" data-tab-group="highlights">
+    <div class="tab-content hidden" data-tab-group="highlights">
     <section id="highlightsPanel" class="panel" style="margin-top:0">
       <h2 style="display:flex;align-items:center;gap:10px">
         <span>✨ Find highlights</span>
         <span class="muted" style="font-size:.78rem;font-weight:normal">AI clip suggestions</span>
       </h2>
+      {% if not gemini_enabled %}
+      <div id="hlGeminiDisabled" class="panel" style="margin:0 0 14px;border-color:#bf616a;background:#1a1216">
+        <p style="margin:0;font-size:.9rem">
+          AI Shorts needs a <code>GEMINI_API_KEY</code> env var. Without it, Find highlights and
+          Auto-Generate Shorts can’t run. Add the key and restart the server.
+        </p>
+      </div>
+      {% endif %}
       <p class="muted panel-desc">
         Pick a format and target length — Gemini scans the transcript and picks the most engaging segments.
         Click <strong>Make a clip</strong> on any suggestion to spawn a new pre-trimmed job that inherits this video's style.
+        Preview opens the Transcript player so you can trim Start/End live.
       </p>
 
       <div class="row">
@@ -972,7 +982,7 @@
       </div>
 
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-        <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Find highlights</button>
+        <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff"{% if not gemini_enabled %} disabled title="Set GEMINI_API_KEY to enable"{% endif %}>Find highlights</button>
         <button id="batchExportBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;margin-left:auto">🚀 Batch Export All Shorts (ZIP / MP4)</button>
         <button id="hlMoreBtn" class="btn" style="display:none">↻ More options</button>
       </div>

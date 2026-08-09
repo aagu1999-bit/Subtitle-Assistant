@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-8";
+  const TL_BUILD = "studio-editor-build-9";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -1915,8 +1915,9 @@
       }
 
       on("tlProjectBtn", "onclick", () => {
-        const f = $("tlAssetFile");
-        if (f) f.click();
+        // Logo / project panel — clear selection so renderProps shows project settings.
+        selected = null;
+        renderTimeline();
       });
 
       const timeline = $("tlTimeline");
@@ -1949,18 +1950,26 @@
     console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
   }
 
-  // Hook the Editor tab button so we init on first open.
+  // Expose for setActiveTab("editor") — both header + main nav entry points.
+  window.ensureTimelineInit = ensureInit;
+
+  // Hook every Editor tab button (header workflow + mainTabs) so either works.
   document.addEventListener("DOMContentLoaded", () => {
-    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
-    if (tabBtn) tabBtn.addEventListener("click", ensureInit);
+    document.querySelectorAll('.main-tab[data-tab="editor"]').forEach((tabBtn) => {
+      tabBtn.addEventListener("click", ensureInit);
+    });
   });
 
-  // Expose an entry point so other parts of the app could open the editor
-  // seeded from a specific job in the future.
+  // Expose an entry point so Shorts / jobs list can open the editor seeded
+  // from a specific job.
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
-    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
-    if (tabBtn) tabBtn.click();
+    if (typeof window.setActiveTab === "function") {
+      window.setActiveTab("editor");
+    } else {
+      const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
+      if (tabBtn) tabBtn.click();
+    }
     await ensureInit();
     // Make sure this newly-added source is in the library list.
     if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();

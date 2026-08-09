@@ -1621,8 +1621,60 @@ function showEditor(words, saved = {}) {
   updateAudioPreviewVisibility();
 
   editor.classList.remove("hidden");
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
+
+  // Studio flow: land on Transcript Cut after transcription so the player +
+  // phrase list are visible (Ingest does not host #sourcePlayer).
+  setActiveTab("transcript");
+  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  // Restore prior AI Shorts suggestions if the job already has them.
+  if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
+    renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
+  }
+
+  // Optional: Auto-Generate Shorts on Upload (Ingest checkbox).
+  maybeAutoGenerateShorts(currentJobId);
+}
+
+async function maybeAutoGenerateShorts(jobId) {
+  const cb = $("autoGenerateShorts");
+  if (!cb || !cb.checked || !jobId) return;
+  if ($("hlGeminiDisabled")) {
+    if (hlStatus) hlStatus.textContent = "Auto-Generate Shorts needs GEMINI_API_KEY.";
+    return;
+  }
+  // Already have suggestions (restored from job) — just surface the Shorts tab.
+  if (hlResults && hlResults.children.length) {
+    setActiveTab("highlights");
+    return;
+  }
+
+  setActiveTab("highlights");
+  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts…";
+  if (hlFindBtn) hlFindBtn.disabled = true;
+  try {
+    const format = (hlFormatEl && hlFormatEl.value) || "auto";
+    const num = (hlCountEl && parseInt(hlCountEl.value, 10)) || 5;
+    const res = await fetch("/auto-process-job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, format, num_clips: num }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    const clips = data.clips || [];
+    renderHighlights(clips, format);
+    if (hlStatus) {
+      hlStatus.textContent = clips.length
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Preview any card to trim.`
+        : "Auto-generate returned no clips — try Find highlights with different lengths.";
+    }
+  } catch (e) {
+    if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
+  } finally {
+    if (hlFindBtn && !$("hlGeminiDisabled")) hlFindBtn.disabled = false;
+  }
 }
 
 // ---- Phase 2: Render ----
@@ -3172,8 +3224,10 @@ function setActiveTab(tab) {
     ingest: "1",
     transcript: "2",
     highlights: "3",
+    compilation: "3",
     branding: "4",
-    editor: "5"
+    editor: "5",
+    result: "5",
   };
   const step = stepMap[tab];
 
@@ -3192,18 +3246,23 @@ function setActiveTab(tab) {
       c.classList.toggle("active", isMatch);
       c.style.display = isMatch ? "block" : "none";
       if (isMatch) {
-        // Ensure inner panels & editor views within the matching tab are visible
-        c.querySelectorAll(".panel, section, #editor, #transcriptEditor, #highlightsPanel").forEach(p => {
-          if (p.id !== "jobsPanel") p.classList.remove("hidden");
+        // Ensure core shells inside the tab are visible. Leave ephemeral
+        // panels (preview editor, filler banner, jobs empty) alone.
+        ["editor", "transcriptEditor", "highlightsPanel", "compilePanel"].forEach((id) => {
+          const el = c.querySelector("#" + id);
+          if (el) el.classList.remove("hidden");
         });
       }
     }
   });
 
-  if (tab === "editor" && window.ensureTimelineInit) {
+  if (tab === "editor" && typeof window.ensureTimelineInit === "function") {
     window.ensureTimelineInit();
   }
 }
+
+// Used by timeline.js openTimelineEditor / other modules.
+window.setActiveTab = setActiveTab;
 
 if (mainTabs) {
   mainTabs.addEventListener("click", (e) => {
@@ -3260,20 +3319,25 @@ document.addEventListener("drop", (e) => {
   }
 });
 
-// Reveal Result tab when a render completes; only auto-switch to it when
-// the user is currently on Edit (so render output gets surfaced) — leave
-// them alone if they're on Highlights or Compilation.
+// Reveal Result tab when a render completes; auto-switch when the user is on
+// Transcript (caption burn) so output surfaces. Leave them alone on Shorts /
+// Compilation / Timeline.
 if (result && tabResultBtn) {
   const obs = new MutationObserver(() => {
     if (result.classList.contains("hidden")) return;
     tabResultBtn.classList.remove("hidden");
     const activeTabBtn = mainTabs && mainTabs.querySelector(".main-tab.active");
-    if (activeTabBtn && activeTabBtn.dataset.tab === "edit") {
+    const tab = activeTabBtn && activeTabBtn.dataset.tab;
+    if (tab === "transcript" || tab === "branding") {
       setActiveTab("result");
     }
   });
   obs.observe(result, { attributes: true, attributeFilter: ["class"] });
 }
+
+// Ensure only Ingest is visible on first paint (other tabs ship with content
+// that used to stack because they lacked `.hidden`).
+setActiveTab("ingest");
 
 // Initial render — hooks now live inline inside renderJobsList /
 // renderCompileQueue / showEditor instead of via function-wrapping.
@@ -3361,9 +3425,13 @@ function openPreviewEditor(clip) {
   _peUpdateDur();
   panel.classList.remove("hidden");
 
-  setActiveTab("highlights");
+  // Preview panel + #sourcePlayer live on the Transcript tab — not Shorts.
+  setActiveTab("transcript");
   // Defer play+scroll until the tab switch's display change has applied.
-  requestAnimationFrame(() => _pePlay());
+  requestAnimationFrame(() => {
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    _pePlay();
+  });
 }
 
 function closePreviewEditor() {
