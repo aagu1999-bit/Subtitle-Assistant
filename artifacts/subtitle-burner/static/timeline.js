@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-9";
+  const TL_BUILD = "editor-build-10";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -14,6 +14,7 @@
   const MIN_TL_SECONDS = 30;
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
   const MAX_UNDO = 50;
+  const SNAP_PX = 10;      // magnetic snap threshold in screen pixels
 
   // ---- State ----
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
@@ -31,6 +32,9 @@
   let redoStack = [];
   let historySuspended = false;
   let seqPreview = null;   // { running, cancel } for main-track cut preview
+  let magnetic = true;     // snap clip edges to nearby cuts / playhead
+  let liveComposite = true; // show timed overlays/titles while previewing
+  let lastCompositeOt = null;
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -717,8 +721,181 @@
     scheduleSave();
   }
 
-  // Lightweight main-track cut preview — play clips in order without a full
-  // FFmpeg render so edit → see → tweak doesn't require waiting on a burn.
+  // Keep-ranges after text cuts — used by Preview cut so struck words are skipped.
+  function keepRangesForClip(clip) {
+    const cin = clip.in || 0;
+    const cout = Math.max(cin + 0.05, clip.out || cin + 0.05);
+    const cuts = (clip.cuts || [])
+      .map(([a, b]) => [Math.max(cin, Number(a)), Math.min(cout, Number(b))])
+      .filter(([a, b]) => b - a > 0.02)
+      .sort((a, b) => a[0] - b[0]);
+    const ranges = [];
+    let cursor = cin;
+    cuts.forEach(([a, b]) => {
+      if (a > cursor + 0.02) ranges.push([cursor, a]);
+      cursor = Math.max(cursor, b);
+    });
+    if (cout > cursor + 0.02) ranges.push([cursor, cout]);
+    return ranges.length ? ranges : [[cin, cout]];
+  }
+
+  function titleDuration(c) {
+    // Titles store duration in `out` (in is unused / 0).
+    if (c.in == null || c.in === 0) return Math.max(0.2, c.out || 4);
+    return clipDuration(c);
+  }
+
+  function assetKind(assetId) {
+    const a = assets.find((x) => x.asset_id === assetId);
+    return a ? a.kind : null;
+  }
+
+  // Timed multi-track composite on the preview stage (overlays / titles / logo).
+  // Not a full FFmpeg substitute (no grades/transitions/audio duck), but enough
+  // to judge placement and timing while editing.
+  function updateLiveComposite(ot) {
+    const layer = $("tlOverlayLayer");
+    if (!layer || !tl || ot == null || !liveComposite) return;
+    lastCompositeOt = ot;
+    layer.innerHTML = "";
+
+    if (tl.logo && tl.logo.asset_id) {
+      addLiveLayerItem("logo", tl.logo, "Logo", { interactive: !(seqPreview && seqPreview.running) });
+    }
+
+    (tl.tracks.overlay || []).forEach((c) => {
+      const start = c.start || 0;
+      if (ot >= start - 0.001 && ot < start + clipDuration(c)) {
+        addLiveLayerItem("overlay", c, "Overlay", { interactive: !(seqPreview && seqPreview.running), media: true, mediaTime: (c.in || 0) + (ot - start) });
+      }
+    });
+
+    (tl.tracks.text || []).forEach((c) => {
+      const start = c.start || 0;
+      if (ot >= start - 0.001 && ot < start + titleDuration(c)) {
+        addLiveTitleItem(c, { interactive: !(seqPreview && seqPreview.running) });
+      }
+    });
+
+    // Music presence chip (no mixed audio in live preview).
+    const musicOn = (tl.tracks.music || []).some((c) => {
+      const start = c.start || 0;
+      return ot >= start && ot < start + clipDuration(c);
+    });
+    if (musicOn) {
+      const chip = document.createElement("div");
+      chip.className = "tl-music-chip";
+      chip.textContent = "🎵 music";
+      layer.appendChild(chip);
+    }
+  }
+
+  function addLiveLayerItem(kind, obj, labelText, opts) {
+    opts = opts || {};
+    const layer = $("tlOverlayLayer");
+    if (!layer) return;
+    const box = document.createElement("div");
+    box.className = "tl-pbox tl-live-box";
+    box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
+    box.style.top = (obj.y != null ? obj.y : 0.1) * 100 + "%";
+    box.style.width = (obj.w != null ? obj.w : 0.3) * 100 + "%";
+    box.style.aspectRatio = "16 / 9";
+    if (obj.opacity != null) box.style.opacity = String(obj.opacity);
+
+    if (opts.media) {
+      let mediaEl = null;
+      if (obj.asset_id) {
+        const kindA = assetKind(obj.asset_id);
+        if (kindA === "image") {
+          mediaEl = document.createElement("img");
+          mediaEl.src = "/asset/" + obj.asset_id;
+        } else {
+          mediaEl = document.createElement("video");
+          mediaEl.src = "/asset/" + obj.asset_id;
+          mediaEl.muted = true;
+          mediaEl.playsInline = true;
+        }
+      } else if (obj.source_job_id) {
+        mediaEl = document.createElement("video");
+        mediaEl.src = "/raw-upload/" + obj.source_job_id;
+        mediaEl.muted = true;
+        mediaEl.playsInline = true;
+      }
+      if (mediaEl) {
+        mediaEl.className = "tl-live-media";
+        box.appendChild(mediaEl);
+        if (mediaEl.tagName === "VIDEO" && opts.mediaTime != null) {
+          const seek = () => {
+            try { mediaEl.currentTime = Math.max(0, opts.mediaTime); } catch (e) {}
+          };
+          if (mediaEl.readyState >= 1) seek();
+          else mediaEl.addEventListener("loadedmetadata", seek, { once: true });
+        }
+      }
+    }
+
+    const lbl = document.createElement("div");
+    lbl.className = "tl-pbox-label";
+    lbl.textContent = labelText;
+    box.appendChild(lbl);
+
+    if (opts.interactive !== false) {
+      const h = document.createElement("div");
+      h.className = "tl-pbox-handle";
+      box.appendChild(h);
+      box.addEventListener("pointerdown", (e) => startBoxDrag(e, kind, obj, box));
+    } else {
+      box.style.pointerEvents = "none";
+    }
+    layer.appendChild(box);
+  }
+
+  function addLiveTitleItem(c, opts) {
+    opts = opts || {};
+    const layer = $("tlOverlayLayer");
+    if (!layer) return;
+    const box = document.createElement("div");
+    box.className = "tl-pbox title tl-live-title";
+    box.style.left = (c.x != null ? c.x : 0.5) * 100 + "%";
+    box.style.top = (c.y != null ? c.y : 0.82) * 100 + "%";
+    box.style.color = c.color || "#FFFFFF";
+    box.style.fontFamily = c.font || "Anton, sans-serif";
+    box.style.fontSize = Math.max(12, Math.min(42, (c.size || 56) * 0.35)) + "px";
+    box.style.fontWeight = c.bold === false ? "500" : "700";
+    if (c.bg_enabled) {
+      const op = c.bg_opacity != null ? c.bg_opacity : 0.55;
+      box.style.background = hexToRgba(c.bg_color || "#000000", op);
+    }
+    box.textContent = c.text || "Title";
+    if (opts.interactive !== false) {
+      box.addEventListener("pointerdown", (e) => startBoxDrag(e, "title", c, box));
+    } else {
+      box.style.pointerEvents = "none";
+    }
+    layer.appendChild(box);
+  }
+
+  function hexToRgba(hex, alpha) {
+    const h = String(hex || "#000000").replace("#", "");
+    const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+    const n = parseInt(full, 16);
+    if (!Number.isFinite(n)) return `rgba(0,0,0,${alpha})`;
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+
+  function refreshCompositeFromPreview() {
+    if (!liveComposite || !tl) return;
+    if (previewingOutput) {
+      const v = $("tlPreviewVideo");
+      if (v) updateLiveComposite(v.currentTime || 0);
+      return;
+    }
+    const ot = playheadOutputTime();
+    if (ot != null) updateLiveComposite(ot);
+  }
+
+  // Lightweight multi-track cut preview — Main keep-ranges + timed overlays/titles.
   async function playSequencePreview() {
     if (seqPreview && seqPreview.running) {
       seqPreview.cancel();
@@ -740,7 +917,7 @@
       },
     };
     if (btn) btn.textContent = "⏹ Stop";
-    setRenderStatus("Previewing cut (Main track)…");
+    setRenderStatus("Previewing cut + overlays/titles…");
     previewingOutput = false;
     v.closest(".tl-preview").classList.add("has-video");
 
@@ -761,38 +938,89 @@
         if (cancelled) break;
         const c = tl.tracks.main[i];
         if (!c.source_job_id) continue;
-        selectClip("main", c.id);
+        selected = { track: "main", id: c.id };
+        setLeftTab("transcript");
+        renderTranscript(c);
         const src = "/raw-upload/" + c.source_job_id;
         if (v.getAttribute("src") !== src) {
           v.src = src;
           await waitEvent(v, "loadedmetadata", 8000);
         }
         if (cancelled) break;
-        const start = c.in || 0;
-        const end = Math.max(start + 0.05, c.out || start + 0.05);
-        try { v.currentTime = start; } catch (e) {}
-        await waitEvent(v, "seeked", 2000);
-        if (cancelled) break;
-        const playP = v.play();
-        if (playP && playP.catch) playP.catch(() => {});
-        await new Promise((resolve) => {
-          const onTime = () => {
-            updatePlayhead();
-            highlightTranscriptAt(v.currentTime || 0);
-            if (cancelled || v.ended || (v.currentTime || 0) >= end - 0.03) {
-              v.removeEventListener("timeupdate", onTime);
-              try { v.pause(); } catch (e) {}
-              resolve();
-            }
-          };
-          v.addEventListener("timeupdate", onTime);
-        });
+        const ranges = keepRangesForClip(c);
+        const baseOut = mainStart(i);
+        let played = 0;
+        for (let r = 0; r < ranges.length; r++) {
+          if (cancelled) break;
+          const [start, end] = ranges[r];
+          try { v.currentTime = start; } catch (e) {}
+          await waitEvent(v, "seeked", 2000);
+          if (cancelled) break;
+          const playP = v.play();
+          if (playP && playP.catch) playP.catch(() => {});
+          await new Promise((resolve) => {
+            const onTime = () => {
+              const srcT = v.currentTime || 0;
+              const ot = baseOut + played + Math.max(0, srcT - start);
+              const ph = $("tlPlayhead");
+              if (ph) {
+                ph.style.display = "block";
+                ph.style.left = (70 + 8 + ot * PPS) + "px";
+              }
+              const lab = $("tlPlayheadTime");
+              if (lab) lab.textContent = fmtTime(ot);
+              highlightTranscriptAt(srcT);
+              updateLiveComposite(ot);
+              if (cancelled || v.ended || srcT >= end - 0.03) {
+                v.removeEventListener("timeupdate", onTime);
+                try { v.pause(); } catch (e) {}
+                played += Math.max(0, end - start);
+                resolve();
+              }
+            };
+            v.addEventListener("timeupdate", onTime);
+          });
+        }
       }
     } finally {
       seqPreview = null;
       if (btn) btn.textContent = "▶ Preview cut";
-      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for overlays / captions / grades");
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for grades / transitions / captions burn");
+      renderTimeline();
     }
+  }
+
+  // ---- Magnetic snap ----
+  function collectSnapTimes(exclude) {
+    const times = [0];
+    if (!tl) return times;
+    (tl.tracks.main || []).forEach((c, i) => {
+      if (exclude && exclude.track === "main" && exclude.id === c.id) return;
+      const s = mainStart(i);
+      times.push(s, s + clipDuration(c));
+    });
+    ["overlay", "text", "music"].forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (exclude && exclude.track === k && exclude.id === c.id) return;
+        const s = c.start || 0;
+        const d = k === "text" ? titleDuration(c) : clipDuration(c);
+        times.push(s, s + d);
+      });
+    });
+    const ot = playheadOutputTime();
+    if (ot != null) times.push(ot);
+    return times;
+  }
+
+  function snapTime(t, exclude) {
+    if (!magnetic || !tl) return t;
+    const thresh = SNAP_PX / PPS;
+    let best = t, bestD = thresh;
+    collectSnapTimes(exclude).forEach((s) => {
+      const d = Math.abs(s - t);
+      if (d <= bestD) { bestD = d; best = s; }
+    });
+    return Math.max(0, best);
   }
 
   function setZoom(delta) {
@@ -805,6 +1033,20 @@
   function renderPreviewBoxes() {
     const layer = $("tlOverlayLayer");
     if (!layer || !tl) return;
+    // Prefer timed composite whenever we can map a preview time → output time.
+    if (liveComposite && !(seqPreview && seqPreview.running)) {
+      const ot = previewingOutput
+        ? (($("tlPreviewVideo") && $("tlPreviewVideo").currentTime) || 0)
+        : playheadOutputTime();
+      if (ot != null) {
+        updateLiveComposite(ot);
+        if (selected && selected.track === "main") {
+          const c = findClip("main", selected.id);
+          if (c && c.split && c.split.enabled) addSplitGuide(c);
+        }
+        return;
+      }
+    }
     layer.innerHTML = "";
     if (!selected) {
       if (tl.logo && tl.logo.asset_id) addPreviewBox("logo", tl.logo, "Logo");
@@ -899,6 +1141,7 @@
       updatePlayhead();
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
+      if (!(seqPreview && seqPreview.running)) refreshCompositeFromPreview();
     };
     v.addEventListener("timeupdate", upd);
     v.addEventListener("loadedmetadata", upd);
@@ -994,6 +1237,7 @@
     // Color swatch clicks (not a generic data-key control).
     wrap.querySelectorAll(".tl-swatch").forEach((sw) => {
       sw.onclick = () => {
+        pushHistory();
         if (!c.color) c.color = {};
         c.color.preset = sw.dataset.preset;
         renderProps(); renderTracks(); scheduleSave();
@@ -1231,8 +1475,16 @@
   function deleteClip(track, id) {
     if (!tl) return;
     pushHistory();
+    // Ripple: dropping a Main clip also drops items anchored exclusively to it.
+    // Remaining Main clips close the gap automatically (starts are cumulative).
+    if (track === "main") {
+      ["overlay", "text", "music"].forEach((k) => {
+        tl.tracks[k] = (tl.tracks[k] || []).filter((c) => c.anchor !== id);
+      });
+    }
     tl.tracks[track] = tl.tracks[track].filter((c) => c.id !== id);
     if (selected && selected.id === id) selected = null;
+    applyAnchors();
     renderTimeline();
     scheduleSave();
   }
@@ -1250,12 +1502,15 @@
     const c = findClip(track, id);
     if (!c) return;
     pushHistory();
+    const mainIdx = track === "main" ? tl.tracks.main.findIndex((x) => x.id === id) : -1;
     drag = {
       track, id, c,
       startX: e.clientX,
       mode: handle ? ("resize-" + handle.dataset.side) : "move",
       origIn: c.in || 0, origOut: c.out || 0, origStart: c.start || 0,
       origLeft: parseFloat(clipEl.style.left) || 0,
+      mainIdx,
+      mainStart0: mainIdx >= 0 ? mainStart(mainIdx) : 0,
     };
     e.preventDefault();
   }
@@ -1266,28 +1521,60 @@
     const dt = dx / PPS;
     const c = drag.c;
     const max = c._max || 1e9;
+    const exclude = { track: drag.track, id: drag.id };
 
     if (drag.mode === "move") {
       if (drag.track === "main") {
         // Reorder by where the cursor lands among main clips.
         reorderMainByX(drag.id, drag.origLeft + dx);
       } else {
-        c.start = Math.max(0, drag.origStart + dt);
+        c.start = snapTime(Math.max(0, drag.origStart + dt), exclude);
       }
     } else if (drag.mode === "resize-left") {
-      let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
-      if (ni < 0) ni = 0;
-      c.in = ni;
-      if (drag.track !== "main" && drag.track !== "text") {
-        // overlay/music: trimming the head shifts visible start too
-        c.start = Math.max(0, drag.origStart + (ni - drag.origIn));
+      if (drag.track === "main" && drag.mainIdx >= 0) {
+        // Snap the output start edge; Main clips always begin at mainStart.
+        // Left-resize changes source `in` (and thus duration) — later clips ripple.
+        let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
+        const newDur = drag.origOut - ni;
+        const endT = drag.mainStart0 + newDur;
+        const snappedEnd = snapTime(endT, exclude);
+        ni = Math.min(Math.max(0, drag.origOut - Math.max(0.2, snappedEnd - drag.mainStart0)), drag.origOut - 0.2);
+        c.in = ni;
+      } else {
+        let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
+        if (ni < 0) ni = 0;
+        c.in = ni;
+        if (drag.track !== "text") {
+          // overlay/music: trimming the head shifts visible start too
+          c.start = snapTime(Math.max(0, drag.origStart + (ni - drag.origIn)), exclude);
+        }
       }
     } else if (drag.mode === "resize-right") {
-      let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
-      if (drag.track !== "text") no = Math.min(no, max);
-      c.out = no;
+      if (drag.track === "main" && drag.mainIdx >= 0) {
+        let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
+        no = Math.min(no, max);
+        const endT = drag.mainStart0 + (no - drag.origIn);
+        const snappedEnd = snapTime(endT, exclude);
+        no = Math.min(max, Math.max(drag.origIn + 0.2, drag.origIn + (snappedEnd - drag.mainStart0)));
+        c.out = no;
+      } else if (drag.track === "text") {
+        let no = Math.max(0.2, drag.origOut + dt);
+        const endT = (c.start || 0) + no;
+        const snappedEnd = snapTime(endT, exclude);
+        c.out = Math.max(0.2, snappedEnd - (c.start || 0));
+      } else {
+        let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
+        no = Math.min(no, max);
+        const endT = (c.start || 0) + (no - (c.in || 0));
+        const snappedEnd = snapTime(endT, exclude);
+        no = Math.min(max, Math.max((c.in || 0) + 0.2, (c.in || 0) + (snappedEnd - (c.start || 0))));
+        c.out = no;
+      }
     }
+    // Live ripple for anchored overlays/titles/music while Main duration changes.
+    if (drag.track === "main") applyAnchors();
     renderTracks();
+    refreshCompositeFromPreview();
   }
 
   function reorderMainByX(id, leftPx) {
@@ -1581,6 +1868,17 @@
       on("tlPlaySeqBtn", "onclick", playSequencePreview);
       on("tlUndoBtn", "onclick", undo);
       on("tlRedoBtn", "onclick", redo);
+      on("tlMagneticBtn", "onclick", () => {
+        magnetic = !magnetic;
+        const b = $("tlMagneticBtn");
+        if (b) {
+          b.classList.toggle("active", magnetic);
+          b.textContent = magnetic ? "🧲 Snap on" : "🧲 Snap off";
+          b.title = magnetic
+            ? "Magnetic snap on — clip edges snap to nearby cuts / playhead"
+            : "Magnetic snap off";
+        }
+      });
       on("tlAddTitleBtn", "onclick", () => addTitle());
       on("tlProjectBtn", "onclick", () => { selected = null; renderTimeline(); });
       on("tlAssetBtn", "onclick", () => { const f = $("tlAssetFile"); if (f) f.click(); });

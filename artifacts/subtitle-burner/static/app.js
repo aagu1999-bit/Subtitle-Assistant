@@ -168,6 +168,121 @@ let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
 let draftSaveTimer = null;
 
+// ---- Edit-tab undo / redo (transcript + style + emoji rules) ----
+const EDIT_MAX_UNDO = 40;
+let editUndoStack = [];
+let editRedoStack = [];
+let editHistSuspended = false;
+let editHistoryArmed = false;
+
+function editTabActive() {
+  const btn = document.querySelector('.main-tab[data-tab="edit"]');
+  return !!(btn && btn.classList.contains("active"));
+}
+
+function captureEditSnapshot() {
+  const words = (typeof collectEditedWords === "function")
+    ? collectEditedWords({ silent: true })
+    : [];
+  return JSON.stringify({
+    words: words.length ? words : (currentWords || []),
+    style: (typeof getStyle === "function") ? getStyle() : {},
+    emoji_rules: (typeof getEmojiRules === "function") ? getEmojiRules() : {},
+  });
+}
+
+function clearEditHistory() {
+  editUndoStack = [];
+  editRedoStack = [];
+  editHistoryArmed = false;
+  updateEditHistoryButtons();
+}
+
+function pushEditHistory() {
+  if (editHistSuspended || !currentJobId) return;
+  const snap = captureEditSnapshot();
+  if (editUndoStack.length && editUndoStack[editUndoStack.length - 1] === snap) return;
+  editUndoStack.push(snap);
+  if (editUndoStack.length > EDIT_MAX_UNDO) editUndoStack.shift();
+  editRedoStack = [];
+  updateEditHistoryButtons();
+}
+
+function armEditHistory() {
+  if (editHistSuspended || editHistoryArmed || !currentJobId) return;
+  pushEditHistory();
+  editHistoryArmed = true;
+}
+
+function disarmEditHistory() {
+  editHistoryArmed = false;
+}
+
+function restoreEditSnapshot(snap) {
+  if (!snap) return;
+  const d = JSON.parse(snap);
+  editHistSuspended = true;
+  currentWords = _sanitizeWords(d.words || []);
+  if (d.style && typeof applyStyle === "function") applyStyle(d.style);
+  if (d.emoji_rules && typeof applyEmojiRules === "function") applyEmojiRules(d.emoji_rules);
+  renderPhraseList(currentWords);
+  updateRowCount();
+  if (typeof updateFontPreview === "function") updateFontPreview();
+  editHistSuspended = false;
+  scheduleDraftSave();
+  updateEditHistoryButtons();
+}
+
+function undoEdit() {
+  if (!editUndoStack.length) return;
+  editRedoStack.push(captureEditSnapshot());
+  restoreEditSnapshot(editUndoStack.pop());
+}
+
+function redoEdit() {
+  if (!editRedoStack.length) return;
+  editUndoStack.push(captureEditSnapshot());
+  restoreEditSnapshot(editRedoStack.pop());
+}
+
+function updateEditHistoryButtons() {
+  const u = $("editUndoBtn");
+  const r = $("editRedoBtn");
+  if (u) u.disabled = !editUndoStack.length;
+  if (r) r.disabled = !editRedoStack.length;
+}
+
+function bindEditHistoryArming(el) {
+  if (!el) return;
+  el.addEventListener("pointerdown", armEditHistory);
+  el.addEventListener("focus", armEditHistory);
+  el.addEventListener("pointerup", disarmEditHistory);
+  el.addEventListener("blur", disarmEditHistory);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const u = $("editUndoBtn");
+  const r = $("editRedoBtn");
+  if (u) u.onclick = () => undoEdit();
+  if (r) r.onclick = () => redoEdit();
+  updateEditHistoryButtons();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (!editTabActive() || !currentJobId) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (!mod) return;
+  const key = e.key.toLowerCase();
+  if (key === "z") {
+    e.preventDefault();
+    if (e.shiftKey) redoEdit();
+    else undoEdit();
+  } else if (key === "y") {
+    e.preventDefault();
+    redoEdit();
+  }
+});
+
 // ---- Audio engine tab state ----
 // "ffmpeg" or "auphonic". Defaults to ffmpeg; only switches if tabs are present.
 let activeAudioTab = "ffmpeg";
@@ -276,6 +391,7 @@ audioCheckboxes.forEach(cb => cb.addEventListener("change", updateAudioPreviewVi
 
 // ---- Instagram Pro preset ----
 $("instagramPreset").onclick = () => {
+  pushEditHistory();
   $("noiseReduction").checked = true;
   $("voiceBoost").checked = true;
   $("loudnessNorm").checked = true;
@@ -291,6 +407,7 @@ THEMES.forEach((t, i) => {
   b.className = "theme" + (i === 0 ? " active" : "");
   b.textContent = t.name;
   b.onclick = () => {
+    pushEditHistory();
     document.querySelectorAll(".theme").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
     primaryEl.value = t.primary;
@@ -307,6 +424,7 @@ sizeEl.oninput  = () => { sizeVal.textContent = sizeEl.value; scheduleDraftSave(
 owEl.oninput    = () => { owVal.textContent = owEl.value; scheduleDraftSave(); };
 posEl.oninput   = () => { posVal.textContent = posEl.value + "%"; scheduleDraftSave(); };
 groupEl.oninput = () => {
+  pushEditHistory();
   const edited = collectEditedWords({ silent: true });
   if (edited.length) currentWords = edited;
   groupVal.textContent = groupEl.value;
@@ -318,9 +436,11 @@ groupEl.oninput = () => {
 ["font", "primary", "highlight", "accent", "outlineColor", "allCaps", "shadow", "smoothTimings", "punchwordEmphasis", "reframeEnabled"].forEach(id => {
   const el = $(id);
   if (!el) return;
+  bindEditHistoryArming(el);
   el.addEventListener("input", scheduleDraftSave);
   el.addEventListener("change", scheduleDraftSave);
 });
+[sizeEl, owEl, posEl].forEach(bindEditHistoryArming);
 
 // ---- Font preview ----
 // Pull a list of TTF/OTF files from the backend and inject @font-face rules
@@ -832,6 +952,7 @@ function addEmojiRule(keyword = "", emoji = "") {
   removeBtn.title = "Remove rule";
   removeBtn.textContent = "×";
   removeBtn.onclick = () => {
+    pushEditHistory();
     row.remove();
     scheduleDraftSave();
   };
@@ -841,6 +962,8 @@ function addEmojiRule(keyword = "", emoji = "") {
   row.appendChild(removeBtn);
   emojiRulesList.appendChild(row);
 
+  bindEditHistoryArming(kwInput);
+  bindEditHistoryArming(emojiInput);
   kwInput.addEventListener("input", scheduleDraftSave);
   emojiInput.addEventListener("input", scheduleDraftSave);
   kwInput.focus();
@@ -1075,6 +1198,7 @@ EMOJI_PRESETS.forEach(p => {
     const existing = Array.from(emojiRulesList.querySelectorAll(".keyword"))
       .map(el => el.value.trim().toLowerCase());
     if (!existing.includes(p.keyword)) {
+      pushEditHistory();
       addEmojiRule(p.keyword, p.emoji);
       scheduleDraftSave();
     }
@@ -1082,7 +1206,10 @@ EMOJI_PRESETS.forEach(p => {
   emojiPresetsDiv.appendChild(btn);
 });
 
-addRuleBtn.onclick = () => addEmojiRule();
+addRuleBtn.onclick = () => {
+  pushEditHistory();
+  addEmojiRule();
+};
 
 // ---- Phase 1: Transcribe ----
 async function uploadAndTranscribe(file, preClean, makeActive = false) {
@@ -1246,6 +1373,7 @@ function renderPhraseList(words) {
     textEl.addEventListener("keydown", e => {
       if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
     });
+    bindEditHistoryArming(textEl);
     textEl.addEventListener("input", scheduleDraftSave);
 
     // Delete row button
@@ -1255,6 +1383,7 @@ function renderPhraseList(words) {
     delBtn.title = "Remove this phrase";
     delBtn.onclick = (e) => {
       e.stopPropagation();
+      pushEditHistory();
       row.remove();
       updateRowCount();
       scheduleDraftSave();
@@ -1295,6 +1424,7 @@ if (fillerCleanBtn) {
       `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"} from captions? ` +
       `The audio in the video stays untouched; this just drops them from the burned subtitles.`
     )) return;
+    pushEditHistory();
     currentWords = currentWords.filter((_, i) => !flagged.has(i));
     renderPhraseList(currentWords);
     updateRowCount();
@@ -1413,6 +1543,7 @@ function showEditor(words, saved = {}) {
   // Populate the editable subtitle list
   renderPhraseList(words);
   updateRowCount();
+  clearEditHistory();
 
   // Show audio preview panel if any enhancement is enabled
   updateAudioPreviewVisibility();

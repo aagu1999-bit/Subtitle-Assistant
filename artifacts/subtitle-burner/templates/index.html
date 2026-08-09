@@ -521,9 +521,13 @@
         <section class="panel subtitle-panel">
           <div class="editor-header">
             <h2>Subtitles</h2>
-            <span id="rowCount" class="pill muted">0 phrases</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <button id="editUndoBtn" class="btn btn-secondary" type="button" title="Undo (Ctrl/⌘Z)" disabled style="padding:4px 10px;font-size:.78rem">↶ Undo</button>
+              <button id="editRedoBtn" class="btn btn-secondary" type="button" title="Redo (Ctrl/⌘⇧Z)" disabled style="padding:4px 10px;font-size:.78rem">↷ Redo</button>
+              <span id="rowCount" class="pill muted">0 phrases</span>
+            </div>
           </div>
-          <p class="muted panel-desc" style="margin-bottom:8px">Click the timestamp to seek · edit text inline · × removes a phrase</p>
+          <p class="muted panel-desc" style="margin-bottom:8px">Click the timestamp to seek · edit text inline · × removes a phrase · ⌘Z undoes transcript/style edits</p>
           <div id="fillerBanner" class="filler-banner hidden">
             <span id="fillerCount" class="filler-count">0 filler words</span>
             <span class="muted" style="font-size:.78rem">um, uh, like, you know, kinda…</span>
@@ -761,6 +765,7 @@
         <div class="tl-toolbar-right">
           <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
           <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
+          <button id="tlMagneticBtn" class="tl-chip-btn active" title="Magnetic snap on — clip edges snap to nearby cuts / playhead">🧲 Snap on</button>
           <label class="tl-inline">Canvas
             <select id="tlCanvas" class="tl-select">
               <option value="9x16">9:16 (Reels/TikTok)</option>
@@ -824,7 +829,7 @@
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
-            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo">⌨ Space · S · Del · ←→ · ⌘Z</span>
+            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges">⌨ Space · S · Del · ←→ · ⌘Z · Snap</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
             <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
