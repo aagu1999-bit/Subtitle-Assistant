@@ -2142,13 +2142,11 @@ function capitalize(s) {
 }
 
 function showError(msg) {
-  progress.classList.add("hidden");
-  statusText.textContent = msg;
   progress.classList.remove("hidden");
+  statusText.textContent = msg;
   barFill.style.width = "0%";
-  // The progress strip can sit off-screen on a phone; mirror the failure into
-  // the on-page banner so it is not silently missed.
-  if (window.__studioNote) window.__studioNote(msg);
+  // Keep soft notes out of the floating red toast so navigation stays clear.
+  // Real script failures still use window.__studioError via the global handlers.
 }
 
 // =====================================================================

@@ -9,39 +9,69 @@
 </head>
 <body>
 
-<!-- On a phone there is no console to open, so a script error is invisible and
-     the page just appears to do nothing. Surface errors on the page itself.
-     This runs before any other script so it can catch their load failures. -->
-<div id="jsErrorBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#7f1d1d;color:#fff;font:12px/1.45 ui-monospace,Menlo,monospace;padding:10px 34px 10px 10px;white-space:pre-wrap;max-height:45vh;overflow:auto"></div>
+<!-- Lightweight dismissible note strip. Does NOT cover the page or trap clicks.
+     Script/load failures used to paint a huge red overlay that blocked nav. -->
+<div id="jsErrorBanner" style="display:none;position:fixed;top:10px;right:10px;left:auto;z-index:99999;max-width:min(420px,calc(100vw - 20px));background:#7f1d1d;color:#fff;font:12px/1.45 ui-monospace,Menlo,monospace;padding:10px 36px 10px 12px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35);white-space:pre-wrap;max-height:30vh;overflow:auto;pointer-events:auto"></div>
 <script>
 (function () {
-  function show(msg) {
+  var MAX_LINES = 4;
+  function ensureChrome(el) {
+    if (el.dataset.ready) return;
+    el.dataset.ready = "1";
+    el.style.position = "fixed";
+    var body = document.createElement("div");
+    body.id = "jsErrorBannerBody";
+    el.appendChild(body);
+    var x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "×";
+    x.title = "Dismiss";
+    x.setAttribute("aria-label", "Dismiss");
+    x.setAttribute("style", "position:absolute;top:4px;right:8px;background:none;border:0;color:#fff;font-size:20px;line-height:1;cursor:pointer");
+    x.onclick = function (ev) {
+      ev.stopPropagation();
+      body.textContent = "";
+      el.style.display = "none";
+    };
+    el.appendChild(x);
+  }
+  function show(msg, opts) {
+    opts = opts || {};
+    // Soft notes (upload/transcription status) stay in the progress strip —
+    // only real script failures use this floating toast.
+    if (opts.soft) return;
     var el = document.getElementById("jsErrorBanner");
     if (!el) return;
+    ensureChrome(el);
+    var body = document.getElementById("jsErrorBannerBody");
+    if (!body) return;
+    var lines = body.textContent ? body.textContent.split("\n") : [];
+    lines.push(String(msg || ""));
+    if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
+    body.textContent = lines.join("\n");
     el.style.display = "block";
-    el.textContent = (el.textContent ? el.textContent + "\n" : "") + msg;
-    if (!el.dataset.dismiss) {
-      el.dataset.dismiss = "1";
-      var x = document.createElement("button");
-      x.textContent = "×";
-      x.setAttribute("style", "position:absolute;top:4px;right:8px;background:none;border:0;color:#fff;font-size:20px;line-height:1");
-      x.onclick = function () { el.style.display = "none"; };
-      el.appendChild(x);
-    }
   }
   window.addEventListener("error", function (e) {
-    if (e.target && e.target.tagName === "SCRIPT") {
-      show("Failed to load script: " + (e.target.src || "?"));
+    // Resource load failures (img/video/audio/css) fire here with capture=true
+    // and empty message → used to spam "JS error: ? at :?" and block the UI.
+    var t = e.target;
+    if (t && t !== window && t.tagName && t.tagName !== "SCRIPT") return;
+    if (t && t.tagName === "SCRIPT") {
+      show("Failed to load script: " + (t.src || "?"));
       return;
     }
+    if (!e.message && !e.filename) return;
     show("JS error: " + (e.message || "?") +
          "\n  at " + String(e.filename || "").split("/").pop() + ":" + (e.lineno || "?"));
   }, true);
   window.addEventListener("unhandledrejection", function (e) {
     var r = e.reason;
-    show("Unhandled: " + ((r && (r.message || r.error)) || r));
+    var msg = (r && (r.message || r.error)) || r;
+    if (!msg) return;
+    show("Unhandled: " + msg);
   });
-  window.__studioNote = show;
+  window.__studioNote = function (msg) { show(msg, { soft: true }); };
+  window.__studioError = show;
 })();
 </script>
 

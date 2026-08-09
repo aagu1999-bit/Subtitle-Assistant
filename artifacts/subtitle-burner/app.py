@@ -565,22 +565,40 @@ def transcribe(video_path: Path, pre_clean: bool = False):
 
     try:
         model = _get_whisper_model()
-        segments, _info = model.transcribe(
+        if model is None:
+            raise RuntimeError(
+                "Whisper model is not loaded. Check that faster-whisper is installed "
+                "and WHISPER_MODEL is reachable."
+            )
+        result = model.transcribe(
             str(target),
             word_timestamps=True,
             vad_filter=True,
             beam_size=int(os.environ.get("WHISPER_BEAM_SIZE", "1")),
         )
+        # faster-whisper returns (segments_generator, info). Guard odd returns.
+        if isinstance(result, tuple):
+            if len(result) < 1:
+                raise RuntimeError("Whisper returned an empty result tuple")
+            segments = result[0]
+        else:
+            segments = result
 
         words = []
         for seg in segments:
-            if not seg.words:
-                continue
-            for w in seg.words:
-                text = w.word.strip()
+            seg_words = getattr(seg, "words", None) or []
+            for w in seg_words:
+                text = (getattr(w, "word", None) or "").strip()
                 if not text:
                     continue
-                words.append({"word": text, "start": float(w.start), "end": float(w.end)})
+                try:
+                    start = float(getattr(w, "start", 0.0) or 0.0)
+                    end = float(getattr(w, "end", start) or start)
+                except (TypeError, ValueError):
+                    continue
+                if end < start:
+                    end = start
+                words.append({"word": text, "start": start, "end": end})
         return words
     finally:
         if cleaned:
@@ -3358,12 +3376,17 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["progress"] = 100
         _db_save_job(job_id)
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[transcribe_job] {job_id} failed:\n{tb}", flush=True)
         jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
+        # Keep the short message for the UI; full traceback goes to the server log.
+        jobs[job_id]["error"] = str(e) or e.__class__.__name__
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
-        # No render will follow — clean up the uploaded video now.
-        _safe_unlink(video_path)
+        # Keep the upload on disk so the user can retry Re-transcribe without
+        # re-uploading. Orphan cleanup can happen later via job delete.
+        # (Previously we deleted the source here, which made retries impossible.)
 
 
 def analyze_reframe_job(job_id: str, video_path: Path) -> None:
