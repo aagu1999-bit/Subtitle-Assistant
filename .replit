@@ -19,7 +19,7 @@ args = ["pnpm", "store", "prune"]
 env = { "CI" = "true" }
 
 [workflows]
-runButton = "artifacts/mockup-sandbox: Start application"
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "artifacts/api-server: API Server"
@@ -42,54 +42,25 @@ router = "path"
 PORT = "8080"
 
 [[workflows.workflow]]
-name = "artifacts/mockup-sandbox: Start application"
+name = "Project"
+mode = "parallel"
 author = "agent"
-mode = "sequential"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-artifactId = "XegfDyZt7HqfW2Bb8Ghoy"
-isCanvasWorkflow = false
 
 [[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
-waitForPort = 8081
-ensurePreviewReachable = "/"
-router = "path"
-
-[workflows.workflow.tasks.env]
-PORT = "8081"
+task = "workflow.run"
+args = "Start application"
 
 [[workflows.workflow]]
-name = "artifacts/mockup-sandbox: Component Preview Server"
+name = "Start application"
 author = "agent"
-mode = "sequential"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-artifactId = "XegfDyZt7HqfW2Bb8Ghoy"
-isCanvasWorkflow = true
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/mockup-sandbox run dev"
-cwd = "./artifacts/mockup-sandbox"
-waitForPort = 8082
-ensurePreviewReachable = "/"
-router = "path"
+args = "cd /home/runner/workspace/artifacts/subtitle-burner && PORT=8081 python app.py"
+waitForPort = 8081
 
-[workflows.workflow.tasks.env]
-PORT = "8082"
-BASE_PATH = "/__mockup"
-
-[agent]
-stack = "PNPM_WORKSPACE"
-expertMode = true
-
-[postMerge]
-path = "scripts/post-merge.sh"
-timeoutMs = 20000
+[workflows.workflow.metadata]
+outputType = "webview"
 
 [[ports]]
 localPort = 5000
@@ -114,6 +85,3 @@ externalPort = 3000
 [[ports]]
 localPort = 8083
 externalPort = 3002
-
-[nix]
-channel = "stable-25_05"

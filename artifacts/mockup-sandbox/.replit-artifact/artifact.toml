@@ -1,21 +1,8 @@
 kind = "design"
-previewPath = "/"
+previewPath = "/__canvas"
 title = "Canvas"
 version = "1.0.0"
 id = "XegfDyZt7HqfW2Bb8Ghoy"
-
-[[services]]
-localPort = 8081
-name = "Start application"
-paths = ["/"]
-
-[services.development]
-run = "cd /home/runner/workspace/artifacts/subtitle-burner && PORT=8081 python app.py"
-
-[services.production]
-run = "cd /home/runner/workspace/artifacts/subtitle-burner && gunicorn -w 1 --threads 8 -b 0.0.0.0:$PORT app:app"
-build = "pip install -r /home/runner/workspace/artifacts/subtitle-burner/requirements.txt"
-deploymentTarget = "vm"
 
 [[services]]
 localPort = 8082
