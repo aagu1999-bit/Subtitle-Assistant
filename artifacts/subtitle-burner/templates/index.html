@@ -1157,6 +1157,9 @@
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
+          <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
+          <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
+          <button id="tlMagneticBtn" class="tl-chip-btn active" title="Magnetic snap on — clip edges snap to nearby cuts / playhead">🧲 Snap on</button>
           <label class="tl-inline">Canvas
             <select id="tlCanvas" class="tl-select">
               <option value="9x16">9:16 (Reels/TikTok)</option>
@@ -1224,7 +1227,7 @@
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
-            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges">⌨ Space · S · Del · ←→ · ⌘C/V/D</span>
+            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/dup">⌨ Space · S · Del · ←→ · ⌘Z · Snap · ⌘C/V/D</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
             <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
