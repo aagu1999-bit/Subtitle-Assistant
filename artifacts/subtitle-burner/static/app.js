@@ -149,6 +149,7 @@ const primaryEl = $("primary"), highlightEl = $("highlight"), outlineEl = $("out
 const accentEl = $("accent");
 const go = $("go"), progress = $("progress"), barFill = $("barFill"), statusText = $("statusText");
 const retryTranscribeBtn = $("retryTranscribeBtn");
+const retryTranscribeHint = $("retryTranscribeHint");
 const result = $("result"), player = $("player"), dl = $("dl");
 const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
@@ -2453,15 +2454,16 @@ function showError(msg, opts) {
   progress.classList.remove("hidden");
   statusText.textContent = msg;
   barFill.style.width = "0%";
+  const jobId = opts.jobId || currentJobId;
+  const showRetry = !!opts.allowRetry && !!jobId;
   if (retryTranscribeBtn) {
-    const jobId = opts.jobId || currentJobId;
-    const showRetry = !!opts.allowRetry && !!jobId;
     retryTranscribeBtn.classList.toggle("hidden", !showRetry);
     retryTranscribeBtn.disabled = false;
     if (showRetry) retryTranscribeBtn.dataset.jobId = jobId;
   }
-  // Keep soft notes out of the floating red toast so navigation stays clear.
-  // Real script failures still use window.__studioError via the global handlers.
+  if (retryTranscribeHint) {
+    retryTranscribeHint.classList.toggle("hidden", !showRetry);
+  }
 }
 
 /** Re-run Whisper on a job already on the server (clears the error tag). */
@@ -2487,6 +2489,7 @@ async function startRetranscribe(jobId, opts) {
     result.classList.add("hidden");
     progress.classList.remove("hidden");
     if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+    if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
     barFill.style.width = "30%";
     statusText.textContent = opts.label || "Re-transcribing…";
     pollTranscription(jobId);

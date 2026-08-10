@@ -739,13 +739,12 @@ def _validate_uploaded_media(path: Path, expected_bytes: int | None = None) -> d
 def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
     """Extract 16 kHz mono PCM for Whisper.
 
-    Always go through FFmpeg — feeding the raw container to faster-whisper/PyAV
-    crashes with ``tuple index out of range`` on video-only files (no audio
-    stream) and on some phone MOV variants.
+    Always go through FFmpeg — feeding the raw container to faster-whisper/PyAv
+    crashes on video-only files and some phone MOV variants.
 
-    Probe is advisory: if it says no audio we still attempt extract (deep
-    ffmpeg read). Only after FFmpeg fails do we show the "no audio" message —
-    that stops false negatives from shallow probes / odd phone containers.
+    Tries several extract strategies (iPhone .MOV / HE-AAC are picky). Probe is
+    advisory only — we never short-circuit to "no audio" before attempting
+    extract. Truncated uploads get a different message than true silent video.
     """
     probe = _probe_media_streams(video_path)
     wav = video_path.with_name(f".{video_path.stem}.whisper.wav")
@@ -754,60 +753,107 @@ def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
         if pre_clean else "anull"
     )
 
-    def _try_extract(audio_map: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [
-                FFMPEG, "-y",
-                *_FFPROBE_DEEP,
-                "-i", str(video_path),
-                "-vn", "-sn", "-dn",
-                "-map", audio_map,
-                "-ac", "1", "-ar", "16000",
-                "-af", af,
-                "-c:a", "pcm_s16le", str(wav),
-            ],
-            capture_output=True, text=True,
-        )
-
     def _wav_ok() -> bool:
         try:
             return wav.exists() and wav.stat().st_size >= 64
         except OSError:
             return False
 
-    # Prefer first audio stream; fall back to "any audio" for odd containers.
-    last = _try_extract("0:a:0?")
-    if not (last.returncode == 0 and _wav_ok()):
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    # Strategy list: phone MOVs often fail optional -map tricks but succeed
+    # when FFmpeg picks the default audio stream (no -map).
+    attempts: list[list[str]] = [
+        # 1) Default audio stream (best for IMG_*.MOV / QuickTime)
+        [
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn",
+            "-ac", "1", "-ar", "16000", "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+        # 2) Explicit first audio stream
+        [
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn", "-map", "0:a:0",
+            "-ac", "1", "-ar", "16000", "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+        # 3) Any audio stream(s), take first via -ac 1
+        [
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn", "-map", "0:a",
+            "-ac", "1", "-ar", "16000", "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+    ]
+
+    last: subprocess.CompletedProcess | None = None
+    for cmd in attempts:
         _safe_unlink(wav)
-        last = _try_extract("0:a?")
-    if last.returncode == 0 and _wav_ok():
-        return wav
+        last = _run(cmd)
+        if last.returncode == 0 and _wav_ok():
+            return wav
+
+    # 4) Remux to a clean MP4 then extract — recovers some QuickTime layouts
+    # where direct PCM extract fails but streams are present.
+    remux = video_path.with_name(f".{video_path.stem}.audioremux.mp4")
+    try:
+        _safe_unlink(remux)
+        remux_proc = _run([
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-c", "copy", "-movflags", "+faststart", str(remux),
+        ])
+        if remux_proc.returncode == 0 and remux.exists() and remux.stat().st_size > 64:
+            _safe_unlink(wav)
+            last = _run([
+                FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(remux),
+                "-vn", "-sn", "-dn",
+                "-ac", "1", "-ar", "16000", "-af", af,
+                "-c:a", "pcm_s16le", str(wav),
+            ])
+            if last.returncode == 0 and _wav_ok():
+                return wav
+    finally:
+        _safe_unlink(remux)
 
     _safe_unlink(wav)
-    err_blob = ((last.stderr or "") + "\n" + (last.stdout or "")).lower()
+    err_blob = ""
+    if last is not None:
+        err_blob = ((last.stderr or "") + "\n" + (last.stdout or "")).lower()
     no_stream = any(
         needle in err_blob
         for needle in (
             "does not contain any stream",
             "output file does not contain any stream",
             "matches no streams",
+            "stream map '0:a",
         )
     )
+    size_kb = int((probe.get("size") or 0) / 1024)
+    dur = float(probe.get("duration") or 0)
 
-    # Probe failed and ffmpeg found nothing → truncated/corrupt, not "no mic".
-    if probe.get("error") and (no_stream or not probe.get("has_audio")):
+    # Truncated / unreadable upload — common on large iPhone MOVs mid-transfer.
+    if probe.get("error") or (not probe.get("has_audio") and not probe.get("has_video")):
         raise RuntimeError(
-            "Could not read audio from this upload (file may be truncated or still "
-            f"writing). Re-upload and retry. Detail: {probe['error']}"
+            "Could not read audio from this upload — the file on the server looks "
+            f"incomplete or unreadable ({size_kb} KB). Re-upload IMG/MOV and try again."
+            + (f" Detail: {probe.get('error')}" if probe.get("error") else "")
         )
-    # Clear video-only file.
+    if not probe.get("has_audio") and probe.get("has_video") and (dur <= 0 or size_kb < 100):
+        raise RuntimeError(
+            "Upload looks incomplete (video stream found but no usable audio / duration). "
+            f"Server only has {size_kb} KB — re-upload the full file."
+        )
     if not probe.get("has_audio") and (probe.get("has_video") or no_stream):
         raise RuntimeError(
-            "This video has no audio track. Whisper needs sound to transcribe — "
-            "export/upload a file that includes microphone or system audio."
+            "This video has no audio track Whisper can read "
+            f"({size_kb} KB, duration {dur:.1f}s). If you hear sound on your phone, "
+            "re-upload the original recording (not a silent export) or tap Retry "
+            "after a full transfer."
         )
-    err = (last.stderr or last.stdout or "").strip().splitlines()
-    tail = err[-1] if err else f"ffmpeg exit {last.returncode}"
+    err = (last.stderr or last.stdout or "").strip().splitlines() if last else []
+    tail = err[-1] if err else "ffmpeg extract failed"
     raise RuntimeError(f"Could not extract audio for transcription: {tail}")
 
 def _edit_proxy_path(job_id: str) -> Path:

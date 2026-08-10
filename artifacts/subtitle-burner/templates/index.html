@@ -222,7 +222,8 @@
           <div id="progress" class="progress hidden" style="margin-top:10px">
             <div class="bar"><div id="barFill" class="fill"></div></div>
             <p id="statusText" class="muted">Starting…</p>
-            <button id="retryTranscribeBtn" class="btn btn-secondary btn-sm hidden" type="button" style="margin-top:8px" title="Re-run Whisper on the file already on the server — no re-upload">↻ Retry transcription</button>
+            <button id="retryTranscribeBtn" class="btn btn-primary btn-sm hidden" type="button" style="margin-top:10px;width:100%" title="Re-run Whisper on the file already on the server — no re-upload">↻ Retry transcription (keeps this upload)</button>
+            <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If this was an iPhone .MOV and you hear audio on your phone, Retry after a full upload — or re-drop the file if the transfer was cut off.</p>
           </div>
         </div>
         <div style="flex:1;min-width:300px;">
