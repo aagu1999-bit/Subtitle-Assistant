@@ -777,6 +777,92 @@ function getPreCleanFlag() {
   return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
 }
 
+// Stable palette for SPEAKER_00…N (Host/Guest first, then extras).
+const DEFAULT_SPEAKER_PALETTE = [
+  "#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770",
+  "#88c0d0", "#bf616a", "#5e81ac", "#ebcb8b", "#c084fc",
+];
+
+function defaultSpeakerColor(speakerId, index) {
+  const m = /SPEAKER_(\d+)/i.exec(String(speakerId || ""));
+  const i = m ? parseInt(m[1], 10) : (Number.isFinite(index) ? index : 0);
+  return DEFAULT_SPEAKER_PALETTE[Math.abs(i) % DEFAULT_SPEAKER_PALETTE.length];
+}
+
+function speakerLabel(speakerId) {
+  if (speakerId === "SPEAKER_00") return "Host";
+  if (speakerId === "SPEAKER_01") return "Guest";
+  const m = /SPEAKER_(\d+)/i.exec(String(speakerId || ""));
+  if (m) return `Speaker ${parseInt(m[1], 10) + 1}`;
+  return speakerId || "Speaker";
+}
+
+function collectSpeakerColors() {
+  const out = {};
+  document.querySelectorAll("[data-speaker-color]").forEach((inp) => {
+    const id = inp.dataset.speakerColor;
+    if (id && inp.value) out[id] = inp.value;
+  });
+  // Legacy Host/Guest ids (kept in sync with SPEAKER_00/01).
+  if ($("hostColor") && !out.SPEAKER_00) out.SPEAKER_00 = $("hostColor").value;
+  if ($("guestColor") && !out.SPEAKER_01) out.SPEAKER_01 = $("guestColor").value;
+  return out;
+}
+
+function colorForSpeaker(speakerId, index) {
+  if (!speakerId) return defaultSpeakerColor("SPEAKER_00", index);
+  const map = collectSpeakerColors();
+  if (map[speakerId]) return map[speakerId];
+  if (speakerId === "SPEAKER_00" && map.Host) return map.Host;
+  if (speakerId === "SPEAKER_01" && map.Guest) return map.Guest;
+  return defaultSpeakerColor(speakerId, index);
+}
+
+function syncSpeakerColorPickers(speakerIds) {
+  const wrap = $("speakerColorPickers");
+  if (!wrap) return;
+  const ids = (speakerIds || []).filter(Boolean);
+  // Always keep at least Host + Guest slots so branding works before Analyze.
+  const ensured = ids.length ? ids.slice() : ["SPEAKER_00", "SPEAKER_01"];
+  if (!ensured.includes("SPEAKER_00")) ensured.unshift("SPEAKER_00");
+  if (!ensured.includes("SPEAKER_01") && ensured.length === 1) ensured.push("SPEAKER_01");
+  const existing = collectSpeakerColors();
+  wrap.innerHTML = "";
+  ensured.forEach((id, i) => {
+    const label = document.createElement("label");
+    label.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.84rem";
+    const name = document.createElement("span");
+    name.textContent = speakerLabel(id);
+    const inp = document.createElement("input");
+    inp.type = "color";
+    inp.dataset.speakerColor = id;
+    if (id === "SPEAKER_00") inp.id = "hostColor";
+    if (id === "SPEAKER_01") inp.id = "guestColor";
+    inp.value = existing[id] || defaultSpeakerColor(id, i);
+    inp.style.cssText =
+      "width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer";
+    inp.addEventListener("input", () => {
+      const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
+      cards.forEach((card) => {
+        const sid = card.dataset.speakerId;
+        const color = colorForSpeaker(sid);
+        const pill = card.querySelector(".speaker-pill");
+        if (pill) {
+          pill.style.background = color + "33";
+          pill.style.color = color;
+          pill.style.borderColor = color + "88";
+        }
+      });
+      if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
+        renderPhraseList(currentWords);
+      }
+    });
+    label.appendChild(name);
+    label.appendChild(inp);
+    wrap.appendChild(label);
+  });
+}
+
 // ---- Helpers: collect style / audio ----
 function getStyle() {
   const speakerColorsEnabled = $("speakerColorsEnabled") && $("speakerColorsEnabled").checked;
@@ -799,10 +885,7 @@ function getStyle() {
     punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
     headline_banner: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
-    speaker_colors: speakerColorsEnabled ? {
-      SPEAKER_00: $("hostColor") ? $("hostColor").value : "#FFD700",
-      SPEAKER_01: $("guestColor") ? $("guestColor").value : "#00E5FF",
-    } : {},
+    speaker_colors: speakerColorsEnabled ? collectSpeakerColors() : {},
     reframe: {
       enabled:      $("reframeEnabled") ? $("reframeEnabled").checked : false,
       top_panel:    $("reframeTopSelect") ? $("reframeTopSelect").value : "active",
@@ -1403,10 +1486,7 @@ function renderPhraseList(words) {
     if (dominantSp) {
       row.dataset.speaker = dominantSp;
       row.classList.add("has-speaker");
-      const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
-      const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
-      const rail = dominantSp === "SPEAKER_00" ? hostC
-        : (dominantSp === "SPEAKER_01" ? guestC : "#a3be8c");
+      const rail = colorForSpeaker(dominantSp);
       row.style.borderLeftColor = rail;
       row.style.boxShadow = `inset 3px 0 0 ${rail}`;
     }
@@ -1416,7 +1496,7 @@ function renderPhraseList(words) {
     timeEl.className = "phrase-time";
     timeEl.textContent = fmtTime(group[0].start);
     timeEl.title = "Seek to " + fmtTime(group[0].start)
-      + (dominantSp ? ` · ${dominantSp === "SPEAKER_00" ? "Host" : (dominantSp === "SPEAKER_01" ? "Guest" : dominantSp)}` : "");
+      + (dominantSp ? ` · ${speakerLabel(dominantSp)}` : "");
 
     // Editable text — punchwords (long words / numbers / proper nouns)
     // are wrapped in a span tinted with the user's accent color so the
@@ -1430,8 +1510,6 @@ function renderPhraseList(words) {
     const punchEnabled = $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true;
     const punchIdxs = punchEnabled ? _selectGroupPunchwordIndices(group) : new Set();
     const accentColor = accentEl ? accentEl.value : "#FF6B35";
-    const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
-    const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
     const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
     }[c]));
@@ -1445,11 +1523,9 @@ function renderPhraseList(words) {
       if (punchIdxs.has(j)) {
         return `<span class="punchword" style="color:${accentColor}">${safe}</span>`;
       }
-      if (w.speaker === "SPEAKER_00") {
-        return `<span class="speaker-word" style="color:${hostC}" title="Host">${safe}</span>`;
-      }
-      if (w.speaker === "SPEAKER_01") {
-        return `<span class="speaker-word" style="color:${guestC}" title="Guest">${safe}</span>`;
+      if (w.speaker) {
+        const sc = colorForSpeaker(w.speaker);
+        return `<span class="speaker-word" style="color:${sc}" title="${speakerLabel(w.speaker)}">${safe}</span>`;
       }
       return safe;
     }).join(" ");
@@ -1881,13 +1957,11 @@ function renderIngestSpeakerCards(stats) {
       `</p>`;
     return;
   }
-  const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
-  const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
-  const palette = [hostC, guestC, "#a3be8c", "#b48ead", "#d08770"];
   const ts = Date.now();
+  syncSpeakerColorPickers(breakdown.map((s) => s.id));
   wrap.innerHTML = "";
   breakdown.forEach((spk, i) => {
-    const color = palette[i % palette.length];
+    const color = colorForSpeaker(spk.id, i);
     const card = document.createElement("div");
     card.className = "speaker-card";
     card.dataset.speakerId = spk.id;
@@ -1902,12 +1976,12 @@ function renderIngestSpeakerCards(stats) {
     const meta = document.createElement("div");
     meta.style.cssText = "flex:1;min-width:0";
     meta.innerHTML =
-      `<div style="font-weight:600;font-size:0.85rem">${spk.label || spk.id}</div>` +
+      `<div style="font-weight:600;font-size:0.85rem">${spk.label || speakerLabel(spk.id)}</div>` +
       `<div style="font-size:0.74rem;color:#94a3b8">${spk.speech_pct}% speech · ${spk.speech_sec}s · ${spk.id}</div>`;
 
     const pill = document.createElement("span");
     pill.className = "speaker-pill";
-    pill.textContent = spk.label || spk.id;
+    pill.textContent = spk.label || speakerLabel(spk.id);
     pill.style.cssText =
       `background:${color}33;color:${color};border:1px solid ${color}88`;
 
@@ -2028,28 +2102,27 @@ if (ingestAnalyzeBtn) {
   ingestAnalyzeBtn.onclick = () => startReframeAnalyze(ingestAnalyzeBtn);
 }
 
-// Live-tint Ingest speaker pills + Transcript phrase colors when Host/Guest change.
-["hostColor", "guestColor"].forEach((id) => {
-  const el = $(id);
-  if (!el) return;
-  el.addEventListener("input", () => {
-    const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
-    const hostC = ($("hostColor") && $("hostColor").value) || "#FFD700";
-    const guestC = ($("guestColor") && $("guestColor").value) || "#00E5FF";
-    const palette = [hostC, guestC, "#a3be8c", "#b48ead", "#d08770"];
-    cards.forEach((card, i) => {
-      const color = palette[i % palette.length];
-      const pill = card.querySelector(".speaker-pill");
-      if (pill) {
-        pill.style.background = color + "33";
-        pill.style.color = color;
-        pill.style.borderColor = color + "88";
-      }
-    });
-    if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
-      renderPhraseList(currentWords);
+// Live-tint Ingest speaker pills + Transcript phrase colors when pickers change.
+// (Dynamic pickers wire their own input handlers in syncSpeakerColorPickers.)
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (!t || !t.dataset || !t.dataset.speakerColor) return;
+  if (t.id !== "hostColor" && t.id !== "guestColor") return;
+  // Host/Guest legacy fields may still exist before first Analyze expand.
+  const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
+  cards.forEach((card) => {
+    const sid = card.dataset.speakerId;
+    const color = colorForSpeaker(sid);
+    const pill = card.querySelector(".speaker-pill");
+    if (pill) {
+      pill.style.background = color + "33";
+      pill.style.color = color;
+      pill.style.borderColor = color + "88";
     }
   });
+  if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
+    renderPhraseList(currentWords);
+  }
 });
 
 function refreshSpeakerAvatars() {
@@ -2305,9 +2378,15 @@ function renderJobsList() {
   });
 }
 
-async function switchToJob(jobId) {
-  if (currentJobId === jobId) return;
-  if (saveDraftNow) await saveDraftNow();  // persist current job's edits first
+async function switchToJob(jobId, opts) {
+  opts = opts || {};
+  // Allow re-opening the same job (e.g. Compilation "Open job") so the UI
+  // still navigates to Transcript even when currentJobId already matches.
+  if (currentJobId === jobId && !opts.force) {
+    if (opts.tab) setActiveTab(opts.tab);
+    return;
+  }
+  if (saveDraftNow && currentJobId && currentJobId !== jobId) await saveDraftNow();
   try {
     const res = await fetch("/status/" + jobId);
     if (res.status === 404) {
@@ -2330,6 +2409,7 @@ async function switchToJob(jobId) {
       } else {
         result.classList.add("hidden");
       }
+      setActiveTab(opts.tab || "transcript");
     } else {
       // Still transcribing — show the progress UI for this job
       editor.classList.add("hidden");
@@ -2338,6 +2418,7 @@ async function switchToJob(jobId) {
       barFill.style.width = (s.progress || 10) + "%";
       statusText.textContent = capitalize(s.status || "loading") + "…";
       pollTranscription(jobId);
+      setActiveTab(opts.tab || "ingest");
     }
     renderJobsList();
   } catch (e) {
@@ -3335,7 +3416,10 @@ async function refreshPastCompiles() {
     const openBtn = document.createElement("button");
     openBtn.textContent = "Open job";
     openBtn.className = "btn";
-    openBtn.onclick = async () => { await switchToJob(c.job_id); };
+    openBtn.title = "Open this compiled job on Transcript Cut";
+    openBtn.onclick = async () => {
+      await switchToJob(c.job_id, { force: true, tab: "transcript" });
+    };
     actions.appendChild(openBtn);
 
     card.appendChild(actions);
@@ -3432,7 +3516,11 @@ function setActiveTab(tab) {
   });
 
   if (tab === "editor" && typeof window.ensureTimelineInit === "function") {
-    window.ensureTimelineInit();
+    // Skip auto-open when Shorts/Compilation is about to seed a fresh project;
+    // otherwise ensureInit races and reloads an older single-clip timeline.
+    if (!window._tlDeferAutoOpen) {
+      window.ensureTimelineInit();
+    }
   }
 }
 
@@ -4512,8 +4600,11 @@ window.loadCustomBrandPreset = function() {
     
     if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
       document.getElementById("speakerColorsEnabled").checked = true;
-      if (style.speaker_colors.SPEAKER_00 && document.getElementById("hostColor")) document.getElementById("hostColor").value = style.speaker_colors.SPEAKER_00;
-      if (style.speaker_colors.SPEAKER_01 && document.getElementById("guestColor")) document.getElementById("guestColor").value = style.speaker_colors.SPEAKER_01;
+      syncSpeakerColorPickers(Object.keys(style.speaker_colors));
+      Object.entries(style.speaker_colors).forEach(([id, color]) => {
+        const inp = document.querySelector(`[data-speaker-color="${id}"]`);
+        if (inp && color) inp.value = color;
+      });
     }
     
     if (typeof scheduleDraftSave === "function") scheduleDraftSave();

@@ -691,10 +691,20 @@ def diarize_audio(video_path: Path) -> list[dict]:
             )
         token = os.environ.get(HUGGINGFACE_TOKEN_ENV) or os.environ.get("HF_TOKEN")
         try:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=token,
-            )
+            # huggingface_hub / pyannote recently renamed use_auth_token → token.
+            # Prefer the modern kwarg; fall back for older pyannote builds.
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=token,
+                )
+            except TypeError as kw_err:
+                if "token" not in str(kw_err) and "use_auth_token" not in str(kw_err):
+                    raise
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=token,
+                )
         except Exception as err:
             err_str = str(err)
             if "gated" in err_str.lower() or "401" in err_str or "403" in err_str or "private" in err_str.lower():
