@@ -1026,8 +1026,29 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   padding: 40px 24px;
 }
 .empty-hero {
+  position: relative;
   text-align: center;
   max-width: 540px;
+  z-index: 2;
+}
+.empty-pick-btn {
+  display: inline-flex !important;
+  position: relative;
+  overflow: hidden;
+  z-index: 3;
+  pointer-events: auto;
+}
+.empty-pick-btn input[type="file"] {
+  /* Full-hit-area file input — click anywhere on the CTA opens the picker. */
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  opacity: 0 !important;
+  cursor: pointer !important;
+  font-size: 64px !important; /* iOS enlarges the tap target */
+  margin: 0 !important;
+  clip-path: none !important;
 }
 .empty-logo {
   font-size: 4rem;

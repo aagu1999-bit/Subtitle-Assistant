@@ -275,14 +275,17 @@ function updateAudioPreviewVisibility() {
 audioCheckboxes.forEach(cb => cb.addEventListener("change", updateAudioPreviewVisibility));
 
 // ---- Instagram Pro preset ----
-$("instagramPreset").onclick = () => {
-  $("noiseReduction").checked = true;
-  $("voiceBoost").checked = true;
-  $("loudnessNorm").checked = true;
-  $("voiceClarity").checked = true;
-  updateAudioPreviewVisibility();
-  scheduleDraftSave();
-};
+const instagramPresetBtn = $("instagramPreset");
+if (instagramPresetBtn) {
+  instagramPresetBtn.onclick = () => {
+    if ($("noiseReduction")) $("noiseReduction").checked = true;
+    if ($("voiceBoost")) $("voiceBoost").checked = true;
+    if ($("loudnessNorm")) $("loudnessNorm").checked = true;
+    if ($("voiceClarity")) $("voiceClarity").checked = true;
+    updateAudioPreviewVisibility();
+    scheduleDraftSave();
+  };
+}
 
 // ---- Themes ----
 const themesDiv = $("themes");
@@ -676,14 +679,18 @@ if (audioOffsetEl) {
 // No click handler here: the drop zone's inner element is a <label for="file">,
 // so the browser opens the picker itself. Calling fileInput.click() as well
 // would fire the picker twice.
-["dragenter", "dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
-["dragleave", "drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
-drop.addEventListener("drop", e => {
-  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
-});
-fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+if (drop) {
+  ["dragenter", "dragover"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+  ["dragleave", "drop"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+  drop.addEventListener("drop", e => {
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+}
+if (fileInput) {
+  fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+}
 
 // Mirrors ALLOWED_EXT in app.py. The server rejects anything else with a 400,
 // so screen for it here and say so rather than letting the upload fail.
@@ -745,12 +752,26 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
+  // Leave the empty hero immediately so the user sees Ingest progress.
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.add("hidden");
+  if (shellEl) shellEl.classList.remove("hidden");
+  if (headerEl) headerEl.classList.remove("hidden");
+
   // Always auto-start upload + transcription on drop/pick. Staging a file and
   // waiting for "Transcribe" looked broken once the user already had jobs
   // (filename appeared, nothing happened).
   currentFile = null;
   if (fn) {
     fn.textContent = videos.length === 1
+      ? `Uploading ${videos[0].name}…`
+      : `Uploading ${videos.length} videos…`;
+  }
+  const emptyStatus = $("emptyPickStatus");
+  if (emptyStatus) {
+    emptyStatus.textContent = videos.length === 1
       ? `Uploading ${videos[0].name}…`
       : `Uploading ${videos.length} videos…`;
   }
@@ -772,6 +793,8 @@ function handleFiles(files) {
       if (go) go.disabled = false;
     });
 }
+// Expose for the early empty-state script in index.html.
+window.handleFiles = handleFiles;
 
 function getPreCleanFlag() {
   return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
@@ -2220,14 +2243,18 @@ function renderJobsList() {
   // Toggle empty-state vs app-shell here — single source of truth.
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
   if (emptyEl) emptyEl.classList.toggle("hidden", ids.length > 0);
   if (shellEl) shellEl.classList.toggle("hidden", ids.length === 0);
+  // Hide the sticky Studio header on the welcome screen so it can't cover
+  // "Choose a video to start" on short viewports.
+  if (headerEl) headerEl.classList.toggle("hidden", ids.length === 0);
   if (!ids.length) {
-    jobsPanel.classList.add("hidden");
+    if (jobsPanel) jobsPanel.classList.add("hidden");
     return;
   }
-  jobsPanel.classList.remove("hidden");
-  jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  if (jobsPanel) jobsPanel.classList.remove("hidden");
+  if (jobsCountEl) jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
   jobsListEl.innerHTML = "";
   ids.forEach(jobId => {
     const meta = jobsById[jobId] || {};
