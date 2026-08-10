@@ -745,41 +745,32 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
-  // In the empty state the Transcribe button isn't visible (it's in the
-  // sidebar which is hidden). Auto-kick everything immediately and activate
-  // the first one so the user lands directly in the editor for it.
-  const isEmpty = (typeof _loadJobIds === "function") && _loadJobIds().length === 0;
-
-  if (videos.length === 1 && !isEmpty) {
-    // Existing behaviour: stage the file, let user click Transcribe.
-    currentFile = videos[0];
-    fn.textContent = videos[0].name + "  (" + (videos[0].size / 1048576).toFixed(1) + " MB)";
-    go.disabled = false;
-  } else {
-    currentFile = null;
-    if (fn) {
-      fn.textContent = videos.length === 1
-        ? `Uploading ${videos[0].name}…`
-        : `Uploading ${videos.length} videos…`;
-    }
-    if (go) go.disabled = true;
-    // The label used to be set once and never touched again, so a finished
-    // upload still read "Queueing …" indefinitely and looked hung. Report the
-    // real outcome and hand the button back once the uploads settle.
-    Promise.all(videos.map((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0)))
-      .then(ids => {
-        const ok = ids.filter(Boolean).length;
-        const failed = ids.length - ok;
-        if (fn) {
-          if (!ok) fn.textContent = "Upload failed — see the error above.";
-          else if (failed) fn.textContent = `${ok} uploaded, ${failed} failed — transcribing…`;
-          else fn.textContent = ids.length === 1
-            ? `${videos[0].name} — transcribing…`
-            : `${ok} videos uploaded — transcribing…`;
-        }
-        if (go) go.disabled = false;
-      });
+  // Always auto-start upload + transcription on drop/pick. Staging a file and
+  // waiting for "Transcribe" looked broken once the user already had jobs
+  // (filename appeared, nothing happened).
+  currentFile = null;
+  if (fn) {
+    fn.textContent = videos.length === 1
+      ? `Uploading ${videos[0].name}…`
+      : `Uploading ${videos.length} videos…`;
   }
+  if (go) go.disabled = true;
+  // Stay on Ingest so the progress bar under Transcribe is visible.
+  if (typeof setActiveTab === "function") setActiveTab("ingest");
+
+  Promise.all(videos.map((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0)))
+    .then(ids => {
+      const ok = ids.filter(Boolean).length;
+      const failed = ids.length - ok;
+      if (fn) {
+        if (!ok) fn.textContent = "Upload failed — see the error above.";
+        else if (failed) fn.textContent = `${ok} uploaded, ${failed} failed — transcribing…`;
+        else fn.textContent = ids.length === 1
+          ? `${videos[0].name} — transcribing…`
+          : `${ok} videos uploaded — transcribing…`;
+      }
+      if (go) go.disabled = false;
+    });
 }
 
 function getPreCleanFlag() {
@@ -1261,7 +1252,8 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
     editor.classList.add("hidden");
     progress.classList.remove("hidden");
     barFill.style.width = "2%";
-    statusText.textContent = "Uploading…";
+    statusText.textContent = "Uploading " + (file.name || "video") + "…";
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
   }
 
   try {
@@ -1269,13 +1261,14 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       if (!makeActive) return;
       barFill.style.width = Math.max(2, Math.round(frac * 100)) + "%";
       statusText.textContent = frac >= 1
-        ? "Upload complete — starting…"
+        ? "Upload complete — starting transcription…"
         : `Uploading… ${Math.round(frac * 100)}%`;
     });
 
     addJobToList(job.job_id);
     if (makeActive) {
       currentJobId = job.job_id;
+      currentFile = null; // consumed — don't re-upload on accidental Transcribe click
       barFill.style.width = "5%";
       statusText.textContent = "Starting transcription…";
       pollTranscription(job.job_id);
@@ -1288,8 +1281,8 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       go.disabled = false;
     } else {
       console.error("Upload failed for", file.name, e);
-      if (window.__studioNote) {
-        window.__studioNote(`Upload failed for ${file.name}: ${e.message}`);
+      if (window.__studioError) {
+        window.__studioError(`Upload failed for ${file.name}: ${e.message}`);
       }
     }
     return null;
@@ -1679,14 +1672,19 @@ async function maybeAutoGenerateShorts(jobId) {
     if (hlStatus) hlStatus.textContent = "Auto-Generate Shorts needs GEMINI_API_KEY.";
     return;
   }
-  // Already have suggestions (restored from job) — just surface the Shorts tab.
+  // Already have suggestions (restored from job) — leave the user on Transcript
+  // with the player loaded; they can open AI Shorts when ready.
   if (hlResults && hlResults.children.length) {
-    setActiveTab("highlights");
+    if (hlStatus) {
+      hlStatus.textContent = `⚡ ${hlResults.children.length} short${hlResults.children.length === 1 ? "" : "s"} ready — open AI Shorts when you want them.`;
+    }
     return;
   }
 
-  setActiveTab("highlights");
-  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts…";
+  // Generate in the background. Do NOT yank the user off Transcript Cut —
+  // that made uploads look broken (video never "loaded" because we jumped
+  // to Highlights before the player was visible).
+  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts in the background…";
   if (hlFindBtn) hlFindBtn.disabled = true;
   try {
     const format = (hlFormatEl && hlFormatEl.value) || "auto";
@@ -1702,10 +1700,14 @@ async function maybeAutoGenerateShorts(jobId) {
     renderHighlights(clips, format);
     if (hlStatus) {
       hlStatus.textContent = clips.length
-        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Preview any card to trim.`
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open AI Shorts to preview.`
         : "Auto-generate returned no clips — try Find highlights with different lengths.";
     }
-    // Auto-process also runs diarization — refresh Ingest speaker cards.
+    // Soft nudge on the Transcript tab without stealing focus.
+    const badge = document.querySelector('.main-tab[data-tab="highlights"]');
+    if (badge && clips.length) {
+      badge.title = `${clips.length} shorts ready`;
+    }
     try { await refreshReframeStatus(); } catch { /* optional */ }
   } catch (e) {
     if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
