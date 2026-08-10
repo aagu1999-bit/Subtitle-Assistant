@@ -640,23 +640,100 @@ def _get_whisper_model():
 threading.Thread(target=_get_whisper_model, daemon=True).start()
 
 
-def _media_has_audio(path: Path) -> bool:
-    """True if ffprobe finds at least one audio stream."""
+# Phone MOVs / large MP4s often put the moov atom at the end. Default ffprobe
+# probesize can miss streams and look like "no audio" even when sound exists.
+_FFPROBE_DEEP = ["-analyzeduration", "100M", "-probesize", "100M"]
+
+
+def _probe_media_streams(path: Path) -> dict:
+    """Return {has_audio, has_video, duration, error} from a deep ffprobe.
+
+    Never treats probe failure as "no audio" — callers decide. Truncated
+    uploads and odd phone containers commonly fail a shallow probe.
+    """
+    info = {
+        "has_audio": False,
+        "has_video": False,
+        "duration": 0.0,
+        "error": None,
+        "size": 0,
+    }
+    try:
+        info["size"] = path.stat().st_size if path.exists() else 0
+    except OSError as e:
+        info["error"] = f"cannot read file: {e}"
+        return info
     try:
         out = subprocess.check_output(
             [
                 "ffprobe", "-v", "error",
-                "-select_streams", "a",
-                "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0",
+                *_FFPROBE_DEEP,
+                "-show_entries", "stream=codec_type:format=duration",
+                "-of", "json",
                 str(path),
             ],
             stderr=subprocess.STDOUT,
             text=True,
+            timeout=60,
         )
-        return "audio" in (out or "").lower()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
+        data = json.loads(out or "{}")
+        for stream in data.get("streams") or []:
+            ctype = (stream.get("codec_type") or "").lower()
+            if ctype == "audio":
+                info["has_audio"] = True
+            elif ctype == "video":
+                info["has_video"] = True
+        try:
+            info["duration"] = float((data.get("format") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            info["duration"] = 0.0
+    except subprocess.TimeoutExpired:
+        info["error"] = "ffprobe timed out (file may still be writing or corrupt)"
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError) as e:
+        info["error"] = str(e) or e.__class__.__name__
+    return info
+
+
+def _media_has_audio(path: Path) -> bool:
+    """True if ffprobe finds at least one audio stream (deep probe)."""
+    return bool(_probe_media_streams(path).get("has_audio"))
+
+
+def _validate_uploaded_media(path: Path, expected_bytes: int | None = None) -> dict:
+    """Reject truncated / empty / video-only uploads before Whisper starts.
+
+    Returns the probe dict on success; raises RuntimeError with a user-facing
+    message on failure.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        raise RuntimeError(f"Upload could not be read on the server: {e}") from e
+
+    # Empty MP4 shells from aborted transfers are often a few hundred bytes.
+    if size < 8_192:
+        raise RuntimeError(
+            "Upload looks incomplete (file is nearly empty on the server). "
+            "Your connection may have dropped mid-transfer — try uploading again."
+        )
+    if expected_bytes and expected_bytes > 0 and size < int(expected_bytes * 0.95):
+        raise RuntimeError(
+            f"Upload incomplete: server received {size // 1024} KB but the browser "
+            f"sent ~{expected_bytes // 1024} KB. Re-upload on a stable connection."
+        )
+
+    probe = _probe_media_streams(path)
+    if probe.get("error") and not probe.get("has_video") and not probe.get("has_audio"):
+        raise RuntimeError(
+            "Upload could not be read as a media file (corrupt or truncated). "
+            f"Re-upload the original export. ({probe['error']})"
+        )
+    if not probe.get("has_video") and not probe.get("has_audio"):
+        raise RuntimeError(
+            "Upload has no video or audio streams — the file is likely truncated "
+            "or not a real media export. Re-upload and try again."
+        )
+    return probe
 
 
 def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
@@ -665,32 +742,73 @@ def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
     Always go through FFmpeg — feeding the raw container to faster-whisper/PyAV
     crashes with ``tuple index out of range`` on video-only files (no audio
     stream) and on some phone MOV variants.
+
+    Probe is advisory: if it says no audio we still attempt extract (deep
+    ffmpeg read). Only after FFmpeg fails do we show the "no audio" message —
+    that stops false negatives from shallow probes / odd phone containers.
     """
-    if not _media_has_audio(video_path):
-        raise RuntimeError(
-            "This video has no audio track. Whisper needs sound to transcribe — "
-            "export/upload a file that includes microphone or system audio."
-        )
+    probe = _probe_media_streams(video_path)
     wav = video_path.with_name(f".{video_path.stem}.whisper.wav")
     af = (
         "afftdn=nf=-25,dynaudnorm=p=0.95:m=12:s=12"
         if pre_clean else "anull"
     )
-    proc = subprocess.run(
-        [
-            FFMPEG, "-y", "-i", str(video_path),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-af", af,
-            "-c:a", "pcm_s16le", str(wav),
-        ],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0 or not wav.exists() or wav.stat().st_size < 64:
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()
-        tail = err[-1] if err else f"ffmpeg exit {proc.returncode}"
-        raise RuntimeError(f"Could not extract audio for transcription: {tail}")
-    return wav
 
+    def _try_extract(audio_map: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                FFMPEG, "-y",
+                *_FFPROBE_DEEP,
+                "-i", str(video_path),
+                "-vn", "-sn", "-dn",
+                "-map", audio_map,
+                "-ac", "1", "-ar", "16000",
+                "-af", af,
+                "-c:a", "pcm_s16le", str(wav),
+            ],
+            capture_output=True, text=True,
+        )
+
+    def _wav_ok() -> bool:
+        try:
+            return wav.exists() and wav.stat().st_size >= 64
+        except OSError:
+            return False
+
+    # Prefer first audio stream; fall back to "any audio" for odd containers.
+    last = _try_extract("0:a:0?")
+    if not (last.returncode == 0 and _wav_ok()):
+        _safe_unlink(wav)
+        last = _try_extract("0:a?")
+    if last.returncode == 0 and _wav_ok():
+        return wav
+
+    _safe_unlink(wav)
+    err_blob = ((last.stderr or "") + "\n" + (last.stdout or "")).lower()
+    no_stream = any(
+        needle in err_blob
+        for needle in (
+            "does not contain any stream",
+            "output file does not contain any stream",
+            "matches no streams",
+        )
+    )
+
+    # Probe failed and ffmpeg found nothing → truncated/corrupt, not "no mic".
+    if probe.get("error") and (no_stream or not probe.get("has_audio")):
+        raise RuntimeError(
+            "Could not read audio from this upload (file may be truncated or still "
+            f"writing). Re-upload and retry. Detail: {probe['error']}"
+        )
+    # Clear video-only file.
+    if not probe.get("has_audio") and (probe.get("has_video") or no_stream):
+        raise RuntimeError(
+            "This video has no audio track. Whisper needs sound to transcribe — "
+            "export/upload a file that includes microphone or system audio."
+        )
+    err = (last.stderr or last.stdout or "").strip().splitlines()
+    tail = err[-1] if err else f"ffmpeg exit {last.returncode}"
+    raise RuntimeError(f"Could not extract audio for transcription: {tail}")
 
 def _edit_proxy_path(job_id: str) -> Path:
     return UPLOAD_DIR / f"{job_id}_editproxy.mp4"
@@ -700,13 +818,16 @@ def build_edit_proxy(job_id: str, video_path: Path) -> None:
     """Background: small H.264 proxy so Transcript Cut seeks fast on phone MOVs.
 
     Burns / renders always use the original upload — this is editor playback only.
+    Started AFTER Whisper finishes so encode does not steal CPU from transcription.
     """
     out = _edit_proxy_path(job_id)
     try:
-        # ultrafast + downscale keeps this off the critical Whisper path.
+        # ultrafast + downscale — playback aid only, not on the Whisper critical path.
         proc = subprocess.run(
             [
-                FFMPEG, "-y", "-i", str(video_path),
+                FFMPEG, "-y",
+                *_FFPROBE_DEEP,
+                "-i", str(video_path),
                 "-vf", "scale=-2:'min(720,ih)'",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", "-b:a", "96k",
@@ -3826,19 +3947,21 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
     try:
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 30
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
-        # Build a lightweight seek proxy in parallel — phone MOVs are huge and
-        # made Transcript Cut feel "stuck loading" after Whisper was already done.
-        threading.Thread(
-            target=build_edit_proxy, args=(job_id, video_path), daemon=True
-        ).start()
         words = transcribe(video_path, pre_clean=pre_clean, job_id=job_id)
         if not words:
             raise RuntimeError("No speech detected in the video.")
         jobs[job_id]["words"] = words
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
+        # Seek proxy AFTER Whisper — encoding in parallel stole CPU and made
+        # short clips feel like a multi-minute "upload" even after transfer done.
+        threading.Thread(
+            target=build_edit_proxy, args=(job_id, video_path), daemon=True
+        ).start()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -3927,7 +4050,11 @@ def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["burn_cache_key"] = None
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
+        threading.Thread(
+            target=build_edit_proxy, args=(job_id, video_path), daemon=True
+        ).start()
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = f"Re-transcribe failed: {e}"
@@ -5240,7 +5367,28 @@ def transcribe_only():
     job_id = uuid.uuid4().hex
     ext = f.filename.rsplit(".", 1)[1].lower()
     video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    # Prefer the part's declared size; Content-Length is the whole multipart body.
+    expected_bytes = None
+    try:
+        if getattr(f, "content_length", None):
+            expected_bytes = int(f.content_length)
+    except (TypeError, ValueError):
+        expected_bytes = None
     f.save(str(video_path))
+    try:
+        probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
+        print(
+            f"[upload] {job_id} ok size={video_path.stat().st_size} "
+            f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
+            f"dur={probe.get('duration'):.1f}s name={f.filename!r}",
+            flush=True,
+        )
+        # Do NOT reject on !has_audio here — shallow/odd probes false-negative on
+        # phone MOVs. Whisper extract is the ground truth (with a clear error).
+    except Exception as e:
+        _safe_unlink(video_path)
+        print(f"[upload] {job_id} rejected after save: {e}", flush=True)
+        return jsonify({"error": str(e)}), 400
 
     jobs[job_id] = {
         "status": "queued",

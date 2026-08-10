@@ -148,6 +148,7 @@ const groupEl = $("group"), groupVal = $("groupVal");
 const primaryEl = $("primary"), highlightEl = $("highlight"), outlineEl = $("outlineColor");
 const accentEl = $("accent");
 const go = $("go"), progress = $("progress"), barFill = $("barFill"), statusText = $("statusText");
+const retryTranscribeBtn = $("retryTranscribeBtn");
 const result = $("result"), player = $("player"), dl = $("dl");
 const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
@@ -1618,7 +1619,7 @@ async function pollTranscription(jobId) {
 
   if (s.status === "error") {
     _progressPhase = null;
-    showError("Transcription error: " + s.error);
+    showError("Transcription error: " + s.error, { allowRetry: true, jobId: jobId });
     go.disabled = false;
     return;
   }
@@ -1626,7 +1627,8 @@ async function pollTranscription(jobId) {
   // Live status: "extracting audio" / "transcribing" with % so a 2‑min clip
   // never looks frozen at 30% for minutes.
   const label = capitalize(s.status || "transcribing");
-  statusText.textContent = `${label}… ${serverPct}%  (usually under a minute for a 2‑min video)`;
+  statusText.textContent = `${label}… ${serverPct}%`;
+  if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
   setTimeout(() => pollTranscription(jobId), 1500);
 }
 
@@ -2130,30 +2132,12 @@ if (retranscribeBtn) {
   retranscribeBtn.onclick = async () => {
     if (!currentJobId) return;
     const ok = confirm(
-      "Re-transcribe this video? Your current transcript edits will be discarded and replaced with a fresh Whisper pass. This usually takes 20–60 seconds."
+      "Re-transcribe this video? Your current transcript edits will be discarded and replaced with a fresh Whisper pass."
     );
     if (!ok) return;
     retranscribeBtn.disabled = true;
-    try {
-      const res = await fetch("/retranscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: currentJobId }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      // Swap the editor for the progress UI and let pollTranscription drive
-      // the rest. When it completes, showEditor() repopulates the new words.
-      editor.classList.add("hidden");
-      result.classList.add("hidden");
-      progress.classList.remove("hidden");
-      barFill.style.width = "30%";
-      statusText.textContent = "Re-transcribing…";
-      pollTranscription(currentJobId);
-    } catch (e) {
-      alert("Re-transcribe failed: " + e.message);
-      retranscribeBtn.disabled = false;
-    }
+    const okRun = await startRetranscribe(currentJobId);
+    if (!okRun) retranscribeBtn.disabled = false;
   };
 }
 
@@ -2468,12 +2452,63 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-function showError(msg) {
+function showError(msg, opts) {
+  opts = opts || {};
   progress.classList.remove("hidden");
   statusText.textContent = msg;
   barFill.style.width = "0%";
+  if (retryTranscribeBtn) {
+    const jobId = opts.jobId || currentJobId;
+    const showRetry = !!opts.allowRetry && !!jobId;
+    retryTranscribeBtn.classList.toggle("hidden", !showRetry);
+    retryTranscribeBtn.disabled = false;
+    if (showRetry) retryTranscribeBtn.dataset.jobId = jobId;
+  }
   // Keep soft notes out of the floating red toast so navigation stays clear.
   // Real script failures still use window.__studioError via the global handlers.
+}
+
+/** Re-run Whisper on a job already on the server (clears the error tag). */
+async function startRetranscribe(jobId, opts) {
+  opts = opts || {};
+  if (!jobId) return false;
+  try {
+    const res = await fetch("/retranscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    currentJobId = jobId;
+    localStorage.setItem("subtitleBurner:lastJobId", jobId);
+    if (jobsById[jobId]) {
+      jobsById[jobId].status = "re-transcribing";
+      jobsById[jobId].error = null;
+    }
+    renderJobsList();
+    editor.classList.add("hidden");
+    result.classList.add("hidden");
+    progress.classList.remove("hidden");
+    if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+    barFill.style.width = "30%";
+    statusText.textContent = opts.label || "Re-transcribing…";
+    pollTranscription(jobId);
+    return true;
+  } catch (e) {
+    alert("Re-transcribe failed: " + e.message);
+    return false;
+  }
+}
+
+if (retryTranscribeBtn) {
+  retryTranscribeBtn.onclick = async () => {
+    const jobId = retryTranscribeBtn.dataset.jobId || currentJobId;
+    if (!jobId) return;
+    retryTranscribeBtn.disabled = true;
+    await startRetranscribe(jobId, { label: "Retrying transcription…" });
+    retryTranscribeBtn.disabled = false;
+  };
 }
 
 // =====================================================================
@@ -2621,6 +2656,19 @@ function renderJobsList() {
       div.appendChild(toTl);
     }
 
+    if (meta.status === "error" && meta.video_available) {
+      const retry = document.createElement("button");
+      retry.className = "job-rename job-retry";
+      retry.textContent = "↻ Retry";
+      retry.title = (meta.error || "Transcription failed") + " — re-run Whisper without re-uploading";
+      retry.onclick = async (e) => {
+        e.stopPropagation();
+        retry.disabled = true;
+        await startRetranscribe(jobId, { label: "Retrying transcription…" });
+      };
+      div.appendChild(retry);
+    }
+
     const del = document.createElement("button");
     del.className = "job-delete";
     del.textContent = "✕";
@@ -2670,11 +2718,20 @@ async function switchToJob(jobId, opts) {
         result.classList.add("hidden");
       }
       setActiveTab(opts.tab || "transcript");
+    } else if (s.status === "error") {
+      editor.classList.add("hidden");
+      result.classList.add("hidden");
+      showError(
+        "Transcription error: " + (s.error || "unknown"),
+        { allowRetry: !!s.video_available, jobId: jobId }
+      );
+      setActiveTab(opts.tab || "ingest");
     } else {
       // Still transcribing — show the progress UI for this job
       editor.classList.add("hidden");
       result.classList.add("hidden");
       progress.classList.remove("hidden");
+      if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
       barFill.style.width = (s.progress || 10) + "%";
       statusText.textContent = capitalize(s.status || "loading") + "…";
       pollTranscription(jobId);
