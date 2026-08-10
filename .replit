@@ -2,7 +2,17 @@ modules = ["nodejs-24", "python-3.11"]
 
 [deployment]
 router = "application"
-deploymentTarget = "autoscale"
+# Reserved VM, not autoscale. The burner keeps uploads, rendered MP4s and its
+# SQLite job database on local disk, so it needs one machine with a filesystem
+# that survives: on autoscale the disk is ephemeral and requests spread across
+# instances, so an upload handled by one instance is invisible to the next.
+deploymentTarget = "gce"
+# Gunicorn rather than Flask's development server, with a single worker
+# because job state lives in memory in the serving process — a second worker
+# would answer /status for jobs it has never heard of. Threads give the
+# concurrency instead. Renders take minutes, so the worker timeout is off;
+# with the default 30s gunicorn would kill the worker mid-encode.
+run = ["sh", "-c", "cd artifacts/subtitle-burner && gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:${PORT:-8081} app:app"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]

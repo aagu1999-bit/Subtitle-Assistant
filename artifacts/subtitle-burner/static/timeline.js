@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "editor-build-8";
+  const TL_BUILD = "studio-editor-build-12";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -26,6 +26,8 @@
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
   let transcriptWords = null;    // cached words for the open transcript clip
+  let seqPreview = null;         // { running, cancel } for Preview cut
+  let musicPlayers = [];         // music bed during Preview cut
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -128,11 +130,15 @@
       fps: tl.fps,
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
+      style: tl.style || null,
+      speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
+      headline_banner: tl.headline_banner || null,
+      track_states: tl.track_states || null,
       tracks: {
         main: tl.tracks.main.map((c) => ({
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
-          cuts: c.cuts || [], ken_burns: c.ken_burns || null, split: c.split || null,
+          cuts: c.cuts || [], ken_burns: c.ken_burns || null, punch_zoom: c.punch_zoom || null, split: c.split || null,
           color: c.color || null, burn_captions: c.burn_captions,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
@@ -297,11 +303,17 @@
     const doc = $("tlTranscriptDoc");
     if (!doc || !transcriptWords) return;
     doc.innerHTML = "";
+    const sc = (tl && tl.speaker_colors) || {};
+    const hostC = sc.SPEAKER_00 || sc.Host || "#FFD700";
+    const guestC = sc.SPEAKER_01 || sc.Guest || "#00E5FF";
     transcriptWords.forEach((w) => {
       const sp = document.createElement("span");
       sp.className = "tl-tword" + (isWordCut(clip, w) ? " cut" : "");
       sp.textContent = w.word + " ";
       sp.dataset.start = w.start;
+      if (w.speaker === "SPEAKER_00") sp.style.color = hostC;
+      else if (w.speaker === "SPEAKER_01") sp.style.color = guestC;
+      if (w.speaker) sp.title = w.speaker === "SPEAKER_00" ? "Host" : (w.speaker === "SPEAKER_01" ? "Guest" : w.speaker);
       sp.onclick = () => toggleWordCut(clip, w);
       doc.appendChild(sp);
     });
@@ -349,7 +361,8 @@
   }
 
   // ---- Add clips ----
-  async function addMainClip(jobId, inS, outS) {
+  async function addMainClip(jobId, inS, outS, opts) {
+    opts = opts || {};
     try {
       if (!(await ensureProject())) return;
       const dur = await getSourceDuration(jobId);
@@ -359,8 +372,10 @@
         id: uid(), source_job_id: jobId, in: ci, out: co > ci ? co : dur,
         _max: dur, transition: null, burn_captions: true,
       });
-      renderTimeline();
-      scheduleSave();
+      if (!opts.skipRender) {
+        renderTimeline();
+        scheduleSave();
+      }
     } catch (e) {
       alert("Couldn't add clip: " + e.message);
     }
@@ -445,11 +460,63 @@
       }
     }
 
+    if (!tl.track_states) {
+      tl.track_states = {
+        main: { mute: false, solo: false, lock: false },
+        overlay: { mute: false, solo: false, lock: false },
+        text: { mute: false, solo: false, lock: false },
+        music: { mute: false, solo: false, lock: false }
+      };
+    }
+
     ["main", "overlay", "text", "music"].forEach((track) => {
       const lane = document.querySelector(`.tl-track-lane[data-lane="${track}"]`);
       if (!lane) return;
+
+      const st = tl.track_states[track] || { mute: false, solo: false, lock: false };
+      const label = document.querySelector(`.tl-track[data-track="${track}"] .tl-track-label`);
+      if (label) {
+        let controls = label.querySelector(".tl-track-controls");
+        if (!controls) {
+          controls = document.createElement("div");
+          controls.className = "tl-track-controls";
+          controls.style.display = "flex";
+          controls.style.gap = "4px";
+          controls.style.marginTop = "4px";
+          label.appendChild(controls);
+        }
+        controls.innerHTML = `
+          <button class="tl-chip-btn ${st.mute ? 'active' : ''}" style="padding:2px 6px; ${st.mute ? 'background:#ff4444;color:#fff;' : ''}" data-act="mute" title="Mute track">M</button>
+          <button class="tl-chip-btn ${st.solo ? 'active' : ''}" style="padding:2px 6px; ${st.solo ? 'background:#fbbf24;color:#000;' : ''}" data-act="solo" title="Solo track">S</button>
+          <button class="tl-chip-btn ${st.lock ? 'active' : ''}" style="padding:2px 6px; ${st.lock ? 'background:#555;color:#fff;' : ''}" data-act="lock" title="Lock track">${st.lock ? '🔒' : '🔓'}</button>
+        `;
+        controls.querySelectorAll("button").forEach(b => {
+          b.onclick = (e) => {
+            e.stopPropagation();
+            const act = b.dataset.act;
+            if (act === "solo") {
+               const val = !st.solo;
+               ["main", "overlay", "text", "music"].forEach(t => {
+                 if (tl.track_states[t]) tl.track_states[t].solo = false;
+               });
+               st.solo = val;
+            } else {
+               st[act] = !st[act];
+            }
+            renderTracks();
+            scheduleSave();
+          };
+        });
+      }
+
       lane.innerHTML = "";
       lane.style.minWidth = width + "px";
+      lane.style.pointerEvents = st.lock ? "none" : "auto";
+
+      const anySolo = ["main", "overlay", "text", "music"].some(t => tl.track_states[t] && tl.track_states[t].solo);
+      const isMuted = st.mute || (anySolo && !st.solo);
+      lane.style.opacity = isMuted ? "0.4" : "1";
+
       tl.tracks[track].forEach((c, idx) => {
         const start = track === "main" ? mainStart(idx) : (c.start || 0);
         const dur = clipDuration(c);
@@ -635,20 +702,632 @@
     updatePlayhead();
   }
 
-  // ---- Live preview boxes (drag to position titles / overlays / logo) ----
-  function renderPreviewBoxes() {
-    const layer = $("tlOverlayLayer");
-    if (!layer || !tl) return;
-    layer.innerHTML = "";
-    if (!selected) {
-      if (tl.logo && tl.logo.asset_id) addPreviewBox("logo", tl.logo, "Logo");
+  // ---- Preview cut (Main keep-ranges + grade/music approx, no full Render) ----
+  function keepRangesForClip(clip) {
+    const cin = clip.in || 0;
+    const cout = Math.max(cin + 0.05, clip.out || cin + 0.05);
+    const cuts = (clip.cuts || [])
+      .map(([a, b]) => [Math.max(cin, Number(a)), Math.min(cout, Number(b))])
+      .filter(([a, b]) => b - a > 0.02)
+      .sort((a, b) => a[0] - b[0]);
+    const ranges = [];
+    let cursor = cin;
+    cuts.forEach(([a, b]) => {
+      if (a > cursor + 0.02) ranges.push([cursor, a]);
+      cursor = Math.max(cursor, b);
+    });
+    if (cout > cursor + 0.02) ranges.push([cursor, cout]);
+    return ranges.length ? ranges : [[cin, cout]];
+  }
+
+  function cssFilterForColor(color) {
+    if (!color) return "";
+    const parts = [];
+    switch (color.preset || "none") {
+      case "neutral": parts.push("contrast(1.04)", "saturate(1.06)"); break;
+      case "warm": parts.push("sepia(0.2)", "saturate(1.18)", "hue-rotate(-10deg)"); break;
+      case "cool": parts.push("saturate(1.06)", "hue-rotate(14deg)", "contrast(1.03)"); break;
+      case "vivid": parts.push("contrast(1.12)", "saturate(1.32)"); break;
+      case "bw": parts.push("grayscale(1)", "contrast(1.05)"); break;
+      default: break;
+    }
+    const b = Number(color.brightness || 0);
+    const c = color.contrast != null ? Number(color.contrast) : 1;
+    const s = color.saturation != null ? Number(color.saturation) : 1;
+    if (Math.abs(b) > 0.001) parts.push(`brightness(${Math.max(0.2, Math.min(1.8, 1 + b))})`);
+    if (Math.abs(c - 1) > 0.001) parts.push(`contrast(${Math.max(0.2, Math.min(2.5, c))})`);
+    if (Math.abs(s - 1) > 0.001) parts.push(`saturate(${Math.max(0, Math.min(2.5, s))})`);
+    return parts.join(" ");
+  }
+
+  function applyLiveGrade(clip) {
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+    v.style.filter = cssFilterForColor(clip && clip.color);
+  }
+
+  function stopMusicPreview() {
+    musicPlayers.forEach((p) => {
+      try { p.audio.pause(); } catch (e) {}
+    });
+    musicPlayers = [];
+  }
+
+  function dbToLinear(db) {
+    return Math.max(0, Math.min(1, Math.pow(10, (Number(db) || 0) / 20)));
+  }
+
+  function syncMusicAt(ot) {
+    if (!tl) return;
+    const active = new Set();
+    (tl.tracks.music || []).forEach((c) => {
+      if (!c.asset_id) return;
+      const start = c.start || 0;
+      const end = start + clipDuration(c);
+      if (ot < start || ot >= end) return;
+      active.add(c.id);
+      let player = musicPlayers.find((p) => p.id === c.id);
+      if (!player) {
+        const audio = new Audio("/asset/" + c.asset_id);
+        audio.volume = dbToLinear((c.gain_db != null ? c.gain_db : -18) + (c.duck ? -8 : 0));
+        player = { id: c.id, audio };
+        musicPlayers.push(player);
+      }
+      const srcT = (c.in || 0) + (ot - start);
+      if (Math.abs((player.audio.currentTime || 0) - srcT) > 0.4) {
+        try { player.audio.currentTime = Math.max(0, srcT); } catch (e) {}
+      }
+      if (player.audio.paused) player.audio.play().catch(() => {});
+    });
+    musicPlayers.forEach((p) => {
+      if (!active.has(p.id) && !p.audio.paused) {
+        try { p.audio.pause(); } catch (e) {}
+      }
+    });
+  }
+
+  async function playSequencePreview() {
+    if (seqPreview && seqPreview.running) {
+      seqPreview.cancel();
       return;
     }
-    const c = findClip(selected.track, selected.id);
-    if (!c) return;
-    if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
-    else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
-    else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one clip to the Main track first.");
+      return;
+    }
+    const v = $("tlPreviewVideo");
+    const btn = $("tlPlaySeqBtn");
+    if (!v) return;
+    let cancelled = false;
+    seqPreview = {
+      running: true,
+      cancel: () => { cancelled = true; try { v.pause(); } catch (e) {} stopMusicPreview(); },
+    };
+    if (btn) btn.textContent = "⏹ Stop";
+    setRenderStatus("Previewing cut (keep-ranges + grades/music)…");
+    previewingOutput = false;
+    v.closest(".tl-preview").classList.add("has-video");
+
+    const waitEvent = (el, ev, timeoutMs) => new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; el.removeEventListener(ev, finish); resolve(); };
+      el.addEventListener(ev, finish);
+      if (timeoutMs) setTimeout(finish, timeoutMs);
+    });
+
+    try {
+      for (let i = 0; i < tl.tracks.main.length; i++) {
+        if (cancelled) break;
+        const c = tl.tracks.main[i];
+        if (!c.source_job_id) continue;
+        selected = { track: "main", id: c.id };
+        setLeftTab("transcript");
+        renderTranscript(c);
+        applyLiveGrade(c);
+        const src = "/raw-upload/" + c.source_job_id;
+        if (v.getAttribute("src") !== src) {
+          v.src = src;
+          await waitEvent(v, "loadedmetadata", 8000);
+        }
+        // Fade in after soft dissolve from previous clip.
+        v.style.opacity = "0";
+        const fadeInSteps = 5;
+        for (let s = 1; s <= fadeInSteps; s++) {
+          if (cancelled) break;
+          v.style.opacity = String(s / fadeInSteps);
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        v.style.opacity = "1";
+        if (cancelled) break;
+        const ranges = keepRangesForClip(c);
+        const baseOut = mainStart(i);
+        let played = 0;
+        for (let r = 0; r < ranges.length; r++) {
+          if (cancelled) break;
+          const [start, end] = ranges[r];
+          try { v.currentTime = start; } catch (e) {}
+          await waitEvent(v, "seeked", 2000);
+          if (cancelled) break;
+          v.play().catch(() => {});
+          await new Promise((resolve) => {
+            const onTime = () => {
+              const srcT = v.currentTime || 0;
+              const ot = baseOut + played + Math.max(0, srcT - start);
+              const ph = $("tlPlayhead");
+              if (ph) { ph.style.display = "block"; ph.style.left = (70 + 8 + ot * PPS) + "px"; }
+              const lab = $("tlPlayheadTime");
+              if (lab) lab.textContent = fmtTime(ot);
+              highlightTranscriptAt(srcT);
+              syncMusicAt(ot);
+              updateLiveCaptions(ot);
+              if (typeof updateStageCompositor === "function") updateStageCompositor();
+              if (cancelled || v.ended || srcT >= end - 0.03) {
+                v.removeEventListener("timeupdate", onTime);
+                try { v.pause(); } catch (e) {}
+                played += Math.max(0, end - start);
+                resolve();
+              }
+            };
+            v.addEventListener("timeupdate", onTime);
+          });
+        }
+        // Soft opacity dissolve into the next Main clip (approx — not ffmpeg xfade).
+        // Longer (~0.45s) when the outgoing clip has a fade-style transition.
+        if (!cancelled && i < tl.tracks.main.length - 1) {
+          const tr = (c.transition && c.transition.type) || c.transition || "";
+          const soft = /fade|dissolve/i.test(String(tr));
+          const steps = soft ? 12 : 7;
+          const stepMs = soft ? 40 : 35;
+          for (let s = 1; s <= steps; s++) {
+            if (cancelled) break;
+            v.style.opacity = String(1 - s / steps);
+            await new Promise((r) => setTimeout(r, stepMs));
+          }
+          v.style.opacity = "0";
+        }
+      }
+    } finally {
+      stopMusicPreview();
+      if (v) {
+        v.style.filter = "";
+        v.style.opacity = "1";
+      }
+      seqPreview = null;
+      if (btn) btn.textContent = "▶ Preview cut";
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for exact xfade / captions burn");
+      renderTimeline();
+    }
+  }
+
+  // ---- Preview animation parity ----------------------------------------
+  // The renderer animates titles with ASS tags (app.py _tl_build_titles_ass):
+  // \fad(300,300) and, for slideup, \move(x, y+60, x, y, 0, 400). Mirror those
+  // exact numbers here so what plays in the preview is what gets burned in.
+  const FADE_MS = 300;
+  const SLIDE_MS = 400;
+  const SLIDE_PX = 60;   // in *output* pixels, as in the \move tag
+  const CANVAS_DIMS = {  // mirrors TIMELINE_CANVASES in app.py
+    "9x16": [1080, 1920], "16x9": [1920, 1080],
+    "1x1": [1080, 1080], "4x5": [1080, 1350],
+  };
+
+  // Titles currently on screen, so the rAF loop can animate them in place
+  // instead of rebuilding the layer (rebuilding would restart overlay <video>
+  // playback and re-request every <img> each frame).
+  let animEntries = [];
+  let ovEntries = [];
+  let visSig = null;
+  let rafId = null;
+  let liveCaptionEl = null;
+
+  // Keep B-roll <video> overlays running with the main preview. Only correct
+  // the time on real drift — reassigning currentTime every frame re-seeks the
+  // decoder and makes the overlay stutter.
+  function syncOverlayVideos(ot, playing) {
+    for (const o of ovEntries) {
+      const want = o.srcIn + Math.max(0, ot - o.start);
+      if (Math.abs((o.el.currentTime || 0) - want) > 0.30) {
+        try { o.el.currentTime = want; } catch (e) {}
+      }
+      if (playing && o.el.paused) { o.el.play().catch(() => {}); }
+      else if (!playing && !o.el.paused) { o.el.pause(); }
+    }
+  }
+
+  // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
+  // The renderer snaps to the peak on the hit and eases out on a cubic, so the
+  // preview has to use the same numbers or the move previews wrong.
+  const PUNCH_PEAK = { low: 1.15, med: 1.25, high: 1.40, strong: 1.40 };
+  const PUNCH_DECAY = 0.45;
+
+  function punchScaleAt(cfg, tRel) {
+    const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
+    const amp = peak - 1;
+    if (amp <= 0) return 1;
+    const hit = Math.max(0, Number(cfg.hit) || 0);
+    if (tRel < hit) return 1;
+    const decay = Math.max(0.05, Number(cfg.decay) || PUNCH_DECAY);
+    const u = Math.min(1, Math.max(0, (tRel - hit) / decay));
+    return 1 + amp * Math.pow(1 - u, 3);
+  }
+
+  // Mirrors _KENBURNS_INTENSITY in app.py — slow zoom ramp over the clip.
+  const KENBURNS_AMOUNT = { low: 0.12, med: 0.22, high: 0.35 };
+
+  function kenBurnsScaleAt(kb, tRel, dur) {
+    if (!kb || !kb.enabled) return 1;
+    const amount = KENBURNS_AMOUNT[kb.intensity] || KENBURNS_AMOUNT.med;
+    const u = Math.min(1, Math.max(0, tRel / Math.max(0.05, dur)));
+    if ((kb.direction || "in") === "out") return (1 + amount) - amount * u;
+    return 1 + amount * u;
+  }
+
+  // Runs every frame so punch + Ken Burns animate; compose both scales.
+  function applyPunchZoom(v, ot) {
+    if (!v || !tl) return;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      const start = mainStart(i);
+      const dur = clipDuration(c);
+      if (ot < start || ot >= start + dur) continue;
+      const tRel = ot - start;
+      let scale = kenBurnsScaleAt(c.ken_burns, tRel, dur);
+      const pz = c.punch_zoom;
+      if (pz && pz.enabled) scale *= punchScaleAt(pz, tRel);
+      const a = (pz && pz.anchor) || {};
+      const ax = Math.min(1, Math.max(0, Number(a.x != null ? a.x : 0.5)));
+      const ay = Math.min(1, Math.max(0, Number(a.y != null ? a.y : 0.5)));
+      v.style.transformOrigin = `${(ax * 100).toFixed(2)}% ${(ay * 100).toFixed(2)}%`;
+      if (Math.abs(scale - 1) > 0.001) {
+        v.style.transform = `scale(${scale.toFixed(4)})`;
+      } else {
+        v.style.transform = "";
+        v.style.transformOrigin = "";
+      }
+      return;
+    }
+    v.style.transform = "";
+    v.style.transformOrigin = "";
+  }
+
+  function outputHeight() {
+    const d = CANVAS_DIMS[(tl && tl.canvas) || "9x16"] || CANVAS_DIMS["9x16"];
+    return d[1];
+  }
+
+  // Which items are on screen at `ot`. When this changes the layer needs a
+  // structural rebuild; while it holds steady we only touch styles.
+  function visibleSignature(ot) {
+    if (!tl) return "";
+    const ids = [];
+    const scan = (arr) => (arr || []).forEach((it) => {
+      const s = it.start || 0;
+      if (ot >= s && ot <= s + clipDuration(it)) ids.push(it.id);
+    });
+    scan(tl.tracks.text);
+    scan(tl.tracks.overlay);
+    let mainId = "";
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const s = mainStart(i);
+      if (ot >= s && ot < s + clipDuration(tl.tracks.main[i])) {
+        mainId = tl.tracks.main[i].id; break;
+      }
+    }
+    return ids.join(",") + "|" + mainId + "|" + (selected ? selected.id : "");
+  }
+
+  function applyTitleAnim(entry, ot) {
+    const t = ot - entry.start;                  // seconds since it appeared
+    const remain = (entry.start + entry.dur) - ot;
+    let opacity = 1, dy = 0;
+
+    if (entry.anim !== "none") {
+      const fade = FADE_MS / 1000;
+      if (t < fade) opacity = t / fade;
+      else if (remain < fade) opacity = remain / fade;
+      opacity = Math.max(0, Math.min(1, opacity));
+    }
+    if (entry.anim === "slideup") {
+      const slide = SLIDE_MS / 1000;
+      if (t < slide) dy = SLIDE_PX * (1 - Math.max(0, Math.min(1, t / slide)));
+    }
+
+    entry.el.style.opacity = opacity;
+    // Scale the output-space slide into stage pixels so it reads the same at
+    // any preview size.
+    const stagePx = dy * ((entry.el.parentNode ? entry.el.parentNode.clientHeight : 0) || 640) / outputHeight();
+    entry.el.style.transform = assAnchorTransform(entry.align) +
+      (stagePx ? ` translateY(${stagePx.toFixed(2)}px)` : "");
+  }
+
+  // Drive the preview from requestAnimationFrame while the video plays.
+  // `timeupdate` only fires ~4x/second, which is why placed elements used to
+  // lag and stutter behind the picture. Editing stays live: dragging updates
+  // the model and the next frame reflects it, with nothing paused.
+  function activeMainAt(ot) {
+    if (!tl) return null;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const start = mainStart(i);
+      const dur = clipDuration(tl.tracks.main[i]);
+      if (ot >= start && ot < start + dur) return tl.tracks.main[i];
+    }
+    return null;
+  }
+
+  function previewFrame() {
+    const v = $("tlPreviewVideo");
+    if (!v || !tl) { rafId = null; return; }
+
+    let ot = playheadOutputTime();
+    if (ot == null) ot = v.currentTime || 0;
+
+    const sig = visibleSignature(ot);
+    if (sig !== visSig) {
+      updateStageCompositor();          // items entered/left: rebuild
+    } else {
+      for (const e of animEntries) applyTitleAnim(e, ot);
+      // Caption text changes every word — refresh karaoke layer cheaply.
+      updateLiveCaptions(ot);
+    }
+    const active = activeMainAt(ot);
+    if (!(seqPreview && seqPreview.running)) applyLiveGrade(active);
+    applyPunchZoom(v, ot);   // must run every frame, not only on rebuild
+    syncOverlayVideos(ot, !v.paused && !v.ended);
+    updatePlayhead();
+    if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
+
+    rafId = (!v.paused && !v.ended) ? requestAnimationFrame(previewFrame) : null;
+  }
+
+  function startPreviewLoop() {
+    if (rafId == null) rafId = requestAnimationFrame(previewFrame);
+  }
+  function stopPreviewLoop() {
+    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
+  // ---- Live preview boxes (drag to position titles / overlays / logo) ----
+  function updateStageCompositor() {
+    const layer = $("tlOverlayLayer");
+    const v = $("tlPreviewVideo");
+    if (!layer || !tl || !v) return;
+
+    if (boxDrag) return;
+
+    layer.innerHTML = "";
+    animEntries = [];
+    ovEntries = [];
+
+    let ot = playheadOutputTime();
+    if (ot == null) ot = v.currentTime || 0;
+    visSig = visibleSignature(ot);
+
+    const activeMainClip = activeMainAt(ot);
+    if (!(seqPreview && seqPreview.running)) applyLiveGrade(activeMainClip);
+
+    applyPunchZoom(v, ot);
+
+    const stHeight = layer.clientHeight || 640;
+
+    tl.tracks.text.forEach(item => {
+      const start = item.start || 0;
+      const dur = clipDuration(item);
+      if (ot >= start && ot <= start + dur) {
+        const el = document.createElement("div");
+        el.style.position = "absolute";
+        el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+        el.style.top = (item.y != null ? item.y : 0.85) * 100 + "%";
+        el.style.transform = assAnchorTransform(item.align);
+        el.style.textAlign = item.align === 1 ? "left" : (item.align === 3 ? "right" : "center");
+        el.style.color = item.color || "#FFFFFF";
+        el.style.fontFamily = item.font || "Anton";
+        el.style.fontWeight = item.bold ? "bold" : "normal";
+        el.style.fontSize = ((item.size || 56) / 1000 * stHeight) + "px";
+        el.style.whiteSpace = "pre-wrap";
+        el.style.pointerEvents = "none";
+        
+        if (item.bg_enabled) {
+           const bg = document.createElement("div");
+           bg.style.position = "absolute";
+           bg.style.inset = "0";
+           bg.style.backgroundColor = item.bg_color || "#000000";
+           bg.style.opacity = item.bg_opacity != null ? item.bg_opacity : 0.55;
+           bg.style.zIndex = "-1";
+           el.appendChild(bg);
+           
+           const txt = document.createElement("div");
+           txt.innerText = item.text || "Title";
+           txt.style.padding = "0.2em 0.4em";
+           el.appendChild(txt);
+        } else {
+           el.innerText = item.text || "Title";
+        }
+
+        layer.appendChild(el);
+        // Register for the rAF loop and apply this frame's state immediately,
+        // so a title that is mid-fade doesn't flash at full opacity on rebuild.
+        const entry = { el, start, dur, anim: item.anim || "fade", align: item.align };
+        animEntries.push(entry);
+        applyTitleAnim(entry, ot);
+      }
+    });
+
+    tl.tracks.overlay.forEach(item => {
+      const start = item.start || 0;
+      const dur = clipDuration(item);
+      if (ot >= start && ot <= start + dur) {
+        let el;
+        if (item.source_job_id) {
+          el = document.createElement("video");
+          el.src = "/raw-upload/" + item.source_job_id;
+          el.muted = true;
+          el.playsInline = true;
+          try { el.currentTime = Math.max(0, (ot - start) + (item.in || 0)); } catch (e) {}
+        } else {
+          el = document.createElement("img");
+          if (item.asset_id) el.src = "/asset/" + item.asset_id;
+          else if (item.src) el.src = item.src;
+        }
+        el.style.position = "absolute";
+        el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+        el.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
+        el.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
+        el.style.opacity = item.opacity != null ? item.opacity : 1.0;
+        el.style.objectFit = "cover";
+        el.style.pointerEvents = "auto";
+        el.style.cursor = "move";
+        
+        el.addEventListener("pointerdown", (e) => {
+          selectClip("overlay", item.id);
+          startBoxDrag(e, "overlay", item, el);
+        });
+
+        layer.appendChild(el);
+        // B-roll video: the layer is no longer rebuilt every frame, so keep the
+        // element playing in step with the main preview instead of freezing on
+        // the frame it was created at.
+        if (el.tagName === "VIDEO") {
+          ovEntries.push({ el, start, srcIn: item.in || 0 });
+        }
+      }
+    });
+
+    if (tl.logo && tl.logo.asset_id) {
+      const lg = tl.logo;
+      const el = document.createElement("img");
+      el.style.position = "absolute";
+      el.style.left = (lg.x != null ? lg.x : 0.04) * 100 + "%";
+      el.style.top = (lg.y != null ? lg.y : 0.04) * 100 + "%";
+      el.style.width = (lg.w != null ? lg.w : 0.18) * 100 + "%";
+      el.style.opacity = lg.opacity != null ? lg.opacity : 0.9;
+      el.style.pointerEvents = "auto";
+      el.style.cursor = "move";
+      el.src = "/asset/" + lg.asset_id;
+
+      el.addEventListener("pointerdown", (e) => {
+        startBoxDrag(e, "logo", lg, el);
+      });
+
+      layer.appendChild(el);
+    }
+
+    // Render interactive bounding boxes & resize handles for selected elements
+    if (selected) {
+      const c = findClip(selected.track, selected.id);
+      if (c) {
+        if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
+        else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
+        else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c);
+      }
+    }
+
+    // Karaoke caption approx from the open transcript + branding style.
+    liveCaptionEl = null;
+    updateLiveCaptions(ot);
+  }
+
+  function sourceTimeFromKeepRanges(ot, clip) {
+    const idx = tl.tracks.main.findIndex((c) => c.id === clip.id);
+    if (idx < 0) return null;
+    let local = ot - mainStart(idx);
+    const ranges = keepRangesForClip(clip);
+    let played = 0;
+    for (let r = 0; r < ranges.length; r++) {
+      const [a, b] = ranges[r];
+      const d = Math.max(0, b - a);
+      if (local <= played + d + 0.001) return a + Math.max(0, local - played);
+      played += d;
+    }
+    return null;
+  }
+
+  function updateLiveCaptions(ot) {
+    const layer = $("tlOverlayLayer");
+    if (!layer || !tl) return;
+    if (!liveCaptionEl || !liveCaptionEl.isConnected) {
+      liveCaptionEl = document.createElement("div");
+      liveCaptionEl.id = "tlLiveCaptions";
+      layer.appendChild(liveCaptionEl);
+    }
+    const clip = activeMainAt(ot);
+    if (!clip || clip.burn_captions === false || !transcriptWords || !transcriptWords.length) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    let srcT = null;
+    if (previewingOutput || (seqPreview && seqPreview.running)) {
+      srcT = sourceTimeFromKeepRanges(ot, clip);
+    } else {
+      const v = $("tlPreviewVideo");
+      srcT = v ? (v.currentTime || 0) : null;
+    }
+    if (srcT == null) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    const style = tl.style || {};
+    const groupSize = Math.max(1, Math.min(5, Number(style.group_size) || 3));
+    let wi = -1;
+    for (let i = 0; i < transcriptWords.length; i++) {
+      const w = transcriptWords[i];
+      const a = Number(w.start || 0);
+      const b = Number(w.end || a);
+      if (srcT >= a && srcT <= b + 0.08) { wi = i; break; }
+    }
+    if (wi < 0) {
+      for (let i = transcriptWords.length - 1; i >= 0; i--) {
+        if (Number(transcriptWords[i].start || 0) <= srcT) { wi = i; break; }
+      }
+    }
+    if (wi < 0) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    // Hide when the active word is outside this clip's keep-ranges.
+    const ranges = keepRangesForClip(clip);
+    const wordMid = (Number(transcriptWords[wi].start || 0) + Number(transcriptWords[wi].end || 0)) / 2;
+    if (!ranges.some(([a, b]) => wordMid >= a && wordMid <= b)) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    const g0 = Math.floor(wi / groupSize) * groupSize;
+    const group = transcriptWords.slice(g0, g0 + groupSize);
+    const primary = style.primary_color || "#FFFFFF";
+    const highlight = style.highlight_color || "#FFE566";
+    const font = style.font_name || "Anton";
+    const size = Number(style.font_size) || 64;
+    const posY = (style.position_y != null ? Number(style.position_y) : 75) / 100;
+    const stHeight = layer.clientHeight || 640;
+    const sc = tl.speaker_colors || style.speaker_colors || {};
+    liveCaptionEl.style.cssText =
+      `position:absolute;left:50%;top:${posY * 100}%;transform:translate(-50%,-50%);` +
+      `pointer-events:none;text-align:center;z-index:6;font-family:"${font}",sans-serif;` +
+      `font-weight:800;font-size:${(size / 1000) * stHeight}px;line-height:1.15;` +
+      `text-shadow:0 2px 8px rgba(0,0,0,.8);width:92%;display:block`;
+    liveCaptionEl.innerHTML = group.map((w, j) => {
+      const idx = g0 + j;
+      let col = idx === wi ? highlight : primary;
+      // Optional speaker tint for non-active words when branding is applied.
+      if (idx !== wi && sc.SPEAKER_00 && w.speaker === "SPEAKER_00") col = sc.SPEAKER_00;
+      if (idx !== wi && sc.SPEAKER_01 && w.speaker === "SPEAKER_01") col = sc.SPEAKER_01;
+      let t = String(w.word || "").replace(/[<>&]/g, "");
+      if (style.all_caps) t = t.toUpperCase();
+      return `<span style="color:${col};margin:0 .12em">${t}</span>`;
+    }).join("");
+  }
+
+  // libass anchors a title at its numpad-alignment point, not its centre: with
+  // the default \an2 the stored (x, y) is the text's bottom-centre. The preview
+  // used a fixed translate(-50%, -50%), so titles previewed half a text-height
+  // above where they rendered (and half a box-width off for left/right aligns).
+  // Map the alignment to the matching CSS transform so both agree.
+  function assAnchorTransform(align) {
+    const a = (align >= 1 && align <= 9) ? align : 2;
+    const col = (a - 1) % 3;             // 0 left, 1 centre, 2 right
+    const row = Math.floor((a - 1) / 3); // 0 bottom, 1 middle, 2 top
+    const tx = col === 0 ? "0%" : (col === 1 ? "-50%" : "-100%");
+    const ty = row === 0 ? "-100%" : (row === 1 ? "-50%" : "0%");
+    return `translate(${tx}, ${ty})`;
   }
 
   function addPreviewBox(kind, obj, labelText) {
@@ -658,6 +1337,8 @@
       box.className = "tl-pbox title";
       box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
       box.style.top = (obj.y != null ? obj.y : 0.85) * 100 + "%";
+      // Override the stylesheet's fixed centre transform to match libass.
+      box.style.transform = assAnchorTransform(obj.align);
       box.textContent = labelText;
     } else {
       box.className = "tl-pbox";
@@ -730,14 +1411,19 @@
     if (!v) return;
     const upd = () => {
       updatePlayhead();
+      updateStageCompositor();
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
-    v.addEventListener("timeupdate", upd);
+    // timeupdate stays as a coarse fallback (~4 Hz) for browsers that throttle
+    // rAF in background tabs; the rAF loop is what drives smooth playback.
+    v.addEventListener("timeupdate", () => { if (rafId == null) upd(); });
     v.addEventListener("loadedmetadata", upd);
     v.addEventListener("seeked", upd);
-    v.addEventListener("play", upd);
-    v.addEventListener("pause", upd);
+    v.addEventListener("play", () => { upd(); startPreviewLoop(); });
+    v.addEventListener("playing", startPreviewLoop);
+    v.addEventListener("pause", () => { stopPreviewLoop(); upd(); });
+    v.addEventListener("ended", () => { stopPreviewLoop(); upd(); });
   }
 
   function findClip(track, id) {
@@ -749,7 +1435,7 @@
     if (!wrap) return;
     if (!selected) {
       renderProjectProps(wrap);
-      renderPreviewBoxes();
+      updateStageCompositor();
       return;
     }
     const c = findClip(selected.track, selected.id);
@@ -776,7 +1462,9 @@
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity, 0, 1, 0.05)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
-      html += propRange("w", "Size (width %)", c.w, 0.05, 1, 0.01);
+      html += propRange("w", "Size (width %)", c.w, 0.05, 2.0, 0.01);
+      const fitOpts = [["cover", "Cover / Crop Fill"], ["contain", "Contain / Fit Aspect"], ["fill", "Stretch / Custom Box"]];
+      html += propSelect("fit", "Crop & Fit Mode", c.fit || "cover", fitOpts);
     } else { // main
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
@@ -791,12 +1479,35 @@
       html += `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
       html += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
 
+      // --- AI effect placement ---
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">✨ AI camera moves</label>`;
+      html += `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
+      html += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes push-ins and drifts timed to the line. Applying one splits the clip so the move covers only that moment.</p>`;
+      html += `<div id="tlFxList" style="margin-top:8px"></div>`;
+
+      // --- Active Speaker Reframe (per clip) ---
+      const ref = c.reframe || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">📱 9:16 Active Speaker Reframe</label>`;
+      html += propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
+      if (ref.enabled) {
+        const pOpts = [["active", "Active Speaker"], ["left", "Left Person"], ["right", "Right Person"], ["full", "Wide Shot"]];
+        html += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
+      }
+
       // --- Ken Burns (per clip) ---
       const kb = c.ken_burns || {};
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (motion)</label>`;
       html += propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
       if (kb.enabled) {
         html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+      }
+
+      // --- Punch Zoom (per clip) ---
+      const pz = c.punch_zoom || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⚡ Punch Zoom</label>`;
+      html += propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
+      if (pz.enabled) {
+        html += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
       }
 
       // --- Split-screen (per clip) ---
@@ -832,7 +1543,7 @@
         renderProps(); renderTracks(); scheduleSave();
       };
     });
-    renderPreviewBoxes();
+    updateStageCompositor();
   }
 
   const COLOR_PRESETS = [
@@ -860,6 +1571,14 @@
       html += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
       html += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
     }
+    const sc = tl.speaker_colors || {};
+    const hb = tl.headline_banner;
+    const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
+    html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>.</p>`;
+    html += `<div class="tl-prop-grid"><label>Host <input type="color" data-key="__sc0" value="${sc.SPEAKER_00 || "#FFD700"}"></label>`;
+    html += `<label>Guest <input type="color" data-key="__sc1" value="${sc.SPEAKER_01 || "#00E5FF"}"></label></div>`;
+    html += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
     wrap.innerHTML = html;
 
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
@@ -870,6 +1589,14 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
+        } else if (key === "__sc0" || key === "__sc1") {
+          tl.speaker_colors = tl.speaker_colors || {};
+          if (key === "__sc0") tl.speaker_colors.SPEAKER_00 = inp.value;
+          else tl.speaker_colors.SPEAKER_01 = inp.value;
+        } else if (key === "__headline") {
+          const t = inp.value.trim();
+          tl.headline_banner = t ? { text: t } : null;
+          if (tl.style) tl.style.headline_banner = t;
         } else {
           if (!tl.logo) return;
           const field = key.replace("__logo_", "");
@@ -877,6 +1604,7 @@
           const outSpan = wrap.querySelector(`[data-out="${key}"]`);
           if (outSpan) outSpan.textContent = (+inp.value).toFixed(2);
         }
+        updateStageCompositor();
         scheduleSave();
       });
     });
@@ -950,6 +1678,7 @@
         // focused control isn't torn out mid-edit.
         const structural = inp.type === "checkbox" || inp.tagName === "SELECT";
         if (structural) renderTimeline(); else renderTracks();
+        updateStageCompositor();
         scheduleSave();
       };
       inp.addEventListener(inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input", handler);
@@ -970,6 +1699,115 @@
       c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
       renderTimeline(); scheduleSave();
     };
+    const sfx = wrap.querySelector('[data-act="suggestfx"]');
+    if (sfx) sfx.onclick = () => suggestEffectsFor(c, sfx);
+  }
+
+  // ---- AI camera moves -------------------------------------------------
+  const FX_LABEL = {
+    punch_zoom: "🔍 Punch zoom",
+    ken_burns: "🎞 Ken Burns",
+    split_screen: "⬓ Split screen",
+  };
+
+  async function suggestEffectsFor(clip, btn) {
+    const list = $("tlFxList");
+    if (!clip.source_job_id) {
+      if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem">This clip has no transcribed source to read.</p>`;
+      return;
+    }
+    btn.disabled = true;
+    if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem">Reading the transcript…</p>`;
+    try {
+      const res = await fetch("/suggest-effects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: clip.source_job_id, max_effects: 6 }),
+      });
+      // A Flask error/404 page is HTML, and res.json() then fails on "<" with
+      // a parse error that says nothing about what went wrong.
+      if (!(res.headers.get("content-type") || "").includes("application/json")) {
+        throw new Error(res.status === 404
+          ? "The server doesn't have /suggest-effects — restart the app after pulling."
+          : `Server returned ${res.status} instead of JSON.`);
+      }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      // Suggestions are in source time; only those inside this clip's trim can
+      // be applied to it.
+      const cin = clip.in || 0, cout = clip.out || 0;
+      const usable = (data.effects || []).filter(
+        (e) => e.start_time >= cin - 0.01 && e.end_time <= cout + 0.01
+      );
+      renderFxSuggestions(clip, data.effects || [], usable);
+    } catch (e) {
+      if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem;color:#ff8a8a">${e.message}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderFxSuggestions(clip, all, usable) {
+    const list = $("tlFxList");
+    if (!list) return;
+    if (!all.length) {
+      list.innerHTML = `<p class="muted" style="font-size:.72rem">No moments stood out — the transcript may be too short.</p>`;
+      return;
+    }
+    const outside = all.length - usable.length;
+    let html = "";
+    usable.forEach((e, i) => {
+      const dur = (e.end_time - e.start_time).toFixed(1);
+      html += `<div class="tl-fx-sug" style="border:1px solid #2c3240;border-radius:8px;padding:8px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:6px;justify-content:space-between">
+          <strong style="font-size:.78rem">${FX_LABEL[e.type] || e.type}</strong>
+          <span class="muted" style="font-size:.7rem">${e.start_time.toFixed(1)}s · ${dur}s</span>
+        </div>
+        ${e.quote ? `<p class="muted" style="font-size:.7rem;margin:4px 0 0">“${e.quote}”</p>` : ""}
+        <p class="muted" style="font-size:.7rem;margin:4px 0 6px">${e.reason || ""}</p>
+        <button class="btn btn-secondary" data-fx="${i}" style="font-size:.74rem;padding:3px 8px">Apply</button>
+      </div>`;
+    });
+    if (outside) {
+      html += `<p class="muted" style="font-size:.7rem">${outside} more fall outside this clip's trim.</p>`;
+    }
+    list.innerHTML = html;
+    list.querySelectorAll("[data-fx]").forEach((b) => {
+      b.onclick = () => applyEffectSuggestion(clip, usable[parseInt(b.dataset.fx, 10)]);
+    });
+  }
+
+  // Effects are stored per clip, so a timed suggestion becomes: cut the clip at
+  // the effect's boundaries and switch the effect on for the middle piece only.
+  function applyEffectSuggestion(clip, fx) {
+    if (!fx) return;
+    const idx = tl.tracks.main.findIndex((m) => m.id === clip.id);
+    if (idx < 0) return;
+
+    const pieces = [];
+    const head = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: clip.in || 0, out: fx.start_time };
+    const mid = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: fx.start_time, out: fx.end_time };
+    const tail = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: fx.end_time, out: clip.out };
+
+    // A boundary sitting on the clip edge produces an empty piece — drop it.
+    if (head.out - head.in > 0.05) pieces.push(head);
+    mid.transition = head.out - head.in > 0.05 ? null : mid.transition;  // internal cuts are hard
+    if (fx.type === "punch_zoom") {
+      mid.punch_zoom = { enabled: true, intensity: fx.intensity || "med" };
+      if (fx.anchor) mid.punch_zoom.anchor = fx.anchor;   // push toward the face
+    } else if (fx.type === "ken_burns") {
+      mid.ken_burns = { enabled: true, intensity: fx.intensity || "med", direction: fx.direction || "in" };
+    } else if (fx.type === "split_screen") {
+      mid.split = Object.assign({}, mid.split, { enabled: true });
+    }
+    pieces.push(mid);
+    if (tail.out - tail.in > 0.05) { tail.transition = null; pieces.push(tail); }
+
+    tl.tracks.main.splice(idx, 1, ...pieces);
+    selectClip("main", mid.id);
+    renderTimeline();
+    scheduleSave();
   }
 
   // ---- Text-based editing: strike out words to cut them from the clip ----
@@ -1170,6 +2008,22 @@
       fps: d.fps || 30,
       bg: d.bg || "#000000",
       logo: d.logo || null,
+      style: d.style || null,
+      speaker_colors: (() => {
+        const sc = d.speaker_colors || {};
+        return {
+          SPEAKER_00: sc.SPEAKER_00 || sc.Host || "#FFD700",
+          SPEAKER_01: sc.SPEAKER_01 || sc.Guest || "#00E5FF",
+          ...sc,
+        };
+      })(),
+      headline_banner: d.headline_banner || null,
+      track_states: d.track_states || {
+        main: { mute: false, solo: false, lock: false },
+        overlay: { mute: false, solo: false, lock: false },
+        text: { mute: false, solo: false, lock: false },
+        music: { mute: false, solo: false, lock: false },
+      },
       tracks: {
         main: (d.tracks && d.tracks.main) || [],
         overlay: (d.tracks && d.tracks.overlay) || [],
@@ -1290,6 +2144,66 @@
     else console.warn("[timeline] missing element:", id, "(stale index.html? hard-refresh)");
   }
 
+  // ---- Clipboard & Copy / Paste / Duplicate ----
+  let tlClipboard = null; // { track, data }
+
+  function copySelectedClip() {
+    if (!selected || !tl) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    tlClipboard = { track: selected.track, data: JSON.parse(JSON.stringify(c)) };
+    setSaveState("Copied clip");
+    if (window.StudioLogger) StudioLogger.clip("copied", `${selected.track}:${selected.id}`);
+  }
+
+  function pasteClip() {
+    if (!tlClipboard || !tl) return;
+    const track = tlClipboard.track;
+    const c = JSON.parse(JSON.stringify(tlClipboard.data));
+    c.id = uid();
+
+    // Paste position: at playhead time
+    const v = $("tlPreviewVideo");
+    const pTime = v ? (v.currentTime || 0) : 0;
+
+    if (track === "main") {
+      tl.tracks.main.push(c);
+    } else {
+      c.start = pTime;
+      reanchor(c);
+      tl.tracks[track].push(c);
+    }
+
+    selectClip(track, c.id);
+    renderTimeline();
+    scheduleSave();
+    if (window.StudioLogger) StudioLogger.clip("pasted", `${track}:${c.id}`);
+  }
+
+  function duplicateSelectedClip() {
+    if (!selected || !tl) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    const track = selected.track;
+    const dup = JSON.parse(JSON.stringify(c));
+    dup.id = uid();
+
+    if (track === "main") {
+      const idx = tl.tracks.main.findIndex((m) => m.id === selected.id);
+      if (idx >= 0) tl.tracks.main.splice(idx + 1, 0, dup);
+      else tl.tracks.main.push(dup);
+    } else {
+      dup.start = (c.start || 0) + clipDuration(c) + 0.3;
+      reanchor(dup);
+      tl.tracks[track].push(dup);
+    }
+
+    selectClip(track, dup.id);
+    renderTimeline();
+    scheduleSave();
+    if (window.StudioLogger) StudioLogger.clip("duplicated", `${track}:${dup.id}`);
+  }
+
   // ---- Init (lazy, when the Editor tab is first opened) ----
   async function ensureInit() {
     if (initialized) {
@@ -1303,18 +2217,66 @@
       on("tlNewBtn", "onclick", newProject);
       on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
       on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
-      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); renderPreviewBoxes(); scheduleSave(); } });
+      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
       on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
       on("tlRenderBtn", "onclick", renderTimelineVideo);
       on("tlAddTitleBtn", "onclick", () => addTitle());
-      on("tlProjectBtn", "onclick", () => { selected = null; renderTimeline(); });
-      on("tlAssetBtn", "onclick", () => { const f = $("tlAssetFile"); if (f) f.click(); });
-      on("tlAssetFile", "onchange", (e) => { if (e.target.files[0]) uploadAsset(e.target.files[0]); e.target.value = ""; });
-      on("tlSplitBtn", "onclick", splitAtPlayhead);
+      on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
+      on("tlSplitBtn", "onclick", () => splitAtPlayhead());
+      on("tlCopyBtn", "onclick", () => copySelectedClip());
+      on("tlPasteBtn", "onclick", () => pasteClip());
+      on("tlDupBtn", "onclick", () => duplicateSelectedClip());
       on("tlZoomIn", "onclick", () => setZoom(4));
       on("tlZoomOut", "onclick", () => setZoom(-4));
-      document.querySelectorAll(".tl-lefttab").forEach((b) =>
-        b.onclick = () => setLeftTab(b.dataset.ltab));
+      // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
+      document.addEventListener("keydown", (e) => {
+        // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
+        const isEditorTab = document.querySelector('.main-tab.active[data-tab="editor"]');
+        if (!isEditorTab || !tl) return;
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+        if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+
+        const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+        if (isCmdOrCtrl && e.key.toLowerCase() === "c") {
+          e.preventDefault(); copySelectedClip();
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "x") {
+          if (selected) {
+            e.preventDefault();
+            copySelectedClip();
+            deleteClip(selected.track, selected.id);
+            setSaveState("Cut clip");
+          }
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "v") {
+          e.preventDefault(); pasteClip();
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
+          e.preventDefault(); duplicateSelectedClip();
+        } else if (e.key === "Delete" || e.key === "Backspace") {
+          if (selected) {
+            e.preventDefault();
+            deleteClip(selected.track, selected.id);
+          }
+        }
+      });
+
+      // Click / scrub anywhere on ruler to seek playhead
+      const ruler = $("tlRuler");
+      if (ruler) {
+        ruler.addEventListener("pointerdown", (e) => {
+          const rect = ruler.getBoundingClientRect();
+          const clickX = e.clientX - rect.left;
+          const t = Math.max(0, clickX / PPS);
+          const v = $("tlPreviewVideo");
+          if (v) v.currentTime = t;
+          updatePlayhead();
+          updateStageCompositor();
+        });
+      }
+
+      on("tlProjectBtn", "onclick", () => {
+        // Logo / project panel — clear selection so renderProps shows project settings.
+        selected = null;
+        renderTimeline();
+      });
 
       const timeline = $("tlTimeline");
       if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
@@ -1346,21 +2308,95 @@
     console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
   }
 
-  // Hook the Editor tab button so we init on first open.
+  // Expose for setActiveTab("editor") — both header + main nav entry points.
+  window.ensureTimelineInit = ensureInit;
+
+  // Branding tab → Timeline: caption style, speaker colors, headline, logo.
+  window.applyTimelineBranding = function (style, opts) {
+    if (!tl) {
+      alert("Open or create a Timeline project first.");
+      return false;
+    }
+    style = style || {};
+    opts = opts || {};
+    tl.style = Object.assign({}, tl.style || {}, style);
+    const sc = style.speaker_colors || {};
+    tl.speaker_colors = {
+      SPEAKER_00: sc.SPEAKER_00 || sc.Host || "#FFD700",
+      SPEAKER_01: sc.SPEAKER_01 || sc.Guest || "#00E5FF",
+    };
+    const banner = style.headline_banner;
+    if (banner) tl.headline_banner = { text: String(banner) };
+    else if (banner === "") tl.headline_banner = null;
+    if (opts.logo && opts.logo.asset_id) {
+      tl.logo = Object.assign(
+        { x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 },
+        tl.logo || {},
+        opts.logo,
+      );
+    }
+    selected = null;
+    renderTimeline();
+    scheduleSave();
+    setSaveState("Branding applied ✓");
+    // Refresh media library so the new logo asset appears.
+    try { loadAssets(); } catch (e) {}
+    return true;
+  };
+
+  // Hook every Editor tab button (header workflow + mainTabs) so either works.
   document.addEventListener("DOMContentLoaded", () => {
-    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
-    if (tabBtn) tabBtn.addEventListener("click", ensureInit);
+    document.querySelectorAll('.main-tab[data-tab="editor"]').forEach((tabBtn) => {
+      tabBtn.addEventListener("click", ensureInit);
+    });
   });
 
-  // Expose an entry point so other parts of the app could open the editor
-  // seeded from a specific job in the future.
+  // Expose an entry point so Shorts / Assembly / Compilation can open the
+  // editor seeded from one job or a multi-clip queue.
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
-    const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
-    if (tabBtn) tabBtn.click();
+    if (typeof window.setActiveTab === "function") {
+      window.setActiveTab("editor");
+    } else {
+      const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
+      if (tabBtn) tabBtn.click();
+    }
     await ensureInit();
-    // Make sure this newly-added source is in the library list.
+
+    if (opts.newProject) {
+      await newProject();
+    }
+
+    const clips = Array.isArray(opts.clips) ? opts.clips : null;
+    if (clips && clips.length) {
+      if (!(await ensureProject())) return;
+      if (opts.replace) {
+        tl.tracks.main = [];
+        selected = null;
+      }
+      await loadSources();
+      for (const item of clips) {
+        const jid = item && (item.source_job_id || item.job_id);
+        if (!jid) continue;
+        const inS = item.start_time != null ? Number(item.start_time)
+          : (item.in != null ? Number(item.in) : null);
+        const outS = item.end_time != null ? Number(item.end_time)
+          : (item.out != null ? Number(item.out) : null);
+        await addMainClip(jid, inS, outS, { skipRender: true });
+      }
+      renderTimeline();
+      scheduleSave();
+      return;
+    }
+
+    // Single-job seed (Edit range / job row).
     if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
-    if (seedJobId && tl) await addMainClip(seedJobId, opts.in, opts.out);
+    if (seedJobId && tl) {
+      if (opts.replace) {
+        tl.tracks.main = [];
+        selected = null;
+      }
+      await addMainClip(seedJobId, opts.in, opts.out);
+    }
   };
 })();
