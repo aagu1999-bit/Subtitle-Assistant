@@ -184,20 +184,25 @@
             </div>
             <div class="row" id="speakerColorRow" style="align-items:center;gap:12px;padding:10px 14px;background:#181c28;border:1px solid #2a2f3a;border-radius:10px;margin-top:14px">
               <label style="font-weight:600;font-size:.85rem;white-space:nowrap">🎤 Speaker Colors</label>
-              <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-                <label style="display:flex;align-items:center;gap:6px;font-size:.84rem">
-                  👤 Host
-                  <input type="color" id="hostColor" value="#FFD700" style="width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer">
-                </label>
-                <label style="display:flex;align-items:center;gap:6px;font-size:.84rem">
-                  👤 Guest
-                  <input type="color" id="guestColor" value="#00E5FF" style="width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer">
-                </label>
+              <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;flex:1">
+                <div id="speakerColorPickers" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:.84rem">
+                    Host
+                    <input type="color" id="hostColor" data-speaker-color="SPEAKER_00" value="#FFD700" style="width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer">
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px;font-size:.84rem">
+                    Guest
+                    <input type="color" id="guestColor" data-speaker-color="SPEAKER_01" value="#00E5FF" style="width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer">
+                  </label>
+                </div>
                 <label style="display:flex;align-items:center;gap:6px;font-size:.82rem">
                   <input type="checkbox" id="speakerColorsEnabled" checked>
                   Enable per-speaker colors
                 </label>
               </div>
+              <p class="muted" style="width:100%;margin:6px 0 0;font-size:.72rem;line-height:1.4">
+                After Analyze, pickers expand for every detected speaker (3–6+). Colors tint Transcript Cut, captions, and Timeline.
+              </p>
             </div>
             <div class="section-title" style="margin-top:20px">⚡ Open-Source Pipeline</div>
             <div style="font-size:0.76rem;color:#94a3b8;line-height:1.6;background:rgba(30,41,59,0.4);padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">

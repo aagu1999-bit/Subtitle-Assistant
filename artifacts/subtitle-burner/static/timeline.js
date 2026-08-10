@@ -299,21 +299,41 @@
       Number(w.start) >= cs - 0.01 && Number(w.end) <= ce + 0.01);
   }
 
+  function _spkColor(sc, speaker) {
+    if (!speaker) return null;
+    if (sc[speaker]) return sc[speaker];
+    if (speaker === "SPEAKER_00" && sc.Host) return sc.Host;
+    if (speaker === "SPEAKER_01" && sc.Guest) return sc.Guest;
+    const m = /SPEAKER_(\d+)/i.exec(speaker);
+    if (!m) return null;
+    const palette = [
+      "#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770",
+      "#88c0d0", "#bf616a", "#5e81ac", "#ebcb8b", "#c084fc",
+    ];
+    return palette[parseInt(m[1], 10) % palette.length];
+  }
+
+  function _spkLabel(speaker) {
+    if (speaker === "SPEAKER_00") return "Host";
+    if (speaker === "SPEAKER_01") return "Guest";
+    const m = /SPEAKER_(\d+)/i.exec(speaker || "");
+    if (m) return "Speaker " + (parseInt(m[1], 10) + 1);
+    return speaker || "";
+  }
+
   function renderTranscriptWords(clip) {
     const doc = $("tlTranscriptDoc");
     if (!doc || !transcriptWords) return;
     doc.innerHTML = "";
     const sc = (tl && tl.speaker_colors) || {};
-    const hostC = sc.SPEAKER_00 || sc.Host || "#FFD700";
-    const guestC = sc.SPEAKER_01 || sc.Guest || "#00E5FF";
     transcriptWords.forEach((w) => {
       const sp = document.createElement("span");
       sp.className = "tl-tword" + (isWordCut(clip, w) ? " cut" : "");
       sp.textContent = w.word + " ";
       sp.dataset.start = w.start;
-      if (w.speaker === "SPEAKER_00") sp.style.color = hostC;
-      else if (w.speaker === "SPEAKER_01") sp.style.color = guestC;
-      if (w.speaker) sp.title = w.speaker === "SPEAKER_00" ? "Host" : (w.speaker === "SPEAKER_01" ? "Guest" : w.speaker);
+      const col = _spkColor(sc, w.speaker);
+      if (col) sp.style.color = col;
+      if (w.speaker) sp.title = _spkLabel(w.speaker);
       sp.onclick = () => toggleWordCut(clip, w);
       doc.appendChild(sp);
     });
@@ -1308,8 +1328,10 @@
       const idx = g0 + j;
       let col = idx === wi ? highlight : primary;
       // Optional speaker tint for non-active words when branding is applied.
-      if (idx !== wi && sc.SPEAKER_00 && w.speaker === "SPEAKER_00") col = sc.SPEAKER_00;
-      if (idx !== wi && sc.SPEAKER_01 && w.speaker === "SPEAKER_01") col = sc.SPEAKER_01;
+      if (idx !== wi && w.speaker) {
+        const scCol = _spkColor(sc, w.speaker);
+        if (scCol) col = scCol;
+      }
       let t = String(w.word || "").replace(/[<>&]/g, "");
       if (style.all_caps) t = t.toUpperCase();
       return `<span style="color:${col};margin:0 .12em">${t}</span>`;
@@ -1576,8 +1598,14 @@
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
     html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
     html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>.</p>`;
-    html += `<div class="tl-prop-grid"><label>Host <input type="color" data-key="__sc0" value="${sc.SPEAKER_00 || "#FFD700"}"></label>`;
-    html += `<label>Guest <input type="color" data-key="__sc1" value="${sc.SPEAKER_01 || "#00E5FF"}"></label></div>`;
+    const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
+    if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
+    html += `<div class="tl-prop-grid">`;
+    spkKeys.forEach((key) => {
+      const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
+      html += `<label>${label} <input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
+    });
+    html += `</div>`;
     html += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
     wrap.innerHTML = html;
 
@@ -1589,6 +1617,10 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
+        } else if (key && key.startsWith("__sc:")) {
+          const spk = key.slice(5);
+          tl.speaker_colors = tl.speaker_colors || {};
+          tl.speaker_colors[spk] = inp.value;
         } else if (key === "__sc0" || key === "__sc1") {
           tl.speaker_colors = tl.speaker_colors || {};
           if (key === "__sc0") tl.speaker_colors.SPEAKER_00 = inp.value;
@@ -2205,107 +2237,124 @@
   }
 
   // ---- Init (lazy, when the Editor tab is first opened) ----
-  async function ensureInit() {
+  let _initPromise = null;
+  let _skipAutoOpenOnce = false;
+
+  async function ensureInit(opts) {
+    opts = opts || {};
+    if (opts.skipAutoOpen) _skipAutoOpenOnce = true;
     if (initialized) {
       loadSources(); loadAssets(); loadProjects();
-      return;
+      return _initPromise || Promise.resolve();
     }
-    initialized = true;
-    console.log("[timeline] " + TL_BUILD + " initializing");
+    if (_initPromise) return _initPromise;
 
-    try {
-      on("tlNewBtn", "onclick", newProject);
-      on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
-      on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
-      on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
-      on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
-      on("tlRenderBtn", "onclick", renderTimelineVideo);
-      on("tlAddTitleBtn", "onclick", () => addTitle());
-      on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
-      on("tlSplitBtn", "onclick", () => splitAtPlayhead());
-      on("tlCopyBtn", "onclick", () => copySelectedClip());
-      on("tlPasteBtn", "onclick", () => pasteClip());
-      on("tlDupBtn", "onclick", () => duplicateSelectedClip());
-      on("tlZoomIn", "onclick", () => setZoom(4));
-      on("tlZoomOut", "onclick", () => setZoom(-4));
-      // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
-      document.addEventListener("keydown", (e) => {
-        // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
-        const isEditorTab = document.querySelector('.main-tab.active[data-tab="editor"]');
-        if (!isEditorTab || !tl) return;
-        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
-        if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+    _initPromise = (async () => {
+      initialized = true;
+      console.log("[timeline] " + TL_BUILD + " initializing");
 
-        const isCmdOrCtrl = e.metaKey || e.ctrlKey;
-        if (isCmdOrCtrl && e.key.toLowerCase() === "c") {
-          e.preventDefault(); copySelectedClip();
-        } else if (isCmdOrCtrl && e.key.toLowerCase() === "x") {
-          if (selected) {
-            e.preventDefault();
-            copySelectedClip();
-            deleteClip(selected.track, selected.id);
-            setSaveState("Cut clip");
+      try {
+        on("tlNewBtn", "onclick", newProject);
+        on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
+        on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
+        on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
+        on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
+        on("tlRenderBtn", "onclick", renderTimelineVideo);
+        on("tlAddTitleBtn", "onclick", () => addTitle());
+        on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
+        on("tlSplitBtn", "onclick", () => splitAtPlayhead());
+        on("tlCopyBtn", "onclick", () => copySelectedClip());
+        on("tlPasteBtn", "onclick", () => pasteClip());
+        on("tlDupBtn", "onclick", () => duplicateSelectedClip());
+        on("tlZoomIn", "onclick", () => setZoom(4));
+        on("tlZoomOut", "onclick", () => setZoom(-4));
+        // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
+        document.addEventListener("keydown", (e) => {
+          // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
+          const isEditorTab = document.querySelector('.main-tab.active[data-tab="editor"]');
+          if (!isEditorTab || !tl) return;
+          const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+          if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+
+          const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+          if (isCmdOrCtrl && e.key.toLowerCase() === "c") {
+            e.preventDefault(); copySelectedClip();
+          } else if (isCmdOrCtrl && e.key.toLowerCase() === "x") {
+            if (selected) {
+              e.preventDefault();
+              copySelectedClip();
+              deleteClip(selected.track, selected.id);
+              setSaveState("Cut clip");
+            }
+          } else if (isCmdOrCtrl && e.key.toLowerCase() === "v") {
+            e.preventDefault(); pasteClip();
+          } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
+            e.preventDefault(); duplicateSelectedClip();
+          } else if (e.key === "Delete" || e.key === "Backspace") {
+            if (selected) {
+              e.preventDefault();
+              deleteClip(selected.track, selected.id);
+            }
           }
-        } else if (isCmdOrCtrl && e.key.toLowerCase() === "v") {
-          e.preventDefault(); pasteClip();
-        } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
-          e.preventDefault(); duplicateSelectedClip();
-        } else if (e.key === "Delete" || e.key === "Backspace") {
-          if (selected) {
-            e.preventDefault();
-            deleteClip(selected.track, selected.id);
-          }
-        }
-      });
-
-      // Click / scrub anywhere on ruler to seek playhead
-      const ruler = $("tlRuler");
-      if (ruler) {
-        ruler.addEventListener("pointerdown", (e) => {
-          const rect = ruler.getBoundingClientRect();
-          const clickX = e.clientX - rect.left;
-          const t = Math.max(0, clickX / PPS);
-          const v = $("tlPreviewVideo");
-          if (v) v.currentTime = t;
-          updatePlayhead();
-          updateStageCompositor();
         });
+
+        // Click / scrub anywhere on ruler to seek playhead
+        const ruler = $("tlRuler");
+        if (ruler) {
+          ruler.addEventListener("pointerdown", (e) => {
+            const rect = ruler.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const t = Math.max(0, clickX / PPS);
+            const v = $("tlPreviewVideo");
+            if (v) v.currentTime = t;
+            updatePlayhead();
+            updateStageCompositor();
+          });
+        }
+
+        on("tlProjectBtn", "onclick", () => {
+          // Logo / project panel — clear selection so renderProps shows project settings.
+          selected = null;
+          renderTimeline();
+        });
+
+        const timeline = $("tlTimeline");
+        if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
+        document.addEventListener("pointermove", onMouseMove);
+        document.addEventListener("pointerup", onMouseUp);
+        document.addEventListener("pointermove", onBoxMove);
+        document.addEventListener("pointerup", onBoxUp);
+        wireScrub();
+        setLeftTab("media");
+        setSaveState(TL_BUILD);
+      } catch (e) {
+        console.error("[timeline] wiring failed", e);
+        alert("Editor failed to start (" + TL_BUILD + "): " + e.message + "\nTry a hard refresh (Cmd/Ctrl+Shift+R).");
       }
 
-      on("tlProjectBtn", "onclick", () => {
-        // Logo / project panel — clear selection so renderProps shows project settings.
-        selected = null;
-        renderTimeline();
-      });
+      // Open/create the project FIRST so `tl` exists before the source list
+      // (with its + buttons) renders — otherwise an early click races a null tl.
+      // When Shorts/Compilation is seeding clips, skip auto-opening the last
+      // project so it can't overwrite the multi-clip seed.
+      const skipAuto = _skipAutoOpenOnce;
+      _skipAutoOpenOnce = false;
+      if (!skipAuto) {
+        try {
+          const data = await api("/timeline/list");
+          if (data.timelines.length) await openProject(data.timelines[0].job_id);
+          else await newProject();
+        } catch (e) {
+          try { await newProject(); } catch (e2) { console.error("[timeline] project init failed", e2); }
+        }
+      }
 
-      const timeline = $("tlTimeline");
-      if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
-      document.addEventListener("pointermove", onMouseMove);
-      document.addEventListener("pointerup", onMouseUp);
-      document.addEventListener("pointermove", onBoxMove);
-      document.addEventListener("pointerup", onBoxUp);
-      wireScrub();
-      setLeftTab("media");
-      setSaveState(TL_BUILD);
-    } catch (e) {
-      console.error("[timeline] wiring failed", e);
-      alert("Editor failed to start (" + TL_BUILD + "): " + e.message + "\nTry a hard refresh (Cmd/Ctrl+Shift+R).");
-    }
+      await loadSources();
+      await loadAssets();
+      await loadProjects();
+      console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
+    })();
 
-    // Open/create the project FIRST so `tl` exists before the source list
-    // (with its + buttons) renders — otherwise an early click races a null tl.
-    try {
-      const data = await api("/timeline/list");
-      if (data.timelines.length) await openProject(data.timelines[0].job_id);
-      else await newProject();
-    } catch (e) {
-      try { await newProject(); } catch (e2) { console.error("[timeline] project init failed", e2); }
-    }
-
-    await loadSources();
-    await loadAssets();
-    await loadProjects();
-    console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
+    return _initPromise;
   }
 
   // Expose for setActiveTab("editor") — both header + main nav entry points.
@@ -2321,10 +2370,13 @@
     opts = opts || {};
     tl.style = Object.assign({}, tl.style || {}, style);
     const sc = style.speaker_colors || {};
-    tl.speaker_colors = {
-      SPEAKER_00: sc.SPEAKER_00 || sc.Host || "#FFD700",
-      SPEAKER_01: sc.SPEAKER_01 || sc.Guest || "#00E5FF",
-    };
+    const merged = Object.assign({}, tl.speaker_colors || {});
+    Object.keys(sc).forEach((k) => { if (sc[k]) merged[k] = sc[k]; });
+    if (sc.Host && !merged.SPEAKER_00) merged.SPEAKER_00 = sc.Host;
+    if (sc.Guest && !merged.SPEAKER_01) merged.SPEAKER_01 = sc.Guest;
+    if (!merged.SPEAKER_00) merged.SPEAKER_00 = "#FFD700";
+    if (!merged.SPEAKER_01) merged.SPEAKER_01 = "#00E5FF";
+    tl.speaker_colors = merged;
     const banner = style.headline_banner;
     if (banner) tl.headline_banner = { text: String(banner) };
     else if (banner === "") tl.headline_banner = null;
@@ -2355,48 +2407,57 @@
   // editor seeded from one job or a multi-clip queue.
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
-    if (typeof window.setActiveTab === "function") {
-      window.setActiveTab("editor");
-    } else {
-      const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
-      if (tabBtn) tabBtn.click();
+    const seeding = !!(opts.newProject || (opts.clips && opts.clips.length) || seedJobId);
+    if (seeding) {
+      window._tlDeferAutoOpen = true;
+      _skipAutoOpenOnce = true;
     }
-    await ensureInit();
-
-    if (opts.newProject) {
-      await newProject();
-    }
-
-    const clips = Array.isArray(opts.clips) ? opts.clips : null;
-    if (clips && clips.length) {
-      if (!(await ensureProject())) return;
-      if (opts.replace) {
-        tl.tracks.main = [];
-        selected = null;
+    try {
+      if (typeof window.setActiveTab === "function") {
+        window.setActiveTab("editor");
+      } else {
+        const tabBtn = document.querySelector('.main-tab[data-tab="editor"]');
+        if (tabBtn) tabBtn.click();
       }
-      await loadSources();
-      for (const item of clips) {
-        const jid = item && (item.source_job_id || item.job_id);
-        if (!jid) continue;
-        const inS = item.start_time != null ? Number(item.start_time)
-          : (item.in != null ? Number(item.in) : null);
-        const outS = item.end_time != null ? Number(item.end_time)
-          : (item.out != null ? Number(item.out) : null);
-        await addMainClip(jid, inS, outS, { skipRender: true });
-      }
-      renderTimeline();
-      scheduleSave();
-      return;
-    }
+      await ensureInit({ skipAutoOpen: seeding });
 
-    // Single-job seed (Edit range / job row).
-    if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
-    if (seedJobId && tl) {
-      if (opts.replace) {
-        tl.tracks.main = [];
-        selected = null;
+      if (opts.newProject || (seeding && !tl)) {
+        await newProject();
       }
-      await addMainClip(seedJobId, opts.in, opts.out);
+
+      const clips = Array.isArray(opts.clips) ? opts.clips : null;
+      if (clips && clips.length) {
+        if (!(await ensureProject())) return;
+        if (opts.replace) {
+          tl.tracks.main = [];
+          selected = null;
+        }
+        await loadSources();
+        for (const item of clips) {
+          const jid = item && (item.source_job_id || item.job_id);
+          if (!jid) continue;
+          const inS = item.start_time != null ? Number(item.start_time)
+            : (item.in != null ? Number(item.in) : null);
+          const outS = item.end_time != null ? Number(item.end_time)
+            : (item.out != null ? Number(item.out) : null);
+          await addMainClip(jid, inS, outS, { skipRender: true });
+        }
+        renderTimeline();
+        scheduleSave();
+        return;
+      }
+
+      // Single-job seed (Edit range / job row).
+      if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
+      if (seedJobId && tl) {
+        if (opts.replace) {
+          tl.tracks.main = [];
+          selected = null;
+        }
+        await addMainClip(seedJobId, opts.in, opts.out);
+      }
+    } finally {
+      window._tlDeferAutoOpen = false;
     }
   };
 })();
