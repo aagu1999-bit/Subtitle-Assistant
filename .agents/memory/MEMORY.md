@@ -1,0 +1,1 @@
+- [Canvas artifact routing](canvas-artifact-routing.md) — Flask app must run only via the managed artifact workflow; duplicates steal port 8081 and cause external 502s.
