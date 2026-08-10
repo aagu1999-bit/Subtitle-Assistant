@@ -76,7 +76,7 @@
 </script>
 
 <!-- Empty state: hero welcome shown when there are no jobs yet -->
-<div id="emptyState" class="empty-state hidden">
+<div id="emptyState" class="empty-state">
   <div class="empty-hero">
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
@@ -159,8 +159,8 @@
   </div>
 </header>
 
-<!-- Main app shell: full-width main area -->
-<div id="appShell" class="app-shell" style="display:block;">
+<!-- Main app shell: full-width main area (hidden until a job exists) -->
+<div id="appShell" class="app-shell hidden">
   <main class="main-area" style="width:100%;">
     <!-- Tab navigation: 5 Unified Production Steps -->
     <nav class="main-tabs" id="mainTabs">
@@ -1392,10 +1392,16 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   // Header Instant Export button handler
   document.getElementById("headerExportBtn")?.addEventListener("click", () => {
+    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+      if (typeof setActiveTab === "function") setActiveTab("ingest");
+      return;
+    }
     const r = document.getElementById("renderBtn");
     const g = document.getElementById("go");
     if (r && !r.disabled && r.offsetParent !== null) r.click();
     else if (g && !g.disabled) g.click();
+    else alert("Open Transcript Cut / Branding and click Render when your edits are ready.");
   });
 });
 </script>

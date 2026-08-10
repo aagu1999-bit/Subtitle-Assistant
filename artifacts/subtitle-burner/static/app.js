@@ -1954,6 +1954,27 @@ function fmtTime(sec) {
 }
 
 function showEditor(words, saved = {}) {
+  // Never present an empty Transcript Cut as "ready" — that produced the
+  // black player + "0 phrases" + "No active job" dead-end.
+  if (!currentJobId || !Array.isArray(words) || !words.length) {
+    if (editor) editor.classList.add("hidden");
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+    if (meta && meta.status === "error") {
+      showError("Transcription error: " + (meta.error || "unknown"), {
+        allowRetry: true,
+        jobId: currentJobId,
+        mediaInfo: meta.media_info || null,
+      });
+    } else {
+      showError(
+        "No transcript yet. Drop a video on Ingest and wait for Whisper to finish.",
+        { allowRetry: false }
+      );
+    }
+    return;
+  }
+
   if (retranscribeBtn) retranscribeBtn.disabled = false;
   if (saved.style) applyStyle(saved.style);
   if (saved.audio) applyAudio(saved.audio);
@@ -1969,6 +1990,7 @@ function showEditor(words, saved = {}) {
   sourcePlayer.src = "/raw-upload/" + currentJobId;
 
   // Populate the editable subtitle list
+  currentWords = words;
   renderPhraseList(words);
   updateRowCount();
   clearEditHistory();
@@ -3369,10 +3391,7 @@ let _hlAvoidRanges = [];
 const hlMoreBtn = $("hlMoreBtn");
 
 async function _runFindHighlights({ avoid }) {
-  if (!currentJobId) {
-    alert("No active job. Transcribe a video first.");
-    return;
-  }
+  if (!requireReadyTranscript("AI Shorts")) return;
   const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
     .map(el => parseInt(el.value, 10));
   if (!durations.length) {
@@ -4286,7 +4305,56 @@ const tabResultBtn = $("tabResult");
 const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
 
+function hasReadyTranscript() {
+  return !!(currentJobId && Array.isArray(currentWords) && currentWords.length);
+}
+
+function requireReadyTranscript(actionLabel) {
+  if (hasReadyTranscript()) return true;
+  const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+  if (meta && meta.status === "error") {
+    alert(
+      (actionLabel || "That step") +
+      " needs a finished transcript.\n\nThis video failed transcription — go to Ingest and use Re-drop video (or Retry)."
+    );
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    switchToJob(currentJobId, { force: true, tab: "ingest" });
+    return false;
+  }
+  alert(
+    (actionLabel || "That step") +
+    " needs a transcribed video first.\n\nDrop a video on Ingest and wait until it shows ready (not error)."
+  );
+  if (typeof setActiveTab === "function") setActiveTab("ingest");
+  return false;
+}
+
 function setActiveTab(tab) {
+  // Tabs that only make sense after Whisper produced words.
+  const needsTranscript = {
+    transcript: "Transcript Cut",
+    highlights: "AI Shorts",
+    branding: "Branding",
+    compilation: "Compilation",
+    editor: "Timeline",
+    result: "Result",
+  };
+  if (needsTranscript[tab] && !hasReadyTranscript()) {
+    // Stay on Ingest with a clear path instead of an empty 0-phrases editor.
+    tab = "ingest";
+    if (currentJobId && jobsById[currentJobId] && jobsById[currentJobId].status === "error") {
+      // keep error recovery visible
+    } else if (!currentJobId) {
+      const statusEl = $("statusText");
+      const prog = $("progress");
+      if (prog) prog.classList.remove("hidden");
+      if (statusEl) {
+        statusEl.textContent =
+          "Transcribe a video on Ingest first — Transcript Cut / AI Shorts unlock after Whisper finishes.";
+      }
+    }
+  }
+
   const stepMap = {
     ingest: "1",
     transcript: "2",
