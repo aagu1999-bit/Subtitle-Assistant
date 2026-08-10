@@ -779,8 +779,19 @@ function handleFiles(files) {
       : `Uploading ${videos.length} videos…`;
   }
   if (go) go.disabled = true;
-  // Stay on Ingest so the progress bar under Transcribe is visible.
+  // Show Ingest + progress bar right away (don't wait for XHR to start).
   if (typeof setActiveTab === "function") setActiveTab("ingest");
+  if (result) result.classList.add("hidden");
+  if (editor) editor.classList.add("hidden");
+  if (progress) {
+    progress.classList.remove("hidden");
+    if (barFill) barFill.style.width = "3%";
+    if (statusText) {
+      statusText.textContent = videos.length === 1
+        ? `Uploading ${videos[0].name}…`
+        : `Uploading ${videos.length} videos…`;
+    }
+  }
 
   Promise.all(videos.map((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0)))
     .then(ids => {
