@@ -12,7 +12,7 @@ deploymentTarget = "gce"
 # would answer /status for jobs it has never heard of. Threads give the
 # concurrency instead. Renders take minutes, so the worker timeout is off;
 # with the default 30s gunicorn would kill the worker mid-encode.
-run = ["sh", "-c", "cd artifacts/subtitle-burner && gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:${PORT:-8091} app:app"]
+run = ["sh", "-c", "cd artifacts/subtitle-burner && gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:${PORT:-8081} app:app"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
@@ -27,8 +27,8 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd artifacts/subtitle-burner && PORT=8091 python app.py"
-waitForPort = 8091
+args = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
+waitForPort = 8081
 
 [workflows.workflow.metadata]
 outputType = "webview"
@@ -65,14 +65,14 @@ isCanvasWorkflow = true
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd artifacts/subtitle-burner && PORT=8091 python app.py"
+args = "pnpm --filter @workspace/mockup-sandbox run dev"
 cwd = "./artifacts/mockup-sandbox"
-waitForPort = 8091
+waitForPort = 8081
 ensurePreviewReachable = "/"
 router = "path"
 
 [workflows.workflow.tasks.env]
-PORT = "8091"
+PORT = "8081"
 
 [[workflows.workflow]]
 name = "artifacts/mockup-sandbox: Component Preview Server"
@@ -117,7 +117,7 @@ localPort = 8080
 externalPort = 8080
 
 [[ports]]
-localPort = 8091
+localPort = 8081
 externalPort = 80
 
 [[ports]]
