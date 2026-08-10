@@ -219,6 +219,9 @@
           </section>
           <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this to retry a failed job or if a file was staged manually">Transcribe Video</button>
           <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video to upload + transcribe. If a job shows <strong>error</strong>, use <strong>Re-drop video</strong> (not only Retry).</p>
+          <p class="muted" style="font-size:.72rem;margin:8px 0 0;line-height:1.45;padding:8px 10px;background:rgba(30,41,59,0.45);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
+            <strong>iPhone / Windows tip:</strong> Many phone clips are <strong>HEVC</strong>. Windows often needs extra codecs to play them, while Google Drive works because it <em>re-encodes for streaming</em>. That does not mean the original has no audio — upload the full original file (or export <em>Most Compatible</em> / H.264 MP4 from the phone) and wait until upload hits 100%.
+          </p>
           <div id="progress" class="progress hidden" style="margin-top:10px">
             <div class="bar"><div id="barFill" class="fill"></div></div>
             <p id="statusText" class="muted">Starting…</p>

@@ -2539,9 +2539,15 @@ function showError(msg, opts) {
       kb ? `${kb} KB on server` : null,
       media.has_audio ? "audio:yes" : "audio:no",
       media.has_video ? "video:yes" : "video:no",
+      media.video_codec ? `v:${media.video_codec}` : null,
+      media.audio_codec ? `a:${media.audio_codec}` : (media.has_audio === false ? "a:none" : null),
+      media.is_hevc ? "HEVC" : null,
       media.duration ? `${Number(media.duration).toFixed(1)}s` : null,
     ].filter(Boolean);
     if (bits.length) text += `  [${bits.join(" · ")}]`;
+    if (media.is_hevc && !media.has_audio) {
+      text += " — HEVC iPhone files often play on Drive (re-encoded) but Windows needs codecs; Re-drop the full original if transfer was cut off.";
+    }
   }
   statusText.textContent = text;
   barFill.style.width = "0%";
@@ -4340,18 +4346,16 @@ function setActiveTab(tab) {
     result: "Result",
   };
   if (needsTranscript[tab] && !hasReadyTranscript()) {
-    // Stay on Ingest with a clear path instead of an empty 0-phrases editor.
+    const wanted = needsTranscript[tab];
     tab = "ingest";
-    if (currentJobId && jobsById[currentJobId] && jobsById[currentJobId].status === "error") {
-      // keep error recovery visible
-    } else if (!currentJobId) {
-      const statusEl = $("statusText");
-      const prog = $("progress");
-      if (prog) prog.classList.remove("hidden");
-      if (statusEl) {
-        statusEl.textContent =
-          "Transcribe a video on Ingest first — Transcript Cut / AI Shorts unlock after Whisper finishes.";
-      }
+    const statusEl = $("statusText");
+    const prog = $("progress");
+    if (prog) prog.classList.remove("hidden");
+    if (statusEl) {
+      const errMeta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+      statusEl.textContent = (errMeta && errMeta.status === "error")
+        ? `${wanted} is locked — this video failed transcription. Use Re-drop video below.`
+        : `${wanted} unlocks after Whisper finishes. Drop a video on Ingest (wait for ready, not error).`;
     }
   }
 

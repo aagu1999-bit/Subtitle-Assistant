@@ -646,10 +646,13 @@ _FFPROBE_DEEP = ["-analyzeduration", "100M", "-probesize", "100M"]
 
 
 def _probe_media_streams(path: Path) -> dict:
-    """Return {has_audio, has_video, duration, error} from a deep ffprobe.
+    """Return stream/format info from a deep ffprobe.
 
     Never treats probe failure as "no audio" — callers decide. Truncated
     uploads and odd phone containers commonly fail a shallow probe.
+
+    Also reports video_codec / audio_codec so we can tip users about iPhone
+    HEVC (plays on Drive after Drive re-encodes; Windows often needs codecs).
     """
     info = {
         "has_audio": False,
@@ -657,6 +660,10 @@ def _probe_media_streams(path: Path) -> dict:
         "duration": 0.0,
         "error": None,
         "size": 0,
+        "video_codec": None,
+        "audio_codec": None,
+        "is_hevc": False,
+        "format_name": None,
     }
     try:
         info["size"] = path.stat().st_size if path.exists() else 0
@@ -668,7 +675,8 @@ def _probe_media_streams(path: Path) -> dict:
             [
                 "ffprobe", "-v", "error",
                 *_FFPROBE_DEEP,
-                "-show_entries", "stream=codec_type:format=duration",
+                "-show_entries",
+                "stream=codec_type,codec_name:format=duration,format_name",
                 "-of", "json",
                 str(path),
             ],
@@ -679,14 +687,26 @@ def _probe_media_streams(path: Path) -> dict:
         data = json.loads(out or "{}")
         for stream in data.get("streams") or []:
             ctype = (stream.get("codec_type") or "").lower()
+            cname = (stream.get("codec_name") or "").lower()
             if ctype == "audio":
                 info["has_audio"] = True
+                if not info["audio_codec"]:
+                    info["audio_codec"] = cname
             elif ctype == "video":
                 info["has_video"] = True
+                if not info["video_codec"]:
+                    info["video_codec"] = cname
+                if cname in ("hevc", "h265", "hev1", "hvc1"):
+                    info["is_hevc"] = True
+        fmt = data.get("format") or {}
+        info["format_name"] = fmt.get("format_name")
         try:
-            info["duration"] = float((data.get("format") or {}).get("duration") or 0)
+            info["duration"] = float(fmt.get("duration") or 0)
         except (TypeError, ValueError):
             info["duration"] = 0.0
+        # Tag-only HEVC sometimes reports codec_name oddly — also sniff format.
+        if not info["is_hevc"] and info.get("video_codec") in ("hevc", "h265"):
+            info["is_hevc"] = True
     except subprocess.TimeoutExpired:
         info["error"] = "ffprobe timed out (file may still be writing or corrupt)"
     except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError) as e:
@@ -846,11 +866,21 @@ def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
             f"Server file is {size_kb} KB — re-upload the full original recording."
         )
     if not probe.get("has_audio") and (probe.get("has_video") or no_stream):
+        tip = ""
+        if probe.get("is_hevc"):
+            tip = (
+                " Note: this looks like iPhone HEVC — Google Drive can still play it "
+                "because Drive re-encodes for streaming; upload the original file "
+                "(or export Most Compatible / H.264 MP4) and wait for 100% transfer."
+            )
         raise RuntimeError(
             "This video has no audio track Whisper can read "
-            f"({size_kb} KB, duration {dur:.1f}s). If you hear sound on your phone, "
-            "re-upload the original recording (not a silent export) or tap Retry "
-            "after a full transfer."
+            f"({size_kb} KB, duration {dur:.1f}s"
+            + (f", video={probe.get('video_codec')}" if probe.get("video_codec") else "")
+            + (f", audio={probe.get('audio_codec') or 'none'}")
+            + "). If you hear sound on your phone, re-upload the original recording "
+            "or tap Re-drop after a full transfer."
+            + tip
         )
     err = (last.stderr or last.stdout or "").strip().splitlines() if last else []
     tail = err[-1] if err else "ffmpeg extract failed"
@@ -3994,7 +4024,19 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 30
         jobs[job_id]["error"] = None
+        probe = _probe_media_streams(video_path)
+        jobs[job_id]["media_info"] = probe
         _db_save_job(job_id)
+        # iPhone HEVC / HDR MOVs often black-screen in Chrome on Windows until we
+        # have an H.264 edit proxy. Start that early for HEVC only; otherwise wait
+        # until after Whisper so we don't steal CPU from transcription.
+        proxy_started_early = False
+        if probe.get("is_hevc") or (video_path.suffix.lower() == ".mov" and probe.get("has_video")):
+            threading.Thread(
+                target=build_edit_proxy, args=(job_id, video_path), daemon=True
+            ).start()
+            proxy_started_early = True
+            print(f"[proxy] {job_id} early start (hevc/mov preview)", flush=True)
         words = transcribe(video_path, pre_clean=pre_clean, job_id=job_id)
         if not words:
             raise RuntimeError("No speech detected in the video.")
@@ -4003,11 +4045,10 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["progress"] = 100
         jobs[job_id]["error"] = None
         _db_save_job(job_id)
-        # Seek proxy AFTER Whisper — encoding in parallel stole CPU and made
-        # short clips feel like a multi-minute "upload" even after transfer done.
-        threading.Thread(
-            target=build_edit_proxy, args=(job_id, video_path), daemon=True
-        ).start()
+        if not proxy_started_early:
+            threading.Thread(
+                target=build_edit_proxy, args=(job_id, video_path), daemon=True
+            ).start()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
