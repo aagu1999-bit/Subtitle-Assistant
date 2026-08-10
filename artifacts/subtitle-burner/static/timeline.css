@@ -139,7 +139,41 @@
   cursor: pointer;
   font-size: .8rem;
 }
-.tl-chip-btn:hover { background: #6c5cff; }
+.tl-chip-btn:hover:not(:disabled) { background: #6c5cff; }
+.tl-chip-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tl-chip-btn.active {
+  background: rgba(108, 92, 255, 0.35);
+  box-shadow: inset 0 0 0 1px #6c5cff;
+}
+.tl-live-box, .tl-live-title { overflow: hidden; }
+.tl-live-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+.tl-music-chip {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  background: rgba(0,0,0,.65);
+  color: #e8eaee;
+  font-size: .72rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.tl-keys-hint {
+  font-size: .72rem;
+  white-space: nowrap;
+  opacity: 0.75;
+  padding: 0 4px;
+}
 .tl-asset-upload { margin: 6px 0 10px; }
 .btn-block { width: 100%; }
 
@@ -175,9 +209,46 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transform-origin: center center;
+  will-change: transform, opacity, filter;
 }
 .tl-stage.fit-contain video { object-fit: contain; }
-.tl-overlay-layer { position: absolute; inset: 0; pointer-events: none; }
+.tl-overlay-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.tl-transition-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  opacity: 0;
+  background: #000;
+  transition: opacity 0.35s linear;
+}
+.tl-transition-layer.active { opacity: 1; }
+.tl-transition-layer.tl-tr-dissolve {
+  background: rgba(255,255,255,0.35);
+}
+.tl-transition-layer.tl-tr-wipeleft {
+  background: #000;
+  clip-path: inset(0 0 0 0);
+  transition: clip-path 0.4s linear, opacity 0.05s linear;
+  opacity: 1;
+}
+.tl-transition-layer.tl-tr-wipeleft.active {
+  clip-path: inset(0 0 0 100%);
+}
+.tl-transition-layer.tl-tr-circleopen,
+.tl-transition-layer.tl-tr-radial {
+  background: #000;
+  opacity: 1;
+  clip-path: circle(0% at 50% 50%);
+  transition: clip-path 0.45s ease-out;
+}
+.tl-transition-layer.tl-tr-circleopen.active,
+.tl-transition-layer.tl-tr-radial.active {
+  clip-path: circle(75% at 50% 50%);
+}
+.tl-stage.tl-slide-left #tlPreviewVideo { transform: translateX(-8%); opacity: 0.85; }
+.tl-stage.tl-slide-right #tlPreviewVideo { transform: translateX(8%); opacity: 0.85; }
 .tl-pbox {
   position: absolute;
   pointer-events: auto;

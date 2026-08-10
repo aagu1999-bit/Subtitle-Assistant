@@ -1139,6 +1139,19 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   line-height: 1;
 }
 .job-item .job-rename:hover { color: #ffd60a; }
+.job-item .job-to-timeline {
+  font-size: 0.72rem;
+  color: #aeb4c0;
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.job-item .job-to-timeline:hover {
+  color: #e8eaee;
+  border-color: #6c5cff;
+  background: rgba(108, 92, 255, 0.15);
+}
 
 /* ---- Tighten silences — gap timeline ---- */
 .tighten-gap-row {
