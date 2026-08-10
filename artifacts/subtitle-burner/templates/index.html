@@ -81,18 +81,71 @@
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
     <p class="empty-tagline">Drop a video, transcribe it, edit the words, then burn captions.<br>AI audio enhancement, intelligent clip suggestions, and multi-video compilation built in.</p>
-    <!-- Also a label, for the same reason as the drop zone above. The empty
-         state has its own file input because the main one lives inside the
-         app shell, which is hidden while this screen is up — and a label
-         cannot reach an input that is display:none. -->
-    <input type="file" id="emptyFile" accept="video/*" multiple class="offscreen-file">
-    <label for="emptyFile" id="emptyDropBtn" class="btn btn-primary btn-lg" style="cursor:pointer">Choose a video to start</label>
-    <p class="muted" style="margin-top:14px">or drag &amp; drop a video anywhere on this page</p>
+    <!-- Input INSIDE the label is the most reliable picker pattern across
+         browsers (for= alone can fail if app.js never finishes wiring). -->
+    <label id="emptyDropBtn" class="btn btn-primary btn-lg empty-pick-btn" style="cursor:pointer;position:relative;overflow:hidden">
+      Choose a video to start
+      <input type="file" id="emptyFile" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" multiple
+             style="position:absolute;inset:0;opacity:0;cursor:pointer;font-size:100px">
+    </label>
+    <p id="emptyPickStatus" class="muted" style="margin-top:14px">or drag &amp; drop a video anywhere on this page</p>
   </div>
 </div>
+<!-- Early empty-state wiring: runs even if app.js later throws. -->
+<script>
+(function () {
+  var input = document.getElementById("emptyFile");
+  var status = document.getElementById("emptyPickStatus");
+  if (!input) return;
+  function kick(files) {
+    if (!files || !files.length) return;
+    if (status) status.textContent = "Selected " + files[0].name + " — starting…";
+    // Prefer the full app handler; fall back to a direct upload so the
+    // button never looks dead if app.js failed to load.
+    if (typeof window.handleFiles === "function") {
+      window.handleFiles(files);
+      return;
+    }
+    if (typeof window.__studioBootUpload === "function") {
+      window.__studioBootUpload(files);
+      return;
+    }
+    // Last resort: minimal FormData upload.
+    var fd = new FormData();
+    fd.append("video", files[0]);
+    if (status) status.textContent = "Uploading " + files[0].name + "…";
+    fetch("/transcribe-only", { method: "POST", body: fd })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || (res.j && res.j.error)) throw new Error((res.j && res.j.error) || "Upload failed");
+        try {
+          var ids = JSON.parse(localStorage.getItem("subtitleBurner:jobIds") || "[]");
+          if (!Array.isArray(ids)) ids = [];
+          if (res.j.job_id && ids.indexOf(res.j.job_id) < 0) ids.unshift(res.j.job_id);
+          localStorage.setItem("subtitleBurner:jobIds", JSON.stringify(ids));
+          localStorage.setItem("subtitleBurner:lastJobId", res.j.job_id);
+        } catch (e) {}
+        if (status) status.textContent = "Upload started — reloading…";
+        location.reload();
+      })
+      .catch(function (e) {
+        if (status) status.textContent = "Upload failed: " + (e.message || e);
+        if (window.__studioError) window.__studioError(String(e.message || e));
+      });
+  }
+  input.addEventListener("change", function () {
+    var files = input.files;
+    if (!files || !files.length) return;
+    // Copy FileList before clearing so we can reset the input for re-picks.
+    var copy = Array.prototype.slice.call(files);
+    try { input.value = ""; } catch (e) {}
+    kick(copy);
+  });
+})();
+</script>
 
 <!-- Studio Top App Header -->
-<header class="app-header">
+<header class="app-header" id="appHeader">
   <div class="logo">🎬 Subtitle Assistant Studio</div>
   <div class="workflow-steps" id="workflowSteps">
     <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
