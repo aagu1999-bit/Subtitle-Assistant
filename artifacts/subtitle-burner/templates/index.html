@@ -223,7 +223,8 @@
             <div class="bar"><div id="barFill" class="fill"></div></div>
             <p id="statusText" class="muted">Starting…</p>
             <button id="retryTranscribeBtn" class="btn btn-primary btn-sm hidden" type="button" style="margin-top:10px;width:100%" title="Re-run Whisper on the file already on the server — no re-upload">↻ Retry transcription (keeps this upload)</button>
-            <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If this was an iPhone .MOV and you hear audio on your phone, Retry after a full upload — or re-drop the file if the transfer was cut off.</p>
+            <button id="redropVideoBtn" class="btn btn-secondary btn-sm hidden" type="button" style="margin-top:8px;width:100%" title="Replace the broken server file with a fresh copy of your video">↑ Re-drop video (fixes incomplete uploads)</button>
+            <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If Retry keeps saying “no audio,” the file on the server is usually truncated — use <strong>Re-drop video</strong> and wait until upload hits 100%.</p>
           </div>
         </div>
         <div style="flex:1;min-width:300px;">

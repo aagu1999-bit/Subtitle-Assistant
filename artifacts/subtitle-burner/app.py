@@ -840,10 +840,10 @@ def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
             f"incomplete or unreadable ({size_kb} KB). Re-upload IMG/MOV and try again."
             + (f" Detail: {probe.get('error')}" if probe.get("error") else "")
         )
-    if not probe.get("has_audio") and probe.get("has_video") and (dur <= 0 or size_kb < 100):
+    if not probe.get("has_audio") and probe.get("has_video") and dur <= 0:
         raise RuntimeError(
             "Upload looks incomplete (video stream found but no usable audio / duration). "
-            f"Server only has {size_kb} KB — re-upload the full file."
+            f"Server file is {size_kb} KB — re-upload the full original recording."
         )
     if not probe.get("has_audio") and (probe.get("has_video") or no_stream):
         raise RuntimeError(
@@ -4016,6 +4016,10 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         # Keep the short message for the UI; full traceback goes to the server log.
         jobs[job_id]["error"] = str(e) or e.__class__.__name__
         jobs[job_id]["completed_at"] = time.time()
+        try:
+            jobs[job_id]["media_info"] = _probe_media_streams(video_path)
+        except Exception:
+            pass
         _db_save_job(job_id)
         # Keep the upload on disk so the user can retry Re-transcribe without
         # re-uploading. Orphan cleanup can happen later via job delete.
@@ -4104,6 +4108,10 @@ def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = f"Re-transcribe failed: {e}"
+        try:
+            jobs[job_id]["media_info"] = _probe_media_streams(video_path)
+        except Exception:
+            pass
         _db_save_job(job_id)
 
 
@@ -5956,7 +5964,77 @@ def status(job_id):
     # actionable (after a render, the source is intentionally deleted).
     payload = dict(job)
     payload["video_available"] = find_video_path(job_id) is not None
+    # When stuck in error, attach a fresh probe so the UI can say "Retry" vs
+    # "re-drop the full file" instead of a dead-end Transcribe alert.
+    if payload.get("status") == "error" and payload["video_available"]:
+        try:
+            path = find_video_path(job_id)
+            if path:
+                payload["media_info"] = _probe_media_streams(path)
+        except Exception:
+            pass
     return jsonify(payload)
+
+
+@app.route("/replace-and-transcribe", methods=["POST"])
+def replace_and_transcribe():
+    """Replace the source file on an existing (usually failed) job and re-run Whisper.
+
+    Use this when Retry keeps saying "no audio" — the file on disk is often a
+    truncated iPhone MOV; re-dropping onto the same job clears that dead-end.
+    Form: job_id, video, optional pre_clean.
+    """
+    job_id = (request.form.get("job_id") or "").strip()
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    if "video" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["video"]
+    if not f.filename or not allowed_file(f.filename):
+        return jsonify({"error": "Unsupported or empty file"}), 400
+
+    # Remove prior source + whisper temps for this job.
+    old = find_video_path(job_id)
+    if old:
+        _safe_unlink(old)
+    for extra in UPLOAD_DIR.glob(f".{job_id}.*"):
+        _safe_unlink(extra)
+    _safe_unlink(_edit_proxy_path(job_id))
+
+    ext = f.filename.rsplit(".", 1)[1].lower()
+    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    expected_bytes = None
+    try:
+        if getattr(f, "content_length", None):
+            expected_bytes = int(f.content_length)
+    except (TypeError, ValueError):
+        expected_bytes = None
+    f.save(str(video_path))
+    try:
+        probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
+        print(
+            f"[replace] {job_id} ok size={video_path.stat().st_size} "
+            f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
+            f"name={f.filename!r}",
+            flush=True,
+        )
+    except Exception as e:
+        _safe_unlink(video_path)
+        return jsonify({"error": str(e)}), 400
+
+    jobs[job_id]["filename"] = f.filename
+    jobs[job_id]["status"] = "queued"
+    jobs[job_id]["progress"] = 0
+    jobs[job_id]["error"] = None
+    jobs[job_id]["words"] = None
+    jobs[job_id]["media_info"] = probe
+    jobs[job_id]["edit_proxy"] = False
+    _db_save_job(job_id)
+    pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
+    t = threading.Thread(target=retranscribe_job, args=(job_id, video_path, pre_clean))
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id, "status": "re-transcribing", "replaced": True})
 
 
 def _format_srt_timestamp(seconds: float) -> str:
