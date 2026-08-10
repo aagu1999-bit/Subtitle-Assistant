@@ -10,11 +10,11 @@ name = "Start application"
 paths = ["/"]
 
 [services.development]
-run = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
+run = "cd /home/runner/workspace/artifacts/subtitle-burner && PORT=8081 python app.py"
 
 [services.production]
-run = "cd artifacts/subtitle-burner && gunicorn -w 1 --threads 8 -b 0.0.0.0:$PORT app:app"
-build = "pip install -r artifacts/subtitle-burner/requirements.txt"
+run = "cd /home/runner/workspace/artifacts/subtitle-burner && gunicorn -w 1 --threads 8 -b 0.0.0.0:$PORT app:app"
+build = "pip install -r /home/runner/workspace/artifacts/subtitle-burner/requirements.txt"
 deploymentTarget = "vm"
 
 [[services]]

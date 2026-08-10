@@ -65,8 +65,7 @@ isCanvasWorkflow = true
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/mockup-sandbox run dev"
-cwd = "./artifacts/mockup-sandbox"
+args = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
 waitForPort = 8081
 ensurePreviewReachable = "/"
 router = "path"
