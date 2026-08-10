@@ -2248,7 +2248,7 @@ async function startReframeAnalyze(triggerBtn) {
   if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
   if (reframeStatus) reframeStatus.textContent = "Starting…";
   const empty = $("ingestSpeakerEmpty");
-  if (empty) empty.textContent = "Analysing speakers… (1–3 min for 1 minute of video)";
+  if (empty) empty.textContent = "Analysing speakers… (GPU if available; CPU uses multi-core on Linux)";
   try {
     const res = await fetch("/analyze-reframe", {
       method: "POST",
@@ -2257,7 +2257,9 @@ async function startReframeAnalyze(triggerBtn) {
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    if (reframeStatus) reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
+    const deviceHint = data.diarization_device ? ` · ${data.diarization_device}` : "";
+    if (reframeStatus) reframeStatus.textContent = `Analysing speakers + faces${deviceHint}…`;
+    if (empty) empty.textContent = `Analysing speakers + faces${deviceHint}…`;
     if (_reframePollTimer) clearInterval(_reframePollTimer);
     _reframePollTimer = setInterval(async () => {
       const r = await fetch(`/reframe-status/${currentJobId}`).then((x) => x.json());
@@ -2281,8 +2283,13 @@ async function startReframeAnalyze(triggerBtn) {
         if (empty) empty.textContent = "Analyze failed: " + r.error;
         if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
         if (ingestBtn) ingestBtn.disabled = false;
+      } else if (r.status) {
+        const pct = r.progress != null ? ` (${r.progress}%)` : "";
+        const msg = `${r.status}${pct}`;
+        if (reframeStatus) reframeStatus.textContent = msg;
+        if (empty) empty.textContent = msg;
       }
-    }, 3000);
+    }, 1500);
   } catch (e) {
     if (reframeStatus) reframeStatus.textContent = "Error: " + e.message;
     if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;

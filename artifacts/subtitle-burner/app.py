@@ -3,9 +3,14 @@ Subtitle Burner - A Flask web app that adds word-by-word highlighted
 captions to videos using Whisper for transcription and FFmpeg for rendering.
 """
 import os
+import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+# OpenMP multi-thread + Flask background workers can segfault on macOS.
+# Keep the single-thread clamp on Darwin only — on Linux/server CPUs it
+# makes Whisper and pyannote diarization several× slower for no benefit.
+if sys.platform == "darwin":
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 import re
 import time
@@ -17,6 +22,7 @@ import hashlib
 import sqlite3
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response, make_response
@@ -657,10 +663,141 @@ def transcribe(video_path: Path, pre_clean: bool = False):
 # subsequent render reuses them without re-running the expensive analysis.
 
 # Frames-per-second we sample the source video at for face detection.
-# Face boxes change slowly (people don't teleport) so 4 fps is plenty —
+# Face boxes change slowly (people don't teleport) so 2 fps is plenty —
 # we interpolate between samples at burn time. Lower fps = faster analysis.
-REFRAME_FACE_SAMPLE_FPS = 4
+REFRAME_FACE_SAMPLE_FPS = float(os.environ.get("REFRAME_FACE_SAMPLE_FPS", "2"))
 HUGGINGFACE_TOKEN_ENV = "HF_TOKEN"
+DIARIZATION_MODEL = os.environ.get(
+    "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"
+)
+# auto | cuda | mps | cpu — auto picks CUDA, then Apple MPS, then CPU.
+DIARIZATION_DEVICE = (os.environ.get("DIARIZATION_DEVICE") or "auto").strip().lower()
+
+_diarization_pipeline = None
+_diarization_pipeline_lock = threading.Lock()
+_diarization_device_resolved: str | None = None
+
+
+def _diarization_torch_threads() -> int:
+    """Thread budget for torch/pyannote inference.
+
+    Darwin stays at 1 (OpenMP + Flask worker segfaults). Linux/server uses
+    up to 8 cores unless DIARIZATION_TORCH_THREADS overrides.
+    """
+    override = (os.environ.get("DIARIZATION_TORCH_THREADS") or "").strip()
+    if override.isdigit():
+        return max(1, int(override))
+    if sys.platform == "darwin":
+        return 1
+    return max(1, min(8, os.cpu_count() or 4))
+
+
+def _resolve_diarization_device(torch_mod) -> str:
+    pref = DIARIZATION_DEVICE
+    if pref in ("cuda", "gpu"):
+        if torch_mod.cuda.is_available():
+            return "cuda"
+        raise RuntimeError("DIARIZATION_DEVICE=cuda but CUDA is not available")
+    if pref == "mps":
+        mps = getattr(torch_mod.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return "mps"
+        raise RuntimeError("DIARIZATION_DEVICE=mps but MPS is not available")
+    if pref == "cpu":
+        return "cpu"
+    # auto
+    if torch_mod.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch_mod.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _get_diarization_pipeline():
+    """Load pyannote once and reuse across Analyze runs (model load is slow)."""
+    global _diarization_pipeline, _diarization_device_resolved
+    if _diarization_pipeline is not None:
+        return _diarization_pipeline
+    with _diarization_pipeline_lock:
+        if _diarization_pipeline is not None:
+            return _diarization_pipeline
+        from pyannote.audio import Pipeline  # heavy, lazy import
+        import torch
+
+        torch.set_num_threads(_diarization_torch_threads())
+        _patch_huggingface_hub()
+        token = (
+            os.environ.get(HUGGINGFACE_TOKEN_ENV)
+            or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("HF_TOKEN")
+        )
+        try:
+            # huggingface_hub / pyannote recently renamed use_auth_token → token.
+            try:
+                pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=token)
+            except TypeError as kw_err:
+                if "token" not in str(kw_err) and "use_auth_token" not in str(kw_err):
+                    raise
+                pipeline = Pipeline.from_pretrained(
+                    DIARIZATION_MODEL, use_auth_token=token
+                )
+        except Exception as err:
+            err_str = str(err)
+            if (
+                "gated" in err_str.lower()
+                or "401" in err_str
+                or "403" in err_str
+                or "private" in err_str.lower()
+            ):
+                raise RuntimeError(
+                    "Hugging Face Access Error: Please verify you have accepted the free model "
+                    "agreements at https://hf.co/pyannote/speaker-diarization-3.1 and "
+                    "https://hf.co/pyannote/segmentation-3.0."
+                ) from err
+            raise
+        if pipeline is None:
+            raise RuntimeError(f"Failed to load {DIARIZATION_MODEL} pipeline.")
+
+        device_name = _resolve_diarization_device(torch)
+        try:
+            pipeline.to(torch.device(device_name))
+        except Exception as move_err:
+            print(
+                f"[diarize] could not move pipeline to {device_name}: {move_err}; using CPU",
+                flush=True,
+            )
+            device_name = "cpu"
+            try:
+                pipeline.to(torch.device("cpu"))
+            except Exception:
+                pass
+
+        _diarization_device_resolved = device_name
+        _diarization_pipeline = pipeline
+        print(
+            f"[diarize] pipeline ready model={DIARIZATION_MODEL} "
+            f"device={device_name} torch_threads={_diarization_torch_threads()}",
+            flush=True,
+        )
+        return _diarization_pipeline
+
+
+def _warm_diarization_pipeline() -> None:
+    """Background warm so the first Analyze doesn't pay full model-download cost."""
+    try:
+        if not (
+            os.environ.get(HUGGINGFACE_TOKEN_ENV)
+            or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("HF_TOKEN")
+        ):
+            return
+        _get_diarization_pipeline()
+    except Exception as e:
+        print(f"[diarize] warm skipped: {e}", flush=True)
+
+
+threading.Thread(target=_warm_diarization_pipeline, daemon=True).start()
 
 
 def _reframe_deps_available() -> tuple[bool, str]:
@@ -684,7 +821,11 @@ def _reframe_deps_available() -> tuple[bool, str]:
         return False, f"pyannote.audio failed to import: {e}"
     except Exception as e:
         return False, f"pyannote.audio import raised {type(e).__name__}: {e}"
-    if not os.environ.get(HUGGINGFACE_TOKEN_ENV):
+    if not (
+        os.environ.get(HUGGINGFACE_TOKEN_ENV)
+        or os.environ.get("HUGGINGFACE_TOKEN")
+        or os.environ.get("HF_TOKEN")
+    ):
         return False, (
             f"{HUGGINGFACE_TOKEN_ENV} env var missing. Get a free token at "
             f"https://huggingface.co/settings/tokens and accept the model "
@@ -707,18 +848,57 @@ def _extract_audio_for_diarization(video_path: Path, out_path: Path) -> None:
         )
 
 
-def diarize_audio(video_path: Path) -> list[dict]:
+def _load_wav_waveform(audio_path: Path):
+    """Load mono/stereo PCM WAV as float32 waveform + sample rate.
+
+    In-memory input is faster than re-decoding the file path inside pyannote.
+    Returns (None, sample_rate) if the WAV layout isn't a simple PCM we handle.
+    """
+    import wave
+    import numpy as np
+    import torch
+
+    with wave.open(str(audio_path), "rb") as w:
+        sr = int(w.getframerate())
+        n_ch = int(w.getnchannels())
+        n_frames = int(w.getnframes())
+        sampwidth = int(w.getsampwidth())
+        raw = w.readframes(n_frames)
+    if sampwidth == 2:
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        return None, sr
+    if n_ch > 1:
+        audio = audio.reshape(-1, n_ch).mean(axis=1)
+    waveform = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
+    return waveform, sr
+
+
+def diarize_audio(
+    video_path: Path,
+    *,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> list[dict]:
     """Run pyannote speaker diarization and return a list of segments:
     [{start, end, speaker}]  where speaker is "SPEAKER_00", "SPEAKER_01", ...
 
     Sorted by start. Skipping overlapped regions inside pyannote's output —
     those are surfaced separately by ``find_overlap_regions``.
-    """
-    from pyannote.audio import Pipeline  # heavy, lazy import
-    import torch
-    torch.set_num_threads(1)  # prevent OpenMP segfault in Flask background threads on macOS
 
-    _patch_huggingface_hub()
+    Speeds vs the old path:
+      - cached pipeline (no per-run HF download / weight load)
+      - CUDA/MPS when available (DIARIZATION_DEVICE=auto)
+      - multi-thread torch on Linux
+      - in-memory waveform when possible
+      - optional num_speakers hint shrinks clustering work
+    """
+    import torch
+
+    torch.set_num_threads(_diarization_torch_threads())
 
     # Use a stable temp path inside UPLOAD_DIR — avoid .with_suffix() on paths
     # whose stem contains dots (e.g. "file.backup.mp4" → wrong suffix stripping).
@@ -732,34 +912,31 @@ def diarize_audio(video_path: Path) -> list[dict]:
                 f"Audio extraction produced no output at {audio_path}. "
                 "Check that the video has an audio track."
             )
-        token = os.environ.get(HUGGINGFACE_TOKEN_ENV) or os.environ.get("HF_TOKEN")
-        try:
-            # huggingface_hub / pyannote recently renamed use_auth_token → token.
-            # Prefer the modern kwarg; fall back for older pyannote builds.
-            try:
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    token=token,
-                )
-            except TypeError as kw_err:
-                if "token" not in str(kw_err) and "use_auth_token" not in str(kw_err):
-                    raise
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=token,
-                )
-        except Exception as err:
-            err_str = str(err)
-            if "gated" in err_str.lower() or "401" in err_str or "403" in err_str or "private" in err_str.lower():
-                raise RuntimeError(
-                    "Hugging Face Access Error: Please verify you have accepted the free model "
-                    "agreements at https://hf.co/pyannote/speaker-diarization-3.1 and "
-                    "https://hf.co/pyannote/segmentation-3.0."
-                ) from err
-            raise
-        if pipeline is None:
-            raise RuntimeError("Failed to load pyannote/speaker-diarization-3.1 pipeline.")
-        diar = pipeline(str(audio_path))
+        pipeline = _get_diarization_pipeline()
+        call_kwargs: dict = {}
+        if num_speakers is not None and int(num_speakers) > 0:
+            call_kwargs["num_speakers"] = int(num_speakers)
+        if min_speakers is not None and int(min_speakers) > 0:
+            call_kwargs["min_speakers"] = int(min_speakers)
+        if max_speakers is not None and int(max_speakers) > 0:
+            call_kwargs["max_speakers"] = int(max_speakers)
+
+        t0 = time.time()
+        waveform, sr = _load_wav_waveform(audio_path)
+        if waveform is not None:
+            diar = pipeline(
+                {"waveform": waveform, "sample_rate": sr},
+                **call_kwargs,
+            )
+        else:
+            diar = pipeline(str(audio_path), **call_kwargs)
+        elapsed = time.time() - t0
+        device = _diarization_device_resolved or "unknown"
+        print(
+            f"[diarize] inference {elapsed:.1f}s device={device} "
+            f"model={DIARIZATION_MODEL}",
+            flush=True,
+        )
         segments = []
         for turn, _, speaker in diar.itertracks(yield_label=True):
             segments.append({
@@ -813,7 +990,7 @@ def find_overlap_regions(diar: list[dict]) -> list[dict]:
 
 
 def detect_face_tracks(video_path: Path,
-                        sample_fps: int = REFRAME_FACE_SAMPLE_FPS) -> list[dict]:
+                        sample_fps: float = REFRAME_FACE_SAMPLE_FPS) -> list[dict]:
     """Sample frames at *sample_fps* and run MediaPipe Face Detection.
     Returns one entry per sampled frame:
         {t: seconds, faces: [{cx, cy, w, h, score}, ...]}
@@ -821,6 +998,9 @@ def detect_face_tracks(video_path: Path,
     """
     import cv2
     import mediapipe as mp
+
+    sample_fps = float(sample_fps) if sample_fps else float(REFRAME_FACE_SAMPLE_FPS)
+    sample_fps = max(0.5, sample_fps)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -901,8 +1081,19 @@ def detect_face_tracks(video_path: Path,
     return samples
 
 
-def analyze_reframe(video_path: Path) -> dict:
+def analyze_reframe(
+    video_path: Path,
+    *,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    face_sample_fps: float | None = None,
+    progress_cb=None,
+) -> dict:
     """End-to-end analysis: diarization + face tracking + overlap detection.
+
+    Diarization (torch) and face sampling (MediaPipe/OpenCV) run in parallel
+    so wall-clock time is closer to max(diar, faces) instead of sum.
 
     Returns a JSON-serializable payload that's cached per job for the
     compositor to consume. Caller is responsible for spawning this in a
@@ -911,10 +1102,55 @@ def analyze_reframe(video_path: Path) -> dict:
     ok, msg = _reframe_deps_available()
     if not ok:
         raise RuntimeError(msg)
-    diar = diarize_audio(video_path)
+
+    def _progress(pct: int, status: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(pct, status)
+            except Exception:
+                pass
+
+    fps = float(face_sample_fps) if face_sample_fps is not None else float(REFRAME_FACE_SAMPLE_FPS)
+    _progress(15, "analysing speakers")
+
+    diar: list[dict] = []
+    faces: list[dict] = []
+    errors: list[BaseException] = []
+
+    def _run_diar():
+        return diarize_audio(
+            video_path,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+
+    def _run_faces():
+        return detect_face_tracks(video_path, sample_fps=fps)
+
+    # Overlap wall time: pyannote (GIL-heavy but releases in native ops) +
+    # OpenCV/MediaPipe face pass on another thread.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="reframe") as pool:
+        fut_diar = pool.submit(_run_diar)
+        fut_faces = pool.submit(_run_faces)
+        for fut in as_completed([fut_diar, fut_faces]):
+            try:
+                if fut is fut_diar:
+                    diar = fut.result()
+                    _progress(55, "speakers labelled — tracking faces")
+                else:
+                    faces = fut.result()
+                    _progress(70, "faces sampled — finishing diarization")
+            except BaseException as e:
+                errors.append(e)
+
+    if errors:
+        # Prefer the first failure; cancel isn't needed — both already done/failed.
+        raise errors[0]
+
     overlaps = find_overlap_regions(diar)
-    faces = detect_face_tracks(video_path)
     speakers = sorted({s["speaker"] for s in diar})
+    _progress(90, "caching speaker map")
     return {
         "diarization": diar,
         "overlaps": overlaps,
@@ -924,6 +1160,8 @@ def analyze_reframe(video_path: Path) -> dict:
             "speaker_count": len(speakers),
             "face_samples": len(faces),
             "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
+            "diarization_device": _diarization_device_resolved,
+            "face_sample_fps": fps,
         },
     }
 
@@ -3442,26 +3680,47 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         # (Previously we deleted the source here, which made retries impossible.)
 
 
-def analyze_reframe_job(job_id: str, video_path: Path) -> None:
+def analyze_reframe_job(
+    job_id: str,
+    video_path: Path,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> None:
     """Background worker that runs diarization + face tracking and caches
     the result to uploads/<job>_reframe.json. Job status is reported via
     the existing in-memory job dict so the UI's status poll picks it up.
     """
+    def _progress(pct: int, status: str) -> None:
+        jobs[job_id]["status"] = status
+        jobs[job_id]["progress"] = int(pct)
+        try:
+            _db_save_job(job_id)
+        except Exception:
+            pass
+
     try:
-        jobs[job_id]["status"] = "analysing speakers"
-        jobs[job_id]["progress"] = 20
-        _db_save_job(job_id)
-        result = analyze_reframe(video_path)
+        _progress(10, "analysing speakers")
+        result = analyze_reframe(
+            video_path,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            progress_cb=_progress,
+        )
         cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
         cache_path.write_text(json.dumps(result), encoding="utf-8")
         n_spk = _stamp_job_speakers(job_id, result.get("diarization") or [])
+        device = (result.get("stats") or {}).get("diarization_device") or "?"
         ai_logger.info(
             f"[{job_id}] Reframe analysis done: {result['stats']['speaker_count']} speakers, "
-            f"{result['stats']['face_samples']} face samples, {n_spk} words labeled"
+            f"{result['stats']['face_samples']} face samples, {n_spk} words labeled "
+            f"(device={device})"
         )
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["reframe_ready"] = True
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
     except Exception as e:
         jobs[job_id]["status"] = "awaiting_edit"
@@ -4810,6 +5069,9 @@ def analyze_reframe_endpoint():
     On completion the result lives in uploads/<job>_reframe.json and the
     job's `reframe_ready` flag flips True.
 
+    Optional JSON body keys (speed / quality knobs):
+      num_speakers, min_speakers, max_speakers — passed to pyannote clustering
+
     Returns 400 with a helpful message if the optional reframe deps aren't
     installed yet — better than a stack trace in the user's face.
     """
@@ -4823,10 +5085,33 @@ def analyze_reframe_endpoint():
     ok, msg = _reframe_deps_available()
     if not ok:
         return jsonify({"error": msg}), 400
-    t = threading.Thread(target=analyze_reframe_job, args=(job_id, video_path))
+
+    def _opt_int(key: str) -> int | None:
+        raw = data.get(key)
+        if raw is None or raw == "":
+            return None
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    num_speakers = _opt_int("num_speakers")
+    min_speakers = _opt_int("min_speakers")
+    max_speakers = _opt_int("max_speakers")
+
+    t = threading.Thread(
+        target=analyze_reframe_job,
+        args=(job_id, video_path, num_speakers, min_speakers, max_speakers),
+    )
     t.daemon = True
     t.start()
-    return jsonify({"job_id": job_id, "status": "started"})
+    return jsonify({
+        "job_id": job_id,
+        "status": "started",
+        "diarization_device": _diarization_device_resolved or DIARIZATION_DEVICE,
+        "diarization_model": DIARIZATION_MODEL,
+    })
 
 
 def _speaker_breakdown(diar: list) -> list:
@@ -4940,7 +5225,14 @@ def reframe_status(job_id: str):
     err = job.get("error") or ""
     if "Reframe" in err or "reframe" in err:
         return jsonify({"ready": False, "error": err}), 200
-    return jsonify({"ready": False}), 200
+    status = job.get("status") or ""
+    analysing = "analys" in status.lower() or "speaker" in status.lower() or "face" in status.lower()
+    return jsonify({
+        "ready": False,
+        "status": status if analysing else None,
+        "progress": job.get("progress") if analysing else None,
+        "diarization_device": _diarization_device_resolved,
+    }), 200
 
 
 @app.route("/reframe-swap-speakers", methods=["POST"])
