@@ -217,8 +217,8 @@
             </h2>
             <div id="jobsList"></div>
           </section>
-          <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this if you staged a file manually">Transcribe Video</button>
-          <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video and upload starts automatically.</p>
+          <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this to retry a failed job or if a file was staged manually">Transcribe Video</button>
+          <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video to upload + transcribe. If a job shows <strong>error</strong>, use <strong>Re-drop video</strong> (not only Retry).</p>
           <div id="progress" class="progress hidden" style="margin-top:10px">
             <div class="bar"><div id="barFill" class="fill"></div></div>
             <p id="statusText" class="muted">Starting…</p>
@@ -1043,7 +1043,7 @@
       <h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span>✨ AI Shorts</span>
         <span class="muted" style="font-size:.78rem;font-weight:normal">Chop long videos into individual clips</span>
-        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:#6c5cff33;border:1px solid #6c5cff88;color:#c8c0ff">Long-form · default path</span>
+        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:#6c5cff33;border:1px solid #6c5cff88;color:#c8c0ff">Long-form · AI Shorts available</span>
       </h2>
       {% if not gemini_enabled %}
       <div id="hlGeminiDisabled" class="panel" style="margin:0 0 14px;border-color:#bf616a;background:#1a1216">

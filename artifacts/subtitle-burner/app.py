@@ -5983,6 +5983,9 @@ def replace_and_transcribe():
     Use this when Retry keeps saying "no audio" — the file on disk is often a
     truncated iPhone MOV; re-dropping onto the same job clears that dead-end.
     Form: job_id, video, optional pre_clean.
+
+    Saves the new file to a temp path and validates BEFORE deleting the old
+    source, so a bad second drop cannot leave the job with zero media.
     """
     job_id = (request.form.get("job_id") or "").strip()
     if not job_id or job_id not in jobs:
@@ -5993,34 +5996,45 @@ def replace_and_transcribe():
     if not f.filename or not allowed_file(f.filename):
         return jsonify({"error": "Unsupported or empty file"}), 400
 
-    # Remove prior source + whisper temps for this job.
-    old = find_video_path(job_id)
-    if old:
-        _safe_unlink(old)
-    for extra in UPLOAD_DIR.glob(f".{job_id}.*"):
-        _safe_unlink(extra)
-    _safe_unlink(_edit_proxy_path(job_id))
-
     ext = f.filename.rsplit(".", 1)[1].lower()
-    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    staging = UPLOAD_DIR / f".{job_id}.replace_staging.{ext}"
+    _safe_unlink(staging)
     expected_bytes = None
     try:
         if getattr(f, "content_length", None):
             expected_bytes = int(f.content_length)
     except (TypeError, ValueError):
         expected_bytes = None
-    f.save(str(video_path))
+    f.save(str(staging))
     try:
-        probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
+        probe = _validate_uploaded_media(staging, expected_bytes=expected_bytes)
         print(
-            f"[replace] {job_id} ok size={video_path.stat().st_size} "
+            f"[replace] {job_id} ok size={staging.stat().st_size} "
             f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
             f"name={f.filename!r}",
             flush=True,
         )
     except Exception as e:
-        _safe_unlink(video_path)
+        _safe_unlink(staging)
         return jsonify({"error": str(e)}), 400
+
+    # Validated — now swap in as the job source.
+    old = find_video_path(job_id)
+    if old:
+        _safe_unlink(old)
+    for extra in UPLOAD_DIR.glob(f".{job_id}.*"):
+        # Keep the staging file until we rename it.
+        if extra == staging:
+            continue
+        _safe_unlink(extra)
+    _safe_unlink(_edit_proxy_path(job_id))
+
+    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    try:
+        staging.replace(video_path)
+    except OSError:
+        shutil.move(str(staging), str(video_path))
+    _safe_unlink(staging)
 
     jobs[job_id]["filename"] = f.filename
     jobs[job_id]["status"] = "queued"

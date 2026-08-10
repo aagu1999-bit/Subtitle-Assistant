@@ -1576,7 +1576,12 @@ go.onclick = async () => {
       return;
     }
     if (currentJobId && (meta.has_words || st === "awaiting_edit" || st === "done" || st === "timeline_edit")) {
-      alert("This video is already transcribed. Pick it under \"Your videos\" to edit it, or use Re-transcribe to run Whisper again.");
+      const again = confirm(
+        "This video is already transcribed.\n\n" +
+        "OK = open it for editing.\n" +
+        "Cancel = stay here (drop a new file to upload another, or use Re-transcribe in the editor)."
+      );
+      if (again) switchToJob(currentJobId, { force: true, tab: "transcript" });
       return;
     }
     alert("Drop a video first, then click Transcribe.");
@@ -1645,6 +1650,7 @@ async function pollTranscription(jobId) {
 
   if (s.status === "error") {
     _progressPhase = null;
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
     showError("Transcription error: " + s.error, {
       allowRetry: true,
       jobId: jobId,
@@ -2482,7 +2488,15 @@ function capitalize(s) {
 function _mediaNeedsRedrop(mediaInfo, errMsg) {
   if (!mediaInfo && !errMsg) return false;
   const msg = String(errMsg || "").toLowerCase();
-  if (msg.includes("incomplete") || msg.includes("truncated") || msg.includes("nearly empty")) {
+  if (
+    msg.includes("incomplete") ||
+    msg.includes("truncated") ||
+    msg.includes("nearly empty") ||
+    msg.includes("unreadable") ||
+    msg.includes("could not extract audio") ||
+    msg.includes("could not read audio") ||
+    msg.includes("source video missing")
+  ) {
     return true;
   }
   if (mediaInfo && mediaInfo.has_audio === false) {
@@ -2551,7 +2565,10 @@ async function startRetranscribe(jobId, opts) {
     const res = await fetch("/retranscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify({
+        job_id: jobId,
+        pre_clean: typeof getPreCleanFlag === "function" ? getPreCleanFlag() : false,
+      }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -2646,32 +2663,36 @@ if (redropVideoBtn) {
   redropVideoBtn.onclick = () => {
     const jobId = redropVideoBtn.dataset.jobId || currentJobId;
     if (!jobId) return;
-    // Private picker so we don't collide with the normal multi-upload drop handler.
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = (typeof ACCEPTED_VIDEO_EXT !== "undefined")
-      ? ACCEPTED_VIDEO_EXT.map((e) => "." + e).join(",")
-      : "video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi";
-    input.onchange = async () => {
-      const file = input.files && input.files[0];
-      if (!file) return;
-      redropVideoBtn.disabled = true;
-      _ingestBusy += 1;
-      try {
-        await replaceAndTranscribe(jobId, file);
-      } catch (e) {
-        showError("Re-drop failed: " + e.message, {
-          allowRetry: true,
-          jobId: jobId,
-        });
-      } finally {
-        redropVideoBtn.disabled = false;
-        _ingestBusy = Math.max(0, _ingestBusy - 1);
-        renderJobsList();
-      }
-    };
-    input.click();
+    pickFileAndReplace(jobId);
   };
+}
+
+/** Open a file picker and replace the source on *jobId*, then re-transcribe. */
+function pickFileAndReplace(jobId) {
+  if (!jobId) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ACCEPTED_VIDEO_EXT.map((e) => "." + e).join(",");
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (redropVideoBtn) redropVideoBtn.disabled = true;
+    _ingestBusy += 1;
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    try {
+      await replaceAndTranscribe(jobId, file);
+    } catch (e) {
+      showError("Re-drop failed: " + e.message, {
+        allowRetry: true,
+        jobId: jobId,
+      });
+    } finally {
+      if (redropVideoBtn) redropVideoBtn.disabled = false;
+      _ingestBusy = Math.max(0, _ingestBusy - 1);
+      renderJobsList();
+    }
+  };
+  input.click();
 }
 
 // =====================================================================
@@ -2819,17 +2840,32 @@ function renderJobsList() {
       div.appendChild(toTl);
     }
 
-    if (meta.status === "error" && meta.video_available) {
-      const retry = document.createElement("button");
-      retry.className = "job-rename job-retry";
-      retry.textContent = "↻ Retry";
-      retry.title = (meta.error || "Transcription failed") + " — re-run Whisper without re-uploading";
-      retry.onclick = async (e) => {
+    if (meta.status === "error") {
+      const errTitle = meta.error || "Transcription failed";
+      const needsDrop = _mediaNeedsRedrop(null, errTitle) || !meta.video_available;
+      if (meta.video_available && !needsDrop) {
+        const retry = document.createElement("button");
+        retry.className = "job-rename job-retry";
+        retry.textContent = "↻ Retry";
+        retry.title = errTitle + " — re-run Whisper without re-uploading";
+        retry.onclick = async (e) => {
+          e.stopPropagation();
+          retry.disabled = true;
+          await startRetranscribe(jobId, { label: "Retrying transcription…" });
+        };
+        div.appendChild(retry);
+      }
+      const redrop = document.createElement("button");
+      redrop.className = "job-rename job-redrop";
+      redrop.textContent = "↑ Re-drop";
+      redrop.title = needsDrop
+        ? errTitle + " — replace the server file with a full re-upload"
+        : "Replace this upload and re-transcribe";
+      redrop.onclick = (e) => {
         e.stopPropagation();
-        retry.disabled = true;
-        await startRetranscribe(jobId, { label: "Retrying transcription…" });
+        pickFileAndReplace(jobId);
       };
-      div.appendChild(retry);
+      div.appendChild(redrop);
     }
 
     const del = document.createElement("button");
@@ -2884,21 +2920,24 @@ async function switchToJob(jobId, opts) {
     } else if (s.status === "error") {
       editor.classList.add("hidden");
       result.classList.add("hidden");
+      if (typeof setActiveTab === "function") setActiveTab(opts.tab || "ingest");
       showError(
         "Transcription error: " + (s.error || "unknown"),
         {
-          allowRetry: !!s.video_available,
+          // Always allow recovery UI — Re-drop works even if the prior file is gone.
+          allowRetry: true,
           jobId: jobId,
           mediaInfo: s.media_info || null,
         }
       );
-      setActiveTab(opts.tab || "ingest");
     } else {
       // Still transcribing — show the progress UI for this job
       editor.classList.add("hidden");
       result.classList.add("hidden");
       progress.classList.remove("hidden");
       if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+      if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+      if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
       barFill.style.width = (s.progress || 10) + "%";
       statusText.textContent = capitalize(s.status || "loading") + "…";
       pollTranscription(jobId);
@@ -2938,12 +2977,14 @@ async function refreshJobsList() {
 
 async function initJobs() {
   await refreshJobsList();
-  // Auto-restore the most recently active job into the editor (if it's
-  // still in a usable state). Skip errored jobs and abandoned uploads.
+  // Auto-restore the most recently active job. Error jobs open Ingest with
+  // Retry / Re-drop — skipping them left users staring at a red badge only.
   const lastId = localStorage.getItem("subtitleBurner:lastJobId");
   if (lastId && jobsById[lastId]) {
     const meta = jobsById[lastId];
-    if (meta.status !== "error" && (meta.status === "done" || meta.video_available !== false)) {
+    if (meta.status === "error") {
+      await switchToJob(lastId, { force: true, tab: "ingest" });
+    } else if (meta.status === "done" || meta.video_available !== false) {
       await switchToJob(lastId);
     }
   }
