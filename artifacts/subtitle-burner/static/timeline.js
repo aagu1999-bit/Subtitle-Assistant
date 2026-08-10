@@ -47,6 +47,7 @@
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
       style: tl.style || null,
+      ai_edit: tl.ai_edit || null,
       speaker_colors: tl.speaker_colors || null,
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -80,6 +81,7 @@
     tl.bg = d.bg || "#000000";
     tl.logo = d.logo || null;
     if (d.style !== undefined) tl.style = d.style;
+    if (d.ai_edit !== undefined) tl.ai_edit = d.ai_edit;
     if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
     if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
     if (d.track_states !== undefined) tl.track_states = d.track_states;
