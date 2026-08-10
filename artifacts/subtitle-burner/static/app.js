@@ -745,12 +745,26 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
+  // Leave the empty hero immediately so the user sees Ingest progress.
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.add("hidden");
+  if (shellEl) shellEl.classList.remove("hidden");
+  if (headerEl) headerEl.classList.remove("hidden");
+
   // Always auto-start upload + transcription on drop/pick. Staging a file and
   // waiting for "Transcribe" looked broken once the user already had jobs
   // (filename appeared, nothing happened).
   currentFile = null;
   if (fn) {
     fn.textContent = videos.length === 1
+      ? `Uploading ${videos[0].name}…`
+      : `Uploading ${videos.length} videos…`;
+  }
+  const emptyStatus = $("emptyPickStatus");
+  if (emptyStatus) {
+    emptyStatus.textContent = videos.length === 1
       ? `Uploading ${videos[0].name}…`
       : `Uploading ${videos.length} videos…`;
   }
@@ -772,6 +786,8 @@ function handleFiles(files) {
       if (go) go.disabled = false;
     });
 }
+// Expose for the early empty-state script in index.html.
+window.handleFiles = handleFiles;
 
 function getPreCleanFlag() {
   return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
@@ -2293,14 +2309,18 @@ function renderJobsList() {
   // Toggle empty-state vs app-shell here — single source of truth.
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
   if (emptyEl) emptyEl.classList.toggle("hidden", ids.length > 0);
   if (shellEl) shellEl.classList.toggle("hidden", ids.length === 0);
+  // Hide sticky Studio header on welcome screen so it can't cover the CTA.
+  if (headerEl) headerEl.classList.toggle("hidden", ids.length === 0);
   if (!ids.length) {
-    jobsPanel.classList.add("hidden");
+    if (jobsPanel) jobsPanel.classList.add("hidden");
     return;
   }
-  jobsPanel.classList.remove("hidden");
-  jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  if (jobsPanel) jobsPanel.classList.remove("hidden");
+  if (jobsCountEl) jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  if (!jobsListEl) return;
   jobsListEl.innerHTML = "";
   ids.forEach(jobId => {
     const meta = jobsById[jobId] || {};
@@ -3556,18 +3576,9 @@ if (workflowSteps) {
   });
 }
 
-// Trigger the file input from the empty-state hero button.
-// The empty state has its own input (#emptyFile) because the main one sits
-// inside the app shell, which is hidden until a job exists. Its label opens
-// the picker; this just routes the chosen files into the same handler.
-const emptyFileInput = $("emptyFile");
-if (emptyFileInput) {
-  emptyFileInput.onchange = () => {
-    if (emptyFileInput.files && emptyFileInput.files.length) {
-      handleFiles(emptyFileInput.files);
-    }
-  };
-}
+// Empty-state #emptyFile is wired by an early inline script in index.html
+// (so the picker works even if something later in this file throws).
+// It calls window.handleFiles — do not attach a second change listener here.
 
 // Allow drag-and-drop anywhere on the page in the empty state.
 document.addEventListener("dragover", (e) => {
