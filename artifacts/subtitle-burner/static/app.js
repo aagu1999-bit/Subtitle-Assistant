@@ -1623,8 +1623,11 @@ async function pollTranscription(jobId) {
     return;
   }
 
-  statusText.textContent = capitalize(s.status) + "…";
-  setTimeout(() => pollTranscription(jobId), 2000);
+  // Live status: "extracting audio" / "transcribing" with % so a 2‑min clip
+  // never looks frozen at 30% for minutes.
+  const label = capitalize(s.status || "transcribing");
+  statusText.textContent = `${label}… ${serverPct}%  (usually under a minute for a 2‑min video)`;
+  setTimeout(() => pollTranscription(jobId), 1500);
 }
 
 // ---- Phrase timeline / editable subtitle list ----

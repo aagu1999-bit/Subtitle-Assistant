@@ -513,9 +513,16 @@ def find_video_path(job_id: str) -> Path | None:
 
 
 # ---- Whisper transcription with word-level timestamps ----
+# Defaults tuned for interactive Studio use on CPU (Replit / laptops).
+# Override with WHISPER_MODEL=small|medium only if you need accuracy over speed.
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+# Cap OpenMP threads — on small VMs "use all cores" often thrashes and is slower.
+try:
+    WHISPER_CPU_THREADS = max(1, int(os.environ.get("WHISPER_CPU_THREADS", "4")))
+except ValueError:
+    WHISPER_CPU_THREADS = 4
 
 _whisper_model = None
 _whisper_lock = threading.Lock()
@@ -529,10 +536,19 @@ def _get_whisper_model():
             if _whisper_model is None:
                 try:
                     from faster_whisper import WhisperModel
-                    _whisper_model = WhisperModel(
-                        WHISPER_MODEL_NAME,
+                    kwargs = dict(
                         device=WHISPER_DEVICE,
                         compute_type=WHISPER_COMPUTE_TYPE,
+                    )
+                    # cpu_threads is ignored on CUDA builds; safe to pass on CPU.
+                    if WHISPER_DEVICE == "cpu":
+                        kwargs["cpu_threads"] = WHISPER_CPU_THREADS
+                    _whisper_model = WhisperModel(WHISPER_MODEL_NAME, **kwargs)
+                    print(
+                        f"[Whisper] Loaded model={WHISPER_MODEL_NAME!r} "
+                        f"device={WHISPER_DEVICE} compute={WHISPER_COMPUTE_TYPE} "
+                        f"cpu_threads={WHISPER_CPU_THREADS}",
+                        flush=True,
                     )
                 except Exception as err:
                     print(f"[Whisper] Note: faster_whisper model not loaded yet ({err})")
@@ -596,15 +612,55 @@ def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
     return wav
 
 
-def transcribe(video_path: Path, pre_clean: bool = False):
+def _edit_proxy_path(job_id: str) -> Path:
+    return UPLOAD_DIR / f"{job_id}_editproxy.mp4"
+
+
+def build_edit_proxy(job_id: str, video_path: Path) -> None:
+    """Background: small H.264 proxy so Transcript Cut seeks fast on phone MOVs.
+
+    Burns / renders always use the original upload — this is editor playback only.
+    """
+    out = _edit_proxy_path(job_id)
+    try:
+        # ultrafast + downscale keeps this off the critical Whisper path.
+        proc = subprocess.run(
+            [
+                FFMPEG, "-y", "-i", str(video_path),
+                "-vf", "scale=-2:'min(720,ih)'",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:a", "aac", "-b:a", "96k",
+                "-movflags", "+faststart",
+                str(out),
+            ],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0 or not out.exists() or out.stat().st_size < 64:
+            _safe_unlink(out)
+            print(f"[proxy] {job_id} failed: {(proc.stderr or '')[-200:]}", flush=True)
+            return
+        if job_id in jobs:
+            jobs[job_id]["edit_proxy"] = True
+            _db_save_job(job_id)
+        print(f"[proxy] {job_id} ready ({out.stat().st_size // 1024} KB)", flush=True)
+    except Exception as e:
+        _safe_unlink(out)
+        print(f"[proxy] {job_id} error: {e}", flush=True)
+
+
+def transcribe(video_path: Path, pre_clean: bool = False, job_id: str | None = None):
     """Return a list of word dicts: [{'word': str, 'start': float, 'end': float}, ...]
 
     When *pre_clean* is True, run a fast local FFmpeg cleanup pass before
     Whisper. The filters chosen (afftdn for spectral noise gate, dynaudnorm
     for soft-voice boost) don't shift transients, so word-level timestamps
     stay aligned with the original video.
+
+    If *job_id* is set, bump jobs[job_id]['progress'] while segments stream so
+    the UI doesn't sit frozen at 30% for the whole pass.
     """
     wav: Path | None = None
+    t0 = time.time()
     try:
         model = _get_whisper_model()
         if model is None:
@@ -612,22 +668,40 @@ def transcribe(video_path: Path, pre_clean: bool = False):
                 "Whisper model is not loaded. Check that faster-whisper is installed "
                 "and WHISPER_MODEL is reachable."
             )
+        if job_id and job_id in jobs:
+            jobs[job_id]["progress"] = 35
+            jobs[job_id]["status"] = "extracting audio"
+            _db_save_job(job_id)
         wav = _extract_whisper_wav(video_path, pre_clean=pre_clean)
+        extract_s = time.time() - t0
+        if job_id and job_id in jobs:
+            jobs[job_id]["progress"] = 45
+            jobs[job_id]["status"] = "transcribing"
+            _db_save_job(job_id)
+
+        beam = max(1, int(os.environ.get("WHISPER_BEAM_SIZE", "1")))
         result = model.transcribe(
             str(wav),
             word_timestamps=True,
             vad_filter=True,
-            beam_size=int(os.environ.get("WHISPER_BEAM_SIZE", "1")),
+            beam_size=beam,
+            best_of=beam,
+            # Huge win on CPU: don't re-decode conditioned on prior text.
+            condition_on_previous_text=False,
         )
         # faster-whisper returns (segments_generator, info). Guard odd returns.
         if isinstance(result, tuple):
             if len(result) < 1:
                 raise RuntimeError("Whisper returned an empty result tuple")
             segments = result[0]
+            info = result[1] if len(result) > 1 else None
         else:
             segments = result
+            info = None
 
+        duration = float(getattr(info, "duration", 0) or 0) if info is not None else 0.0
         words = []
+        last_pct_save = 45
         for seg in segments:
             seg_words = getattr(seg, "words", None) or []
             for w in seg_words:
@@ -642,6 +716,20 @@ def transcribe(video_path: Path, pre_clean: bool = False):
                 if end < start:
                     end = start
                 words.append({"word": text, "start": start, "end": end})
+            # Heartbeat progress from segment end time.
+            if job_id and job_id in jobs and duration > 0:
+                seg_end = float(getattr(seg, "end", 0) or 0)
+                pct = 45 + int(min(50, max(0, (seg_end / duration) * 50)))
+                if pct >= last_pct_save + 5:
+                    jobs[job_id]["progress"] = pct
+                    last_pct_save = pct
+                    _db_save_job(job_id)
+        elapsed = time.time() - t0
+        print(
+            f"[Whisper] {video_path.name}: {len(words)} words in {elapsed:.1f}s "
+            f"(extract {extract_s:.1f}s, model={WHISPER_MODEL_NAME})",
+            flush=True,
+        )
         return words
     except IndexError as e:
         # PyAV's cryptic failure mode for missing/broken audio streams.
@@ -3659,7 +3747,12 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 30
         _db_save_job(job_id)
-        words = transcribe(video_path, pre_clean=pre_clean)
+        # Build a lightweight seek proxy in parallel — phone MOVs are huge and
+        # made Transcript Cut feel "stuck loading" after Whisper was already done.
+        threading.Thread(
+            target=build_edit_proxy, args=(job_id, video_path), daemon=True
+        ).start()
+        words = transcribe(video_path, pre_clean=pre_clean, job_id=job_id)
         if not words:
             raise RuntimeError("No speech detected in the video.")
         jobs[job_id]["words"] = words
@@ -3747,7 +3840,7 @@ def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["progress"] = 30
         jobs[job_id]["error"] = None
         _db_save_job(job_id)
-        words = transcribe(video_path, pre_clean=pre_clean)
+        words = transcribe(video_path, pre_clean=pre_clean, job_id=job_id)
         if not words:
             raise RuntimeError("No speech detected in the video.")
         jobs[job_id]["words"] = words
@@ -4570,10 +4663,18 @@ def clip_from_job():
 
 @app.route("/auto-process-job", methods=["POST"])
 def auto_process_job():
+    """Generate AI Shorts for a job.
+
+    Fast path: Gemini on the existing transcript only.
+    Diarization / 9:16 reframe is kicked off in the background (optional) —
+    it must NEVER block Shorts or make upload feel like a 15‑minute hang.
+    """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
     format_type = data.get("format", "vendor_interview")
     num_clips = int(data.get("num_clips", 5))
+    # Opt-in only — Analyze Speakers button is the explicit path.
+    run_diarization = bool(data.get("run_diarization"))
 
     if not job_id or job_id not in jobs:
         return jsonify({"error": "Job not found"}), 404
@@ -4583,34 +4684,28 @@ def auto_process_job():
         return jsonify({"error": "Video missing"}), 404
 
     try:
-        # a. Check if Whisper transcription exists
+        # a. Transcript must already exist (normal upload path). Do not
+        # re-run Whisper here — that doubled wait when Auto-Shorts was on.
         if not job.get("words"):
-            api_logger.info(f"[{job_id}] Auto-process: No words found, transcribing...")
-            job["status"] = "transcribing"
-            _db_save_job(job_id)
-            words = transcribe(video_path, pre_clean=False)
-            job["words"] = words
-            job["status"] = "awaiting_edit"
-            _db_save_job(job_id)
+            return jsonify({
+                "error": "Transcript not ready yet — wait for Whisper to finish, then retry."
+            }), 409
 
-        # b. Check if PyAnnote diarization / reframe analysis exists
+        # b. Optional diarization — background only, never block this request.
         cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
-        if not cache_path.exists():
-            api_logger.info(f"[{job_id}] Auto-process: No reframe analysis found, analyzing...")
-            job["status"] = "analysing speakers"
-            _db_save_job(job_id)
-            result = analyze_reframe(video_path)
-            cache_path.write_text(json.dumps(result), encoding="utf-8")
-            job["status"] = "awaiting_edit"
-            job["reframe_ready"] = True
-            _db_save_job(job_id)
+        if run_diarization and not cache_path.exists():
+            ok, _msg = _reframe_deps_available()
+            if ok:
+                threading.Thread(
+                    target=analyze_reframe_job, args=(job_id, video_path), daemon=True
+                ).start()
 
-        # c. Calls _gemini_generate_clip_suggestions
+        # c. Gemini clip suggestions (the actual Shorts work).
         transcript_text = _format_transcript_for_llm(job["words"])
         prompt = _build_clip_suggestion_prompt(transcript_text, format_type, [60], num_clips)
         result = _gemini_generate_clip_suggestions(prompt)
         clips = result.get("clips", [])
-        
+
         cleaned = []
         for c in clips:
             try:
@@ -4637,9 +4732,7 @@ def auto_process_job():
         cleaned.sort(key=lambda c: c["start_time"])
         _detect_overlap_groups(cleaned, threshold=0.90)
 
-        # d. Pre-populates clip suggestions in job metadata
-        job['clip_suggestions'] = cleaned
-        # e. Saves job database
+        job["clip_suggestions"] = cleaned
         _db_save_job(job_id)
 
         return jsonify({"ok": True, "job_id": job_id, "clips": cleaned})
@@ -5740,7 +5833,22 @@ def list_fonts():
 
 @app.route("/raw-upload/<job_id>")
 def raw_upload(job_id):
-    """Stream the original uploaded video so the editor can seek through it."""
+    """Stream video for the editor. Prefer the lightweight edit proxy when ready
+    so large phone MOVs seek quickly; burns still use the original file."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    proxy = _edit_proxy_path(job_id)
+    if proxy.exists() and proxy.stat().st_size > 64:
+        return send_from_directory(UPLOAD_DIR, proxy.name)
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Video not found"}), 404
+    return send_from_directory(UPLOAD_DIR, video_path.name)
+
+
+@app.route("/source-video/<job_id>")
+def source_video(job_id):
+    """Always the original upload (for burns / downloads that need full quality)."""
     if job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
     video_path = find_video_path(job_id)
