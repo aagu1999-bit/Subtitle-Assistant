@@ -167,6 +167,11 @@ let currentJobId = null;
 let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
 let draftSaveTimer = null;
+// While an upload/transcribe is in flight, never bounce back to the empty
+// landing page — refreshJobsList used to see 0 localStorage IDs mid-upload
+// and hide the progress UI (looked like 1–5% then "Choose a video to start").
+let _ingestBusy = 0;
+let _progressPhase = null; // "upload" | "transcribe" | null
 
 // ---- Edit-tab undo / redo (transcript + style + emoji rules) ----
 const EDIT_MAX_UNDO = 40;
@@ -417,6 +422,37 @@ THEMES.forEach((t, i) => {
     scheduleDraftSave();
   };
   themesDiv.appendChild(b);
+});
+
+// ---- Viral Presets click handler ----
+const VIRAL_PRESETS = {
+  hormozi: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", outline: "#000000", outlineWidth: 4, allCaps: true, shadow: 2 },
+  mrbeast: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", outline: "#000000", outlineWidth: 5, allCaps: true, shadow: 3 },
+  neon:    { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", outline: "#110022", outlineWidth: 3, allCaps: true, shadow: 2 },
+  karaoke: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", outline: "#0F172A", outlineWidth: 2, allCaps: false, shadow: 1 },
+};
+
+document.querySelectorAll("#viralPresets .theme").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#viralPresets .theme").forEach(x => x.classList.remove("active"));
+    btn.classList.add("active");
+    const presetKey = btn.dataset.preset;
+    const p = VIRAL_PRESETS[presetKey];
+    if (!p) return;
+    const fontEl = $("font");
+    if (fontEl) fontEl.value = p.font;
+    if (sizeEl) { sizeEl.value = p.size; sizeVal.textContent = p.size; }
+    if (primaryEl) primaryEl.value = p.primary;
+    if (highlightEl) highlightEl.value = p.highlight;
+    if (accentEl) accentEl.value = p.accent;
+    if (outlineEl) outlineEl.value = p.outline;
+    if (owEl) { owEl.value = p.outlineWidth; owVal.textContent = p.outlineWidth; }
+    const capsEl = $("allCaps");
+    if (capsEl) capsEl.checked = p.allCaps;
+    const shadowEl = $("shadow");
+    if (shadowEl) shadowEl.value = p.shadow;
+    scheduleDraftSave();
+  });
 });
 
 // ---- Live labels ----
@@ -762,48 +798,239 @@ if (audioOffsetEl) {
 });
 
 // ---- Drag & drop ----
-drop.onclick = () => fileInput.click();
-["dragenter", "dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
-["dragleave", "drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
-drop.addEventListener("drop", e => {
-  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
-});
-fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+// No click handler here: the drop zone's inner element is a <label for="file">,
+// so the browser opens the picker itself. Calling fileInput.click() as well
+// would fire the picker twice.
+if (drop) {
+  ["dragenter", "dragover"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+  ["dragleave", "drop"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+  drop.addEventListener("drop", e => {
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+}
+if (fileInput) {
+  fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+}
 
-function handleFiles(files) {
-  const videos = Array.from(files).filter(f => f.type.startsWith("video/"));
-  if (!videos.length) { alert("Please select video files."); return; }
+// Mirrors ALLOWED_EXT in app.py. The server rejects anything else with a 400,
+// so screen for it here and say so rather than letting the upload fail.
+const ACCEPTED_VIDEO_EXT = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
 
-  // In the empty state the Transcribe button isn't visible (it's in the
-  // sidebar which is hidden). Auto-kick everything immediately and activate
-  // the first one so the user lands directly in the editor for it.
-  const isEmpty = (typeof _loadJobIds === "function") && _loadJobIds().length === 0;
+// The server identifies uploads by extension too, so a phone file that
+// arrives without a usable one is refused at both ends. When the browser
+// tells us the MIME type we can supply the matching extension ourselves.
+const MIME_TO_EXT = {
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/x-quicktime": "mov",
+  "video/x-matroska": "mkv",
+  "video/webm": "webm",
+  "video/avi": "avi",
+  "video/x-msvideo": "avi",
+  "video/x-m4v": "m4v",
+  "video/m4v": "m4v",
+};
 
-  if (videos.length === 1 && !isEmpty) {
-    // Existing behaviour: stage the file, let user click Transcribe.
-    currentFile = videos[0];
-    fn.textContent = videos[0].name + "  (" + (videos[0].size / 1048576).toFixed(1) + " MB)";
-    go.disabled = false;
-  } else {
-    currentFile = null;
-    if (fn) {
-      fn.textContent = videos.length === 1
-        ? `Queueing ${videos[0].name}…`
-        : `Queueing ${videos.length} videos…`;
-    }
-    if (go) go.disabled = true;
-    videos.forEach((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0));
+function videoExtOf(f) {
+  const parts = (f.name || "").split(".");
+  return parts.length > 1 ? parts.pop().toLowerCase() : "";
+}
+
+function isAcceptedVideo(f) {
+  if (ACCEPTED_VIDEO_EXT.includes(videoExtOf(f))) return true;
+  // iOS and some Android pickers hand over names the server won't recognise
+  // ("capturedvideo", "image.mov" variants, or no extension at all), so trust
+  // the MIME type when it maps onto a format we support.
+  return !!MIME_TO_EXT[(f.type || "").toLowerCase()];
+}
+
+// Give the file a name the server will accept, without touching its bytes.
+function normalizeVideoFile(f) {
+  if (ACCEPTED_VIDEO_EXT.includes(videoExtOf(f))) return f;
+  const ext = MIME_TO_EXT[(f.type || "").toLowerCase()];
+  if (!ext) return f;
+  const base = (f.name || "video").replace(/\.[^.]*$/, "") || "video";
+  try {
+    return new File([f], `${base}.${ext}`, { type: f.type });
+  } catch (e) {
+    return f;   // very old browsers: send it as-is and let the server answer
   }
 }
+
+function handleFiles(files) {
+  const all = Array.from(files);
+  const videos = all.filter(isAcceptedVideo).map(normalizeVideoFile);
+  if (!videos.length) {
+    const names = all.map(f => f.name).join(", ");
+    alert(all.length
+      ? `Can't use ${names}.\n\nSupported formats: ${ACCEPTED_VIDEO_EXT.join(", ")}.`
+      : "Please select video files.");
+    return;
+  }
+  const skipped = all.filter(f => !isAcceptedVideo(f));
+  if (skipped.length) {
+    alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
+  }
+
+  // Leave the empty hero immediately so the user sees Ingest progress.
+  _ingestBusy += 1;
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.add("hidden");
+  if (shellEl) shellEl.classList.remove("hidden");
+  if (headerEl) headerEl.classList.remove("hidden");
+
+  // Always auto-start upload + transcription on drop/pick. Staging a file and
+  // waiting for "Transcribe" looked broken once the user already had jobs
+  // (filename appeared, nothing happened).
+  currentFile = null;
+  if (fn) {
+    fn.textContent = videos.length === 1
+      ? `Uploading ${videos[0].name}…`
+      : `Uploading ${videos.length} videos…`;
+  }
+  const emptyStatus = $("emptyPickStatus");
+  if (emptyStatus) {
+    emptyStatus.textContent = videos.length === 1
+      ? `Uploading ${videos[0].name}…`
+      : `Uploading ${videos.length} videos…`;
+  }
+  if (go) go.disabled = true;
+  // Show Ingest + progress bar right away (don't wait for XHR to start).
+  if (typeof setActiveTab === "function") setActiveTab("ingest");
+  if (result) result.classList.add("hidden");
+  if (editor) editor.classList.add("hidden");
+  if (progress) {
+    progress.classList.remove("hidden");
+    if (barFill) barFill.style.width = "3%";
+    if (statusText) {
+      statusText.textContent = videos.length === 1
+        ? `Uploading ${videos[0].name}…`
+        : `Uploading ${videos.length} videos…`;
+    }
+  }
+
+  Promise.all(videos.map((f, idx) => uploadAndTranscribe(f, getPreCleanFlag(), idx === 0)))
+    .then(ids => {
+      const ok = ids.filter(Boolean).length;
+      const failed = ids.length - ok;
+      if (fn) {
+        if (!ok) fn.textContent = "Upload failed — see the error above.";
+        else if (failed) fn.textContent = `${ok} uploaded, ${failed} failed — transcribing…`;
+        else fn.textContent = ids.length === 1
+          ? `${videos[0].name} — transcribing…`
+          : `${ok} videos uploaded — transcribing…`;
+      }
+      if (go) go.disabled = false;
+    })
+    .finally(() => {
+      _ingestBusy = Math.max(0, _ingestBusy - 1);
+      // Re-evaluate empty vs shell now that the in-flight gate dropped.
+      renderJobsList();
+    });
+}
+// Expose for the early empty-state script in index.html.
+window.handleFiles = handleFiles;
 
 function getPreCleanFlag() {
   return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
 }
 
+// Stable palette for SPEAKER_00…N (Host/Guest first, then extras).
+const DEFAULT_SPEAKER_PALETTE = [
+  "#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770",
+  "#88c0d0", "#bf616a", "#5e81ac", "#ebcb8b", "#c084fc",
+];
+
+function defaultSpeakerColor(speakerId, index) {
+  const m = /SPEAKER_(\d+)/i.exec(String(speakerId || ""));
+  const i = m ? parseInt(m[1], 10) : (Number.isFinite(index) ? index : 0);
+  return DEFAULT_SPEAKER_PALETTE[Math.abs(i) % DEFAULT_SPEAKER_PALETTE.length];
+}
+
+function speakerLabel(speakerId) {
+  if (speakerId === "SPEAKER_00") return "Host";
+  if (speakerId === "SPEAKER_01") return "Guest";
+  const m = /SPEAKER_(\d+)/i.exec(String(speakerId || ""));
+  if (m) return `Speaker ${parseInt(m[1], 10) + 1}`;
+  return speakerId || "Speaker";
+}
+
+function collectSpeakerColors() {
+  const out = {};
+  document.querySelectorAll("[data-speaker-color]").forEach((inp) => {
+    const id = inp.dataset.speakerColor;
+    if (id && inp.value) out[id] = inp.value;
+  });
+  // Legacy Host/Guest ids (kept in sync with SPEAKER_00/01).
+  if ($("hostColor") && !out.SPEAKER_00) out.SPEAKER_00 = $("hostColor").value;
+  if ($("guestColor") && !out.SPEAKER_01) out.SPEAKER_01 = $("guestColor").value;
+  return out;
+}
+
+function colorForSpeaker(speakerId, index) {
+  if (!speakerId) return defaultSpeakerColor("SPEAKER_00", index);
+  const map = collectSpeakerColors();
+  if (map[speakerId]) return map[speakerId];
+  if (speakerId === "SPEAKER_00" && map.Host) return map.Host;
+  if (speakerId === "SPEAKER_01" && map.Guest) return map.Guest;
+  return defaultSpeakerColor(speakerId, index);
+}
+
+function syncSpeakerColorPickers(speakerIds) {
+  const wrap = $("speakerColorPickers");
+  if (!wrap) return;
+  const ids = (speakerIds || []).filter(Boolean);
+  // Always keep at least Host + Guest slots so branding works before Analyze.
+  const ensured = ids.length ? ids.slice() : ["SPEAKER_00", "SPEAKER_01"];
+  if (!ensured.includes("SPEAKER_00")) ensured.unshift("SPEAKER_00");
+  if (!ensured.includes("SPEAKER_01") && ensured.length === 1) ensured.push("SPEAKER_01");
+  const existing = collectSpeakerColors();
+  wrap.innerHTML = "";
+  ensured.forEach((id, i) => {
+    const label = document.createElement("label");
+    label.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.84rem";
+    const name = document.createElement("span");
+    name.textContent = speakerLabel(id);
+    const inp = document.createElement("input");
+    inp.type = "color";
+    inp.dataset.speakerColor = id;
+    if (id === "SPEAKER_00") inp.id = "hostColor";
+    if (id === "SPEAKER_01") inp.id = "guestColor";
+    inp.value = existing[id] || defaultSpeakerColor(id, i);
+    inp.style.cssText =
+      "width:32px;height:28px;padding:0;border:1px solid #3b4252;border-radius:6px;background:transparent;cursor:pointer";
+    inp.addEventListener("input", () => {
+      const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
+      cards.forEach((card) => {
+        const sid = card.dataset.speakerId;
+        const color = colorForSpeaker(sid);
+        const pill = card.querySelector(".speaker-pill");
+        if (pill) {
+          pill.style.background = color + "33";
+          pill.style.color = color;
+          pill.style.borderColor = color + "88";
+        }
+      });
+      if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
+        renderPhraseList(currentWords);
+      }
+    });
+    label.appendChild(name);
+    label.appendChild(inp);
+    wrap.appendChild(label);
+  });
+}
+
 // ---- Helpers: collect style / audio ----
 function getStyle() {
+  const speakerColorsEnabled = $("speakerColorsEnabled") && $("speakerColorsEnabled").checked;
+  const bgMusicDuck = $("bgMusicDuck") ? $("bgMusicDuck").checked : false;
+  const bgMusicIntensity = $("bgMusicDuckIntensity") ? $("bgMusicDuckIntensity").value : "medium";
+  const duckRatioMap = { gentle: 4, medium: 8, aggressive: 16 };
   return {
     font_name:       $("font").value,
     font_size:       parseInt(sizeEl.value, 10),
@@ -819,8 +1046,16 @@ function getStyle() {
     smooth_timings:  $("smoothTimings") ? $("smoothTimings").checked : true,
     punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
+    headline_banner: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
+    speaker_colors: speakerColorsEnabled ? collectSpeakerColors() : {},
     reframe: {
-      enabled: $("reframeEnabled") ? $("reframeEnabled").checked : false,
+      enabled:      $("reframeEnabled") ? $("reframeEnabled").checked : false,
+      top_panel:    $("reframeTopSelect") ? $("reframeTopSelect").value : "active",
+      bottom_panel: $("reframeBottomSelect") ? $("reframeBottomSelect").value : "full",
+    },
+    punch_zoom: {
+      enabled: $("punchZoomEnabled") ? $("punchZoomEnabled").checked : false,
+      intensity: $("punchZoomIntensity") ? $("punchZoomIntensity").value : "med",
     },
     tighten_silences: {
       enabled:    $("tightenEnabled") ? $("tightenEnabled").checked : false,
@@ -828,6 +1063,12 @@ function getStyle() {
       target_gap: $("tightenTargetGap") ? parseFloat($("tightenTargetGap").value) : 0.3,
       crossfade:  $("tightenCrossfade") ? $("tightenCrossfade").checked : false,
       preserved_gap_starts: (typeof _tPreservedCache !== "undefined") ? _tPreservedCache.slice() : [],
+    },
+    bg_music: {
+      enabled:   !!window._bgMusicUploaded,
+      volume_db: $("bgMusicVolume") ? parseInt($("bgMusicVolume").value, 10) : -12,
+      duck:      bgMusicDuck,
+      duck_ratio: duckRatioMap[bgMusicIntensity] || 8,
     },
   };
 }
@@ -1140,17 +1381,24 @@ function collectEditedWords(options = {}) {
 
     if (words.length === origTimes.length) {
       words.forEach((word, i) => {
-        editedWords.push({ word, start: origTimes[i].s, end: origTimes[i].e });
+        const entry = { word, start: origTimes[i].s, end: origTimes[i].e };
+        if (origTimes[i].sp) entry.speaker = origTimes[i].sp;
+        editedWords.push(entry);
       });
     } else {
       const duration = Math.max(0, end - start);
       const wordDur  = duration / words.length;
+      // Preserve dominant speaker for the row when word count changes.
+      const rowSp = row.dataset.speaker || null;
       words.forEach((word, i) => {
-        editedWords.push({
+        const entry = {
           word,
           start: start + i * wordDur,
           end:   start + (i + 1) * wordDur,
-        });
+        };
+        if (rowSp) entry.speaker = rowSp;
+        else if (origTimes[i] && origTimes[i].sp) entry.speaker = origTimes[i].sp;
+        editedWords.push(entry);
       });
     }
   });
@@ -1211,44 +1459,119 @@ addRuleBtn.onclick = () => {
   addEmojiRule();
 };
 
+// XHR rather than fetch purely for upload progress — fetch cannot report how
+// much of a request body has been sent, and phone uploads are slow enough
+// that the difference between "working" and "frozen" has to be visible.
+function _uploadWithProgress(fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/transcribe-only");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch (err) {
+        // Flask serves HTML for errors; surface the status, not a parse error.
+        reject(new Error(`Server returned ${xhr.status} instead of JSON.`));
+        return;
+      }
+      if (xhr.status >= 400 || (data && data.error)) {
+        reject(new Error((data && data.error) || `Upload failed (${xhr.status}).`));
+      } else {
+        resolve(data);
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload — check the connection."));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(fd);
+  });
+}
+
 // ---- Phase 1: Transcribe ----
 async function uploadAndTranscribe(file, preClean, makeActive = false) {
   const fd = new FormData();
   fd.append("video", file);
   if (preClean) fd.append("pre_clean", "true");
 
+  // Show the bar before the request starts. fetch() reports no upload
+  // progress, so a phone video used to sit on a blank screen for the whole
+  // transfer with nothing to show it was working.
+  if (makeActive) {
+    result.classList.add("hidden");
+    editor.classList.add("hidden");
+    progress.classList.remove("hidden");
+    _progressPhase = "upload";
+    // Upload phase uses 0–40% of the bar; transcription takes 40–100%.
+    barFill.style.width = "3%";
+    statusText.textContent = "Uploading " + (file.name || "video") + "…";
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+  }
+
   try {
-    const res = await fetch("/transcribe-only", { method: "POST", body: fd });
-    const job = await res.json();
-    if (job.error) throw new Error(job.error);
+    const job = await _uploadWithProgress(fd, (frac) => {
+      if (!makeActive || _progressPhase !== "upload") return;
+      const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
+      barFill.style.width = pct + "%";
+      statusText.textContent = frac >= 1
+        ? "Upload complete — starting transcription…"
+        : `Uploading… ${Math.round(frac * 100)}%`;
+    });
 
     addJobToList(job.job_id);
     if (makeActive) {
       currentJobId = job.job_id;
-      result.classList.add("hidden");
-      editor.classList.add("hidden");
-      progress.classList.remove("hidden");
-      barFill.style.width = "5%";
-      statusText.textContent = "Uploading…";
+      currentFile = null; // consumed — don't re-upload on accidental Transcribe click
+      _progressPhase = "transcribe";
+      barFill.style.width = "42%";
+      statusText.textContent = "Starting transcription…";
       pollTranscription(job.job_id);
     }
     refreshJobsList();
     return job.job_id;
   } catch (e) {
     if (makeActive) {
+      _progressPhase = null;
       showError("Upload failed: " + e.message);
       go.disabled = false;
     } else {
       console.error("Upload failed for", file.name, e);
+      if (window.__studioError) {
+        window.__studioError(`Upload failed for ${file.name}: ${e.message}`);
+      }
     }
     return null;
   }
 }
 
 go.onclick = async () => {
-  if (!currentFile) return;
+  // No staged file: the video was auto-queued on drop or restored from a
+  // previous session. Silently returning made the button look dead, so tell
+  // the user what to do instead.
+  if (!currentFile) {
+    if (currentJobId) {
+      alert("This video is already transcribed. Pick it under \"Your videos\" to edit it, or use Re-transcribe to run Whisper again.");
+    } else {
+      alert("Drop a video first, then click Transcribe.");
+    }
+    return;
+  }
   go.disabled = true;
-  await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
+  _ingestBusy += 1;
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.add("hidden");
+  if (shellEl) shellEl.classList.remove("hidden");
+  if (headerEl) headerEl.classList.remove("hidden");
+  try {
+    await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
+  } finally {
+    _ingestBusy = Math.max(0, _ingestBusy - 1);
+    renderJobsList();
+  }
 };
 
 async function pollTranscription(jobId) {
@@ -1271,11 +1594,18 @@ async function pollTranscription(jobId) {
   // poller — the new job's poller (or the periodic /jobs refresh) takes over.
   if (currentJobId && currentJobId !== jobId) return;
 
-  barFill.style.width = (s.progress || 10) + "%";
+  _progressPhase = "transcribe";
+  // Map server 0–100 onto the remaining bar (40–100) so we never jump backwards
+  // into the upload band (which looked like 1%↔5% thrashing).
+  const serverPct = Math.max(0, Math.min(100, Number(s.progress) || 0));
+  const uiPct = 40 + Math.round(serverPct * 0.6);
+  barFill.style.width = uiPct + "%";
 
   if (s.status === "awaiting_edit") {
+    _progressPhase = null;
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
+    if (fn) fn.textContent = "";   // clear the "…transcribing" upload label
     currentWords = _sanitizeWords(s.words);
     setTimeout(() => {
       if (currentJobId !== jobId) return;
@@ -1287,6 +1617,7 @@ async function pollTranscription(jobId) {
   }
 
   if (s.status === "error") {
+    _progressPhase = null;
     showError("Transcription error: " + s.error);
     go.disabled = false;
     return;
@@ -1335,13 +1666,30 @@ function renderPhraseList(words) {
     row.className = "phrase-row";
     row.dataset.start = group[0].start;
     row.dataset.end   = group[group.length - 1].end;
-    row.dataset.words = JSON.stringify(group.map(w => ({ s: w.start, e: w.end })));
+    row.dataset.words = JSON.stringify(group.map(w => ({
+      s: w.start, e: w.end, sp: w.speaker || null,
+    })));
+
+    // Dominant speaker for this phrase → left rail color (Host/Guest).
+    const spCounts = {};
+    group.forEach((w) => {
+      if (w.speaker) spCounts[w.speaker] = (spCounts[w.speaker] || 0) + 1;
+    });
+    const dominantSp = Object.keys(spCounts).sort((a, b) => spCounts[b] - spCounts[a])[0] || "";
+    if (dominantSp) {
+      row.dataset.speaker = dominantSp;
+      row.classList.add("has-speaker");
+      const rail = colorForSpeaker(dominantSp);
+      row.style.borderLeftColor = rail;
+      row.style.boxShadow = `inset 3px 0 0 ${rail}`;
+    }
 
     // Timestamp label
     const timeEl = document.createElement("span");
     timeEl.className = "phrase-time";
     timeEl.textContent = fmtTime(group[0].start);
-    timeEl.title = "Seek to " + fmtTime(group[0].start);
+    timeEl.title = "Seek to " + fmtTime(group[0].start)
+      + (dominantSp ? ` · ${speakerLabel(dominantSp)}` : "");
 
     // Editable text — punchwords (long words / numbers / proper nouns)
     // are wrapped in a span tinted with the user's accent color so the
@@ -1367,6 +1715,10 @@ function renderPhraseList(words) {
       }
       if (punchIdxs.has(j)) {
         return `<span class="punchword" style="color:${accentColor}">${safe}</span>`;
+      }
+      if (w.speaker) {
+        const sc = colorForSpeaker(w.speaker);
+        return `<span class="speaker-word" style="color:${sc}" title="${speakerLabel(w.speaker)}">${safe}</span>`;
       }
       return safe;
     }).join(" ");
@@ -1503,7 +1855,7 @@ function highlightPhraseRow(target) {
   if (target) target.classList.add("active");
 }
 
-// Sync phrase list highlight as the source video plays
+// Sync phrase list highlight and live WYSIWYG overlay as the source video plays
 sourcePlayer.addEventListener("timeupdate", () => {
   const t = sourcePlayer.currentTime;
   const rows = Array.from(phraseListEl.querySelectorAll(".phrase-row:not(.gap-row)"));
@@ -1516,6 +1868,27 @@ sourcePlayer.addEventListener("timeupdate", () => {
   if (activeRow && !activeRow.classList.contains("active")) {
     highlightPhraseRow(activeRow);
     activeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  // Render Live WYSIWYG Subtitle Overlay on video stage
+  const overlay = $("liveCaptionOverlay");
+  if (overlay && currentWords && currentWords.length) {
+    const currentWord = currentWords.find(w => t >= w.start && t <= w.end);
+    if (currentWord) {
+      const activeText = currentWord.word;
+      const highlightColor = highlightEl ? highlightEl.value : "#FFD60A";
+      const fontVal = $("font") ? $("font").value : "Outfit";
+      overlay.style.fontFamily = `'${fontVal}', sans-serif`;
+      overlay.innerHTML = `<span>${activeText.replace(/</g, "&lt;")}</span>`;
+      overlay.style.display = "block";
+      const span = overlay.querySelector("span");
+      if (span) {
+        span.className = "word-active";
+        span.style.color = highlightColor;
+      }
+    } else {
+      overlay.style.display = "none";
+    }
   }
 });
 
@@ -1549,8 +1922,71 @@ function showEditor(words, saved = {}) {
   updateAudioPreviewVisibility();
 
   editor.classList.remove("hidden");
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
+
+  // Studio flow: land on Transcript Cut after transcription so the player +
+  // phrase list are visible (Ingest does not host #sourcePlayer).
+  setActiveTab("transcript");
+  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  // Restore prior AI Shorts suggestions if the job already has them.
+  if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
+    renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
+  }
+
+  // Optional: Auto-Generate Shorts on Upload (Ingest checkbox).
+  maybeAutoGenerateShorts(currentJobId);
+}
+
+async function maybeAutoGenerateShorts(jobId) {
+  const cb = $("autoGenerateShorts");
+  if (!cb || !cb.checked || !jobId) return;
+  if ($("hlGeminiDisabled")) {
+    if (hlStatus) hlStatus.textContent = "Auto-Generate Shorts needs GEMINI_API_KEY.";
+    return;
+  }
+  // Already have suggestions (restored from job) — leave the user on Transcript
+  // with the player loaded; they can open AI Shorts when ready.
+  if (hlResults && hlResults.children.length) {
+    if (hlStatus) {
+      hlStatus.textContent = `⚡ ${hlResults.children.length} short${hlResults.children.length === 1 ? "" : "s"} ready — open AI Shorts when you want them.`;
+    }
+    return;
+  }
+
+  // Generate in the background. Do NOT yank the user off Transcript Cut —
+  // that made uploads look broken (video never "loaded" because we jumped
+  // to Highlights before the player was visible).
+  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts in the background…";
+  if (hlFindBtn) hlFindBtn.disabled = true;
+  try {
+    const format = (hlFormatEl && hlFormatEl.value) || "auto";
+    const num = (hlCountEl && parseInt(hlCountEl.value, 10)) || 5;
+    const res = await fetch("/auto-process-job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, format, num_clips: num }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    const clips = data.clips || [];
+    renderHighlights(clips, format);
+    if (hlStatus) {
+      hlStatus.textContent = clips.length
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open AI Shorts to preview.`
+        : "Auto-generate returned no clips — try Find highlights with different lengths.";
+    }
+    // Soft nudge on the Transcript tab without stealing focus.
+    const badge = document.querySelector('.main-tab[data-tab="highlights"]');
+    if (badge && clips.length) {
+      badge.title = `${clips.length} shorts ready`;
+    }
+    try { await refreshReframeStatus(); } catch { /* optional */ }
+  } catch (e) {
+    if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
+  } finally {
+    if (hlFindBtn && !$("hlGeminiDisabled")) hlFindBtn.disabled = false;
+  }
 }
 
 // ---- Phase 2: Render ----
@@ -1702,68 +2138,270 @@ if (exportVttBtn) exportVttBtn.onclick = () => _downloadCaptions("vtt");
 // dedicated /reframe-status endpoint until ready. Once ready, the
 // "Apply 9:16 reframe on next render" checkbox enables.
 const reframeAnalyzeBtn = $("reframeAnalyzeBtn");
-const reframeEnabled = $("reframeEnabled");
-const reframeStatus = $("reframeStatus");
+const reframeSwapBtn    = $("reframeSwapBtn");
+const reframeEnabled    = $("reframeEnabled");
+const reframeStatus     = $("reframeStatus");
 let _reframePollTimer = null;
 
+function renderIngestSpeakerCards(stats) {
+  const wrap = $("ingestSpeakerCards");
+  if (!wrap) return;
+  const breakdown = (stats && stats.speaker_breakdown) || [];
+  if (!breakdown.length) {
+    wrap.innerHTML =
+      `<p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">` +
+      `No speakers yet. Click <strong>Analyze</strong>, run Analyze on Transcript Cut, or enable Auto-Generate Shorts — live cards appear after diarization.` +
+      `</p>`;
+    return;
+  }
+  const ts = Date.now();
+  syncSpeakerColorPickers(breakdown.map((s) => s.id));
+  wrap.innerHTML = "";
+  breakdown.forEach((spk, i) => {
+    const color = colorForSpeaker(spk.id, i);
+    const card = document.createElement("div");
+    card.className = "speaker-card";
+    card.dataset.speakerId = spk.id;
+    const avatar = document.createElement("img");
+    avatar.className = "speaker-avatar";
+    avatar.alt = spk.label || spk.id;
+    avatar.src = currentJobId
+      ? `/reframe-speaker-avatar/${currentJobId}/${encodeURIComponent(spk.id)}?t=${ts}`
+      : "";
+    avatar.onerror = () => { avatar.style.display = "none"; };
+
+    const meta = document.createElement("div");
+    meta.style.cssText = "flex:1;min-width:0";
+    meta.innerHTML =
+      `<div style="font-weight:600;font-size:0.85rem">${spk.label || speakerLabel(spk.id)}</div>` +
+      `<div style="font-size:0.74rem;color:#94a3b8">${spk.speech_pct}% speech · ${spk.speech_sec}s · ${spk.id}</div>`;
+
+    const pill = document.createElement("span");
+    pill.className = "speaker-pill";
+    pill.textContent = spk.label || speakerLabel(spk.id);
+    pill.style.cssText =
+      `background:${color}33;color:${color};border:1px solid ${color}88`;
+
+    card.appendChild(avatar);
+    card.appendChild(meta);
+    card.appendChild(pill);
+    wrap.appendChild(card);
+  });
+}
+
 async function refreshReframeStatus() {
-  if (!currentJobId || !reframeStatus) return;
+  if (!currentJobId) return;
   try {
     const res = await fetch(`/reframe-status/${currentJobId}`);
     const data = await res.json();
     if (data.ready && data.stats) {
-      reframeStatus.textContent =
-        `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples} face samples`;
-      if (reframeEnabled) reframeEnabled.disabled = false;
+      if (reframeStatus) {
+        reframeStatus.textContent =
+          `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples || 0} face samples`;
+      }
+      if (reframeEnabled) {
+        reframeEnabled.disabled = false;
+        reframeEnabled.checked = true; // Auto-check when analysis is ready!
+      }
       if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Re-analyze";
+      refreshReframePreview();
+      refreshSpeakerAvatars();
+      renderIngestSpeakerCards(data.stats);
+      const ingestBtn = $("ingestAnalyzeBtn");
+      if (ingestBtn) ingestBtn.textContent = "Re-analyze";
+      // Stamp word.speaker + refresh Transcript Cut coloring.
+      try {
+        await fetch(`/stamp-speakers/${currentJobId}`, { method: "POST" });
+        const st = await fetch(`/status/${currentJobId}`).then((r) => r.json());
+        if (Array.isArray(st.words) && st.words.length) {
+          currentWords = _sanitizeWords(st.words);
+          if (phraseListEl && !phraseListEl.closest(".hidden")) {
+            renderPhraseList(currentWords);
+            updateRowCount();
+          }
+        }
+      } catch { /* optional */ }
     } else {
-      reframeStatus.textContent = "Not analysed yet";
+      if (reframeStatus) reframeStatus.textContent = "Not analysed yet";
       if (reframeEnabled) {
         reframeEnabled.disabled = true;
         reframeEnabled.checked = false;
       }
       if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+      const box = $("reframePreviewBox");
+      if (box) box.style.display = "none";
+      const spkBox = $("reframeSpeakerBox");
+      if (spkBox) spkBox.style.display = "none";
+      renderIngestSpeakerCards(null);
+      const ingestBtn = $("ingestAnalyzeBtn");
+      if (ingestBtn) ingestBtn.textContent = "Analyze";
     }
   } catch { /* offline — silent */ }
 }
 
-if (reframeAnalyzeBtn) {
-  reframeAnalyzeBtn.onclick = async () => {
-    if (!currentJobId) { alert("Open a transcribed video first."); return; }
-    reframeAnalyzeBtn.disabled = true;
-    reframeStatus.textContent = "Starting…";
-    try {
-      const res = await fetch("/analyze-reframe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: currentJobId }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
-      if (_reframePollTimer) clearInterval(_reframePollTimer);
-      _reframePollTimer = setInterval(async () => {
-        const r = await fetch(`/reframe-status/${currentJobId}`).then(r => r.json());
-        if (r.ready) {
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
-          refreshReframeStatus();
-          reframeAnalyzeBtn.disabled = false;
-        } else if (r.error) {
-          // Worker died — stop polling and tell the user what went wrong.
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
+async function startReframeAnalyze(triggerBtn) {
+  if (!currentJobId) { alert("Open a transcribed video first."); return; }
+  if (triggerBtn) triggerBtn.disabled = true;
+  if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = true;
+  const ingestBtn = $("ingestAnalyzeBtn");
+  if (ingestBtn) ingestBtn.disabled = true;
+  if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
+  if (reframeStatus) reframeStatus.textContent = "Starting…";
+  const empty = $("ingestSpeakerEmpty");
+  if (empty) empty.textContent = "Analysing speakers… (1–3 min for 1 minute of video)";
+  try {
+    const res = await fetch("/analyze-reframe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: currentJobId }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (reframeStatus) reframeStatus.textContent = "Analysing… (1–3 min for 1 minute of video)";
+    if (_reframePollTimer) clearInterval(_reframePollTimer);
+    _reframePollTimer = setInterval(async () => {
+      const r = await fetch(`/reframe-status/${currentJobId}`).then((x) => x.json());
+      if (r.ready) {
+        clearInterval(_reframePollTimer);
+        _reframePollTimer = null;
+        refreshReframeStatus();
+        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+        if (ingestBtn) ingestBtn.disabled = false;
+        if (reframeEnabled) {
+          reframeEnabled.disabled = false;
+          reframeEnabled.checked = true;
+        }
+      } else if (r.error) {
+        clearInterval(_reframePollTimer);
+        _reframePollTimer = null;
+        if (reframeStatus) {
           reframeStatus.textContent = `❌ ${r.error}`;
           reframeStatus.style.color = "#ff8a8a";
-          reframeAnalyzeBtn.disabled = false;
         }
-      }, 3000);
-    } catch (e) {
-      reframeStatus.textContent = "Error: " + e.message;
-      reframeAnalyzeBtn.disabled = false;
-    }
-  };
+        if (empty) empty.textContent = "Analyze failed: " + r.error;
+        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+        if (ingestBtn) ingestBtn.disabled = false;
+      }
+    }, 3000);
+  } catch (e) {
+    if (reframeStatus) reframeStatus.textContent = "Error: " + e.message;
+    if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+    if (ingestBtn) ingestBtn.disabled = false;
+    if (empty) empty.textContent = "Analyze failed: " + e.message;
+  }
 }
+
+if (reframeAnalyzeBtn) {
+  reframeAnalyzeBtn.onclick = () => startReframeAnalyze(reframeAnalyzeBtn);
+}
+const ingestAnalyzeBtn = $("ingestAnalyzeBtn");
+if (ingestAnalyzeBtn) {
+  ingestAnalyzeBtn.onclick = () => startReframeAnalyze(ingestAnalyzeBtn);
+}
+
+// Live-tint Ingest speaker pills + Transcript phrase colors when pickers change.
+// (Dynamic pickers wire their own input handlers in syncSpeakerColorPickers.)
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (!t || !t.dataset || !t.dataset.speakerColor) return;
+  if (t.id !== "hostColor" && t.id !== "guestColor") return;
+  // Host/Guest legacy fields may still exist before first Analyze expand.
+  const cards = document.querySelectorAll("#ingestSpeakerCards .speaker-card");
+  cards.forEach((card) => {
+    const sid = card.dataset.speakerId;
+    const color = colorForSpeaker(sid);
+    const pill = card.querySelector(".speaker-pill");
+    if (pill) {
+      pill.style.background = color + "33";
+      pill.style.color = color;
+      pill.style.borderColor = color + "88";
+    }
+  });
+  if (currentWords && currentWords.some((w) => w.speaker) && phraseListEl) {
+    renderPhraseList(currentWords);
+  }
+});
+
+function refreshSpeakerAvatars() {
+  const spkBox = $("reframeSpeakerBox");
+  if (!currentJobId || !spkBox) return;
+  const ts = Date.now();
+  const spk0 = $("spk0Avatar");
+  const spk1 = $("spk1Avatar");
+  if (spk0) spk0.src = `/reframe-speaker-avatar/${currentJobId}/SPEAKER_00?t=${ts}`;
+  if (spk1) spk1.src = `/reframe-speaker-avatar/${currentJobId}/SPEAKER_01?t=${ts}`;
+  spkBox.style.display = "block";
+}
+
+async function handleSwapSpeakerVoices() {
+  if (!currentJobId) return;
+  const btn = $("reframeSwapDiarBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Swapping…"; }
+  try {
+    const res = await fetch("/reframe-swap-speakers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: currentJobId }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (reframeStatus) reframeStatus.textContent = "✓ Speaker voices swapped";
+    refreshSpeakerAvatars();
+    refreshReframePreview();
+    refreshReframeStatus();
+  } catch (e) {
+    if (reframeStatus) reframeStatus.textContent = "❌ Swap failed: " + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⇄ Swap Speaker Voices"; }
+  }
+}
+
+const reframeSwapDiarBtn = $("reframeSwapDiarBtn");
+if (reframeSwapDiarBtn) reframeSwapDiarBtn.onclick = handleSwapSpeakerVoices;
+
+function refreshReframePreview() {
+  const box = $("reframePreviewBox");
+  if (!currentJobId || !box) return;
+  const topVal = $("reframeTopSelect") ? $("reframeTopSelect").value : "active";
+  const botVal = $("reframeBottomSelect") ? $("reframeBottomSelect").value : "full";
+  const ts = Date.now();
+  const topImg = $("reframeTopImg");
+  const botImg = $("reframeBottomImg");
+  if (topImg) topImg.src = `/reframe-preview-crop/${currentJobId}/top?top=${topVal}&bottom=${botVal}&t=${ts}`;
+  if (botImg) botImg.src = `/reframe-preview-crop/${currentJobId}/bottom?top=${topVal}&bottom=${botVal}&t=${ts}`;
+  
+  const labels = {
+    active: "🗣️ Active Speaker (Auto Zoom)",
+    left:   "👤 Speaker 1 (Left Person)",
+    right:  "👤 Speaker 2 (Right Person)",
+    full:   "📹 Original Wide Video",
+  };
+  const topDesc = $("reframeTopDesc");
+  const botDesc = $("reframeBottomDesc");
+  if (topDesc) topDesc.textContent = labels[topVal] || topVal;
+  if (botDesc) botDesc.textContent = labels[botVal] || botVal;
+  box.style.display = "block";
+}
+
+function handleReframeSwap() {
+  const topEl = $("reframeTopSelect");
+  const botEl = $("reframeBottomSelect");
+  if (topEl && botEl) {
+    const tmp = topEl.value;
+    topEl.value = botEl.value;
+    botEl.value = tmp;
+    refreshReframePreview();
+  }
+}
+
+const reframeSwapBtnCard = $("reframeSwapBtnCard");
+if (reframeSwapBtnCard) reframeSwapBtnCard.onclick = handleReframeSwap;
+
+const reframeTopSelect = $("reframeTopSelect");
+if (reframeTopSelect) reframeTopSelect.onchange = () => refreshReframePreview();
+
+const reframeBottomSelect = $("reframeBottomSelect");
+if (reframeBottomSelect) reframeBottomSelect.onchange = () => refreshReframePreview();
 
 // Refresh reframe panel state whenever a job is switched in / out.
 if (typeof window !== "undefined") {
@@ -1776,10 +2414,11 @@ function capitalize(s) {
 }
 
 function showError(msg) {
-  progress.classList.add("hidden");
-  statusText.textContent = msg;
   progress.classList.remove("hidden");
+  statusText.textContent = msg;
   barFill.style.width = "0%";
+  // Keep soft notes out of the floating red toast so navigation stays clear.
+  // Real script failures still use window.__studioError via the global handlers.
 }
 
 // =====================================================================
@@ -1849,16 +2488,24 @@ function _statusBadgeClass(status) {
 function renderJobsList() {
   const ids = _loadJobIds();
   // Toggle empty-state vs app-shell here — single source of truth.
+  // Keep the shell visible while an upload is in flight even before the
+  // job id lands in localStorage (otherwise the 4s /jobs poll bounces the
+  // user back to "Choose a video to start").
+  const showShell = ids.length > 0 || _ingestBusy > 0;
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
-  if (emptyEl) emptyEl.classList.toggle("hidden", ids.length > 0);
-  if (shellEl) shellEl.classList.toggle("hidden", ids.length === 0);
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.toggle("hidden", showShell);
+  if (shellEl) shellEl.classList.toggle("hidden", !showShell);
+  // Hide sticky Studio header on welcome screen so it can't cover the CTA.
+  if (headerEl) headerEl.classList.toggle("hidden", !showShell);
   if (!ids.length) {
-    jobsPanel.classList.add("hidden");
+    if (jobsPanel) jobsPanel.classList.add("hidden");
     return;
   }
-  jobsPanel.classList.remove("hidden");
-  jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  if (jobsPanel) jobsPanel.classList.remove("hidden");
+  if (jobsCountEl) jobsCountEl.textContent = ids.length === 1 ? "1 video" : `${ids.length} videos`;
+  if (!jobsListEl) return;
   jobsListEl.innerHTML = "";
   ids.forEach(jobId => {
     const meta = jobsById[jobId] || {};
@@ -1936,9 +2583,15 @@ function renderJobsList() {
   });
 }
 
-async function switchToJob(jobId) {
-  if (currentJobId === jobId) return;
-  if (saveDraftNow) await saveDraftNow();  // persist current job's edits first
+async function switchToJob(jobId, opts) {
+  opts = opts || {};
+  // Allow re-opening the same job (e.g. Compilation "Open job") so the UI
+  // still navigates to Transcript even when currentJobId already matches.
+  if (currentJobId === jobId && !opts.force) {
+    if (opts.tab) setActiveTab(opts.tab);
+    return;
+  }
+  if (saveDraftNow && currentJobId && currentJobId !== jobId) await saveDraftNow();
   try {
     const res = await fetch("/status/" + jobId);
     if (res.status === 404) {
@@ -1961,6 +2614,7 @@ async function switchToJob(jobId) {
       } else {
         result.classList.add("hidden");
       }
+      setActiveTab(opts.tab || "transcript");
     } else {
       // Still transcribing — show the progress UI for this job
       editor.classList.add("hidden");
@@ -1969,6 +2623,7 @@ async function switchToJob(jobId) {
       barFill.style.width = (s.progress || 10) + "%";
       statusText.textContent = capitalize(s.status || "loading") + "…";
       pollTranscription(jobId);
+      setActiveTab(opts.tab || "ingest");
     }
     renderJobsList();
   } catch (e) {
@@ -2142,6 +2797,37 @@ function renderHighlights(clips, format) {
     }
     card.appendChild(title);
 
+    // ---- Viral Score Badge + Category Tag (from enhanced Gemini response) ----
+    if (c.viral_score || c.category || c.suggested_headline) {
+      const metaRow = document.createElement("div");
+      metaRow.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 2px";
+      if (c.viral_score != null) {
+        const scoreBadge = document.createElement("span");
+        const score = parseInt(c.viral_score, 10);
+        const scoreColor = score >= 80 ? "#ff4444" : score >= 60 ? "#ff9500" : score >= 40 ? "#ffd60a" : "#8892b0";
+        scoreBadge.style.cssText = `display:inline-flex;align-items:center;gap:4px;font-size:.76rem;font-weight:700;color:${scoreColor};background:${scoreColor}18;padding:2px 8px;border-radius:12px;border:1px solid ${scoreColor}44`;
+        scoreBadge.textContent = `🔥 ${score}`;
+        scoreBadge.title = "Viral potential score (0-100)";
+        metaRow.appendChild(scoreBadge);
+      }
+      if (c.category) {
+        const catBadge = document.createElement("span");
+        const catIcons = { founder_story: "📖", product_spotlight: "🎯", business_advice: "💡", festival_vibe: "🎪" };
+        const catLabels = { founder_story: "Founder Story", product_spotlight: "Product Spotlight", business_advice: "Business Advice", festival_vibe: "Festival Vibe" };
+        catBadge.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:.76rem;color:#a0b0c8;background:#1e2535;padding:2px 8px;border-radius:12px;border:1px solid #2d3a50";
+        catBadge.textContent = `${catIcons[c.category] || "🏷"} ${catLabels[c.category] || c.category}`;
+        metaRow.appendChild(catBadge);
+      }
+      if (c.suggested_headline) {
+        const headlineBadge = document.createElement("span");
+        headlineBadge.style.cssText = "font-size:.76rem;color:#8892b0;font-style:italic";
+        headlineBadge.textContent = `💬 "${c.suggested_headline}"`;
+        headlineBadge.title = "AI-suggested headline for this clip";
+        metaRow.appendChild(headlineBadge);
+      }
+      card.appendChild(metaRow);
+    }
+
     // Hook quote — editable too. Always render the row so the user can add
     // a quote even when Gemini didn't supply one.
     const quote = document.createElement("div");
@@ -2246,6 +2932,19 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(previewBtn);
 
+    const addSegBtn = document.createElement("button");
+    addSegBtn.textContent = "🔗 Add to assembly";
+    addSegBtn.title = "Add this clip as a segment in the assembly bar";
+    addSegBtn.onclick = () => {
+      if (editedEnd <= editedStart) { alert("End time must be greater than start time."); return; }
+      _addClipToAssembly({ title: editedTitle, start: editedStart, end: editedEnd, quote: editedQuote });
+      addSegBtn.textContent = "✓ Added";
+      addSegBtn.disabled = true;
+      setTimeout(() => { addSegBtn.disabled = false; addSegBtn.textContent = "🔗 Add to assembly"; }, 1500);
+      if (window.StudioLogger) StudioLogger.clip("segment_added", `"${editedTitle}" ${editedStart.toFixed(1)}-${editedEnd.toFixed(1)}s`);
+    };
+    actions.appendChild(addSegBtn);
+
     const addBtn = document.createElement("button");
     addBtn.textContent = "+ Add to compilation";
     addBtn.onclick = () => {
@@ -2304,19 +3003,21 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(makeBtn);
 
-    if (typeof window.openTimelineEditor === "function") {
-      const tlBtn = document.createElement("button");
-      tlBtn.textContent = "🎬 To timeline";
-      tlBtn.title = "Open the timeline editor with this highlight as a clip";
-      tlBtn.onclick = () => {
-        if (editedEnd <= editedStart) {
-          alert("End time must be greater than start time.");
-          return;
-        }
+    const tlBtn = document.createElement("button");
+    tlBtn.textContent = "🎬 Open in Timeline";
+    tlBtn.title = "Open the timeline editor with this highlight as a clip";
+    tlBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      if (typeof window.openTimelineEditor === "function") {
         window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd });
-      };
-      actions.appendChild(tlBtn);
-    }
+      } else {
+        alert("Timeline Editor is not available.");
+      }
+    };
+    actions.appendChild(tlBtn);
 
     card.appendChild(actions);
     hlResults.appendChild(card);
@@ -2449,7 +3150,7 @@ function renderCompileQueue() {
     : "0 clips";
   if (compileGoBtn) compileGoBtn.disabled = !q.length;
   if (compileClearBtn) compileClearBtn.disabled = !q.length;
-  const compileToTl = document.getElementById("compileToTimelineBtn");
+  const compileToTl = $("compileToTimelineBtn");
   if (compileToTl) compileToTl.disabled = !q.length;
 
   compileListEl.innerHTML = "";
@@ -2724,7 +3425,7 @@ async function previewCompileAll() {
     alert("Queue is empty (or all clips have missing sources).");
     return;
   }
-  setActiveTab("edit");
+  setActiveTab("compilation");
   await new Promise(r => requestAnimationFrame(r));
   _compileSequenceActive = true;
   const btn = $("compilePreviewAllBtn");
@@ -2785,12 +3486,15 @@ function sendCompileQueueToTimeline() {
     alert("Editor is still loading — try again in a second.");
     return;
   }
-  const clips = q.map((it) => ({
-    source_job_id: it.source_job_id,
-    start_time: it.start_time,
-    end_time: it.end_time,
-  }));
-  window.openTimelineEditor(null, { clips, replace: true, newProject: true });
+  window.openTimelineEditor(null, {
+    clips: q.map((it) => ({
+      source_job_id: it.source_job_id,
+      start_time: it.start_time,
+      end_time: it.end_time,
+    })),
+    replace: true,
+    newProject: true,
+  });
 }
 
 const compileToTimelineBtn = $("compileToTimelineBtn");
@@ -2917,7 +3621,10 @@ async function refreshPastCompiles() {
     const openBtn = document.createElement("button");
     openBtn.textContent = "Open job";
     openBtn.className = "btn";
-    openBtn.onclick = async () => { await switchToJob(c.job_id); };
+    openBtn.title = "Open this compiled job on Transcript Cut";
+    openBtn.onclick = async () => {
+      await switchToJob(c.job_id, { force: true, tab: "transcript" });
+    };
     actions.appendChild(openBtn);
 
     card.appendChild(actions);
@@ -2977,35 +3684,86 @@ const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
 
 function setActiveTab(tab) {
-  if (!mainTabs) {
-    console.warn("[tabs] setActiveTab called but #mainTabs not found");
-    return;
-  }
-  // Re-query tab content nodes every call so we don't depend on a snapshot
-  // taken before the DOM was fully parsed (defensive against script timing).
-  const contents = document.querySelectorAll("[data-tab-group]");
-  console.log("[tabs] setActiveTab", tab, "found", contents.length, "tab-content elements");
-  mainTabs.querySelectorAll(".main-tab").forEach(b => {
+  const stepMap = {
+    ingest: "1",
+    transcript: "2",
+    highlights: "3",
+    compilation: "3",
+    branding: "4",
+    editor: "5",
+    result: "5",
+  };
+  const step = stepMap[tab];
+
+  document.querySelectorAll(".main-tab").forEach(b => {
     b.classList.toggle("active", b.dataset.tab === tab);
   });
-  contents.forEach(c => {
-    const match = c.dataset.tabGroup === tab;
-    c.classList.toggle("hidden", !match);
+
+  document.querySelectorAll(".step-badge").forEach(b => {
+    b.classList.toggle("active", b.dataset.step === step);
   });
+
+  document.querySelectorAll(".tab-content, [data-tab-group]").forEach(c => {
+    if (c.dataset.tabGroup) {
+      const isMatch = c.dataset.tabGroup === tab;
+      c.classList.toggle("hidden", !isMatch);
+      c.classList.toggle("active", isMatch);
+      c.style.display = isMatch ? "block" : "none";
+      if (isMatch) {
+        // Ensure core shells inside the tab are visible. Leave ephemeral
+        // panels (preview editor, filler banner, jobs empty) alone.
+        ["editor", "transcriptEditor", "highlightsPanel", "compilePanel"].forEach((id) => {
+          const el = c.querySelector("#" + id);
+          if (el) el.classList.remove("hidden");
+        });
+      }
+    }
+  });
+
+  if (tab === "editor" && typeof window.ensureTimelineInit === "function") {
+    // Skip auto-open when Shorts/Compilation is about to seed a fresh project;
+    // otherwise ensureInit races and reloads an older single-clip timeline.
+    if (!window._tlDeferAutoOpen) {
+      window.ensureTimelineInit();
+    }
+  }
 }
+
+// Used by timeline.js openTimelineEditor / other modules.
+window.setActiveTab = setActiveTab;
 
 if (mainTabs) {
   mainTabs.addEventListener("click", (e) => {
     const btn = e.target.closest(".main-tab");
     if (!btn || btn.classList.contains("hidden")) return;
-    setActiveTab(btn.dataset.tab);
+    if (btn.dataset.tab) setActiveTab(btn.dataset.tab);
   });
 }
 
-// Trigger the file input from the empty-state hero button.
-if (emptyDropBtn) {
-  emptyDropBtn.onclick = () => fileInput.click();
+const workflowSteps = document.getElementById("workflowSteps");
+if (workflowSteps) {
+  workflowSteps.addEventListener("click", (e) => {
+    // The header row is built from .main-tab buttons (data-tab); an older build
+    // used .step-badge (data-step). Support both so the top nav actually works.
+    const tabBtn = e.target.closest(".main-tab");
+    if (tabBtn && tabBtn.dataset.tab) { setActiveTab(tabBtn.dataset.tab); return; }
+    const badge = e.target.closest(".step-badge");
+    if (!badge || !badge.dataset.step) return;
+    const stepToTab = {
+      "1": "ingest",
+      "2": "transcript",
+      "3": "highlights",
+      "4": "branding",
+      "5": "editor"
+    };
+    const tab = stepToTab[badge.dataset.step];
+    if (tab) setActiveTab(tab);
+  });
 }
+
+// Empty-state #emptyFile is wired by an early inline script in index.html
+// (so the picker works even if something later in this file throws).
+// It calls window.handleFiles — do not attach a second change listener here.
 
 // Allow drag-and-drop anywhere on the page in the empty state.
 document.addEventListener("dragover", (e) => {
@@ -3020,20 +3778,25 @@ document.addEventListener("drop", (e) => {
   }
 });
 
-// Reveal Result tab when a render completes; only auto-switch to it when
-// the user is currently on Edit (so render output gets surfaced) — leave
-// them alone if they're on Highlights or Compilation.
+// Reveal Result tab when a render completes; auto-switch when the user is on
+// Transcript (caption burn) so output surfaces. Leave them alone on Shorts /
+// Compilation / Timeline.
 if (result && tabResultBtn) {
   const obs = new MutationObserver(() => {
     if (result.classList.contains("hidden")) return;
     tabResultBtn.classList.remove("hidden");
     const activeTabBtn = mainTabs && mainTabs.querySelector(".main-tab.active");
-    if (activeTabBtn && activeTabBtn.dataset.tab === "edit") {
+    const tab = activeTabBtn && activeTabBtn.dataset.tab;
+    if (tab === "transcript" || tab === "branding") {
       setActiveTab("result");
     }
   });
   obs.observe(result, { attributes: true, attributeFilter: ["class"] });
 }
+
+// Ensure only Ingest is visible on first paint (other tabs ship with content
+// that used to stack because they lacked `.hidden`).
+setActiveTab("ingest");
 
 // Initial render — hooks now live inline inside renderJobsList /
 // renderCompileQueue / showEditor instead of via function-wrapping.
@@ -3121,9 +3884,13 @@ function openPreviewEditor(clip) {
   _peUpdateDur();
   panel.classList.remove("hidden");
 
-  setActiveTab("edit");
+  // Preview panel + #sourcePlayer live on the Transcript tab — not Shorts.
+  setActiveTab("transcript");
   // Defer play+scroll until the tab switch's display change has applied.
-  requestAnimationFrame(() => _pePlay());
+  requestAnimationFrame(() => {
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    _pePlay();
+  });
 }
 
 function closePreviewEditor() {
@@ -3461,3 +4228,661 @@ function _tMaybeReScan() {
 }
 if (_tMaxGap) _tMaxGap.addEventListener("change", _tMaybeReScan);
 if (_tTargetGap) _tTargetGap.addEventListener("change", _tMaybeReScan);
+
+// ===========================================================================
+//  NEW FEATURES — Studio Logger, Bg Music, Speaker Colors, Clip Assembly
+// ===========================================================================
+
+// ---- StudioLogger initialisation ----
+if (window.StudioLogger) {
+  StudioLogger.init();
+  StudioLogger.enableFetchLogging();
+  // Attach to the source video player once the DOM is ready
+  const _slVideo = $("sourcePlayer");
+  if (_slVideo) StudioLogger.attachMediaElement(_slVideo);
+}
+
+// ---- Speaker Color Row: show when reframe analysis completes ----
+(function() {
+  const _scRow = $("speakerColorRow");
+  if (!_scRow) return;
+  // Watch for the reframe checkbox becoming enabled (analysis completed)
+  const _reframeCheck = $("reframeEnabled");
+  if (_reframeCheck) {
+    const _scObserver = new MutationObserver(() => {
+      if (!_reframeCheck.disabled) { _scRow.style.display = "flex"; }
+    });
+    _scObserver.observe(_reframeCheck, { attributes: true, attributeFilter: ["disabled"] });
+  }
+})();
+
+// ---- Headline Banner: live WYSIWYG preview ----
+(function() {
+  const bannerInput = $("headlineBanner");
+  const overlay = $("liveCaptionOverlay");
+  if (!bannerInput || !overlay) return;
+  let bannerDiv = document.createElement("div");
+  bannerDiv.id = "headlineBannerOverlay";
+  bannerDiv.style.cssText = "position:absolute;top:5%;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);color:#fff;font-weight:700;font-size:.78rem;padding:4px 14px;border-radius:14px;white-space:nowrap;display:none;z-index:20;backdrop-filter:blur(6px);letter-spacing:.02em";
+  overlay.parentElement.appendChild(bannerDiv);
+  bannerInput.addEventListener("input", () => {
+    const txt = bannerInput.value.trim();
+    if (txt) { bannerDiv.textContent = "📍 " + txt; bannerDiv.style.display = "block"; }
+    else { bannerDiv.style.display = "none"; }
+  });
+})();
+
+// ---- Background Music upload handler ----
+window._bgMusicUploaded = false;
+(function() {
+  const fileInput = $("bgMusicFile");
+  const uploadBtn = $("bgMusicUploadBtn");
+  const statusEl = $("bgMusicStatus");
+  const nameEl = $("bgMusicFileName");
+  const volSlider = $("bgMusicVolume");
+  const volVal = $("bgMusicVolVal");
+  if (!fileInput || !uploadBtn) return;
+
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files[0];
+    if (f) {
+      uploadBtn.disabled = false;
+      if (nameEl) nameEl.textContent = f.name;
+      if (window.StudioLogger) StudioLogger.action("bgMusicFile", "selected", f.name);
+    } else {
+      uploadBtn.disabled = true;
+      if (nameEl) nameEl.textContent = "";
+    }
+  });
+
+  if (volSlider && volVal) {
+    volSlider.addEventListener("input", () => { volVal.textContent = volSlider.value + " dB"; });
+  }
+
+  uploadBtn.addEventListener("click", async () => {
+    if (!currentJobId) { alert("No active job. Upload a video first."); return; }
+    const f = fileInput.files[0];
+    if (!f) return;
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = "Uploading…";
+    if (statusEl) statusEl.textContent = "";
+    try {
+      const fd = new FormData();
+      fd.append("job_id", currentJobId);
+      fd.append("music", f);
+      const res = await fetch("/upload-bg-music", { method: "POST", body: fd });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      window._bgMusicUploaded = true;
+      uploadBtn.textContent = "✓ Uploaded";
+      if (statusEl) statusEl.textContent = `Ready: ${j.path}`;
+      if (window.StudioLogger) StudioLogger.action("bgMusicUpload", "success", j.path);
+    } catch (e) {
+      uploadBtn.textContent = "⬆ Upload music";
+      uploadBtn.disabled = false;
+      if (statusEl) { statusEl.textContent = "Error: " + e.message; statusEl.style.color = "#ff8a8a"; }
+      if (window.StudioLogger) StudioLogger.error("bgMusicUpload", e, 0, "Music upload failed");
+    }
+  });
+})();
+
+// ---- Clip Assembly Bar (multi-segment editor) ----
+const _clipAssembly = [];
+
+function _addClipToAssembly(seg) {
+  _clipAssembly.push({ ...seg, id: Date.now() + Math.random() });
+  _renderAssemblyBar();
+}
+
+function _nudgeAssemblySeg(i, which, delta) {
+  const seg = _clipAssembly[i];
+  if (!seg) return;
+  const minDur = 0.5;
+  if (which === "start") {
+    const next = Math.max(0, seg.start + delta);
+    if (seg.end - next < minDur) return;
+    seg.start = Math.round(next * 10) / 10;
+  } else {
+    const next = Math.max(seg.start + minDur, seg.end + delta);
+    seg.end = Math.round(next * 10) / 10;
+  }
+  _renderAssemblyBar();
+  if (window.StudioLogger) {
+    StudioLogger.clip("segment_trimmed", `${String.fromCharCode(65 + i)} ${seg.start.toFixed(1)}–${seg.end.toFixed(1)}s`);
+  }
+}
+
+function _renderAssemblyBar() {
+  const bar = $("clipAssemblyBar");
+  const track = $("clipSegmentTrack");
+  const countEl = $("clipAssemblyCount");
+  if (!bar || !track) return;
+
+  if (_clipAssembly.length === 0) {
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  if (countEl) countEl.textContent = _clipAssembly.length + " segment" + (_clipAssembly.length !== 1 ? "s" : "");
+
+  track.innerHTML = "";
+  const segColors = ["#5e81ac", "#a3be8c", "#b48ead", "#d08770", "#88c0d0", "#ebcb8b"];
+  const chipCss = "background:transparent;border:1px solid currentColor;border-radius:4px;color:inherit;font-size:.68rem;cursor:pointer;padding:1px 4px;line-height:1.2;opacity:0.85";
+  _clipAssembly.forEach((seg, i) => {
+    const block = document.createElement("div");
+    const dur = (seg.end - seg.start).toFixed(1);
+    const bg = segColors[i % segColors.length];
+    block.style.cssText = `display:flex;align-items:center;gap:5px;padding:6px 8px;background:${bg}22;border:1px solid ${bg};border-radius:6px;font-size:.78rem;color:${bg};cursor:grab;user-select:none;white-space:nowrap;flex-shrink:0`;
+    block.draggable = true;
+    block.dataset.idx = i;
+
+    // Drag-to-reorder
+    block.addEventListener("dragstart", e => { e.dataTransfer.setData("text/plain", String(i)); block.style.opacity = "0.5"; });
+    block.addEventListener("dragend", () => { block.style.opacity = "1"; });
+    block.addEventListener("dragover", e => e.preventDefault());
+    block.addEventListener("drop", e => {
+      e.preventDefault();
+      const fromIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
+      if (isNaN(fromIdx) || fromIdx === i) return;
+      const [moved] = _clipAssembly.splice(fromIdx, 1);
+      _clipAssembly.splice(i, 0, moved);
+      _renderAssemblyBar();
+      if (window.StudioLogger) StudioLogger.clip("reordered", `Moved segment ${fromIdx} → ${i}`);
+    });
+
+    const mkTrim = (label, title, which, delta) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.style.cssText = chipCss;
+      b.onclick = (e) => { e.stopPropagation(); _nudgeAssemblySeg(i, which, delta); };
+      // Don't start a drag from trim chips.
+      b.addEventListener("mousedown", (e) => e.stopPropagation());
+      b.draggable = false;
+      return b;
+    };
+
+    block.appendChild(mkTrim("−2s", "Start 2s earlier", "start", -2));
+    block.appendChild(mkTrim("+2s", "Start 2s later", "start", 2));
+
+    const label = document.createElement("span");
+    label.innerHTML = `<strong>${String.fromCharCode(65 + i)}</strong> ${_fmtTimeFine(seg.start)}–${_fmtTimeFine(seg.end)} <span style="opacity:0.6">(${dur}s)</span>`;
+    block.appendChild(label);
+
+    block.appendChild(mkTrim("−2s", "End 2s earlier", "end", -2));
+    block.appendChild(mkTrim("+2s", "End 2s later", "end", 2));
+
+    // Remove button
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.textContent = "✕";
+    removeBtn.title = "Remove this segment";
+    removeBtn.style.cssText = "background:transparent;border:none;color:#bf616a;font-size:.82rem;cursor:pointer;padding:0 2px;line-height:1";
+    removeBtn.onclick = (e) => {
+      e.stopPropagation();
+      _clipAssembly.splice(i, 1);
+      _renderAssemblyBar();
+      if (window.StudioLogger) StudioLogger.clip("segment_removed", `Segment ${String.fromCharCode(65 + i)} removed`);
+    };
+    block.appendChild(removeBtn);
+
+    track.appendChild(block);
+  });
+}
+
+// Clip Assembly: Preview sequence (virtual playlist) + Timeline handoff
+(function() {
+  const previewBtn = $("clipAssemblyPreview");
+  const clearBtn = $("clipAssemblyClear");
+  const exportBtn = $("clipAssemblyExport");
+  const toTlBtn = $("clipAssemblyToTimeline");
+  if (!previewBtn || !clearBtn) return;
+
+  let _playingAssembly = false;
+  let _assemblyRaf = null;
+
+  previewBtn.addEventListener("click", () => {
+    const video = $("sourcePlayer");
+    if (!video || _clipAssembly.length === 0) return;
+    if (_playingAssembly) {
+      _playingAssembly = false;
+      video.pause();
+      if (_assemblyRaf) cancelAnimationFrame(_assemblyRaf);
+      previewBtn.textContent = "▶ Preview sequence";
+      return;
+    }
+
+    // Player lives on Transcript — switch there so preview is visible.
+    setActiveTab("transcript");
+    _playingAssembly = true;
+    previewBtn.textContent = "⏸ Stop preview";
+    let segIdx = 0;
+    requestAnimationFrame(() => {
+      video.currentTime = _clipAssembly[0].start;
+      video.play().catch(() => {});
+    });
+
+    function tick() {
+      if (!_playingAssembly) return;
+      const seg = _clipAssembly[segIdx];
+      if (!seg) { _playingAssembly = false; previewBtn.textContent = "▶ Preview sequence"; return; }
+      if (video.currentTime >= seg.end) {
+        segIdx++;
+        if (segIdx >= _clipAssembly.length) {
+          _playingAssembly = false;
+          video.pause();
+          previewBtn.textContent = "▶ Preview sequence";
+          return;
+        }
+        video.currentTime = _clipAssembly[segIdx].start;
+      }
+      _assemblyRaf = requestAnimationFrame(tick);
+    }
+    tick();
+    if (window.StudioLogger) StudioLogger.clip("assembly_preview", `${_clipAssembly.length} segments`);
+  });
+
+  clearBtn.addEventListener("click", () => {
+    _clipAssembly.length = 0;
+    _renderAssemblyBar();
+    if (window.StudioLogger) StudioLogger.clip("assembly_cleared", "all segments removed");
+  });
+
+  if (toTlBtn) {
+    toTlBtn.addEventListener("click", () => {
+      if (_clipAssembly.length === 0) return;
+      if (!currentJobId) { alert("No active job."); return; }
+      if (typeof window.openTimelineEditor !== "function") {
+        alert("Timeline Editor is not available.");
+        return;
+      }
+      const clips = _clipAssembly.map((s) => ({
+        source_job_id: currentJobId,
+        start_time: s.start,
+        end_time: s.end,
+      }));
+      window.openTimelineEditor(null, { clips, replace: true, newProject: true });
+      if (window.StudioLogger) StudioLogger.clip("assembly_to_timeline", `${clips.length} segments`);
+    });
+  }
+
+  if (exportBtn) {
+    exportBtn.addEventListener("click", async () => {
+      if (_clipAssembly.length === 0) return;
+      if (!currentJobId) { alert("No active job."); return; }
+      exportBtn.disabled = true;
+      exportBtn.textContent = "Exporting…";
+      try {
+        const segments = _clipAssembly.map(s => ({ start_time: s.start, end_time: s.end, title: s.title }));
+        const res = await fetch("/compile-clips", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            clips: segments.map(s => ({
+              source_job_id: currentJobId,
+              source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+              start_time: s.start_time,
+              end_time: s.end_time,
+              title: s.title,
+            })),
+            label: "Assembled Short",
+          }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        await refreshJobsList();
+        await switchToJob(j.job_id);
+        if (window.StudioLogger) StudioLogger.clip("assembly_exported", `job: ${j.job_id}`);
+      } catch (e) {
+        alert("Export failed: " + e.message);
+        if (window.StudioLogger) StudioLogger.error("assembly_export", e, 0, "Export failed");
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.textContent = "🚀 Export assembled short";
+      }
+    });
+  }
+})();
+
+// ---- Smart Export Engine (Header Controller) ----
+(function() {
+  const headerBtn = $("headerExportBtn");
+  if (!headerBtn) return;
+
+  headerBtn.addEventListener("click", () => {
+    // Determine active tab
+    const activeTabBtn = document.querySelector(".main-tab.active");
+    const tabName = activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "edit";
+
+    if (window.StudioLogger) StudioLogger.action("headerExportBtn", "click", `tab:${tabName}`);
+
+    if (tabName === "highlights") {
+      const batchBtn = $("batchExportBtn");
+      if (batchBtn) { batchBtn.click(); return; }
+    }
+    if (tabName === "editor") {
+      const tlBtn = $("tlRenderBtn");
+      if (tlBtn) { tlBtn.click(); return; }
+    }
+    if ($("clipAssemblyBar") && !$("clipAssemblyBar").classList.contains("hidden")) {
+      const expAss = $("clipAssemblyExport");
+      if (expAss) { expAss.click(); return; }
+    }
+
+    // Default to main Edit Studio render
+    const rBtn = $("renderBtn");
+    const gBtn = $("go");
+    if (rBtn && !rBtn.disabled && rBtn.offsetParent !== null) {
+      rBtn.click();
+    } else if (gBtn && !gBtn.disabled) {
+      gBtn.click();
+    } else {
+      alert("No active video or edit to render. Upload a video to begin!");
+    }
+  });
+})();
+
+// ---- Batch Export All Shorts Handler ----
+(function() {
+  const batchBtn = $("batchExportBtn");
+  if (!batchBtn) return;
+
+  batchBtn.addEventListener("click", async () => {
+    if (!currentJobId) { alert("No active job. Upload a video first."); return; }
+    
+    // Collect highlight cards from DOM or state
+    const cards = document.querySelectorAll(".hl-card");
+    if (!cards || cards.length === 0) {
+      alert("No clip suggestions available yet. Click 'Find highlights' first!");
+      return;
+    }
+
+    batchBtn.disabled = true;
+    batchBtn.textContent = "⏳ Generating ZIP Batch…";
+
+    try {
+      const clipsToRender = [];
+      cards.forEach(card => {
+        const titleEl = card.querySelector(".hl-title strong");
+        const inputs = card.querySelectorAll(".hl-time-edit input");
+        let start = 0, end = 0;
+        if (inputs.length >= 2) {
+          start = _parseTime(inputs[0].value) || 0;
+          end = _parseTime(inputs[1].value) || 0;
+        }
+        if (end > start) {
+          clipsToRender.push({
+            start_time: start,
+            end_time: end,
+            title: titleEl ? titleEl.textContent.trim() : "Viral Short",
+            headline: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
+          });
+        }
+      });
+
+      if (clipsToRender.length === 0) throw new Error("No valid clips found to export.");
+
+      const style = getStyle();
+      const res = await fetch("/batch-render-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_job_id: currentJobId,
+          clips: clipsToRender,
+          style: style,
+          format_zip: true,
+        }),
+      });
+
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+
+      // Trigger automatic browser download of ZIP
+      if (j.download_url) {
+        const a = document.createElement("a");
+        a.href = j.download_url;
+        a.download = j.zip_filename || "viral_shorts_batch.zip";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+
+      batchBtn.textContent = "✓ Batch Exported (ZIP)!";
+      if (window.StudioLogger) StudioLogger.net("POST", "/batch-render-clips", 200, 0, clipsToRender.length);
+      setTimeout(() => {
+        batchBtn.disabled = false;
+        batchBtn.textContent = "🚀 Batch Export All Shorts (ZIP / MP4)";
+      }, 3000);
+    } catch (e) {
+      alert("Batch export failed: " + e.message);
+      batchBtn.disabled = false;
+      batchBtn.textContent = "🚀 Batch Export All Shorts (ZIP / MP4)";
+      if (window.StudioLogger) StudioLogger.error("batchExport", e, 0, "Batch export failed");
+    }
+  });
+})();
+
+// ---- CapCut Viral Templates ----
+const CAPCUT_TEMPLATES = {
+  podcast_interview: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", group: 2, headline: "Mind-Blowing Secret", speakerColors: true },
+  capcut_reels: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1, headline: "", speakerColors: false, punch_zoom: { enabled: true, intensity: "med" } },
+  product_spotlight: { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", group: 3, headline: "Must Have Product!", speakerColors: false },
+  cinematic_vlog: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", group: 4, headline: "", speakerColors: false },
+};
+
+const capcutTemplateEl = document.getElementById("capcutTemplate");
+if (capcutTemplateEl) {
+  capcutTemplateEl.addEventListener("change", () => {
+    const tKey = capcutTemplateEl.value;
+    const t = CAPCUT_TEMPLATES[tKey];
+    if (!t) return;
+    
+    if (document.getElementById("font")) document.getElementById("font").value = t.font;
+    if (document.getElementById("group")) { document.getElementById("group").value = t.group; if (document.getElementById("groupVal")) document.getElementById("groupVal").textContent = t.group; }
+    if (document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = t.headline;
+    if (document.getElementById("speakerColorsEnabled")) document.getElementById("speakerColorsEnabled").checked = t.speakerColors;
+    
+    if (t.punch_zoom) {
+      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = t.punch_zoom.enabled;
+      if (document.getElementById("punchZoomIntensity")) document.getElementById("punchZoomIntensity").value = t.punch_zoom.intensity;
+    } else {
+      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = false;
+    }
+    
+    const presetMap = {
+      podcast_interview: "hormozi",
+      capcut_reels: "mrbeast",
+      product_spotlight: "neon",
+      cinematic_vlog: "karaoke"
+    };
+    const presetBtn = document.querySelector(`#viralPresets .theme[data-preset="${presetMap[tKey]}"]`);
+    if (presetBtn) presetBtn.click();
+    else {
+      if (document.getElementById("size")) document.getElementById("size").value = t.size;
+      if (document.getElementById("primary")) document.getElementById("primary").value = t.primary;
+      if (document.getElementById("highlight")) document.getElementById("highlight").value = t.highlight;
+      if (document.getElementById("accent")) document.getElementById("accent").value = t.accent;
+      if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+      if (typeof updateFontPreview === "function") updateFontPreview();
+    }
+  });
+}
+
+// ---- Custom Brand Preset Saver ----
+window.saveCustomBrandPreset = function(name = "custom") {
+  try {
+    const style = typeof getStyle === "function" ? getStyle() : {};
+    localStorage.setItem("_customBrandPreset", JSON.stringify(style));
+    console.log("Custom brand preset saved:", name);
+    alert("Brand preset saved successfully!");
+  } catch (e) {
+    console.error("Failed to save preset", e);
+    alert("Failed to save brand preset.");
+  }
+};
+
+const saveBrandPresetBtn = $("saveBrandPresetBtn");
+if (saveBrandPresetBtn) {
+  saveBrandPresetBtn.onclick = () => window.saveCustomBrandPreset("custom");
+}
+const loadBrandPresetBtn = $("loadBrandPresetBtn");
+if (loadBrandPresetBtn) {
+  loadBrandPresetBtn.onclick = () => window.loadCustomBrandPreset();
+}
+
+// Brand logo (Branding tab) — upload once, apply with Apply → Timeline.
+window._brandLogoAssetId = window._brandLogoAssetId || null;
+
+(function wireBrandLogo() {
+  const input = $("brandLogoInput");
+  const clearBtn = $("brandLogoClearBtn");
+  const status = $("brandLogoStatus");
+  const preview = $("brandLogoPreview");
+  if (!input) return;
+
+  const setUi = (assetId, note) => {
+    window._brandLogoAssetId = assetId || null;
+    if (status) status.textContent = note || (assetId ? `Logo ready (${assetId.slice(0, 8)}…)` : "Optional — applied when you hit Apply → Timeline");
+    if (preview) {
+      if (assetId) {
+        preview.src = "/asset/" + assetId + "?t=" + Date.now();
+        preview.style.display = "inline-block";
+      } else {
+        preview.removeAttribute("src");
+        preview.style.display = "none";
+      }
+    }
+  };
+
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (status) status.textContent = "Uploading logo…";
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/upload-asset", { method: "POST", body: fd });
+      const j = await res.json();
+      if (!res.ok || j.error) throw new Error(j.error || res.statusText);
+      setUi(j.asset_id, "Logo uploaded — Apply → Timeline to place it");
+      if (window.StudioLogger) StudioLogger.clip("brand_logo_upload", j.asset_id);
+    } catch (e) {
+      setUi(null, "Logo upload failed: " + e.message);
+      alert("Logo upload failed: " + e.message);
+    } finally {
+      input.value = "";
+    }
+  });
+
+  if (clearBtn) {
+    clearBtn.onclick = () => setUi(null, "Logo cleared");
+  }
+})();
+
+async function applyBrandingToTimeline() {
+  const style = typeof getStyle === "function" ? getStyle() : {};
+  if (typeof window.ensureTimelineInit === "function") {
+    await window.ensureTimelineInit();
+  }
+  if (typeof window.applyTimelineBranding !== "function") {
+    alert("Timeline Editor is not available.");
+    return;
+  }
+  const opts = {};
+  if (window._brandLogoAssetId) {
+    opts.logo = {
+      asset_id: window._brandLogoAssetId,
+      x: 0.04, y: 0.04, w: 0.18, opacity: 0.9,
+    };
+  }
+  window.applyTimelineBranding(style, opts);
+  setActiveTab("editor");
+  if (window.StudioLogger) StudioLogger.clip("branding_to_timeline", "style + speaker colors" + (opts.logo ? " + logo" : ""));
+}
+
+const applyBrandingToTimelineBtn = $("applyBrandingToTimelineBtn");
+if (applyBrandingToTimelineBtn) {
+  applyBrandingToTimelineBtn.onclick = () => {
+    applyBrandingToTimeline().catch((e) => alert("Could not apply branding: " + e.message));
+  };
+}
+
+window.loadCustomBrandPreset = function() {
+  try {
+    const data = localStorage.getItem("_customBrandPreset");
+    if (!data) {
+      alert("No custom brand preset found.");
+      return;
+    }
+    const style = JSON.parse(data);
+    
+    if (style.font_name && document.getElementById("font")) document.getElementById("font").value = style.font_name;
+    if (style.font_size && document.getElementById("size")) { document.getElementById("size").value = style.font_size; if (document.getElementById("sizeVal")) document.getElementById("sizeVal").textContent = style.font_size; }
+    if (style.primary_color && document.getElementById("primary")) document.getElementById("primary").value = style.primary_color;
+    if (style.highlight_color && document.getElementById("highlight")) document.getElementById("highlight").value = style.highlight_color;
+    if (style.accent_color && document.getElementById("accent")) document.getElementById("accent").value = style.accent_color;
+    if (style.outline_color && document.getElementById("outlineColor")) document.getElementById("outlineColor").value = style.outline_color;
+    if (style.outline_width !== undefined && document.getElementById("outlineWidth")) { document.getElementById("outlineWidth").value = style.outline_width; if (document.getElementById("owVal")) document.getElementById("owVal").textContent = style.outline_width; }
+    
+    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = style.headline_banner;
+    
+    if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
+      document.getElementById("speakerColorsEnabled").checked = true;
+      syncSpeakerColorPickers(Object.keys(style.speaker_colors));
+      Object.entries(style.speaker_colors).forEach(([id, color]) => {
+        const inp = document.querySelector(`[data-speaker-color="${id}"]`);
+        if (inp && color) inp.value = color;
+      });
+    }
+    
+    if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+    if (typeof updateFontPreview === "function") updateFontPreview();
+    
+    alert("Brand preset loaded successfully!");
+  } catch (e) {
+    console.error("Failed to load preset", e);
+    alert("Failed to load brand preset.");
+  }
+};
+
+// ---- Auto-Fetch B-Roll & Overlays Button Handler ----
+const autoFetchOverlaysBtn = document.getElementById("autoFetchOverlaysBtn");
+if (autoFetchOverlaysBtn) {
+  autoFetchOverlaysBtn.addEventListener("click", async () => {
+    try {
+      autoFetchOverlaysBtn.disabled = true;
+      autoFetchOverlaysBtn.textContent = "Fetching...";
+      
+      let wordsToUse = [];
+      if (typeof currentWords !== "undefined" && currentWords.length > 0) {
+        wordsToUse = currentWords;
+      }
+      
+      const res = await fetch("/fetch-auto-overlays", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ words: wordsToUse }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      
+      if (data.overlays && Array.isArray(data.overlays)) {
+        if (typeof window.addOverlayClip === "function") {
+          data.overlays.forEach(overlay => window.addOverlayClip(overlay));
+        } else if (typeof window.populateOverlaysList === "function") {
+          window.populateOverlaysList(data.overlays);
+        } else {
+          console.log("Fetched overlays:", data.overlays);
+          alert("Overlays fetched but no handler found to display them. Check console.");
+        }
+      }
+    } catch (e) {
+      alert("Failed to fetch overlays: " + e.message);
+    } finally {
+      autoFetchOverlaysBtn.disabled = false;
+      autoFetchOverlaysBtn.textContent = "Auto-Fetch B-Roll & Overlays";
+    }
+  });
+}
+

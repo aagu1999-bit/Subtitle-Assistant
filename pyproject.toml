@@ -7,4 +7,8 @@ dependencies = [
     "faster-whisper>=1.0.0",
     "flask>=3.0.0",
     "requests>=2.33.1",
+    # Serves the burner in deployment. Flask's built-in server prints
+    # "do not use it in a production deployment" for good reason: it is
+    # single-process and has no request timeouts or worker supervision.
+    "gunicorn>=21.0.0",
 ]

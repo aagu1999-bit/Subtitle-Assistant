@@ -59,6 +59,15 @@ artifacts/subtitle-burner/outputs/
 artifacts/subtitle-burner/uploads/
 artifacts/subtitle-burner/jobs.db
 artifacts/subtitle-burner/jobs.db-journal
+artifacts/subtitle-burner/burner.db
+artifacts/subtitle-burner/burner.db-journal
+artifacts/subtitle-burner/assets/
+artifacts/subtitle-burner/cache/
+artifacts/subtitle-burner/logs/
+
+# Local virtualenv — multi-GB with torch/whisper models, never commit it
+artifacts/subtitle-burner/.venv/
+.venv/
 
 # Attached video assets (binary, not tracked)
 attached_assets/*.mp4
