@@ -3012,17 +3012,27 @@
   // ---- Co-editor (chat mutates timeline) ----
   function openCoEditor() {
     const drawer = $("coEditorDrawer");
-    if (!drawer) return;
+    if (!drawer) {
+      console.warn("[timeline] coEditorDrawer missing from DOM");
+      return;
+    }
     drawer.classList.remove("hidden");
+    drawer.style.display = "flex";
     drawer.setAttribute("aria-hidden", "false");
     const btn = $("tlCoEditorBtn");
     if (btn) btn.classList.add("active-co");
-    if ($("coEditorInput")) $("coEditorInput").focus();
+    const log = $("coEditorLog");
+    if (log && !log.dataset.booted) {
+      log.dataset.booted = "1";
+      appendCoMsg("bot", "Describe an edit — e.g. “make captions bigger”, “remove the third shot”, “add a title”.");
+    }
+    try { if ($("coEditorInput")) $("coEditorInput").focus(); } catch (e) {}
   }
   function closeCoEditor() {
     const drawer = $("coEditorDrawer");
     if (!drawer) return;
     drawer.classList.add("hidden");
+    drawer.style.display = "";
     drawer.setAttribute("aria-hidden", "true");
     const btn = $("tlCoEditorBtn");
     if (btn) btn.classList.remove("active-co");
@@ -3233,9 +3243,12 @@
     const coBtn = $("tlCoEditorBtn");
     if (coBtn && !coBtn._wired) {
       coBtn._wired = true;
-      coBtn.onclick = () => {
+      coBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         const drawer = $("coEditorDrawer");
-        if (drawer && !drawer.classList.contains("hidden")) closeCoEditor();
+        const open = drawer && !drawer.classList.contains("hidden") && drawer.style.display !== "none";
+        if (open) closeCoEditor();
         else openCoEditor();
       };
     }
@@ -3254,6 +3267,20 @@
       });
     }
   }
+  // Belt-and-suspenders: delegated click in case early wiring missed the button.
+  if (!window._tlCoEditorDelegated) {
+    window._tlCoEditorDelegated = true;
+    document.addEventListener("click", (e) => {
+      const t = e.target && e.target.closest && e.target.closest("#tlCoEditorBtn");
+      if (!t) return;
+      // If direct onclick already handled it, skip; otherwise open.
+      if (t._wired) return;
+      e.preventDefault();
+      openCoEditor();
+    });
+  }
   wireCaptionsToolbar();
+  window.openCoEditor = openCoEditor;
+  window.closeCoEditor = closeCoEditor;
   window.restyleSelectedShot = restyleSelectedShot;
 })();

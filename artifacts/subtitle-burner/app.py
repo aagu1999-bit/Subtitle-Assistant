@@ -5202,6 +5202,18 @@ def index():
     return resp
 
 
+@app.route("/favicon.ico")
+def favicon():
+    """Tiny SVG favicon so browsers stop 404-spamming the console."""
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+        "<rect width='32' height='32' rx='8' fill='#6c5cff'/>"
+        "<text x='16' y='22' text-anchor='middle' font-size='16' "
+        "font-family='system-ui,sans-serif' fill='white'>S</text></svg>"
+    )
+    return Response(svg, mimetype="image/svg+xml")
+
+
 @app.route("/transcribe-only", methods=["POST"])
 def transcribe_only():
     """Phase 1: upload video and transcribe. Returns job_id; poll /status for words."""
@@ -5693,10 +5705,21 @@ def save_draft():
         if error:
             return jsonify({"error": error}), 400
         jobs[job_id]["words"] = words
+        # Recover from a prior transcription miss (e.g. silent upload) once
+        # a usable transcript exists — needed for demo/UI workflows.
+        if words and jobs[job_id].get("status") == "error":
+            jobs[job_id]["status"] = "awaiting_edit"
+            jobs[job_id]["error"] = None
+            jobs[job_id]["progress"] = 100
 
     for key in ("style", "audio", "emoji_rules"):
         if key in data:
             jobs[job_id][key] = data.get(key) or {}
+
+    if "clip_suggestions" in data and isinstance(data.get("clip_suggestions"), list):
+        jobs[job_id]["clip_suggestions"] = data.get("clip_suggestions") or []
+        if data.get("clip_format"):
+            jobs[job_id]["clip_format"] = data.get("clip_format")
 
     _db_save_job(job_id)
     return jsonify({"ok": True})
