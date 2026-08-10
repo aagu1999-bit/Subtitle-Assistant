@@ -676,14 +676,18 @@ if (audioOffsetEl) {
 // No click handler here: the drop zone's inner element is a <label for="file">,
 // so the browser opens the picker itself. Calling fileInput.click() as well
 // would fire the picker twice.
-["dragenter", "dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
-["dragleave", "drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
-drop.addEventListener("drop", e => {
-  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
-});
-fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+if (drop) {
+  ["dragenter", "dragover"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+  ["dragleave", "drop"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+  drop.addEventListener("drop", e => {
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+}
+if (fileInput) {
+  fileInput.onchange = () => { if (fileInput.files.length) handleFiles(fileInput.files); };
+}
 
 // Mirrors ALLOWED_EXT in app.py. The server rejects anything else with a 400,
 // so screen for it here and say so rather than letting the upload fail.
