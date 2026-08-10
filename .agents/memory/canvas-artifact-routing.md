@@ -10,4 +10,6 @@ External/mobile traffic to `/` is routed via the Canvas artifact's managed servi
 
 **Why:** Two outages (Aug 2026) came from (1) a relative `cd` failing in the managed workflow, (2) a duplicate standalone "Start application" workflow holding 8081.
 
-**How to apply:** If mobile/external preview 502s, check the managed workflow's logs first; kill any stray `python app.py` process holding 8081; never re-create a standalone workflow for this app.
+**How to apply (superseded Aug 2026):** Final working setup is the opposite of the old rule: the Flask app is served by a STANDALONE "Start application" workflow (port 8081 → external 80), because the workspace proxy does not route web traffic to a `kind = "design"` artifact's services. The Canvas artifact was moved to previewPath `/__canvas` and no longer owns `/`. Do not re-add the Flask app as a Canvas artifact service.
+
+**Port gotcha:** `replit.dev:8080` is the API server (external 8080 → local 8080), NOT the app. The app is at the plain domain URL (external 80 → local 8081). A preview tab pinned to `:8080` shows 502 whenever the API server is down — check which port the preview URL uses before debugging the app.
