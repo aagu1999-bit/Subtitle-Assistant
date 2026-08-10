@@ -1151,6 +1151,9 @@
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
+          <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
+          <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
+          <button id="tlMagneticBtn" class="tl-chip-btn active" title="Magnetic snap on — clip edges snap to nearby cuts / playhead">🧲 Snap on</button>
           <label class="tl-inline">Canvas
             <select id="tlCanvas" class="tl-select">
               <option value="9x16">9:16 (Reels/TikTok)</option>
@@ -1210,17 +1213,18 @@
 
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
           <div class="tl-tltoolbar">
-            <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead">✂ Split</button>
+            <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
             <button id="tlPlaySeqBtn" class="tl-chip-btn" title="Play Main keep-ranges in order (skips text cuts) with grade approx — no full Render">▶ Preview cut</button>
             <button id="tlCopyBtn" class="tl-chip-btn" title="Copy selected clip (Cmd/Ctrl+C)">📋 Copy</button>
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
+            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges">⌨ Space · S · Del · ←→ · ⌘Z · Snap</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
-            <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out">−</button>
-            <button id="tlZoomIn" class="tl-chip-btn" title="Zoom in">+</button>
+            <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
+            <button id="tlZoomIn" class="tl-chip-btn" title="Zoom in (+)">+</button>
           </div>
 
           <div class="tl-timeline" id="tlTimeline">

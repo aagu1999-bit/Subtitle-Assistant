@@ -6,13 +6,15 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-12";
+  const TL_BUILD = "studio-editor-build-14";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
   let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
+  const MAX_UNDO = 50;
+  const SNAP_PX = 10;      // magnetic snap threshold in screen pixels
 
   // ---- State ----
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
@@ -26,10 +28,95 @@
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
   let transcriptWords = null;    // cached words for the open transcript clip
+  let undoStack = [];
+  let redoStack = [];
+  let historySuspended = false;
   let seqPreview = null;         // { running, cancel } for Preview cut
+  let magnetic = true;           // snap clip edges to nearby cuts / playhead
   let musicPlayers = [];         // music bed during Preview cut
 
   const uid = () => Math.random().toString(36).slice(2, 10);
+
+  // ---- Undo / redo ----
+  function snapshotState() {
+    return JSON.stringify({
+      label: tl.label,
+      canvas: tl.canvas,
+      fit: tl.fit,
+      fps: tl.fps,
+      bg: tl.bg || "#000000",
+      logo: tl.logo || null,
+      style: tl.style || null,
+      speaker_colors: tl.speaker_colors || null,
+      headline_banner: tl.headline_banner || null,
+      track_states: tl.track_states || null,
+      tracks: tl.tracks,
+      selected,
+    });
+  }
+
+  function pushHistory() {
+    if (!tl || historySuspended) return;
+    undoStack.push(snapshotState());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  function clearHistory() {
+    undoStack = [];
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  function restoreSnapshot(snap) {
+    if (!tl || !snap) return;
+    const d = JSON.parse(snap);
+    historySuspended = true;
+    tl.label = d.label;
+    tl.canvas = d.canvas || "9x16";
+    tl.fit = d.fit || "cover";
+    tl.fps = d.fps || 30;
+    tl.bg = d.bg || "#000000";
+    tl.logo = d.logo || null;
+    if (d.style !== undefined) tl.style = d.style;
+    if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
+    if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
+    if (d.track_states !== undefined) tl.track_states = d.track_states;
+    tl.tracks = d.tracks || { main: [], overlay: [], text: [], music: [] };
+    selected = d.selected || null;
+    if ($("tlLabel")) $("tlLabel").value = tl.label;
+    if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+    if ($("tlFit")) $("tlFit").value = tl.fit;
+    applyStage();
+    renderTimeline();
+    if (selected && selected.track === "main") {
+      const c = findClip(selected.track, selected.id);
+      if (c) renderTranscript(c);
+    }
+    historySuspended = false;
+    scheduleSave();
+    updateHistoryButtons();
+  }
+
+  function undo() {
+    if (!tl || !undoStack.length) return;
+    redoStack.push(snapshotState());
+    restoreSnapshot(undoStack.pop());
+  }
+
+  function redo() {
+    if (!tl || !redoStack.length) return;
+    undoStack.push(snapshotState());
+    restoreSnapshot(redoStack.pop());
+  }
+
+  function updateHistoryButtons() {
+    const u = $("tlUndoBtn");
+    const r = $("tlRedoBtn");
+    if (u) u.disabled = !undoStack.length;
+    if (r) r.disabled = !redoStack.length;
+  }
 
   // ---- Helpers ----
   function fmtTime(s) {
@@ -349,6 +436,7 @@
   }
 
   function toggleWordCut(clip, w) {
+    pushHistory();
     const cuts = (clip.cuts || []).slice();
     if (isWordCut(clip, w)) {
       // Remove any cut covering this word.
@@ -385,6 +473,7 @@
     opts = opts || {};
     try {
       if (!(await ensureProject())) return;
+      if (!opts.skipHistory) pushHistory();
       const dur = await getSourceDuration(jobId);
       const ci = inS != null ? Math.max(0, inS) : 0;
       const co = outS != null ? Math.min(dur, outS) : dur;
@@ -403,6 +492,7 @@
 
   async function addOverlayClip(ref, asset) {
     if (!(await ensureProject())) return;
+    pushHistory();
     let max = 4;
     if (ref.source_job_id) {
       try { max = await getSourceDuration(ref.source_job_id); } catch (e) {}
@@ -423,6 +513,7 @@
 
   async function addMusicClip(asset) {
     if (!(await ensureProject())) return;
+    pushHistory();
     const max = asset.duration || 60;
     const mc = {
       id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
@@ -437,6 +528,7 @@
 
   async function addTitle() {
     if (!(await ensureProject())) return;
+    pushHistory();
     const tc = {
       id: uid(), text: "Lower third\nName · Title", start: 0, out: 4,
       x: 0.5, y: 0.82, size: 56, color: "#FFFFFF", font: "Anton",
@@ -703,6 +795,7 @@
       alert("Move the playhead to somewhere inside the clip first.");
       return;
     }
+    pushHistory();
     const second = JSON.parse(JSON.stringify(c));
     second.id = uid();
     c.out = t;
@@ -720,6 +813,45 @@
     PPS = Math.max(4, Math.min(60, PPS + delta));
     renderTracks();
     updatePlayhead();
+  }
+
+  function titleDuration(c) {
+    // Titles store duration in `out` (in is unused / 0).
+    if (c.in == null || c.in === 0) return Math.max(0.2, c.out || 4);
+    return clipDuration(c);
+  }
+
+  // ---- Magnetic snap ----
+  function collectSnapTimes(exclude) {
+    const times = [0];
+    if (!tl) return times;
+    (tl.tracks.main || []).forEach((c, i) => {
+      if (exclude && exclude.track === "main" && exclude.id === c.id) return;
+      const s = mainStart(i);
+      times.push(s, s + clipDuration(c));
+    });
+    ["overlay", "text", "music"].forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (exclude && exclude.track === k && exclude.id === c.id) return;
+        const s = c.start || 0;
+        const d = k === "text" ? titleDuration(c) : clipDuration(c);
+        times.push(s, s + d);
+      });
+    });
+    const ot = playheadOutputTime();
+    if (ot != null) times.push(ot);
+    return times;
+  }
+
+  function snapTime(t, exclude) {
+    if (!magnetic || !tl) return t;
+    const thresh = SNAP_PX / PPS;
+    let best = t, bestD = thresh;
+    collectSnapTimes(exclude).forEach((s) => {
+      const d = Math.abs(s - t);
+      if (d <= bestD) { bestD = d; best = s; }
+    });
+    return Math.max(0, best);
   }
 
   // ---- Preview cut (Main keep-ranges + grade/music approx, no full Render) ----
@@ -1394,6 +1526,7 @@
 
   let boxDrag = null;
   function startBoxDrag(e, kind, obj, box) {
+    pushHistory();
     const rect = $("tlStage").getBoundingClientRect();
     boxDrag = {
       kind, obj, box, rect,
@@ -1560,6 +1693,7 @@
     // Color swatch clicks (not a generic data-key control).
     wrap.querySelectorAll(".tl-swatch").forEach((sw) => {
       sw.onclick = () => {
+        pushHistory();
         if (!c.color) c.color = {};
         c.color.preset = sw.dataset.preset;
         renderProps(); renderTracks(); scheduleSave();
@@ -1681,7 +1815,10 @@
   function wireProps(wrap, track, c) {
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;
+      let histPushed = false;
+      inp.addEventListener("focus", () => { histPushed = false; });
       const handler = () => {
+        if (!histPushed) { pushHistory(); histPushed = true; }
         let v;
         if (inp.type === "checkbox") v = inp.checked;
         else if (inp.type === "number" || inp.type === "range") v = parseFloat(inp.value);
@@ -1721,12 +1858,14 @@
     if (et) et.onclick = () => { setLeftTab("transcript"); renderTranscript(c); };
     const setin = wrap.querySelector('[data-act="setin"]');
     if (setin) setin.onclick = () => {
+      pushHistory();
       const t = $("tlPreviewVideo").currentTime || 0;
       c.in = Math.max(0, Math.min(t, (c.out || 0) - 0.2));
       renderTimeline(); scheduleSave();
     };
     const setout = wrap.querySelector('[data-act="setout"]');
     if (setout) setout.onclick = () => {
+      pushHistory();
       const t = $("tlPreviewVideo").currentTime || 0;
       c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
       renderTimeline(); scheduleSave();
@@ -1816,6 +1955,7 @@
     if (!fx) return;
     const idx = tl.tracks.main.findIndex((m) => m.id === clip.id);
     if (idx < 0) return;
+    pushHistory();
 
     const pieces = [];
     const head = { ...JSON.parse(JSON.stringify(clip)), id: uid(), in: clip.in || 0, out: fx.start_time };
@@ -1918,6 +2058,7 @@
         } else if (run) { ranges.push(run); run = null; }
       });
       if (run) ranges.push(run);
+      pushHistory();
       clip.cuts = ranges;
       close();
       renderTimeline();
@@ -1926,8 +2067,18 @@
   }
 
   function deleteClip(track, id) {
+    if (!tl) return;
+    pushHistory();
+    // Ripple: dropping a Main clip also drops items anchored exclusively to it.
+    // Remaining Main clips close the gap automatically (starts are cumulative).
+    if (track === "main") {
+      ["overlay", "text", "music"].forEach((k) => {
+        tl.tracks[k] = (tl.tracks[k] || []).filter((c) => c.anchor !== id);
+      });
+    }
     tl.tracks[track] = tl.tracks[track].filter((c) => c.id !== id);
     if (selected && selected.id === id) selected = null;
+    applyAnchors();
     renderTimeline();
     scheduleSave();
   }
@@ -1944,12 +2095,16 @@
     const handle = e.target.closest(".tl-clip-handle");
     const c = findClip(track, id);
     if (!c) return;
+    pushHistory();
+    const mainIdx = track === "main" ? tl.tracks.main.findIndex((x) => x.id === id) : -1;
     drag = {
       track, id, c,
       startX: e.clientX,
       mode: handle ? ("resize-" + handle.dataset.side) : "move",
       origIn: c.in || 0, origOut: c.out || 0, origStart: c.start || 0,
       origLeft: parseFloat(clipEl.style.left) || 0,
+      mainIdx,
+      mainStart0: mainIdx >= 0 ? mainStart(mainIdx) : 0,
     };
     e.preventDefault();
   }
@@ -1960,28 +2115,60 @@
     const dt = dx / PPS;
     const c = drag.c;
     const max = c._max || 1e9;
+    const exclude = { track: drag.track, id: drag.id };
 
     if (drag.mode === "move") {
       if (drag.track === "main") {
         // Reorder by where the cursor lands among main clips.
         reorderMainByX(drag.id, drag.origLeft + dx);
       } else {
-        c.start = Math.max(0, drag.origStart + dt);
+        c.start = snapTime(Math.max(0, drag.origStart + dt), exclude);
       }
     } else if (drag.mode === "resize-left") {
-      let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
-      if (ni < 0) ni = 0;
-      c.in = ni;
-      if (drag.track !== "main" && drag.track !== "text") {
-        // overlay/music: trimming the head shifts visible start too
-        c.start = Math.max(0, drag.origStart + (ni - drag.origIn));
+      if (drag.track === "main" && drag.mainIdx >= 0) {
+        // Snap the output start edge; Main clips always begin at mainStart.
+        // Left-resize changes source `in` (and thus duration) — later clips ripple.
+        let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
+        const newDur = drag.origOut - ni;
+        const endT = drag.mainStart0 + newDur;
+        const snappedEnd = snapTime(endT, exclude);
+        ni = Math.min(Math.max(0, drag.origOut - Math.max(0.2, snappedEnd - drag.mainStart0)), drag.origOut - 0.2);
+        c.in = ni;
+      } else {
+        let ni = Math.min(Math.max(0, drag.origIn + dt), drag.origOut - 0.2);
+        if (ni < 0) ni = 0;
+        c.in = ni;
+        if (drag.track !== "text") {
+          // overlay/music: trimming the head shifts visible start too
+          c.start = snapTime(Math.max(0, drag.origStart + (ni - drag.origIn)), exclude);
+        }
       }
     } else if (drag.mode === "resize-right") {
-      let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
-      if (drag.track !== "text") no = Math.min(no, max);
-      c.out = no;
+      if (drag.track === "main" && drag.mainIdx >= 0) {
+        let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
+        no = Math.min(no, max);
+        const endT = drag.mainStart0 + (no - drag.origIn);
+        const snappedEnd = snapTime(endT, exclude);
+        no = Math.min(max, Math.max(drag.origIn + 0.2, drag.origIn + (snappedEnd - drag.mainStart0)));
+        c.out = no;
+      } else if (drag.track === "text") {
+        let no = Math.max(0.2, drag.origOut + dt);
+        const endT = (c.start || 0) + no;
+        const snappedEnd = snapTime(endT, exclude);
+        c.out = Math.max(0.2, snappedEnd - (c.start || 0));
+      } else {
+        let no = Math.max(drag.origIn + 0.2, drag.origOut + dt);
+        no = Math.min(no, max);
+        const endT = (c.start || 0) + (no - (c.in || 0));
+        const snappedEnd = snapTime(endT, exclude);
+        no = Math.min(max, Math.max((c.in || 0) + 0.2, (c.in || 0) + (snappedEnd - (c.start || 0))));
+        c.out = no;
+      }
     }
+    // Live ripple for anchored overlays/titles/music while Main duration changes.
+    if (drag.track === "main") applyAnchors();
     renderTracks();
+    updateStageCompositor();
   }
 
   function reorderMainByX(id, leftPx) {
@@ -2065,6 +2252,7 @@
     };
     // Restore _max trims by probing main/overlay sources lazily.
     selected = null;
+    clearHistory();
     $("tlLabel").value = tl.label;
     $("tlCanvas").value = tl.canvas;
     $("tlFit").value = tl.fit;
@@ -2190,6 +2378,7 @@
 
   function pasteClip() {
     if (!tlClipboard || !tl) return;
+    pushHistory();
     const track = tlClipboard.track;
     const c = JSON.parse(JSON.stringify(tlClipboard.data));
     c.id = uid();
@@ -2216,6 +2405,7 @@
     if (!selected || !tl) return;
     const c = findClip(selected.track, selected.id);
     if (!c) return;
+    pushHistory();
     const track = selected.track;
     const dup = JSON.parse(JSON.stringify(c));
     dup.id = uid();
@@ -2234,6 +2424,124 @@
     renderTimeline();
     scheduleSave();
     if (window.StudioLogger) StudioLogger.clip("duplicated", `${track}:${dup.id}`);
+  }
+
+  // ---- Keyboard (Editor tab) ----
+  function editorTabActive() {
+    return !!document.querySelector('.main-tab.active[data-tab="editor"]');
+  }
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    if (el.isContentEditable) return true;
+    return !!el.closest("[contenteditable='true']");
+  }
+
+  function nudgeSelected(dt) {
+    if (!tl || !selected) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) return;
+    pushHistory();
+    if (selected.track === "main") {
+      const max = c._max || 1e9;
+      const dur = clipDuration(c);
+      let ni = Math.max(0, Math.min((c.in || 0) + dt, max - dur));
+      c.in = ni;
+      c.out = ni + dur;
+    } else {
+      c.start = Math.max(0, (c.start || 0) + dt);
+      reanchor(c);
+    }
+    renderTimeline();
+    scheduleSave();
+  }
+
+  function onEditorKeyDown(e) {
+    if (!initialized || !editorTabActive() || !tl) return;
+    if (isTypingTarget(e.target)) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key;
+
+    if (mod && key.toLowerCase() === "z") {
+      e.preventDefault();
+      if (e.shiftKey) redo(); else undo();
+      return;
+    }
+    if (mod && key.toLowerCase() === "y") {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if (mod && key.toLowerCase() === "c") {
+      e.preventDefault();
+      copySelectedClip();
+      return;
+    }
+    if (mod && key.toLowerCase() === "x") {
+      if (selected) {
+        e.preventDefault();
+        copySelectedClip();
+        deleteClip(selected.track, selected.id);
+        setSaveState("Cut clip");
+      }
+      return;
+    }
+    if (mod && key.toLowerCase() === "v") {
+      e.preventDefault();
+      pasteClip();
+      return;
+    }
+    if (mod && key.toLowerCase() === "d") {
+      e.preventDefault();
+      duplicateSelectedClip();
+      return;
+    }
+    if (key === " " || key === "Spacebar") {
+      e.preventDefault();
+      const v = $("tlPreviewVideo");
+      if (!v) return;
+      if (v.paused) v.play().catch(() => {});
+      else v.pause();
+      return;
+    }
+    if (key === "Delete" || key === "Backspace") {
+      if (selected) {
+        e.preventDefault();
+        deleteClip(selected.track, selected.id);
+      }
+      return;
+    }
+    if (key === "s" || key === "S") {
+      e.preventDefault();
+      splitAtPlayhead();
+      return;
+    }
+    if (key === "+" || key === "=") {
+      e.preventDefault();
+      setZoom(4);
+      return;
+    }
+    if (key === "-" || key === "_") {
+      e.preventDefault();
+      setZoom(-4);
+      return;
+    }
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      e.preventDefault();
+      const dir = key === "ArrowLeft" ? -1 : 1;
+      const step = e.shiftKey ? 1 : 0.1;
+      if (selected) nudgeSelected(dir * step);
+      else {
+        const v = $("tlPreviewVideo");
+        if (v) {
+          try { v.currentTime = Math.max(0, (v.currentTime || 0) + dir * step); } catch (err) {}
+          updatePlayhead();
+        }
+      }
+      return;
+    }
   }
 
   // ---- Init (lazy, when the Editor tab is first opened) ----
@@ -2257,8 +2565,8 @@
         on("tlNewBtn", "onclick", newProject);
         on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
         on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
-        on("tlCanvas", "onchange", (e) => { if (tl) { tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
-        on("tlFit", "onchange", (e) => { if (tl) { tl.fit = e.target.value; applyStage(); scheduleSave(); } });
+        on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
+        on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
         on("tlAddTitleBtn", "onclick", () => addTitle());
         on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
@@ -2266,37 +2574,22 @@
         on("tlCopyBtn", "onclick", () => copySelectedClip());
         on("tlPasteBtn", "onclick", () => pasteClip());
         on("tlDupBtn", "onclick", () => duplicateSelectedClip());
-        on("tlZoomIn", "onclick", () => setZoom(4));
-        on("tlZoomOut", "onclick", () => setZoom(-4));
-        // Global keyboard shortcuts for timeline (Copy, Cut, Paste, Duplicate, Delete)
-        document.addEventListener("keydown", (e) => {
-          // Only trigger shortcuts if the Editor tab is active and focus is not inside a text input/textarea
-          const isEditorTab = document.querySelector('.main-tab.active[data-tab="editor"]');
-          if (!isEditorTab || !tl) return;
-          const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
-          if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
-
-          const isCmdOrCtrl = e.metaKey || e.ctrlKey;
-          if (isCmdOrCtrl && e.key.toLowerCase() === "c") {
-            e.preventDefault(); copySelectedClip();
-          } else if (isCmdOrCtrl && e.key.toLowerCase() === "x") {
-            if (selected) {
-              e.preventDefault();
-              copySelectedClip();
-              deleteClip(selected.track, selected.id);
-              setSaveState("Cut clip");
-            }
-          } else if (isCmdOrCtrl && e.key.toLowerCase() === "v") {
-            e.preventDefault(); pasteClip();
-          } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
-            e.preventDefault(); duplicateSelectedClip();
-          } else if (e.key === "Delete" || e.key === "Backspace") {
-            if (selected) {
-              e.preventDefault();
-              deleteClip(selected.track, selected.id);
-            }
+        on("tlUndoBtn", "onclick", undo);
+        on("tlRedoBtn", "onclick", redo);
+        on("tlMagneticBtn", "onclick", () => {
+          magnetic = !magnetic;
+          const b = $("tlMagneticBtn");
+          if (b) {
+            b.classList.toggle("active", magnetic);
+            b.textContent = magnetic ? "🧲 Snap on" : "🧲 Snap off";
+            b.title = magnetic
+              ? "Magnetic snap on — clip edges snap to nearby cuts / playhead"
+              : "Magnetic snap off";
           }
         });
+        on("tlZoomIn", "onclick", () => setZoom(4));
+        on("tlZoomOut", "onclick", () => setZoom(-4));
+        document.addEventListener("keydown", onEditorKeyDown);
 
         // Click / scrub anywhere on ruler to seek playhead
         const ruler = $("tlRuler");
@@ -2327,6 +2620,7 @@
         wireScrub();
         setLeftTab("media");
         setSaveState(TL_BUILD);
+        updateHistoryButtons();
       } catch (e) {
         console.error("[timeline] wiring failed", e);
         alert("Editor failed to start (" + TL_BUILD + "): " + e.message + "\nTry a hard refresh (Cmd/Ctrl+Shift+R).");
@@ -2366,6 +2660,7 @@
       alert("Open or create a Timeline project first.");
       return false;
     }
+    pushHistory();
     style = style || {};
     opts = opts || {};
     tl.style = Object.assign({}, tl.style || {}, style);
@@ -2428,6 +2723,7 @@
       const clips = Array.isArray(opts.clips) ? opts.clips : null;
       if (clips && clips.length) {
         if (!(await ensureProject())) return;
+        pushHistory();
         if (opts.replace) {
           tl.tracks.main = [];
           selected = null;
@@ -2440,7 +2736,7 @@
             : (item.in != null ? Number(item.in) : null);
           const outS = item.end_time != null ? Number(item.end_time)
             : (item.out != null ? Number(item.out) : null);
-          await addMainClip(jid, inS, outS, { skipRender: true });
+          await addMainClip(jid, inS, outS, { skipRender: true, skipHistory: true });
         }
         renderTimeline();
         scheduleSave();
@@ -2451,6 +2747,7 @@
       if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
       if (seedJobId && tl) {
         if (opts.replace) {
+          pushHistory();
           tl.tracks.main = [];
           selected = null;
         }
