@@ -2153,7 +2153,7 @@ function renderIngestSpeakerCards(stats) {
   if (!breakdown.length) {
     wrap.innerHTML =
       `<p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">` +
-      `No speakers yet. Click <strong>Analyze</strong>, run Analyze on Transcript Cut, or enable Auto-Generate Shorts — live cards appear after diarization.` +
+      `No speakers yet. Click <strong>Analyze</strong> (or Analyze on Transcript Cut) — live cards appear after diarization. Auto-Generate Shorts is Gemini-only and does not run speakers.` +
       `</p>`;
     return;
   }
