@@ -1517,7 +1517,7 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
       barFill.style.width = pct + "%";
       statusText.textContent = frac >= 1
-        ? "Upload complete — starting transcription…"
+        ? "Upload complete — extracting audio & transcribing…"
         : `Uploading… ${Math.round(frac * 100)}%`;
     });
 
@@ -1606,6 +1606,7 @@ async function pollTranscription(jobId) {
     _progressPhase = null;
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
+    if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
     if (fn) fn.textContent = "";   // clear the "…transcribing" upload label
     currentWords = _sanitizeWords(s.words);
     setTimeout(() => {
@@ -1941,33 +1942,28 @@ function showEditor(words, saved = {}) {
   editor.classList.remove("hidden");
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
 
-  // Studio flow: long-form (≥4 min, Captions AI Shorts threshold) lands on
-  // AI Shorts as the default path. Short clips stay on Transcript Cut.
+  // After first transcription, land on Transcript Cut. Analyze / Enhance /
+  // AI Shorts are opt-in via their own buttons — do not auto-run them here.
   const jobDur = _jobDurationFromWords(words);
   const isLongForm = jobDur >= 240;
   const longBadge = $("hlLongFormBadge");
   if (longBadge) longBadge.style.display = isLongForm ? "" : "none";
 
-  if (isLongForm) {
-    setActiveTab("highlights");
-  } else {
-    setActiveTab("transcript");
-  }
+  setActiveTab("transcript");
   if (typeof updateAiEditNudge === "function") updateAiEditNudge(isLongForm);
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // Restore prior AI Shorts suggestions if the job already has them.
   if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
     renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
-    if (isLongForm) {
-      if (hlStatus) {
-        hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — open any as a project.`;
-      }
+    if (hlStatus) {
+      hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — open any as a project.`;
     }
   }
 
-  // Auto-Generate Shorts: always for long-form; otherwise honor the checkbox.
-  maybeAutoGenerateShorts(currentJobId, { force: isLongForm, switchTab: isLongForm });
+  // Only if the Ingest checkbox is explicitly checked — never force Gemini
+  // Shorts on first transcription just because the clip is long-form.
+  maybeAutoGenerateShorts(currentJobId, { force: false, switchTab: false });
 }
 
 function _jobDurationFromWords(words) {
