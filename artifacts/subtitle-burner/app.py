@@ -538,6 +538,58 @@ def _get_whisper_model():
 threading.Thread(target=_get_whisper_model, daemon=True).start()
 
 
+def _media_has_audio(path: Path) -> bool:
+    """True if ffprobe finds at least one audio stream."""
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return "audio" in (out or "").lower()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+
+
+def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
+    """Extract 16 kHz mono PCM for Whisper.
+
+    Always go through FFmpeg — feeding the raw container to faster-whisper/PyAV
+    crashes with ``tuple index out of range`` on video-only files (no audio
+    stream) and on some phone MOV variants.
+    """
+    if not _media_has_audio(video_path):
+        raise RuntimeError(
+            "This video has no audio track. Whisper needs sound to transcribe — "
+            "export/upload a file that includes microphone or system audio."
+        )
+    wav = video_path.with_name(f".{video_path.stem}.whisper.wav")
+    af = (
+        "afftdn=nf=-25,dynaudnorm=p=0.95:m=12:s=12"
+        if pre_clean else "anull"
+    )
+    proc = subprocess.run(
+        [
+            FFMPEG, "-y", "-i", str(video_path),
+            "-vn", "-ac", "1", "-ar", "16000",
+            "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not wav.exists() or wav.stat().st_size < 64:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = err[-1] if err else f"ffmpeg exit {proc.returncode}"
+        raise RuntimeError(f"Could not extract audio for transcription: {tail}")
+    return wav
+
+
 def transcribe(video_path: Path, pre_clean: bool = False):
     """Return a list of word dicts: [{'word': str, 'start': float, 'end': float}, ...]
 
@@ -546,23 +598,7 @@ def transcribe(video_path: Path, pre_clean: bool = False):
     for soft-voice boost) don't shift transients, so word-level timestamps
     stay aligned with the original video.
     """
-    target = video_path
-    cleaned: Path | None = None
-    if pre_clean:
-        cleaned = video_path.with_name(f".{video_path.stem}.preclean.wav")
-        proc = subprocess.run(
-            [FFMPEG, "-y", "-i", str(video_path),
-             "-vn", "-ac", "1", "-ar", "16000",
-             "-af", "afftdn=nf=-25,dynaudnorm=p=0.95:m=12:s=12",
-             "-c:a", "pcm_s16le", str(cleaned)],
-            capture_output=True, text=True,
-        )
-        if proc.returncode == 0:
-            target = cleaned
-        else:
-            # Pre-clean failure isn't fatal — fall back to the raw video.
-            cleaned = None
-
+    wav: Path | None = None
     try:
         model = _get_whisper_model()
         if model is None:
@@ -570,8 +606,9 @@ def transcribe(video_path: Path, pre_clean: bool = False):
                 "Whisper model is not loaded. Check that faster-whisper is installed "
                 "and WHISPER_MODEL is reachable."
             )
+        wav = _extract_whisper_wav(video_path, pre_clean=pre_clean)
         result = model.transcribe(
-            str(target),
+            str(wav),
             word_timestamps=True,
             vad_filter=True,
             beam_size=int(os.environ.get("WHISPER_BEAM_SIZE", "1")),
@@ -600,9 +637,15 @@ def transcribe(video_path: Path, pre_clean: bool = False):
                     end = start
                 words.append({"word": text, "start": start, "end": end})
         return words
+    except IndexError as e:
+        # PyAV's cryptic failure mode for missing/broken audio streams.
+        raise RuntimeError(
+            "Could not read audio from this video (no usable audio stream). "
+            "Re-export with audio and try again."
+        ) from e
     finally:
-        if cleaned:
-            _safe_unlink(cleaned)
+        if wav:
+            _safe_unlink(wav)
 
 
 # ---- Interview reframe: speaker diarization + face tracking ----

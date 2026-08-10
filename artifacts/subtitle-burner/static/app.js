@@ -1421,7 +1421,19 @@ go.onclick = async () => {
     return;
   }
   go.disabled = true;
-  await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
+  _ingestBusy += 1;
+  const emptyEl = document.getElementById("emptyState");
+  const shellEl = document.getElementById("appShell");
+  const headerEl = document.getElementById("appHeader");
+  if (emptyEl) emptyEl.classList.add("hidden");
+  if (shellEl) shellEl.classList.remove("hidden");
+  if (headerEl) headerEl.classList.remove("hidden");
+  try {
+    await uploadAndTranscribe(currentFile, getPreCleanFlag(), true);
+  } finally {
+    _ingestBusy = Math.max(0, _ingestBusy - 1);
+    renderJobsList();
+  }
 };
 
 async function pollTranscription(jobId) {
