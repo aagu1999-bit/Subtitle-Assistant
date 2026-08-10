@@ -1951,6 +1951,7 @@ function showEditor(words, saved = {}) {
   } else {
     setActiveTab("transcript");
   }
+  if (typeof updateAiEditNudge === "function") updateAiEditNudge(isLongForm);
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // Restore prior AI Shorts suggestions if the job already has them.
@@ -3164,9 +3165,11 @@ if (hlMoreBtn) {
 // =====================================================================
 let _aiEditCtx = null;
 let _aiEditPackId = "pulse";
+let _aiEditRecCuts = []; // full recommended cuts from preview
 
 async function openAiEditPlan(ctx) {
   _aiEditCtx = ctx || null;
+  _aiEditRecCuts = [];
   const modal = $("aiEditModal");
   if (!modal || !_aiEditCtx) return;
   modal.classList.remove("hidden");
@@ -3181,6 +3184,11 @@ async function openAiEditPlan(ctx) {
   }
   const status = $("aiEditCutsPreview");
   if (status) status.textContent = "Loading style packs…";
+  const outline = $("aiEditOutline");
+  if (outline) {
+    outline.innerHTML = "";
+    outline.classList.remove("has-cuts");
+  }
   try {
     const res = await fetch("/ai-edit/style-packs");
     const data = await res.json();
@@ -3217,6 +3225,63 @@ function closeAiEditPlan() {
   modal.classList.add("hidden");
   modal.setAttribute("aria-hidden", "true");
   _aiEditCtx = null;
+  _aiEditRecCuts = [];
+}
+
+function _fmtCutTime(t) {
+  const v = Math.max(0, Number(t) || 0);
+  const m = Math.floor(v / 60);
+  const s = (v - m * 60).toFixed(1);
+  return `${m}:${s.padStart(4, "0")}`;
+}
+
+function renderAiEditOutline(rec) {
+  const outline = $("aiEditOutline");
+  if (!outline) return;
+  const cuts = (rec && rec.cuts) || [];
+  _aiEditRecCuts = cuts.map((c) => [Number(c[0]), Number(c[1])]);
+  if (!_aiEditRecCuts.length) {
+    outline.innerHTML = "";
+    outline.classList.remove("has-cuts");
+    return;
+  }
+  outline.classList.add("has-cuts");
+  const details = (rec && rec.cut_details) || [];
+  let html = `<div class="ai-edit-outline-head">
+    <span>Outline · recommended cuts (uncheck to keep)</span>
+    <button type="button" class="tl-chip-btn" id="aiEditRestoreCuts">Restore all</button>
+  </div>`;
+  _aiEditRecCuts.forEach((c, i) => {
+    const dur = (c[1] - c[0]).toFixed(1);
+    const d = details[i] || {};
+    const kind = d.kind === "silence" ? "silence" : "filler";
+    const ctx = (d.context_before || d.context_after)
+      ? `${d.context_before || ""} … ${d.context_after || ""}`.trim()
+      : kind;
+    html += `<label class="ai-edit-cut-row">
+      <input type="checkbox" class="ai-edit-cut-check" data-idx="${i}" checked>
+      <span><span class="cut-meta">${_fmtCutTime(c[0])}–${_fmtCutTime(c[1])} · ${dur}s · ${kind}</span><br>${ctx}</span>
+    </label>`;
+  });
+  outline.innerHTML = html;
+  const restore = $("aiEditRestoreCuts");
+  if (restore) {
+    restore.onclick = () => {
+      outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => { cb.checked = true; });
+    };
+  }
+}
+
+function selectedAiEditCuts() {
+  const outline = $("aiEditOutline");
+  if (!outline || !_aiEditRecCuts.length) return _aiEditRecCuts.slice();
+  const selected = [];
+  outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => {
+    if (!cb.checked) return;
+    const i = parseInt(cb.dataset.idx, 10);
+    if (!isNaN(i) && _aiEditRecCuts[i]) selected.push(_aiEditRecCuts[i]);
+  });
+  return selected;
 }
 
 async function previewAiEditCuts() {
@@ -3240,8 +3305,10 @@ async function previewAiEditCuts() {
     el.textContent = `Recommended AI Trim: ${st.cut_count || 0} cut(s) · ~${st.seconds_removed || 0}s removed`
       + (data.filler_count ? ` · ${data.filler_count} filler word(s)` : "")
       + ((data.silence_gaps || []).length ? ` · ${(data.silence_gaps || []).length} silence gap(s)` : "");
+    renderAiEditOutline(data);
   } catch (e) {
     el.textContent = "Cut preview unavailable: " + e.message;
+    renderAiEditOutline({ cuts: [] });
   }
 }
 
@@ -3255,6 +3322,8 @@ async function runAiEditGenerate() {
     const intensity = ($("aiEditIntensity") && $("aiEditIntensity").value) || "med";
     const applyCuts = !($("aiEditApplyCuts") && !$("aiEditApplyCuts").checked);
     const createClip = !($("aiEditCreateClip") && !$("aiEditCreateClip").checked);
+    const insertMedia = !($("aiEditInsertMedia") && !$("aiEditInsertMedia").checked);
+    const cuts = applyCuts ? selectedAiEditCuts() : [];
     const res = await fetch("/ai-edit-seed", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3267,6 +3336,8 @@ async function runAiEditGenerate() {
         intensity,
         apply_cuts: applyCuts,
         create_clip: createClip,
+        insert_media: insertMedia,
+        cuts,
       }),
     });
     const data = await res.json();
@@ -3288,10 +3359,7 @@ async function runAiEditGenerate() {
     } else {
       alert("Timeline Editor is not available.");
     }
-    if (data.warning && status) {
-      // Modal already closed — surface via console.
-      console.warn("[ai-edit]", data.warning);
-    }
+    if (data.warning) console.warn("[ai-edit]", data.warning);
   } catch (e) {
     if (status) status.textContent = "Error: " + e.message;
     alert("AI Edit failed: " + e.message);
@@ -3311,6 +3379,17 @@ async function runAiEditGenerate() {
       if (e.target === modal) close();
     });
   }
+  const applyCutsEl = $("aiEditApplyCuts");
+  if (applyCutsEl) {
+    applyCutsEl.addEventListener("change", () => {
+      const outline = $("aiEditOutline");
+      if (!outline) return;
+      outline.style.opacity = applyCutsEl.checked ? "1" : "0.45";
+      outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => {
+        cb.disabled = !applyCutsEl.checked;
+      });
+    });
+  }
   // Also expose for short-clip path: AI Edit whole current job from Transcript.
   window.openAiEditPlanForJob = function (jobId, opts) {
     opts = opts || {};
@@ -3323,6 +3402,27 @@ async function runAiEditGenerate() {
     });
   };
 })();
+
+function updateAiEditNudge(isLongForm) {
+  const nudge = $("aiEditNudge");
+  if (!nudge) return;
+  if (isLongForm) {
+    nudge.classList.add("hidden");
+    return;
+  }
+  nudge.classList.remove("hidden");
+}
+const aiEditNudgeBtn = $("aiEditNudgeBtn");
+if (aiEditNudgeBtn) {
+  aiEditNudgeBtn.onclick = () => {
+    if (!currentJobId) return;
+    if (typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Edit",
+      });
+    }
+  };
+}
 
 // =====================================================================
 // Compilation queue

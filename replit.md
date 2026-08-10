@@ -98,10 +98,14 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
   - **Captions-aligned flow (2026):**
     - Long-form (≥4 min) defaults to **AI Shorts** gallery after ingest.
     - **Open as project** runs AI Edit (style pack + intensity) → seeded timeline.
-    - **AI Trim** via `/recommended-cuts` (filler + silence → Main `cuts`).
+    - **AI Trim** via `/recommended-cuts` (filler + silence → Main `cuts`) with
+      outline review (uncheck to keep) before Create project.
+    - Keyword callouts seeded on the Titles track by intensity (`insert_media`).
+    - Short clips get an **AI Edit now** nudge on Transcript Cut.
     - Timeline: Detect shots, Merge, per-shot Restyle, **Co-editor** chat.
     - Deferred (not in scope): AI Twin, eye contact, lip-sync dubbing, native
-      mobile apps, social publish scheduling, React sandbox migration.
+      mobile apps, social publish scheduling, React sandbox migration,
+      YouTube URL ingest.
 - Runs on port 8081 (local), served at `/` via external port 80 (no port suffix in URL)
 
 ### Structure

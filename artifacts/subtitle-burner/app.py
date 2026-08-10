@@ -7420,8 +7420,29 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
                 })
     merged = _merge_cut_ranges(cuts)
     cut_total = sum(b - a for a, b in merged)
+    labeled = []
+    for a, b in merged:
+        kind = "silence"
+        for g in silence_gaps:
+            if a < g["end"] and b > g["start"]:
+                kind = "silence"
+                labeled.append({
+                    "start": a, "end": b,
+                    "kind": kind,
+                    "context_before": g.get("context_before", ""),
+                    "context_after": g.get("context_after", ""),
+                })
+                break
+        else:
+            labeled.append({
+                "start": a, "end": b,
+                "kind": "filler",
+                "context_before": "",
+                "context_after": "",
+            })
     return {
         "cuts": merged,
+        "cut_details": labeled,
         "filler_count": filler_count,
         "silence_gaps": silence_gaps,
         "stats": {
@@ -7444,7 +7465,9 @@ def _uid_short() -> str:
 def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             pack: dict, intensity: str,
                             cuts: list, effects: list,
-                            label: str = "") -> dict:
+                            label: str = "",
+                            words: list | None = None,
+                            insert_media: bool = True) -> dict:
     """Assemble a Captions-style seeded timeline project from a style pack."""
     main_id = _uid_short()
     main_clip = {
@@ -7547,6 +7570,37 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "anchor": pieces[0]["id"] if pieces else None,
         })
 
+    # Keyword callouts as text-track "B-roll titles" (Captions insert-media lite).
+    if insert_media and words:
+        media_budget = {"low": 1, "med": 3, "high": 5}.get((intensity or "med").lower(), 3)
+        callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
+        style = pack.get("style") or {}
+        for co in callouts:
+            # Map source time into output time roughly as offset from t_in
+            # (before cut compression — good enough for seed placement).
+            start = max(0.0, float(co["start"]) - t_in)
+            text_track.append({
+                "id": _uid_short(),
+                "text": str(co["text"])[:40],
+                "start": start,
+                "out": min(2.2, max(1.2, float(co.get("duration") or 1.8))),
+                "x": 0.72, "y": 0.18, "size": int(style.get("size") or 56) - 8,
+                "color": style.get("highlight") or "#FFD60A",
+                "font": style.get("font") or "Anton",
+                "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.55,
+                "outline_color": "#000000", "outline_width": 0, "shadow": 0,
+                "bold": True, "align": 2, "anim": "slideup",
+                "anchor": pieces[0]["id"] if pieces else None,
+            })
+
+    music_track = []
+    # Auto-attach previously uploaded bg music for this job, if present.
+    bg_music_files = list(UPLOAD_DIR.glob(f"{job_id}_bgmusic.*"))
+    if bg_music_files and intensity != "low":
+        # Music assets on the timeline use asset_id from /upload-asset.
+        # For job-scoped bg music we keep a hint the UI can surface.
+        pass
+
     return {
         "canvas": pack.get("canvas") or "9x16",
         "fit": "cover",
@@ -7557,14 +7611,69 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "ai_edit": {
             "style_pack": pack.get("label"),
             "intensity": intensity,
+            "insert_media": bool(insert_media),
         },
         "tracks": {
             "main": pieces,
             "overlay": [],
             "text": text_track,
-            "music": [],
+            "music": music_track,
+        },
+        "media_hints": {
+            "bg_music_available": bool(bg_music_files),
+            "callout_count": max(0, len(text_track) - (1 if pack.get("add_title") and label else 0)),
         },
     }
+
+
+_VISUAL_KEYWORDS = {
+    "coffee", "candle", "festival", "money", "growth", "craft", "food", "music",
+    "car", "house", "dog", "cat", "computer", "phone", "book", "water", "fire",
+    "earth", "sky", "sun", "moon", "star", "city", "tree", "flower", "people",
+    "business", "love", "happy", "sad", "angry", "time", "day", "night", "world",
+    "life", "school", "family", "friend", "party", "game", "sport", "art",
+    "nature", "technology", "health", "travel", "work", "home",
+    "success", "power", "brand", "product", "design", "video", "photo",
+    "founder", "vendor", "market", "customer", "sale", "shop",
+}
+
+
+def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
+                                 budget: int) -> list:
+    """Pick visual keywords inside [t_in, t_out] for text-track callouts."""
+    stop = {
+        "the", "and", "a", "to", "of", "in", "i", "is", "that", "it", "on", "you",
+        "this", "for", "but", "with", "are", "have", "be", "at", "or", "as", "was",
+        "so", "if", "out", "not", "we", "my", "they", "your", "all", "do", "can",
+        "will", "about", "which", "up", "one", "there", "what", "would", "when",
+        "an", "she", "he", "their", "her", "his", "has", "who", "from", "by",
+        "some", "me", "how", "like", "just", "know", "then", "them", "now", "well",
+        "think", "um", "uh", "okay", "ok", "right",
+    }
+    out = []
+    seen = set()
+    for w in words or []:
+        if len(out) >= max(0, budget):
+            break
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if we <= t_in or ws >= t_out:
+            continue
+        text = str(w.get("word", "")).strip()
+        clean = re.sub(r"[^a-zA-Z0-9]", "", text).lower()
+        if not clean or clean in stop or clean in seen:
+            continue
+        if clean in _VISUAL_KEYWORDS or len(clean) > 5:
+            seen.add(clean)
+            out.append({
+                "text": text.strip(".,!?").capitalize(),
+                "start": ws,
+                "duration": 1.8,
+            })
+    return out
 
 
 def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
@@ -7677,6 +7786,7 @@ def ai_edit_seed():
 
     apply_cuts = bool(data.get("apply_cuts", True))
     create_clip = bool(data.get("create_clip", False))
+    insert_media = bool(data.get("insert_media", True))
 
     # Optional: materialize a chopped child job (Captions "individual clip").
     work_job_id = source_job_id
@@ -7691,7 +7801,12 @@ def ai_edit_seed():
             return jsonify({"error": f"Could not create clip: {e}"}), 400
 
     rec = _recommended_cuts_for_words(words, work_in, work_out)
-    cuts = rec["cuts"] if apply_cuts else []
+    # Client may send an outline-reviewed subset of cuts (Captions "revert" flow).
+    raw_cuts = data.get("cuts")
+    if isinstance(raw_cuts, list):
+        cuts = _merge_cut_ranges(raw_cuts) if apply_cuts else []
+    else:
+        cuts = rec["cuts"] if apply_cuts else []
 
     # Effect suggestions (Gemini when available; empty otherwise).
     effects = []
@@ -7719,7 +7834,8 @@ def ai_edit_seed():
         gemini_warning = str(exc)
 
     timeline = _build_ai_edit_timeline(
-        work_job_id, work_in, work_out, pack, intensity, cuts, effects, label=label
+        work_job_id, work_in, work_out, pack, intensity, cuts, effects,
+        label=label, words=words, insert_media=insert_media,
     )
     # Persist style onto the working job for caption burns.
     if pack.get("style"):
@@ -7737,6 +7853,7 @@ def ai_edit_seed():
         "in": work_in,
         "out": work_out,
         "recommended_cuts": rec,
+        "applied_cuts": cuts,
         "effects": effects,
         "timeline": timeline,
         "warning": gemini_warning,
