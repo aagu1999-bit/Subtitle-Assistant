@@ -167,6 +167,11 @@ let currentJobId = null;
 let currentWords = []; // original words from transcription [{word, start, end}]
 let audioBlobUrl = null;
 let draftSaveTimer = null;
+// While an upload/transcribe is in flight, never bounce back to the empty
+// landing page — refreshJobsList used to see 0 localStorage IDs mid-upload
+// and hide the progress UI (looked like 1–5% then "Choose a video to start").
+let _ingestBusy = 0;
+let _progressPhase = null; // "upload" | "transcribe" | null
 
 // ---- Audio engine tab state ----
 // "ffmpeg" or "auphonic". Defaults to ffmpeg; only switches if tabs are present.
@@ -750,6 +755,7 @@ function handleFiles(files) {
   }
 
   // Leave the empty hero immediately so the user sees Ingest progress.
+  _ingestBusy += 1;
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
   const headerEl = document.getElementById("appHeader");
@@ -788,6 +794,11 @@ function handleFiles(files) {
           : `${ok} videos uploaded — transcribing…`;
       }
       if (go) go.disabled = false;
+    })
+    .finally(() => {
+      _ingestBusy = Math.max(0, _ingestBusy - 1);
+      // Re-evaluate empty vs shell now that the in-flight gate dropped.
+      renderJobsList();
     });
 }
 // Expose for the early empty-state script in index.html.
@@ -1271,15 +1282,18 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
     result.classList.add("hidden");
     editor.classList.add("hidden");
     progress.classList.remove("hidden");
-    barFill.style.width = "2%";
+    _progressPhase = "upload";
+    // Upload phase uses 0–40% of the bar; transcription takes 40–100%.
+    barFill.style.width = "3%";
     statusText.textContent = "Uploading " + (file.name || "video") + "…";
     if (typeof setActiveTab === "function") setActiveTab("ingest");
   }
 
   try {
     const job = await _uploadWithProgress(fd, (frac) => {
-      if (!makeActive) return;
-      barFill.style.width = Math.max(2, Math.round(frac * 100)) + "%";
+      if (!makeActive || _progressPhase !== "upload") return;
+      const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
+      barFill.style.width = pct + "%";
       statusText.textContent = frac >= 1
         ? "Upload complete — starting transcription…"
         : `Uploading… ${Math.round(frac * 100)}%`;
@@ -1289,7 +1303,8 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
     if (makeActive) {
       currentJobId = job.job_id;
       currentFile = null; // consumed — don't re-upload on accidental Transcribe click
-      barFill.style.width = "5%";
+      _progressPhase = "transcribe";
+      barFill.style.width = "42%";
       statusText.textContent = "Starting transcription…";
       pollTranscription(job.job_id);
     }
@@ -1297,6 +1312,7 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
     return job.job_id;
   } catch (e) {
     if (makeActive) {
+      _progressPhase = null;
       showError("Upload failed: " + e.message);
       go.disabled = false;
     } else {
@@ -1345,9 +1361,15 @@ async function pollTranscription(jobId) {
   // poller — the new job's poller (or the periodic /jobs refresh) takes over.
   if (currentJobId && currentJobId !== jobId) return;
 
-  barFill.style.width = (s.progress || 10) + "%";
+  _progressPhase = "transcribe";
+  // Map server 0–100 onto the remaining bar (40–100) so we never jump backwards
+  // into the upload band (which looked like 1%↔5% thrashing).
+  const serverPct = Math.max(0, Math.min(100, Number(s.progress) || 0));
+  const uiPct = 40 + Math.round(serverPct * 0.6);
+  barFill.style.width = uiPct + "%";
 
   if (s.status === "awaiting_edit") {
+    _progressPhase = null;
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
     if (fn) fn.textContent = "";   // clear the "…transcribing" upload label
@@ -1362,6 +1384,7 @@ async function pollTranscription(jobId) {
   }
 
   if (s.status === "error") {
+    _progressPhase = null;
     showError("Transcription error: " + s.error);
     go.disabled = false;
     return;
@@ -2238,13 +2261,17 @@ function _statusBadgeClass(status) {
 function renderJobsList() {
   const ids = _loadJobIds();
   // Toggle empty-state vs app-shell here — single source of truth.
+  // Keep the shell visible while an upload is in flight even before the
+  // job id lands in localStorage (otherwise the 4s /jobs poll bounces the
+  // user back to "Choose a video to start").
+  const showShell = ids.length > 0 || _ingestBusy > 0;
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
   const headerEl = document.getElementById("appHeader");
-  if (emptyEl) emptyEl.classList.toggle("hidden", ids.length > 0);
-  if (shellEl) shellEl.classList.toggle("hidden", ids.length === 0);
+  if (emptyEl) emptyEl.classList.toggle("hidden", showShell);
+  if (shellEl) shellEl.classList.toggle("hidden", !showShell);
   // Hide sticky Studio header on welcome screen so it can't cover the CTA.
-  if (headerEl) headerEl.classList.toggle("hidden", ids.length === 0);
+  if (headerEl) headerEl.classList.toggle("hidden", !showShell);
   if (!ids.length) {
     if (jobsPanel) jobsPanel.classList.add("hidden");
     return;
