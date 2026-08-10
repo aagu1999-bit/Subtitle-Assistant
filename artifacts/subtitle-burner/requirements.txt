@@ -7,6 +7,12 @@ gunicorn>=21.0.0
 # so the app still boots without these installed). pyannote.audio pulls
 # torch (~2 GB) so install only if you want the reframe feature.
 #
+# Speed knobs (env):
+#   DIARIZATION_DEVICE=auto|cuda|mps|cpu   # auto prefers CUDA then MPS
+#   DIARIZATION_TORCH_THREADS=8            # Linux CPU parallelism
+#   REFRAME_FACE_SAMPLE_FPS=2              # lower = faster face pass
+#   DIARIZATION_MODEL=pyannote/speaker-diarization-3.1
+#
 # IMPORTANT — on minimal Linux sandboxes (Replit, Docker slim), after
 # `pip install -r requirements.txt` you must also:
 #   pip uninstall -y opencv-contrib-python

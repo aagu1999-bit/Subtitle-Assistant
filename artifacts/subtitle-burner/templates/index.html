@@ -230,6 +230,10 @@
               <span>👥 Speaker Diarization (PyAnnote)</span>
               <button id="ingestAnalyzeBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.72rem" title="Run PyAnnote diarization + face samples for this job">Analyze</button>
             </div>
+            <p class="muted" style="font-size:.72rem;line-height:1.45;margin:0 0 8px">
+              Optional. Uses a cached PyAnnote pipeline; set <code>DIARIZATION_DEVICE=cuda</code> (or <code>mps</code>) for a large speedup.
+              CPU still works — first run warms the model, later Analyzes are faster.
+            </p>
             <div id="ingestSpeakerCards">
               <p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
                 No speakers yet. Click <strong>Analyze</strong>, run Analyze on Transcript Cut, or enable Auto-Generate Shorts — live cards appear after diarization.
@@ -260,7 +264,7 @@
             <div class="section-title" style="margin-top:20px">⚡ Open-Source Pipeline</div>
             <div style="font-size:0.76rem;color:#94a3b8;line-height:1.6;background:rgba(30,41,59,0.4);padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
               • <b>Whisper / Faster-Whisper</b> — Word alignment<br>
-              • <b>PyAnnote 3.1</b> — Speaker diarization<br>
+              • <b>PyAnnote 3.1</b> — Speaker diarization (cached; GPU via <code>DIARIZATION_DEVICE</code>)<br>
               • <b>MediaPipe Face Mesh</b> — 9:16 Auto-reframe<br>
               • <b>FFmpeg Concat &amp; ASS</b> — Instant render
             </div>
@@ -920,6 +924,7 @@
         On overlapping speech we'll stack both faces vertically.
         Requires <code>pyannote.audio</code> + <code>mediapipe</code> installed and a free
         <code>HF_TOKEN</code> env var (Hugging Face).
+        Speed: GPU via <code>DIARIZATION_DEVICE=cuda</code> / <code>mps</code>, or multi-core CPU on Linux.
       </p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button id="reframeAnalyzeBtn" class="btn btn-secondary">Analyze speakers + faces</button>
