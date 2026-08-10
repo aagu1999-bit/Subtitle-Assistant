@@ -135,6 +135,86 @@ CAPCUT_TEMPLATES = {
     }
 }
 
+# Captions-style AI Edit recipes. Intensity scales cut/zoom/B-roll density.
+# These seed timeline JSON — they are not full generative Mirage styles.
+AI_EDIT_STYLE_PACKS = {
+    "pulse": {
+        "label": "Pulse",
+        "blurb": "Fast social pacing — punch zooms, hard cuts, bold captions",
+        "canvas": "9x16",
+        "transition": "crossfade",
+        "caption_preset": "mrbeast",
+        "style": {
+            "font": "Integral CF", "size": 68, "primary": "#FFFFFF",
+            "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
+        },
+        "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
+    },
+    "clarity": {
+        "label": "Clarity",
+        "blurb": "Clean talking-head — light trim, subtle zoom, readable captions",
+        "canvas": "9x16",
+        "transition": "dissolve",
+        "caption_preset": "hormozi",
+        "style": {
+            "font": "Montserrat Black", "size": 64, "primary": "#FFFFFF",
+            "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
+        },
+        "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
+    },
+    "magazine": {
+        "label": "Magazine",
+        "blurb": "Editorial polish — soft Ken Burns, warm grade, lower-third titles",
+        "canvas": "9x16",
+        "transition": "fade_black",
+        "caption_preset": "karaoke",
+        "style": {
+            "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
+            "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
+        },
+        "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
+        "add_title": True,
+    },
+    "velocity": {
+        "label": "Velocity",
+        "blurb": "High intensity — dense zooms, silence cuts, energetic captions",
+        "canvas": "9x16",
+        "transition": "slide",
+        "caption_preset": "neon",
+        "style": {
+            "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
+            "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
+        },
+        "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
+    },
+    "film": {
+        "label": "Film",
+        "blurb": "Cinematic slow push — muted grade, sparse cuts, elegant type",
+        "canvas": "16x9",
+        "transition": "dissolve",
+        "caption_preset": "karaoke",
+        "style": {
+            "font": "DM Sans", "size": 52, "primary": "#F5F0E8",
+            "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
+        },
+        "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
+    },
+}
+
+_FILLER_SINGLE_WORDS = {
+    "um", "uh", "uhh", "uhm", "umm", "er", "erm",
+    "ah", "ahh", "hm", "hmm", "mm", "mhm",
+    "like", "basically", "literally", "actually",
+    "kinda", "sorta", "anyway", "anyways",
+    "okay", "ok", "right", "well",
+}
+_FILLER_PAIR_WORDS = [
+    ("you", "know"), ("i", "mean"), ("sort", "of"), ("kind", "of"),
+]
+
+# Long-form threshold matching Captions AI Shorts (4 minutes).
+LONG_FORM_SECONDS = 240.0
+
 
 # ---- Config ----
 BASE_DIR = Path(__file__).parent
@@ -7223,6 +7303,590 @@ def timeline_list():
         })
     out.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
     return jsonify({"timelines": out})
+
+
+# =====================================================================
+# Captions-aligned pipeline: AI Edit seed, recommended cuts, shots, co-editor
+# =====================================================================
+
+def _strip_filler_token(s: str) -> str:
+    return re.sub(r"[^a-z']", "", (s or "").lower())
+
+
+def _filler_indices(words: list) -> set:
+    flagged = set()
+    if not words:
+        return flagged
+    for i, w in enumerate(words):
+        tok = _strip_filler_token(str(w.get("word", "")))
+        if not tok:
+            continue
+        if tok in _FILLER_SINGLE_WORDS:
+            flagged.add(i)
+            continue
+        if i + 1 < len(words):
+            nxt = _strip_filler_token(str(words[i + 1].get("word", "")))
+            for a, b in _FILLER_PAIR_WORDS:
+                if tok == a and nxt == b:
+                    flagged.add(i)
+                    flagged.add(i + 1)
+                    break
+    return flagged
+
+
+def _merge_cut_ranges(ranges: list) -> list:
+    if not ranges:
+        return []
+    norm = []
+    for r in ranges:
+        try:
+            a, b = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b > a:
+            norm.append([a, b])
+    if not norm:
+        return []
+    norm.sort(key=lambda x: x[0])
+    out = [norm[0]]
+    for a, b in norm[1:]:
+        if a <= out[-1][1] + 0.05:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
+                                max_gap: float = 1.0,
+                                include_fillers: bool = True,
+                                include_silence: bool = True) -> dict:
+    """Build filler + silence cut ranges (source seconds) for AI Trim parity."""
+    window = [w for w in (words or [])
+              if float(w.get("end", 0) or 0) > t_in
+              and float(w.get("start", 0) or 0) < t_out]
+    cuts = []
+    filler_count = 0
+    if include_fillers and window:
+        flagged = _filler_indices(window)
+        for i in flagged:
+            try:
+                ws = max(t_in, float(window[i].get("start", 0)))
+                we = min(t_out, float(window[i].get("end", 0)))
+            except (TypeError, ValueError):
+                continue
+            if we > ws:
+                cuts.append([ws, we])
+                filler_count += 1
+    silence_gaps = []
+    if include_silence and len(window) >= 2:
+        silence = compute_silence_compression(window, max_gap=max_gap, target_gap=0.25)
+        for g in silence.get("gaps") or []:
+            if g.get("preserved"):
+                continue
+            try:
+                gs = max(t_in, float(g["start"]))
+                ge = min(t_out, float(g["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Cut the middle of the gap, leave target_gap/2 on each side.
+            cut_len = (ge - gs) - 0.25
+            if cut_len < 0.15:
+                continue
+            mid_start = gs + 0.125
+            mid_end = ge - 0.125
+            if mid_end > mid_start:
+                cuts.append([mid_start, mid_end])
+                silence_gaps.append({
+                    "start": gs, "end": ge, "duration": ge - gs,
+                    "context_before": g.get("context_before", ""),
+                    "context_after": g.get("context_after", ""),
+                })
+    merged = _merge_cut_ranges(cuts)
+    cut_total = sum(b - a for a, b in merged)
+    return {
+        "cuts": merged,
+        "filler_count": filler_count,
+        "silence_gaps": silence_gaps,
+        "stats": {
+            "cut_count": len(merged),
+            "seconds_removed": round(cut_total, 2),
+            "window_in": t_in,
+            "window_out": t_out,
+        },
+    }
+
+
+def _intensity_effect_budget(intensity: str) -> int:
+    return {"low": 2, "med": 4, "high": 8}.get((intensity or "med").lower(), 4)
+
+
+def _uid_short() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
+                            pack: dict, intensity: str,
+                            cuts: list, effects: list,
+                            label: str = "") -> dict:
+    """Assemble a Captions-style seeded timeline project from a style pack."""
+    main_id = _uid_short()
+    main_clip = {
+        "id": main_id,
+        "source_job_id": job_id,
+        "in": t_in,
+        "out": t_out,
+        "transition": None,
+        "burn_captions": True,
+        "cuts": cuts or [],
+        "color_grade": pack.get("color_grade") or {"preset": "none"},
+    }
+    # Apply up to budget punch/Ken Burns by splitting the main clip.
+    budget = _intensity_effect_budget(intensity)
+    pieces = [main_clip]
+    usable = []
+    for fx in effects or []:
+        try:
+            fs = float(fx.get("start_time"))
+            fe = float(fx.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        if fe <= fs or fs < t_in - 0.05 or fe > t_out + 0.05:
+            continue
+        usable.append(fx)
+        if len(usable) >= budget:
+            break
+
+    if usable:
+        # Split chronologically into effect mid-segments.
+        usable.sort(key=lambda e: float(e["start_time"]))
+        pieces = []
+        cursor = t_in
+        for fx in usable:
+            fs = max(t_in, float(fx["start_time"]))
+            fe = min(t_out, float(fx["end_time"]))
+            if fs - cursor > 0.08:
+                pieces.append({
+                    "id": _uid_short(), "source_job_id": job_id,
+                    "in": cursor, "out": fs, "transition": None,
+                    "burn_captions": True, "cuts": [],
+                    "color_grade": pack.get("color_grade") or {"preset": "none"},
+                })
+            mid = {
+                "id": _uid_short(), "source_job_id": job_id,
+                "in": fs, "out": fe, "transition": None,
+                "burn_captions": True, "cuts": [],
+                "color_grade": pack.get("color_grade") or {"preset": "none"},
+            }
+            ftype = fx.get("type")
+            if ftype == "punch_zoom":
+                mid["punch_zoom"] = {
+                    "enabled": True,
+                    "intensity": fx.get("intensity") or ("high" if intensity == "high" else "med"),
+                }
+                if fx.get("anchor"):
+                    mid["punch_zoom"]["anchor"] = fx["anchor"]
+            elif ftype == "ken_burns":
+                mid["ken_burns"] = {
+                    "enabled": True,
+                    "intensity": fx.get("intensity") or "med",
+                    "direction": fx.get("direction") or "in",
+                }
+            elif ftype == "split_screen":
+                mid["split"] = {"enabled": True}
+            pieces.append(mid)
+            cursor = fe
+        if t_out - cursor > 0.08:
+            pieces.append({
+                "id": _uid_short(), "source_job_id": job_id,
+                "in": cursor, "out": t_out, "transition": None,
+                "burn_captions": True, "cuts": [],
+                "color_grade": pack.get("color_grade") or {"preset": "none"},
+            })
+        # Redistribute original cuts onto pieces by intersection.
+        if cuts:
+            for p in pieces:
+                p["cuts"] = [
+                    [max(p["in"], c[0]), min(p["out"], c[1])]
+                    for c in cuts
+                    if c[1] > p["in"] and c[0] < p["out"] and min(p["out"], c[1]) - max(p["in"], c[0]) > 0.05
+                ]
+        # Transitions between pieces
+        tr = pack.get("transition") or "crossfade"
+        for i, p in enumerate(pieces[:-1]):
+            p["transition"] = {"type": tr, "duration": 0.25 if intensity != "high" else 0.15}
+
+    text_track = []
+    if pack.get("add_title") and label:
+        text_track.append({
+            "id": _uid_short(),
+            "text": label[:80],
+            "start": 0,
+            "out": 2.5,
+            "x": 0.5, "y": 0.12, "size": 64,
+            "color": "#FFFFFF", "font": pack.get("style", {}).get("font") or "Anton",
+            "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.45,
+            "outline_color": "#000000", "outline_width": 0, "shadow": 0,
+            "bold": True, "align": 2, "anim": "fade",
+            "anchor": pieces[0]["id"] if pieces else None,
+        })
+
+    return {
+        "canvas": pack.get("canvas") or "9x16",
+        "fit": "cover",
+        "fps": 30,
+        "bg": "#000000",
+        "style": pack.get("style") or {},
+        "caption_preset": pack.get("caption_preset"),
+        "ai_edit": {
+            "style_pack": pack.get("label"),
+            "intensity": intensity,
+        },
+        "tracks": {
+            "main": pieces,
+            "overlay": [],
+            "text": text_track,
+            "music": [],
+        },
+    }
+
+
+def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
+                         t_in: float | None = None,
+                         t_out: float | None = None) -> list:
+    """Scene-change timestamps via ffmpeg select=gt(scene,N)."""
+    cmd = [
+        FFMPEG, "-hide_banner",
+    ]
+    if t_in is not None and t_in > 0:
+        cmd += ["-ss", f"{float(t_in):.3f}"]
+    cmd += ["-i", str(video_path)]
+    if t_out is not None and t_in is not None and t_out > t_in:
+        cmd += ["-t", f"{float(t_out - (t_in or 0)):.3f}"]
+    cmd += [
+        "-filter:v", f"select='gt(scene,{threshold})',showinfo",
+        "-f", "null", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    # showinfo lands on stderr
+    times = []
+    for line in (proc.stderr or "").splitlines():
+        # pts_time:12.345
+        m = re.search(r"pts_time:([0-9.]+)", line)
+        if m:
+            t = float(m.group(1))
+            if t_in:
+                t += float(t_in)
+            times.append(round(t, 3))
+    # Dedupe near-duplicates
+    cleaned = []
+    for t in times:
+        if not cleaned or t - cleaned[-1] >= 0.35:
+            cleaned.append(t)
+    return cleaned
+
+
+@app.route("/ai-edit/style-packs", methods=["GET"])
+def ai_edit_style_packs():
+    packs = []
+    for key, pack in AI_EDIT_STYLE_PACKS.items():
+        packs.append({
+            "id": key,
+            "label": pack.get("label", key),
+            "blurb": pack.get("blurb", ""),
+            "canvas": pack.get("canvas", "9x16"),
+        })
+    return jsonify({"packs": packs})
+
+
+@app.route("/recommended-cuts", methods=["POST"])
+def recommended_cuts():
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words") or []
+    if not words:
+        return jsonify({"error": "Transcript not available"}), 400
+    try:
+        t_in = float(data.get("in", data.get("start_time", 0)) or 0)
+        t_out = float(data.get("out", data.get("end_time", words[-1].get("end", 0))) or 0)
+        max_gap = float(data.get("max_gap", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid in/out"}), 400
+    if t_out <= t_in:
+        t_out = float(words[-1].get("end", 0) or 0)
+    result = _recommended_cuts_for_words(
+        words, t_in, t_out, max_gap=max_gap,
+        include_fillers=bool(data.get("include_fillers", True)),
+        include_silence=bool(data.get("include_silence", True)),
+    )
+    return jsonify(result)
+
+
+@app.route("/ai-edit-seed", methods=["POST"])
+def ai_edit_seed():
+    """Captions-style AI Edit: style pack + intensity → seeded timeline JSON.
+
+    Body: {
+      source_job_id, start_time?, end_time?, style_pack, intensity,
+      label?, apply_cuts?, create_clip?, max_effects?
+    }
+    """
+    data = request.get_json(force=True) or {}
+    source_job_id = data.get("source_job_id") or data.get("job_id")
+    if not source_job_id or source_job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src = jobs[source_job_id]
+    words = src.get("words") or []
+    if not words:
+        return jsonify({"error": "Transcript not available"}), 400
+
+    pack_id = (data.get("style_pack") or "pulse").lower()
+    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    intensity = (data.get("intensity") or "med").lower()
+    if intensity not in ("low", "med", "high"):
+        intensity = "med"
+    label = (data.get("label") or src.get("filename") or "AI Edit")[:120]
+
+    try:
+        t_in = float(data.get("start_time", data.get("in", 0)) or 0)
+        default_out = float(words[-1].get("end", 0) or 0)
+        t_out = float(data.get("end_time", data.get("out", default_out)) or default_out)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid start/end"}), 400
+    t_in = max(0.0, t_in)
+    if t_out <= t_in + 0.5:
+        return jsonify({"error": "Clip window too short"}), 400
+
+    apply_cuts = bool(data.get("apply_cuts", True))
+    create_clip = bool(data.get("create_clip", False))
+
+    # Optional: materialize a chopped child job (Captions "individual clip").
+    work_job_id = source_job_id
+    work_in, work_out = t_in, t_out
+    if create_clip:
+        try:
+            work_job_id = _create_clip_from_job(source_job_id, t_in, t_out, label)
+            # Child job words are remapped to 0..duration
+            work_in, work_out = 0.0, t_out - t_in
+            words = jobs[work_job_id].get("words") or []
+        except Exception as e:
+            return jsonify({"error": f"Could not create clip: {e}"}), 400
+
+    rec = _recommended_cuts_for_words(words, work_in, work_out)
+    cuts = rec["cuts"] if apply_cuts else []
+
+    # Effect suggestions (Gemini when available; empty otherwise).
+    effects = []
+    gemini_warning = None
+    try:
+        max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity))
+    except (TypeError, ValueError):
+        max_fx = _intensity_effect_budget(intensity)
+    try:
+        total = float(words[-1].get("end", 0) or work_out)
+        result = _gemini_generate_clip_suggestions(
+            _build_effect_suggestion_prompt(
+                _format_transcript_for_llm(words), total, max_fx
+            )
+        )
+        effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
+        for fx in effects:
+            if fx.get("type") == "punch_zoom":
+                anchor = _face_anchor_at(work_job_id, fx["start_time"])
+                if anchor:
+                    fx["anchor"] = anchor
+    except RuntimeError as exc:
+        gemini_warning = str(exc)
+    except Exception as exc:
+        gemini_warning = str(exc)
+
+    timeline = _build_ai_edit_timeline(
+        work_job_id, work_in, work_out, pack, intensity, cuts, effects, label=label
+    )
+    # Persist style onto the working job for caption burns.
+    if pack.get("style"):
+        jobs[work_job_id]["style"] = dict(pack["style"])
+        _db_save_job(work_job_id)
+
+    return jsonify({
+        "ok": True,
+        "source_job_id": source_job_id,
+        "clip_job_id": work_job_id if create_clip else None,
+        "job_id": work_job_id,
+        "style_pack": pack_id,
+        "intensity": intensity,
+        "label": label,
+        "in": work_in,
+        "out": work_out,
+        "recommended_cuts": rec,
+        "effects": effects,
+        "timeline": timeline,
+        "warning": gemini_warning,
+    })
+
+
+@app.route("/detect-shots", methods=["POST"])
+def detect_shots():
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Video missing"}), 404
+    try:
+        threshold = float(data.get("threshold", 0.35) or 0.35)
+        t_in = data.get("in")
+        t_out = data.get("out")
+        t_in = float(t_in) if t_in is not None else None
+        t_out = float(t_out) if t_out is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid parameters"}), 400
+    try:
+        times = _detect_shots_ffmpeg(video_path, threshold=threshold, t_in=t_in, t_out=t_out)
+    except Exception as e:
+        return jsonify({"error": f"Shot detection failed: {e}"}), 500
+
+    # Build shot spans covering [t_in,t_out] or full duration.
+    if t_in is None:
+        t_in = 0.0
+    if t_out is None:
+        words = jobs[job_id].get("words") or []
+        t_out = float(words[-1].get("end", 0) or 0) if words else _ffprobe_duration(video_path)
+    bounds = [t_in] + [t for t in times if t_in < t < t_out] + [t_out]
+    shots = []
+    for i in range(len(bounds) - 1):
+        if bounds[i + 1] - bounds[i] < 0.2:
+            continue
+        shots.append({
+            "index": len(shots),
+            "start": bounds[i],
+            "end": bounds[i + 1],
+            "duration": round(bounds[i + 1] - bounds[i], 3),
+        })
+    return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
+
+
+@app.route("/co-editor", methods=["POST"])
+def co_editor():
+    """Natural-language → validated timeline mutation ops (Captions Co-editor)."""
+    data = request.get_json(force=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    timeline = data.get("timeline") or {}
+    if not prompt:
+        return jsonify({"error": "Prompt is required"}), 400
+    if not timeline:
+        return jsonify({"error": "Timeline is required"}), 400
+
+    main = (timeline.get("tracks") or {}).get("main") or []
+    summary = {
+        "canvas": timeline.get("canvas"),
+        "main_clip_count": len(main),
+        "main_clips": [
+            {
+                "index": i,
+                "id": c.get("id"),
+                "in": c.get("in"),
+                "out": c.get("out"),
+                "has_punch_zoom": bool((c.get("punch_zoom") or {}).get("enabled")),
+                "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
+                "cut_count": len(c.get("cuts") or []),
+                "transition": (c.get("transition") or {}).get("type") if isinstance(c.get("transition"), dict) else c.get("transition"),
+            }
+            for i, c in enumerate(main[:24])
+        ],
+        "overlay_count": len((timeline.get("tracks") or {}).get("overlay") or []),
+        "text_count": len((timeline.get("tracks") or {}).get("text") or []),
+        "music_count": len((timeline.get("tracks") or {}).get("music") or []),
+        "style": timeline.get("style") or {},
+    }
+
+    system_prompt = f"""You are a video-editor co-pilot. Convert the user's request into JSON ops that mutate a timeline.
+
+Current timeline summary:
+{json.dumps(summary, indent=2)}
+
+Return ONLY JSON:
+{{
+  "ops": [
+    {{"op": "set_caption_style", "font": "...", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "delete_shot", "index": 2}},
+    {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
+    {{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}},
+    {{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}},
+    {{"op": "clear_effects", "index": 0}},
+    {{"op": "set_canvas", "canvas": "9x16"}},
+    {{"op": "set_color_grade", "index": 0, "preset": "warm"}},
+    {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
+    {{"op": "apply_recommended_cuts", "index": 0}},
+    {{"op": "merge_shots", "index": 0}},
+    {{"op": "reorder_shot", "from": 2, "to": 0}}
+  ],
+  "message": "Short confirmation of what you changed"
+}}
+
+Rules:
+- Use only the ops listed above.
+- Shot indexes refer to main track clips (0-based).
+- Prefer 1-5 ops. If the request is unclear, return ops: [] and explain in message.
+- Colors must be #RRGGBB. Canvas must be one of 9x16, 16x9, 1x1, 4x5.
+"""
+    try:
+        result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    raw_ops = result.get("ops") if isinstance(result, dict) else None
+    if raw_ops is None and isinstance(result, list):
+        raw_ops = result
+    raw_ops = raw_ops or []
+    message = ""
+    if isinstance(result, dict):
+        message = str(result.get("message") or "")[:400]
+
+    allowed = {
+        "set_caption_style", "delete_shot", "set_transition", "enable_punch_zoom",
+        "enable_ken_burns", "clear_effects", "set_canvas", "set_color_grade",
+        "add_title", "apply_recommended_cuts", "merge_shots", "reorder_shot",
+    }
+    ops = []
+    for op in raw_ops:
+        if not isinstance(op, dict):
+            continue
+        name = str(op.get("op") or "")
+        if name not in allowed:
+            continue
+        ops.append(op)
+        if len(ops) >= 8:
+            break
+
+    return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
+
+
+@app.route("/job-duration/<job_id>", methods=["GET"])
+def job_duration(job_id):
+    """Duration helper for long-form routing (words end, else ffprobe)."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words") or []
+    dur = 0.0
+    if words:
+        try:
+            dur = float(words[-1].get("end", 0) or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+    if dur <= 0:
+        path = find_video_path(job_id)
+        if path:
+            dur = _ffprobe_duration(path)
+    return jsonify({
+        "job_id": job_id,
+        "duration": dur,
+        "is_long_form": dur >= LONG_FORM_SECONDS,
+        "long_form_threshold": LONG_FORM_SECONDS,
+    })
 
 
 if __name__ == "__main__":

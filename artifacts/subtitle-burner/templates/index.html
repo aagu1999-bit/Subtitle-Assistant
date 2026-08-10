@@ -196,7 +196,7 @@
                 <input type="checkbox" id="autoGenerateShorts">
                 <span class="toggle-text">
                   <strong>⚡ Auto-Generate Shorts on Upload</strong>
-                  <span class="muted">Optional Gemini pass after Whisper (does not block Transcript Cut). Leave off for the fastest path. Use <strong>Analyze</strong> separately for speaker diarization.</span>
+                  <span class="muted">Optional for short clips. Long-form videos (≥4 min) always run AI Shorts and open that gallery by default (Captions-style).</span>
                 </span>
               </label>
             </div>
@@ -1017,6 +1017,7 @@
 
     <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
       <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1;min-width:240px">Render with Edits</button>
+      <button id="aiEditJobBtn" class="btn btn-secondary" title="Captions-style AI Edit — style + intensity → seeded timeline project" style="background:linear-gradient(135deg,#2a2450,#1a1e2a);border-color:#6c5cff88;color:#e8e4ff">✨ AI Edit</button>
       <button id="editToTimelineBtn" class="btn btn-secondary" title="Open the multi-track Editor with this video on the Main track">🎬 Edit in timeline</button>
       <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
       <button id="exportSrtBtn" class="btn btn-secondary" title="Download the current transcript as an SRT subtitle file (works with YouTube, Premiere, CapCut).">⬇ .srt</button>
@@ -1028,12 +1029,13 @@
     </div>
     <!-- /Tab: Transcript Cut -->
 
-    <!-- Tab 3: Highlights -->
+    <!-- Tab 3: Highlights / AI Shorts (Captions-aligned gallery) -->
     <div class="tab-content hidden" data-tab-group="highlights">
     <section id="highlightsPanel" class="panel" style="margin-top:0">
-      <h2 style="display:flex;align-items:center;gap:10px">
-        <span>✨ Find highlights</span>
-        <span class="muted" style="font-size:.78rem;font-weight:normal">AI clip suggestions</span>
+      <h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>✨ AI Shorts</span>
+        <span class="muted" style="font-size:.78rem;font-weight:normal">Chop long videos into individual clips</span>
+        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:#6c5cff33;border:1px solid #6c5cff88;color:#c8c0ff">Long-form · default path</span>
       </h2>
       {% if not gemini_enabled %}
       <div id="hlGeminiDisabled" class="panel" style="margin:0 0 14px;border-color:#bf616a;background:#1a1216">
@@ -1044,9 +1046,9 @@
       </div>
       {% endif %}
       <p class="muted panel-desc">
-        Pick a format and target length — Gemini scans the transcript and picks the most engaging segments.
-        Click <strong>Make a clip</strong> on any suggestion to spawn a new pre-trimmed job that inherits this video's style.
-        Preview opens the Transcript player so you can trim Start/End live.
+        Pick a format and target length — Gemini finds hook-first moments. Each card is an individual clip:
+        <strong>Open as project</strong> runs AI Edit (style + intensity) into the timeline,
+        <strong>Export alone</strong> trims a standalone job, or batch-export the gallery.
       </p>
 
       <div class="row">
@@ -1093,7 +1095,7 @@
       </div>
 
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
-      <div id="hlResults" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
+      <div id="hlResults" class="hl-gallery" style="margin-top:14px"></div>
 
       <!-- Clip Assembly Bar (shown when multi-segment clip is active) -->
       <div id="clipAssemblyBar" class="hidden" style="margin-top:20px;padding:16px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
@@ -1227,11 +1229,14 @@
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
           <div class="tl-tltoolbar">
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
+            <button id="tlMergeBtn" class="tl-chip-btn" title="Merge selected Main clip with the next shot">⛓ Merge</button>
+            <button id="tlDetectShotsBtn" class="tl-chip-btn" title="Detect shot changes and split Main at scene cuts">🎞 Detect shots</button>
             <button id="tlCopyBtn" class="tl-chip-btn" title="Copy selected clip (Cmd/Ctrl+C)">📋 Copy</button>
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
+            <button id="tlCoEditorBtn" class="tl-chip-btn" title="Chat-based co-editor — describe edits in plain language">💬 Co-editor</button>
             <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/dup">⌨ Space · S · Del · ←→ · ⌘Z · Snap · ⌘C/V/D</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
@@ -1274,6 +1279,65 @@
     </div>
   </div>
   <!-- /Tab: Editor -->
+
+  <!-- AI Edit plan modal (Captions-style style + intensity → timeline seed) -->
+  <div id="aiEditModal" class="ai-edit-modal hidden" aria-hidden="true">
+    <div class="ai-edit-modal-card">
+      <div class="ai-edit-modal-head">
+        <strong>AI Edit</strong>
+        <span class="muted" style="font-size:.78rem">Pick a style + intensity, review recommended cuts, then open as a timeline project</span>
+        <button type="button" id="aiEditClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+      </div>
+      <div class="ai-edit-modal-body">
+        <div class="row" style="align-items:flex-start">
+          <label style="min-width:100px;padding-top:6px">Style</label>
+          <div id="aiEditPacks" class="ai-edit-packs"></div>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">Intensity</label>
+          <select id="aiEditIntensity">
+            <option value="low">Low — light trim &amp; sparse zooms</option>
+            <option value="med" selected>Med — balanced social edit</option>
+            <option value="high">High — dense cuts &amp; zooms</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">AI Trim</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="aiEditApplyCuts" checked>
+            Apply recommended filler + silence cuts
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">Clip job</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="aiEditCreateClip" checked>
+            Chop into a standalone clip job first
+          </label>
+        </div>
+        <div id="aiEditCutsPreview" class="muted" style="font-size:.82rem;margin:8px 0 0;min-height:1.2em"></div>
+        <div id="aiEditStatus" class="muted" style="font-size:.82rem;margin-top:8px"></div>
+      </div>
+      <div class="ai-edit-modal-foot">
+        <button type="button" id="aiEditCancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="aiEditGenerate" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Create project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Co-editor chat drawer -->
+  <div id="coEditorDrawer" class="co-editor-drawer hidden" aria-hidden="true">
+    <div class="co-editor-head">
+      <strong>💬 Co-editor</strong>
+      <span class="muted" style="font-size:.72rem">Describe edits — “make captions bigger”, “remove the third shot”</span>
+      <button type="button" id="coEditorClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+    </div>
+    <div id="coEditorLog" class="co-editor-log"></div>
+    <div class="co-editor-compose">
+      <input type="text" id="coEditorInput" placeholder="Describe a change…" maxlength="400">
+      <button type="button" id="coEditorSend" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Send</button>
+    </div>
+  </div>
 
   <!-- Tab: Result -->
   <div class="tab-content hidden" data-tab-group="result">

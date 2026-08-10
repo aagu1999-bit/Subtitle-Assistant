@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-15";
+  const TL_BUILD = "studio-editor-build-16-captions";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -1640,6 +1640,25 @@
       html += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes push-ins and drifts timed to the line. Applying one splits the clip so the move covers only that moment.</p>`;
       html += `<div id="tlFxList" style="margin-top:8px"></div>`;
 
+      // --- Per-shot AI restyle (Captions shot restyle) ---
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 AI Edit this shot</label>`;
+      html += `<div class="tl-prop-grid">
+        <label class="tl-prop">Style<select data-restyle-pack>
+          <option value="pulse">Pulse</option>
+          <option value="clarity">Clarity</option>
+          <option value="magazine">Magazine</option>
+          <option value="velocity">Velocity</option>
+          <option value="film">Film</option>
+        </select></label>
+        <label class="tl-prop">Intensity<select data-restyle-intensity>
+          <option value="low">Low</option>
+          <option value="med" selected>Med</option>
+          <option value="high">High</option>
+        </select></label>
+      </div>`;
+      html += `<button class="btn btn-secondary btn-block" data-act="restyle" style="margin-top:6px">Restyle shot</button>`;
+      html += `<p class="muted" style="font-size:.72rem">Re-runs the AI Edit recipe on this shot only (Captions per-shot restyle).</p>`;
+
       // --- Active Speaker Reframe (per clip) ---
       const ref = c.reframe || {};
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">📱 9:16 Active Speaker Reframe</label>`;
@@ -1872,6 +1891,12 @@
     };
     const sfx = wrap.querySelector('[data-act="suggestfx"]');
     if (sfx) sfx.onclick = () => suggestEffectsFor(c, sfx);
+    const restyle = wrap.querySelector('[data-act="restyle"]');
+    if (restyle) restyle.onclick = () => {
+      const pack = (wrap.querySelector("[data-restyle-pack]") || {}).value || "pulse";
+      const intensity = (wrap.querySelector("[data-restyle-intensity]") || {}).value || "med";
+      restyleSelectedShot(pack, intensity);
+    };
   }
 
   // ---- AI camera moves -------------------------------------------------
@@ -2574,6 +2599,7 @@
         on("tlCopyBtn", "onclick", () => copySelectedClip());
         on("tlPasteBtn", "onclick", () => pasteClip());
         on("tlDupBtn", "onclick", () => duplicateSelectedClip());
+        wireCaptionsToolbar();
         on("tlUndoBtn", "onclick", undo);
         on("tlRedoBtn", "onclick", redo);
         on("tlMagneticBtn", "onclick", () => {
@@ -2702,7 +2728,7 @@
   // editor seeded from one job or a multi-clip queue.
   window.openTimelineEditor = async function (seedJobId, opts) {
     opts = opts || {};
-    const seeding = !!(opts.newProject || (opts.clips && opts.clips.length) || seedJobId);
+    const seeding = !!(opts.newProject || (opts.clips && opts.clips.length) || seedJobId || opts.seedTimeline);
     if (seeding) {
       window._tlDeferAutoOpen = true;
       _skipAutoOpenOnce = true;
@@ -2716,8 +2742,19 @@
       }
       await ensureInit({ skipAutoOpen: seeding });
 
-      if (opts.newProject || (seeding && !tl)) {
+      if (opts.newProject || (seeding && !tl) || opts.seedTimeline) {
         await newProject();
+      }
+
+      // Captions-style AI Edit seed: apply full timeline JSON onto the project.
+      if (opts.seedTimeline && tl) {
+        pushHistory();
+        applySeedTimeline(opts.seedTimeline, opts.label);
+        await loadSources();
+        await refreshMaxTrims();
+        renderTimeline();
+        scheduleSave();
+        return;
       }
 
       const clips = Array.isArray(opts.clips) ? opts.clips : null;
@@ -2757,4 +2794,427 @@
       window._tlDeferAutoOpen = false;
     }
   };
+
+  function applySeedTimeline(seed, label) {
+    if (!tl || !seed) return;
+    const tracks = seed.tracks || {};
+    tl.canvas = seed.canvas || tl.canvas || "9x16";
+    tl.fit = seed.fit || tl.fit || "cover";
+    tl.fps = seed.fps || tl.fps || 30;
+    tl.bg = seed.bg || tl.bg || "#000000";
+    if (seed.style) tl.style = seed.style;
+    if (seed.ai_edit) tl.ai_edit = seed.ai_edit;
+    if (label) {
+      tl.label = label;
+      if ($("tlLabel")) $("tlLabel").value = label;
+    }
+    if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+    if ($("tlFit")) $("tlFit").value = tl.fit;
+    tl.tracks.main = Array.isArray(tracks.main) ? tracks.main.map((c) => ({
+      ...c,
+      id: c.id || uid(),
+      burn_captions: c.burn_captions !== false,
+    })) : [];
+    tl.tracks.overlay = Array.isArray(tracks.overlay) ? tracks.overlay.map((c) => ({ ...c, id: c.id || uid() })) : [];
+    tl.tracks.text = Array.isArray(tracks.text) ? tracks.text.map((c) => ({ ...c, id: c.id || uid() })) : [];
+    tl.tracks.music = Array.isArray(tracks.music) ? tracks.music.map((c) => ({ ...c, id: c.id || uid() })) : [];
+    selected = tl.tracks.main[0] ? { track: "main", id: tl.tracks.main[0].id } : null;
+    applyStage();
+  }
+
+  // ---- Merge adjacent Main shots (Captions split/merge parity) ----
+  function mergeSelectedWithNext() {
+    if (!tl || !selected || selected.track !== "main") {
+      alert("Select a Main clip to merge with the next shot.");
+      return;
+    }
+    const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
+    if (idx < 0 || idx >= tl.tracks.main.length - 1) {
+      alert("Nothing to merge — pick a clip that has a following shot.");
+      return;
+    }
+    const a = tl.tracks.main[idx];
+    const b = tl.tracks.main[idx + 1];
+    if (a.source_job_id !== b.source_job_id) {
+      alert("Can only merge adjacent shots from the same source.");
+      return;
+    }
+    // Contiguous or overlapping in source time.
+    if (Math.abs((a.out || 0) - (b.in || 0)) > 0.15 && (b.in || 0) < (a.out || 0) - 0.05) {
+      // Allow slight overlap; if b starts earlier than a ends it's ok.
+    }
+    if ((b.in || 0) + 0.05 < (a.out || 0) - 0.2 && (b.in || 0) < (a.in || 0)) {
+      alert("Shots are not sequential in source time.");
+      return;
+    }
+    pushHistory();
+    const mergedCuts = [...(a.cuts || []), ...(b.cuts || [])];
+    a.out = Math.max(a.out || 0, b.out || 0);
+    a.cuts = mergedCuts;
+    a.transition = b.transition || a.transition;
+    // Prefer keeping effects from a; clear mid-boundary effects from b by not copying.
+    tl.tracks.main.splice(idx + 1, 1);
+    // Re-anchor anything that pointed at b.
+    ["overlay", "text", "music"].forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (c.anchor === b.id) c.anchor = a.id;
+      });
+    });
+    selectClip("main", a.id);
+    renderTimeline();
+    scheduleSave();
+  }
+
+  async function detectShotsOnSelected() {
+    if (!tl) return;
+    let clip = null;
+    if (selected && selected.track === "main") {
+      clip = tl.tracks.main.find((c) => c.id === selected.id);
+    } else if (tl.tracks.main.length === 1) {
+      clip = tl.tracks.main[0];
+    }
+    if (!clip || !clip.source_job_id) {
+      alert("Select a Main clip with a source video first.");
+      return;
+    }
+    const btn = $("tlDetectShotsBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Detecting…"; }
+    try {
+      const res = await fetch("/detect-shots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: clip.source_job_id,
+          in: clip.in || 0,
+          out: clip.out,
+          threshold: 0.35,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const shots = data.shots || [];
+      if (shots.length <= 1) {
+        alert("No scene changes detected in this clip.");
+        return;
+      }
+      pushHistory();
+      const idx = tl.tracks.main.findIndex((c) => c.id === clip.id);
+      const pieces = shots.map((s, i) => {
+        const piece = {
+          id: uid(),
+          source_job_id: clip.source_job_id,
+          in: s.start,
+          out: s.end,
+          _max: clip._max,
+          transition: i < shots.length - 1 ? { type: "crossfade", duration: 0.25 } : null,
+          burn_captions: clip.burn_captions !== false,
+          cuts: (clip.cuts || []).filter(([cs, ce]) => ce > s.start && cs < s.end)
+            .map(([cs, ce]) => [Math.max(cs, s.start), Math.min(ce, s.end)]),
+          color_grade: clip.color_grade ? JSON.parse(JSON.stringify(clip.color_grade)) : null,
+          shot_index: s.index,
+        };
+        return piece;
+      });
+      // Preserve first-piece effects if whole-clip had them.
+      if (clip.punch_zoom) pieces[0].punch_zoom = clip.punch_zoom;
+      if (clip.ken_burns) pieces[0].ken_burns = clip.ken_burns;
+      tl.tracks.main.splice(idx, 1, ...pieces);
+      selectClip("main", pieces[0].id);
+      renderTimeline();
+      scheduleSave();
+      setRenderStatus(`Split into ${pieces.length} shots`);
+    } catch (e) {
+      alert("Shot detection failed: " + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "🎞 Detect shots"; }
+    }
+  }
+
+  async function restyleSelectedShot(packId, intensity) {
+    if (!tl || !selected || selected.track !== "main") {
+      alert("Select a Main shot to restyle.");
+      return;
+    }
+    const clip = tl.tracks.main.find((c) => c.id === selected.id);
+    if (!clip || !clip.source_job_id) return;
+    try {
+      const res = await fetch("/ai-edit-seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_job_id: clip.source_job_id,
+          start_time: clip.in || 0,
+          end_time: clip.out,
+          style_pack: packId || "pulse",
+          intensity: intensity || "med",
+          apply_cuts: false,
+          create_clip: false,
+          label: "Shot restyle",
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const seeded = ((data.timeline || {}).tracks || {}).main || [];
+      if (!seeded.length) throw new Error("No restyle result");
+      pushHistory();
+      const idx = tl.tracks.main.findIndex((c) => c.id === clip.id);
+      // Replace this one shot with the seeded pieces; shift later clips.
+      const pieces = seeded.map((c) => ({ ...c, id: uid() }));
+      tl.tracks.main.splice(idx, 1, ...pieces);
+      if (data.timeline && data.timeline.style) tl.style = data.timeline.style;
+      selectClip("main", pieces[0].id);
+      renderTimeline();
+      scheduleSave();
+    } catch (e) {
+      alert("Shot restyle failed: " + e.message);
+    }
+  }
+
+  // ---- Co-editor (chat mutates timeline) ----
+  function openCoEditor() {
+    const drawer = $("coEditorDrawer");
+    if (!drawer) return;
+    drawer.classList.remove("hidden");
+    drawer.setAttribute("aria-hidden", "false");
+    const btn = $("tlCoEditorBtn");
+    if (btn) btn.classList.add("active-co");
+    if ($("coEditorInput")) $("coEditorInput").focus();
+  }
+  function closeCoEditor() {
+    const drawer = $("coEditorDrawer");
+    if (!drawer) return;
+    drawer.classList.add("hidden");
+    drawer.setAttribute("aria-hidden", "true");
+    const btn = $("tlCoEditorBtn");
+    if (btn) btn.classList.remove("active-co");
+  }
+  function appendCoMsg(role, text) {
+    const log = $("coEditorLog");
+    if (!log) return;
+    const div = document.createElement("div");
+    div.className = "co-editor-msg " + role;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function timelinePayloadForCoEditor() {
+    if (!tl) return null;
+    return {
+      canvas: tl.canvas,
+      fit: tl.fit,
+      style: tl.style || {},
+      tracks: {
+        main: tl.tracks.main,
+        overlay: tl.tracks.overlay,
+        text: tl.tracks.text,
+        music: tl.tracks.music,
+      },
+    };
+  }
+
+  async function applyCoEditorOps(ops) {
+    if (!tl || !Array.isArray(ops) || !ops.length) return 0;
+    pushHistory();
+    historySuspended = true;
+    let applied = 0;
+    try {
+    for (const op of ops) {
+      const name = op && op.op;
+      if (!name) continue;
+      try {
+        if (name === "set_caption_style") {
+          tl.style = Object.assign({}, tl.style || {}, {
+            font: op.font || (tl.style && tl.style.font),
+            size: op.size != null ? Number(op.size) : (tl.style && tl.style.size),
+            primary: op.primary || (tl.style && tl.style.primary),
+            highlight: op.highlight || (tl.style && tl.style.highlight),
+            accent: op.accent || (tl.style && tl.style.accent),
+          });
+          applied++;
+        } else if (name === "delete_shot") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            const id = tl.tracks.main[i].id;
+            deleteClip("main", id);
+            applied++;
+          }
+        } else if (name === "set_transition") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            tl.tracks.main[i].transition = {
+              type: op.type || "crossfade",
+              duration: Number(op.duration) || 0.3,
+            };
+            applied++;
+          }
+        } else if (name === "enable_punch_zoom") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            tl.tracks.main[i].punch_zoom = { enabled: true, intensity: op.intensity || "med" };
+            applied++;
+          }
+        } else if (name === "enable_ken_burns") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            tl.tracks.main[i].ken_burns = {
+              enabled: true,
+              intensity: op.intensity || "med",
+              direction: op.direction || "in",
+            };
+            applied++;
+          }
+        } else if (name === "clear_effects") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            tl.tracks.main[i].punch_zoom = null;
+            tl.tracks.main[i].ken_burns = null;
+            applied++;
+          }
+        } else if (name === "set_canvas") {
+          const c = String(op.canvas || "").replace(":", "x");
+          if (["9x16", "16x9", "1x1", "4x5"].includes(c)) {
+            tl.canvas = c;
+            if ($("tlCanvas")) $("tlCanvas").value = c;
+            applyStage();
+            applied++;
+          }
+        } else if (name === "set_color_grade") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            tl.tracks.main[i].color_grade = { preset: op.preset || "warm" };
+            applied++;
+          }
+        } else if (name === "add_title") {
+          const tc = {
+            id: uid(),
+            text: String(op.text || "Title").slice(0, 120),
+            start: Number(op.start) || 0,
+            out: Number(op.duration) || 3,
+            x: 0.5, y: 0.15, size: 60, color: "#FFFFFF", font: "Anton",
+            bg_enabled: true, bg_color: "#000000", bg_opacity: 0.5,
+            outline_color: "#000000", outline_width: 0, shadow: 0,
+            bold: true, align: 2, anim: "fade",
+          };
+          reanchor(tc);
+          tl.tracks.text.push(tc);
+          applied++;
+        } else if (name === "apply_recommended_cuts") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length) {
+            const clip = tl.tracks.main[i];
+            const res = await fetch("/recommended-cuts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                job_id: clip.source_job_id,
+                in: clip.in || 0,
+                out: clip.out,
+              }),
+            });
+            const data = await res.json();
+            if (!data.error) {
+              clip.cuts = data.cuts || [];
+              applied++;
+            }
+          }
+        } else if (name === "merge_shots") {
+          const i = Number(op.index);
+          if (i >= 0 && i < tl.tracks.main.length - 1) {
+            selectClip("main", tl.tracks.main[i].id);
+            mergeSelectedWithNext();
+            applied++;
+          }
+        } else if (name === "reorder_shot") {
+          const from = Number(op.from);
+          const to = Number(op.to);
+          if (from >= 0 && from < tl.tracks.main.length && to >= 0 && to < tl.tracks.main.length && from !== to) {
+            const [item] = tl.tracks.main.splice(from, 1);
+            tl.tracks.main.splice(to, 0, item);
+            applied++;
+          }
+        }
+      } catch (e) {
+        console.warn("[co-editor] op failed", name, e);
+      }
+    }
+    } finally {
+      historySuspended = false;
+    }
+    renderTimeline();
+    scheduleSave();
+    return applied;
+  }
+
+  async function sendCoEditorPrompt() {
+    if (!tl) {
+      alert("Open a timeline project first.");
+      return;
+    }
+    const input = $("coEditorInput");
+    const prompt = (input && input.value || "").trim();
+    if (!prompt) return;
+    if (input) input.value = "";
+    appendCoMsg("user", prompt);
+    appendCoMsg("bot", "Thinking…");
+    const log = $("coEditorLog");
+    const thinking = log && log.lastChild;
+    try {
+      const res = await fetch("/co-editor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          timeline: timelinePayloadForCoEditor(),
+        }),
+      });
+      const data = await res.json();
+      if (thinking) thinking.remove();
+      if (data.error) throw new Error(data.error);
+      const n = await applyCoEditorOps(data.ops || []);
+      appendCoMsg("bot", (data.message || `Applied ${n} edit(s).`) + (n ? "" : " (no ops)"));
+    } catch (e) {
+      if (thinking) thinking.remove();
+      appendCoMsg("bot", "Error: " + e.message);
+    }
+  }
+
+  // Wire new toolbar buttons once DOM is ready (ensureInit also calls wireToolbar).
+  function wireCaptionsToolbar() {
+    const mergeBtn = $("tlMergeBtn");
+    if (mergeBtn && !mergeBtn._wired) {
+      mergeBtn._wired = true;
+      mergeBtn.onclick = () => mergeSelectedWithNext();
+    }
+    const shotsBtn = $("tlDetectShotsBtn");
+    if (shotsBtn && !shotsBtn._wired) {
+      shotsBtn._wired = true;
+      shotsBtn.onclick = () => detectShotsOnSelected();
+    }
+    const coBtn = $("tlCoEditorBtn");
+    if (coBtn && !coBtn._wired) {
+      coBtn._wired = true;
+      coBtn.onclick = () => {
+        const drawer = $("coEditorDrawer");
+        if (drawer && !drawer.classList.contains("hidden")) closeCoEditor();
+        else openCoEditor();
+      };
+    }
+    if ($("coEditorClose") && !$("coEditorClose")._wired) {
+      $("coEditorClose")._wired = true;
+      $("coEditorClose").onclick = () => closeCoEditor();
+    }
+    if ($("coEditorSend") && !$("coEditorSend")._wired) {
+      $("coEditorSend")._wired = true;
+      $("coEditorSend").onclick = () => sendCoEditorPrompt();
+    }
+    if ($("coEditorInput") && !$("coEditorInput")._wired) {
+      $("coEditorInput")._wired = true;
+      $("coEditorInput").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); sendCoEditorPrompt(); }
+      });
+    }
+  }
+  wireCaptionsToolbar();
+  window.restyleSelectedShot = restyleSelectedShot;
 })();

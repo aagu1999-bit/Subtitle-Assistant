@@ -1766,24 +1766,36 @@ function renderPhraseList(words) {
 }
 
 // One-click filler cleanup: drop every flagged word from currentWords,
-// re-render, and persist. Pure caption edit — the underlying audio still
-// says "um", we just no longer caption it. If the user wants the audio
-// trimmed too, that's a follow-up (silence-tightening per-word).
+// re-render, and persist. Optionally apply AI Trim (real keep-range cuts)
+// via the timeline — Captions AI Trim parity.
 const fillerCleanBtn = $("fillerCleanBtn");
 if (fillerCleanBtn) {
-  fillerCleanBtn.onclick = () => {
+  fillerCleanBtn.onclick = async () => {
     if (!currentWords || !currentWords.length) return;
     const flagged = _detectFillerIndices(currentWords);
     if (flagged.size === 0) return;
-    if (!confirm(
-      `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"} from captions? ` +
-      `The audio in the video stays untouched; this just drops them from the burned subtitles.`
-    )) return;
+    const cutVideo = confirm(
+      `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"}?\n\n` +
+      `OK = remove from captions AND open AI Edit with AI Trim (cuts audio/video).\n` +
+      `Cancel = captions only (audio unchanged).`
+    );
     pushEditHistory();
+    // Always strip from captions first.
+    const cutRanges = [];
+    flagged.forEach((i) => {
+      const w = currentWords[i];
+      if (!w) return;
+      cutRanges.push([Number(w.start), Number(w.end)]);
+    });
     currentWords = currentWords.filter((_, i) => !flagged.has(i));
     renderPhraseList(currentWords);
     updateRowCount();
     if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+    if (cutVideo && currentJobId && typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Trim",
+      });
+    }
   };
 }
 
@@ -1927,40 +1939,63 @@ function showEditor(words, saved = {}) {
   editor.classList.remove("hidden");
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
 
-  // Studio flow: land on Transcript Cut after transcription so the player +
-  // phrase list are visible (Ingest does not host #sourcePlayer).
-  setActiveTab("transcript");
+  // Studio flow: long-form (≥4 min, Captions AI Shorts threshold) lands on
+  // AI Shorts as the default path. Short clips stay on Transcript Cut.
+  const jobDur = _jobDurationFromWords(words);
+  const isLongForm = jobDur >= 240;
+  const longBadge = $("hlLongFormBadge");
+  if (longBadge) longBadge.style.display = isLongForm ? "" : "none";
+
+  if (isLongForm) {
+    setActiveTab("highlights");
+  } else {
+    setActiveTab("transcript");
+  }
   editor.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // Restore prior AI Shorts suggestions if the job already has them.
   if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
     renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
+    if (isLongForm) {
+      if (hlStatus) {
+        hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — open any as a project.`;
+      }
+    }
   }
 
-  // Optional: Auto-Generate Shorts on Upload (Ingest checkbox).
-  maybeAutoGenerateShorts(currentJobId);
+  // Auto-Generate Shorts: always for long-form; otherwise honor the checkbox.
+  maybeAutoGenerateShorts(currentJobId, { force: isLongForm, switchTab: isLongForm });
 }
 
-async function maybeAutoGenerateShorts(jobId) {
+function _jobDurationFromWords(words) {
+  if (!words || !words.length) return 0;
+  try {
+    return Math.max(0, Number(words[words.length - 1].end) || 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function maybeAutoGenerateShorts(jobId, opts) {
+  opts = opts || {};
   const cb = $("autoGenerateShorts");
-  if (!cb || !cb.checked || !jobId) return;
+  const force = !!opts.force;
+  if (!force && (!cb || !cb.checked)) return;
+  if (!jobId) return;
   if ($("hlGeminiDisabled")) {
     if (hlStatus) hlStatus.textContent = "Auto-Generate Shorts needs GEMINI_API_KEY.";
     return;
   }
-  // Already have suggestions (restored from job) — leave the user on Transcript
-  // with the player loaded; they can open AI Shorts when ready.
+  // Already have suggestions (restored from job).
   if (hlResults && hlResults.children.length) {
     if (hlStatus) {
       hlStatus.textContent = `⚡ ${hlResults.children.length} short${hlResults.children.length === 1 ? "" : "s"} ready — open AI Shorts when you want them.`;
     }
+    if (opts.switchTab) setActiveTab("highlights");
     return;
   }
 
-  // Generate in the background. Do NOT yank the user off Transcript Cut —
-  // that made uploads look broken (video never "loaded" because we jumped
-  // to Highlights before the player was visible).
-  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts in the background…";
+  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts…";
   if (hlFindBtn) hlFindBtn.disabled = true;
   try {
     const format = (hlFormatEl && hlFormatEl.value) || "auto";
@@ -1976,14 +2011,14 @@ async function maybeAutoGenerateShorts(jobId) {
     renderHighlights(clips, format);
     if (hlStatus) {
       hlStatus.textContent = clips.length
-        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open AI Shorts to preview.`
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open any as a project.`
         : "Auto-generate returned no clips — try Find highlights with different lengths.";
     }
-    // Soft nudge on the Transcript tab without stealing focus.
     const badge = document.querySelector('.main-tab[data-tab="highlights"]');
     if (badge && clips.length) {
       badge.title = `${clips.length} shorts ready`;
     }
+    if (opts.switchTab && clips.length) setActiveTab("highlights");
     try { await refreshReframeStatus(); } catch { /* optional */ }
   } catch (e) {
     if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
@@ -1993,6 +2028,7 @@ async function maybeAutoGenerateShorts(jobId) {
 }
 
 // ---- Phase 2: Render ----
+// (legacy maybeAutoGenerateShorts replaced above; keep render wiring)
 renderBtn.onclick = async () => {
   const editedWords = collectEditedWords();
 
@@ -2981,7 +3017,8 @@ function renderHighlights(clips, format) {
 
     const makeBtn = document.createElement("button");
     makeBtn.className = "primary";
-    makeBtn.textContent = "Make a clip";
+    makeBtn.textContent = "Export alone";
+    makeBtn.title = "Chop this highlight into a standalone clip job";
     makeBtn.onclick = async () => {
       if (editedEnd <= editedStart) {
         alert("End time must be greater than start time.");
@@ -3008,21 +3045,39 @@ function renderHighlights(clips, format) {
       } catch (e) {
         alert("Could not create clip: " + e.message);
         makeBtn.disabled = false;
-        makeBtn.textContent = "Make a clip";
+        makeBtn.textContent = "Export alone";
       }
     };
     actions.appendChild(makeBtn);
 
+    const openProjectBtn = document.createElement("button");
+    openProjectBtn.className = "hl-open-project";
+    openProjectBtn.textContent = "Open as project";
+    openProjectBtn.title = "AI Edit → style + intensity → seeded timeline project";
+    openProjectBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      openAiEditPlan({
+        source_job_id: currentJobId,
+        start_time: editedStart,
+        end_time: editedEnd,
+        label: editedTitle || "highlight",
+      });
+    };
+    actions.appendChild(openProjectBtn);
+
     const tlBtn = document.createElement("button");
-    tlBtn.textContent = "🎬 Open in Timeline";
-    tlBtn.title = "Open the timeline editor with this highlight as a clip";
+    tlBtn.textContent = "🎬 Timeline only";
+    tlBtn.title = "Open the timeline editor with this highlight (no AI Edit plan)";
     tlBtn.onclick = () => {
       if (editedEnd <= editedStart) {
         alert("End time must be greater than start time.");
         return;
       }
       if (typeof window.openTimelineEditor === "function") {
-        window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd });
+        window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd, newProject: true, replace: true });
       } else {
         alert("Timeline Editor is not available.");
       }
@@ -3095,6 +3150,171 @@ if (hlFindBtn) {
 if (hlMoreBtn) {
   hlMoreBtn.onclick = () => _runFindHighlights({ avoid: _hlAvoidRanges.slice() });
 }
+
+// =====================================================================
+// AI Edit plan modal — style + intensity → seeded timeline project
+// =====================================================================
+let _aiEditCtx = null;
+let _aiEditPackId = "pulse";
+
+async function openAiEditPlan(ctx) {
+  _aiEditCtx = ctx || null;
+  const modal = $("aiEditModal");
+  if (!modal || !_aiEditCtx) return;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  const createClipEl = $("aiEditCreateClip");
+  if (createClipEl) {
+    // Highlight chops prefer a child clip job; whole-job AI Edit does not.
+    const preferClip = _aiEditCtx.create_clip !== false
+      && (_aiEditCtx.start_time != null && _aiEditCtx.end_time != null
+          && Number(_aiEditCtx.end_time) - Number(_aiEditCtx.start_time) < 180);
+    createClipEl.checked = preferClip;
+  }
+  const status = $("aiEditCutsPreview");
+  if (status) status.textContent = "Loading style packs…";
+  try {
+    const res = await fetch("/ai-edit/style-packs");
+    const data = await res.json();
+    const packs = data.packs || [];
+    const host = $("aiEditPacks");
+    if (host) {
+      host.innerHTML = "";
+      packs.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ai-edit-pack" + (p.id === _aiEditPackId ? " active" : "");
+        btn.dataset.pack = p.id;
+        btn.innerHTML = `<strong>${p.label}</strong><span>${p.blurb || ""}</span>`;
+        btn.onclick = () => {
+          _aiEditPackId = p.id;
+          host.querySelectorAll(".ai-edit-pack").forEach((el) => el.classList.toggle("active", el.dataset.pack === p.id));
+          previewAiEditCuts();
+        };
+        host.appendChild(btn);
+      });
+      if (!packs.find((p) => p.id === _aiEditPackId) && packs[0]) {
+        _aiEditPackId = packs[0].id;
+      }
+    }
+    await previewAiEditCuts();
+  } catch (e) {
+    if (status) status.textContent = "Could not load style packs: " + e.message;
+  }
+}
+
+function closeAiEditPlan() {
+  const modal = $("aiEditModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  _aiEditCtx = null;
+}
+
+async function previewAiEditCuts() {
+  if (!_aiEditCtx) return;
+  const el = $("aiEditCutsPreview");
+  if (!el) return;
+  el.textContent = "Estimating recommended cuts…";
+  try {
+    const res = await fetch("/recommended-cuts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: _aiEditCtx.source_job_id,
+        start_time: _aiEditCtx.start_time,
+        end_time: _aiEditCtx.end_time,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const st = data.stats || {};
+    el.textContent = `Recommended AI Trim: ${st.cut_count || 0} cut(s) · ~${st.seconds_removed || 0}s removed`
+      + (data.filler_count ? ` · ${data.filler_count} filler word(s)` : "")
+      + ((data.silence_gaps || []).length ? ` · ${(data.silence_gaps || []).length} silence gap(s)` : "");
+  } catch (e) {
+    el.textContent = "Cut preview unavailable: " + e.message;
+  }
+}
+
+async function runAiEditGenerate() {
+  if (!_aiEditCtx) return;
+  const btn = $("aiEditGenerate");
+  const status = $("aiEditStatus");
+  if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
+  if (status) status.textContent = "Building AI Edit project…";
+  try {
+    const intensity = ($("aiEditIntensity") && $("aiEditIntensity").value) || "med";
+    const applyCuts = !($("aiEditApplyCuts") && !$("aiEditApplyCuts").checked);
+    const createClip = !($("aiEditCreateClip") && !$("aiEditCreateClip").checked);
+    const res = await fetch("/ai-edit-seed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_job_id: _aiEditCtx.source_job_id,
+        start_time: _aiEditCtx.start_time,
+        end_time: _aiEditCtx.end_time,
+        label: _aiEditCtx.label || "AI Edit",
+        style_pack: _aiEditPackId,
+        intensity,
+        apply_cuts: applyCuts,
+        create_clip: createClip,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    if (data.clip_job_id) {
+      try {
+        addJobToList(data.clip_job_id);
+        await refreshJobsList();
+      } catch { /* non-fatal */ }
+    }
+    closeAiEditPlan();
+    if (typeof window.openTimelineEditor === "function") {
+      await window.openTimelineEditor(data.job_id, {
+        newProject: true,
+        replace: true,
+        seedTimeline: data.timeline,
+        label: data.label || "AI Edit",
+      });
+    } else {
+      alert("Timeline Editor is not available.");
+    }
+    if (data.warning && status) {
+      // Modal already closed — surface via console.
+      console.warn("[ai-edit]", data.warning);
+    }
+  } catch (e) {
+    if (status) status.textContent = "Error: " + e.message;
+    alert("AI Edit failed: " + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Create project"; }
+  }
+}
+
+(function wireAiEditModal() {
+  const close = () => closeAiEditPlan();
+  if ($("aiEditClose")) $("aiEditClose").onclick = close;
+  if ($("aiEditCancel")) $("aiEditCancel").onclick = close;
+  if ($("aiEditGenerate")) $("aiEditGenerate").onclick = () => runAiEditGenerate();
+  const modal = $("aiEditModal");
+  if (modal) {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) close();
+    });
+  }
+  // Also expose for short-clip path: AI Edit whole current job from Transcript.
+  window.openAiEditPlanForJob = function (jobId, opts) {
+    opts = opts || {};
+    openAiEditPlan({
+      source_job_id: jobId || currentJobId,
+      start_time: opts.start_time != null ? opts.start_time : 0,
+      end_time: opts.end_time,
+      label: opts.label || "AI Edit",
+      create_clip: opts.create_clip === true ? true : false,
+    });
+  };
+})();
 
 // =====================================================================
 // Compilation queue
@@ -3993,6 +4213,23 @@ if (editToTimelineBtn) {
       return;
     }
     window.openTimelineEditor(currentJobId);
+  };
+}
+
+const aiEditJobBtn = $("aiEditJobBtn");
+if (aiEditJobBtn) {
+  aiEditJobBtn.onclick = () => {
+    if (!currentJobId) {
+      alert("No active video. Transcribe a video first.");
+      return;
+    }
+    if (typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Edit",
+      });
+    } else {
+      alert("AI Edit is still loading — try again in a second.");
+    }
   };
 }
 

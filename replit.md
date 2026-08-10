@@ -95,6 +95,13 @@ Located in `artifacts/subtitle-burner/`. A Flask web app that:
     persisted in the `timeline` column of `jobs.db` and survive restarts.
   - Renders in four passes (main → music → overlays → titles); output lands in
     `outputs/` and plays back in the Editor preview.
+  - **Captions-aligned flow (2026):**
+    - Long-form (≥4 min) defaults to **AI Shorts** gallery after ingest.
+    - **Open as project** runs AI Edit (style pack + intensity) → seeded timeline.
+    - **AI Trim** via `/recommended-cuts` (filler + silence → Main `cuts`).
+    - Timeline: Detect shots, Merge, per-shot Restyle, **Co-editor** chat.
+    - Deferred (not in scope): AI Twin, eye contact, lip-sync dubbing, native
+      mobile apps, social publish scheduling, React sandbox migration.
 - Runs on port 8081 (local), served at `/` via external port 80 (no port suffix in URL)
 
 ### Structure

@@ -552,3 +552,28 @@
   align-items: center;
   gap: 8px;
 }
+
+.tl-shot-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 214, 10, 0.85);
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-shot-marker::after {
+  content: attr(data-label);
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 9px;
+  color: #ffd60a;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+.tl-chip-btn.active-co {
+  background: #2a2450;
+  border-color: #6c5cff;
+  color: #e8e4ff;
+}
