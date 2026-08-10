@@ -4763,6 +4763,21 @@ def auto_process_job():
     if not video_path:
         return jsonify({"error": "Video missing"}), 404
 
+    # Accept the same target_durations shape as /suggest-clips (UI checkboxes).
+    raw_durations = data.get("target_durations")
+    if raw_durations is None and "target_duration" in data:
+        raw_durations = [data.get("target_duration")]
+    durations: list[int] = []
+    for d in (raw_durations or []):
+        try:
+            v = int(d)
+            if 5 <= v <= 180:
+                durations.append(v)
+        except (TypeError, ValueError):
+            continue
+    if not durations:
+        durations = [30, 60]
+
     try:
         # a. Transcript must already exist (normal upload path). Do not
         # re-run Whisper here — that doubled wait when Auto-Shorts was on.
@@ -4782,7 +4797,7 @@ def auto_process_job():
 
         # c. Gemini clip suggestions (the actual Shorts work).
         transcript_text = _format_transcript_for_llm(job["words"])
-        prompt = _build_clip_suggestion_prompt(transcript_text, format_type, [60], num_clips)
+        prompt = _build_clip_suggestion_prompt(transcript_text, format_type, durations, num_clips)
         result = _gemini_generate_clip_suggestions(prompt)
         clips = result.get("clips", [])
 
@@ -4807,15 +4822,16 @@ def auto_process_job():
                 })
             except (TypeError, ValueError):
                 continue
-        _snap_clip_to_target_durations(cleaned, job["words"], [60])
+        _snap_clip_to_target_durations(cleaned, job["words"], durations)
         cleaned = [c for c in cleaned if (c["end_time"] - c["start_time"]) >= 3]
         cleaned.sort(key=lambda c: c["start_time"])
         _detect_overlap_groups(cleaned, threshold=0.90)
 
         job["clip_suggestions"] = cleaned
+        job["clip_format"] = format_type
         _db_save_job(job_id)
 
-        return jsonify({"ok": True, "job_id": job_id, "clips": cleaned})
+        return jsonify({"ok": True, "job_id": job_id, "clips": cleaned, "format": format_type})
     except Exception as e:
         ai_logger.error(f"[{job_id}] Auto-process failed: {e}")
         return jsonify({"error": str(e)}), 500

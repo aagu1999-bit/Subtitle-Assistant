@@ -218,6 +218,7 @@
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
       style: tl.style || null,
+      ai_edit: tl.ai_edit || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -226,7 +227,9 @@
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
           cuts: c.cuts || [], ken_burns: c.ken_burns || null, punch_zoom: c.punch_zoom || null, split: c.split || null,
-          color: c.color || null, burn_captions: c.burn_captions,
+          color: c.color || null, color_grade: c.color_grade || null,
+          reframe: c.reframe || null, shot_index: c.shot_index != null ? c.shot_index : null,
+          burn_captions: c.burn_captions,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         text: tl.tracks.text.map((c) => ({ ...c })),
@@ -658,6 +661,16 @@
         });
 
         lane.appendChild(el);
+
+        // Shot boundary marker at the start of each Main shot after the first.
+        if (track === "main" && idx > 0) {
+          const mark = document.createElement("div");
+          mark.className = "tl-shot-marker";
+          mark.style.left = (LANE_OFFSET + start * PPS) + "px";
+          mark.dataset.label = `S${idx + 1}`;
+          mark.title = `Shot ${idx + 1} boundary`;
+          lane.appendChild(mark);
+        }
       });
     });
     updatePlayhead();
@@ -697,7 +710,9 @@
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const name = s ? (s.filename || "clip") : "clip";
       let badges = "";
+      if (c.shot_index != null) badges += ` S${Number(c.shot_index) + 1}`;
       if (c.ken_burns && c.ken_burns.enabled) badges += " 🔍";
+      if (c.punch_zoom && c.punch_zoom.enabled) badges += " ⚡";
       if (c.split && c.split.enabled) badges += " ⬓";
       if (c.cuts && c.cuts.length) badges += " ✂️";
       return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")}${badges}`;
@@ -1750,7 +1765,20 @@
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
     html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
-    html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>.</p>`;
+    html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>, or edit captions here.</p>`;
+    const st = tl.style || {};
+    html += `<div class="tl-prop-grid">
+      ${propSelect("__cap_font", "Caption font", st.font || "Anton", FONT_OPTS)}
+      ${propNum("__cap_size", "Caption size", st.size != null ? st.size : 64, 24, 120, 1)}
+    </div>`;
+    html += `<div class="tl-prop-grid">
+      ${propColor("__cap_primary", "Primary", st.primary || "#FFFFFF")}
+      ${propColor("__cap_highlight", "Highlight", st.highlight || "#FFD60A")}
+    </div>`;
+    html += propColor("__cap_accent", "Accent", st.accent || "#00FF88");
+    if (tl.ai_edit) {
+      html += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
+    }
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
     html += `<div class="tl-prop-grid">`;
@@ -1764,7 +1792,7 @@
 
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;
-      const ev = inp.tagName === "SELECT" ? "change" : "input";
+      const ev = inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input";
       inp.addEventListener(ev, () => {
         if (key === "__logo_asset") {
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
@@ -1782,6 +1810,14 @@
           const t = inp.value.trim();
           tl.headline_banner = t ? { text: t } : null;
           if (tl.style) tl.style.headline_banner = t;
+        } else if (key === "__cap_font" || key === "__cap_size" || key === "__cap_primary" || key === "__cap_highlight" || key === "__cap_accent") {
+          tl.style = tl.style || {};
+          if (key === "__cap_font") tl.style.font = inp.value;
+          else if (key === "__cap_size") tl.style.size = parseFloat(inp.value) || 64;
+          else if (key === "__cap_primary") tl.style.primary = inp.value;
+          else if (key === "__cap_highlight") tl.style.highlight = inp.value;
+          else if (key === "__cap_accent") tl.style.accent = inp.value;
+          updateStageCompositor();
         } else {
           if (!tl.logo) return;
           const field = key.replace("__logo_", "");
@@ -2253,6 +2289,7 @@
       bg: d.bg || "#000000",
       logo: d.logo || null,
       style: d.style || null,
+      ai_edit: d.ai_edit || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
         return {

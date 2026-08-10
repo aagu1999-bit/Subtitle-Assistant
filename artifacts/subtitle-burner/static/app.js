@@ -2000,10 +2000,18 @@ async function maybeAutoGenerateShorts(jobId, opts) {
   try {
     const format = (hlFormatEl && hlFormatEl.value) || "auto";
     const num = (hlCountEl && parseInt(hlCountEl.value, 10)) || 5;
+    const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
+      .map((el) => parseInt(el.value, 10))
+      .filter((n) => !isNaN(n));
     const res = await fetch("/auto-process-job", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: jobId, format, num_clips: num }),
+      body: JSON.stringify({
+        job_id: jobId,
+        format,
+        num_clips: num,
+        target_durations: durations.length ? durations : [30, 60],
+      }),
     });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || res.statusText);
