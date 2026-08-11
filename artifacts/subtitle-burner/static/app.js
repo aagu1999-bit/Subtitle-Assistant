@@ -5825,6 +5825,8 @@ if (autoFetchOverlaysBtn) {
         job_id: currentJobId || undefined,
         words: (typeof currentWords !== "undefined" && currentWords.length) ? currentWords : undefined,
         budget: 5,
+        mode: "auto",
+        placement: "pip",
       };
       const res = await fetch("/fetch-auto-overlays", {
         method: "POST",

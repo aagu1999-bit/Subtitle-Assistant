@@ -3127,9 +3127,12 @@
   async function suggestKeywordOverlays() {
     if (!(await ensureProject())) return;
     const btn = $("tlAutoOverlaysBtn");
-    if (btn) { btn.disabled = true; btn.textContent = "Suggesting…"; }
+    const modeEl = $("tlBrollMode");
+    const placeEl = $("tlBrollPlacement");
+    const mode = modeEl ? modeEl.value : "auto";
+    const placement = placeEl ? placeEl.value : "pip";
+    if (btn) { btn.disabled = true; btn.textContent = mode === "badge" ? "Making badges…" : "Fetching B-roll…"; }
     try {
-      // Prefer words from selected/first main clip source.
       let jobId = null;
       if (selected && selected.track === "main") {
         const c = findClip("main", selected.id);
@@ -3137,7 +3140,7 @@
       }
       if (!jobId && tl.tracks.main[0]) jobId = tl.tracks.main[0].source_job_id;
       if (!jobId && typeof window.currentJobId !== "undefined") jobId = window.currentJobId;
-      const body = { budget: 5 };
+      const body = { budget: 5, mode, placement };
       if (jobId) body.job_id = jobId;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
@@ -3146,18 +3149,24 @@
       });
       const list = data.overlays || [];
       if (!list.length) {
-        alert("No keyword overlay moments found in this transcript.");
+        alert(mode === "photo"
+          ? "No photo B-roll found. Check API keys / try Auto or Badges."
+          : "No keyword overlay moments found in this transcript.");
         return;
       }
       for (const ov of list) {
         await addOverlayClip(ov);
       }
-      setSaveState(`Added ${list.length} keyword overlay${list.length === 1 ? "" : "s"}`);
-      if (window.StudioLogger) StudioLogger.clip("auto_overlays", String(list.length));
+      const st = data.stats || {};
+      const bits = [];
+      if (st.photo) bits.push(`${st.photo} photo`);
+      if (st.badge) bits.push(`${st.badge} badge`);
+      setSaveState(`Added ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}` + (bits.length ? ` (${bits.join(", ")})` : ""));
+      if (window.StudioLogger) StudioLogger.clip("auto_overlays", `${list.length}:${mode}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest keyword overlays"; }
+      if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest B-roll overlays"; }
     }
   }
 

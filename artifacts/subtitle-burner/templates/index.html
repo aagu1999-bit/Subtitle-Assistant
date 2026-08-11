@@ -1248,8 +1248,29 @@
             <div class="tl-asset-upload">
               <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" class="offscreen-file">
               <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
-              <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" style="margin-top:8px" title="Create timed keyword PiP badges from the transcript">✨ Suggest keyword overlays</button>
-              <p class="muted tl-hint" style="margin-top:6px">Uploads go on the Overlay track. Suggest places keyword badges timed to visual words.</p>
+              <div class="tl-broll-controls" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+                <label class="muted" style="font-size:.74rem">Auto B-roll from transcript
+                  <select id="tlBrollMode" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
+                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured, else badges)</option>
+                    <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (Pexels / Unsplash / Google CSE)</option>
+                    <option value="badge" {% if not broll_photo_ready %}selected{% endif %}>Keyword badges only</option>
+                  </select>
+                </label>
+                <label class="muted" style="font-size:.74rem">Placement
+                  <select id="tlBrollPlacement" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
+                    <option value="pip" selected>Corner PiP</option>
+                    <option value="center">Center overlay</option>
+                  </select>
+                </label>
+                <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Fetch timed B-roll images or badges from transcript keywords">✨ Suggest B-roll overlays</button>
+                <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
+                  {% if broll_photo_ready %}
+                    Photo providers ready. Suggest pulls stock images timed to visual words.
+                  {% else %}
+                    No photo API keys yet — badges still work. Set <code>PEXELS_API_KEY</code>, <code>UNSPLASH_ACCESS_KEY</code>, or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> for real B-roll.
+                  {% endif %}
+                </p>
+              </div>
             </div>
             <div id="tlAssetList" class="tl-source-list"></div>
           </div>

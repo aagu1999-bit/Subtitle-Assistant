@@ -4610,10 +4610,177 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 
 # ---- Routes ----
 
+# ---- B-roll / photo overlay helpers (Phase 5+) ----
+# Pipeline: transcript keywords → image provider → ASSET_DIR → Timeline overlay
+# track → existing FFmpeg composite. We deliberately do NOT use Playwright to
+# scrape Google (ToS/fragile) or MoviePy (duplicates the FFmpeg render path).
+
+def _broll_provider_status() -> dict:
+    return {
+        "google_cse": bool(os.environ.get("GOOGLE_CSE_API_KEY") and os.environ.get("GOOGLE_CSE_CX")),
+        "pexels": bool(os.environ.get("PEXELS_API_KEY")),
+        "unsplash": bool(os.environ.get("UNSPLASH_ACCESS_KEY")),
+        "badge": True,
+    }
+
+
+def _broll_any_photo_provider() -> bool:
+    st = _broll_provider_status()
+    return bool(st["google_cse"] or st["pexels"] or st["unsplash"])
+
+
+def _download_url_to_asset(url: str, dest_stem: Path, timeout: int = 25) -> Path | None:
+    """Download an image URL next to dest_stem. Returns the saved Path or None."""
+    if not url:
+        return None
+    try:
+        import requests as _req
+        headers = {
+            "User-Agent": "SubtitleAssistantBroll/1.0",
+            "Accept": "image/*,*/*",
+        }
+        r = _req.get(url, headers=headers, timeout=timeout, stream=True)
+        if r.status_code >= 400:
+            return None
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        ext = "jpg"
+        if "png" in ctype:
+            ext = "png"
+        elif "webp" in ctype:
+            ext = "webp"
+        elif "gif" in ctype:
+            ext = "gif"
+        dest = dest_stem.with_suffix(f".{ext}")
+        written = 0
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(64 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                written += len(chunk)
+                if written > 12 * 1024 * 1024:
+                    break
+        if dest.exists() and dest.stat().st_size > 800:
+            return dest
+        _safe_unlink(dest)
+        return None
+    except Exception as e:
+        ai_logger.warning(f"B-roll download failed: {e}")
+        return None
+
+
+def _search_broll_google_cse(query: str) -> str | None:
+    key = os.environ.get("GOOGLE_CSE_API_KEY", "")
+    cx = os.environ.get("GOOGLE_CSE_CX", "")
+    if not key or not cx:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": key, "cx": cx, "q": query,
+                "searchType": "image", "num": 1, "safe": "active",
+            },
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        items = (r.json() or {}).get("items") or []
+        if not items:
+            return None
+        return items[0].get("link")
+    except Exception as e:
+        ai_logger.warning(f"Google CSE B-roll search failed: {e}")
+        return None
+
+
+def _search_broll_pexels(query: str) -> str | None:
+    key = os.environ.get("PEXELS_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://api.pexels.com/v1/search",
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            headers={"Authorization": key},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        photos = (r.json() or {}).get("photos") or []
+        if not photos:
+            return None
+        src = photos[0].get("src") or {}
+        return src.get("large") or src.get("medium") or src.get("original")
+    except Exception as e:
+        ai_logger.warning(f"Pexels B-roll search failed: {e}")
+        return None
+
+
+def _search_broll_unsplash(query: str) -> str | None:
+    key = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://api.unsplash.com/search/photos",
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            headers={"Authorization": f"Client-ID {key}", "Accept-Version": "v1"},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        results = (r.json() or {}).get("results") or []
+        if not results:
+            return None
+        urls = results[0].get("urls") or {}
+        return urls.get("regular") or urls.get("small") or urls.get("full")
+    except Exception as e:
+        ai_logger.warning(f"Unsplash B-roll search failed: {e}")
+        return None
+
+
+def _fetch_broll_image_for_keyword(query: str, dest_stem: Path) -> Path | None:
+    """Search providers in order and download the first hit next to dest_stem."""
+    q = (query or "").strip()
+    if not q:
+        return None
+    url = (
+        _search_broll_google_cse(q)
+        or _search_broll_pexels(q)
+        or _search_broll_unsplash(q)
+    )
+    if not url:
+        return None
+    return _download_url_to_asset(url, dest_stem)
+
+
+def _overlay_layout_for_index(i: int, placement: str = "pip") -> dict:
+    placement = (placement or "pip").lower()
+    if placement in ("center", "centre", "full"):
+        return {
+            "x": 0.12, "y": 0.18, "w": 0.76, "h": 0.52,
+            "fit": "contain", "layout": "center",
+        }
+    corners = [
+        {"x": 0.58, "y": 0.06},
+        {"x": 0.04, "y": 0.06},
+        {"x": 0.58, "y": 0.62},
+        {"x": 0.04, "y": 0.62},
+    ]
+    pos = corners[i % 4]
+    return {
+        "x": pos["x"], "y": pos["y"], "w": 0.38, "h": 0.24,
+        "fit": "cover", "layout": "pip_auto",
+    }
+
+
 def _make_keyword_badge_png(text: str, dest: Path) -> bool:
     """Render a simple keyword badge PNG via ffmpeg (no Pillow required)."""
     label = re.sub(r"[^\w\s\-']", "", str(text or "")).strip()[:28] or "B-roll"
-    # Escape drawtext specials
     safe = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     vf = (
         f"drawbox=x=0:y=0:w=iw:h=ih:color=0x10131d@1:t=fill,"
@@ -4631,10 +4798,13 @@ def _make_keyword_badge_png(text: str, dest: Path) -> bool:
 
 @app.route('/fetch-auto-overlays', methods=['POST'])
 def fetch_auto_overlays():
-    """Suggest keyword B-roll badges timed to transcript words.
+    """Suggest timed B-roll overlays from transcript keywords.
 
-    Returns timeline-shaped overlay clips (local PNG assets) — no Unsplash.
-    Body: { words?: [...], job_id?: str, budget?: int }
+    Body: {
+      words?: [...], job_id?: str, budget?: int,
+      mode?: "auto"|"photo"|"badge",
+      placement?: "pip"|"center"
+    }
     """
     data = request.get_json(force=True) or {}
     words = data.get("words") or []
@@ -4645,50 +4815,101 @@ def fetch_auto_overlays():
         budget = max(1, min(8, int(data.get("budget") or 5)))
     except (TypeError, ValueError):
         budget = 5
+    mode = str(data.get("mode") or "auto").lower().strip()
+    if mode not in ("auto", "photo", "badge"):
+        mode = "auto"
+    placement = str(data.get("placement") or "pip").lower().strip()
 
     callouts = _keyword_callouts_for_window(words, 0.0, 1e9, budget)
-    # Fallback: if keyword helper is defined later in file... it's at module level
-    # after this route in source order — but Python resolves at call time. OK.
-
     overlays = []
+    providers = _broll_provider_status()
+    used_photo = 0
+    used_badge = 0
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
     for co in callouts:
-        asset_id = uuid.uuid4().hex
-        dest = ASSET_DIR / f"{asset_id}.png"
-        label = str(co.get("text") or "B-roll")
-        if not _make_keyword_badge_png(label, dest):
-            _safe_unlink(dest)
-            continue
+        label = str(co.get("text") or "B-roll").strip() or "B-roll"
         start = float(co.get("start") or 0)
         dur = float(co.get("duration") or 1.8)
-        # Alternate corners so badges don't stack.
-        corner = len(overlays) % 4
-        layouts = {
-            0: {"x": 0.58, "y": 0.06},
-            1: {"x": 0.04, "y": 0.06},
-            2: {"x": 0.58, "y": 0.62},
-            3: {"x": 0.04, "y": 0.62},
-        }
-        pos = layouts[corner]
+        asset_id = uuid.uuid4().hex
+        asset_path = None
+        source = "badge"
+
+        want_photo = mode in ("photo", "auto") and _broll_any_photo_provider()
+        if want_photo:
+            asset_path = _fetch_broll_image_for_keyword(label, ASSET_DIR / asset_id)
+            if asset_path:
+                source = "photo"
+                used_photo += 1
+                final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
+                if asset_path.resolve() != final.resolve():
+                    try:
+                        if final.exists():
+                            _safe_unlink(final)
+                        asset_path.replace(final)
+                        asset_path = final
+                    except OSError:
+                        pass
+
+        if asset_path is None:
+            if mode == "photo":
+                continue
+            dest = ASSET_DIR / f"{asset_id}.png"
+            if not _make_keyword_badge_png(label, dest):
+                _safe_unlink(dest)
+                continue
+            asset_path = dest
+            source = "badge"
+            used_badge += 1
+
+        stem = asset_path.stem
+        if stem != asset_id:
+            asset_id = stem
+
+        pos = _overlay_layout_for_index(len(overlays), placement)
         overlays.append({
             "asset_id": asset_id,
             "keyword": label,
+            "source": source,
             "in": 0,
             "out": max(1.2, dur),
             "start": max(0.0, start),
             "x": pos["x"],
             "y": pos["y"],
-            "w": 0.38,
-            "h": 0.22,
-            "opacity": 0.95,
-            "fit": "contain",
+            "w": pos["w"],
+            "h": pos["h"],
+            "opacity": 0.95 if source == "badge" else 1.0,
+            "fit": pos["fit"],
             "fade_in": 0.15,
-            "fade_out": 0.2,
-            "border_px": 0,
-            "layout": "pip_auto",
+            "fade_out": 0.25,
+            "border_px": 2 if source == "photo" else 0,
+            "layout": pos["layout"],
         })
 
-    return jsonify({"ok": True, "overlays": overlays, "count": len(overlays)})
+    return jsonify({
+        "ok": True,
+        "overlays": overlays,
+        "count": len(overlays),
+        "mode": mode,
+        "placement": placement,
+        "providers": providers,
+        "stats": {"photo": used_photo, "badge": used_badge},
+    })
+
+
+@app.route("/broll/status", methods=["GET"])
+def broll_status():
+    """Which B-roll image providers are configured."""
+    st = _broll_provider_status()
+    return jsonify({
+        "providers": st,
+        "photo_ready": _broll_any_photo_provider(),
+        "hint": (
+            "Set PEXELS_API_KEY and/or UNSPLASH_ACCESS_KEY and/or "
+            "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll."
+        ),
+    })
+
 
 @app.route("/jobs")
 def list_jobs():
@@ -5494,6 +5715,8 @@ def index():
     elevenlabs_enabled = bool(os.environ.get("ELEVENLABS_API_KEY"))
     dolby_enabled = bool(os.environ.get("DOLBY_API_KEY"))
     gemini_enabled = bool(os.environ.get("GEMINI_API_KEY"))
+    broll_providers = _broll_provider_status()
+    broll_photo_ready = _broll_any_photo_provider()
     # Cache-bust static assets whenever they change on disk (e.g. after a
     # `git pull`). Browsers caching old app.js/style.css was producing
     # phantom layout bugs (e.g. tab content appearing blank).
@@ -5512,6 +5735,8 @@ def index():
         elevenlabs_enabled=elevenlabs_enabled,
         dolby_enabled=dolby_enabled,
         gemini_enabled=gemini_enabled,
+        broll_photo_ready=broll_photo_ready,
+        broll_providers=broll_providers,
         asset_version=asset_version,
     )
     # Never let the browser cache the HTML shell. The ?v=asset_version on the
