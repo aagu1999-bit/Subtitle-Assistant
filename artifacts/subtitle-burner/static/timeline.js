@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-16-captions";
+  const TL_BUILD = "studio-editor-build-17-caption-look";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -36,6 +36,67 @@
   let musicPlayers = [];         // music bed during Preview cut
 
   const uid = () => Math.random().toString(36).slice(2, 10);
+
+  /** Caption look is canonical; accept Timeline/AI short aliases too. */
+  function normalizeTlStyle(style) {
+    if (typeof window.normalizeCaptionStyle === "function") {
+      return window.normalizeCaptionStyle(style || {});
+    }
+    if (!style || typeof style !== "object") return {};
+    const out = Object.assign({}, style);
+    const map = [
+      ["font", "font_name"], ["size", "font_size"],
+      ["primary", "primary_color"], ["highlight", "highlight_color"],
+      ["accent", "accent_color"], ["outline", "outline_color"],
+      ["group", "group_size"],
+    ];
+    for (const [short, long] of map) {
+      if ((out[long] == null || out[long] === "") && out[short] != null && out[short] !== "") out[long] = out[short];
+      if ((out[short] == null || out[short] === "") && out[long] != null && out[long] !== "") out[short] = out[long];
+    }
+    return out;
+  }
+
+  function styleIsEmpty(st) {
+    if (typeof window.styleHasCaptionFields === "function") {
+      return !window.styleHasCaptionFields(st);
+    }
+    if (!st || typeof st !== "object") return true;
+    return !(st.font_name || st.font || st.primary_color || st.primary || st.font_size || st.size);
+  }
+
+  /** If Timeline has no caption style yet, seed from Caption look / source job. */
+  function seedStyleFromCaptionLook(preferredJobId) {
+    if (!tl || !styleIsEmpty(tl.style)) {
+      if (tl && tl.style) tl.style = normalizeTlStyle(tl.style);
+      return false;
+    }
+    let style = null;
+    if (typeof window.captionLookStyle === "function") {
+      style = window.captionLookStyle();
+    } else if (typeof window.getStyle === "function") {
+      style = window.getStyle();
+    }
+    // Fall back to persisted job.style when the Branding panel has no fields yet.
+    if (styleIsEmpty(style)) {
+      const jid = preferredJobId
+        || (tl.tracks && tl.tracks.main[0] && tl.tracks.main[0].source_job_id)
+        || null;
+      const meta = jid && window.jobsById && window.jobsById[jid];
+      if (meta && !styleIsEmpty(meta.style)) style = meta.style;
+    }
+    if (styleIsEmpty(style)) return false;
+    tl.style = normalizeTlStyle(style);
+    const sc = (style && style.speaker_colors) || {};
+    if (sc && Object.keys(sc).length) {
+      tl.speaker_colors = Object.assign({}, tl.speaker_colors || {}, sc);
+    }
+    const banner = style && style.headline_banner;
+    if (banner && !tl.headline_banner) {
+      tl.headline_banner = typeof banner === "string" ? { text: banner } : banner;
+    }
+    return true;
+  }
 
   // ---- Undo / redo ----
   function snapshotState() {
@@ -1461,10 +1522,10 @@
     }
     const g0 = Math.floor(wi / groupSize) * groupSize;
     const group = transcriptWords.slice(g0, g0 + groupSize);
-    const primary = style.primary_color || "#FFFFFF";
-    const highlight = style.highlight_color || "#FFE566";
-    const font = style.font_name || "Anton";
-    const size = Number(style.font_size) || 64;
+    const primary = style.primary_color || style.primary || "#FFFFFF";
+    const highlight = style.highlight_color || style.highlight || "#FFE566";
+    const font = style.font_name || style.font || "Anton";
+    const size = Number(style.font_size || style.size) || 64;
     const posY = (style.position_y != null ? Number(style.position_y) : 75) / 100;
     const stHeight = layer.clientHeight || 640;
     const sc = tl.speaker_colors || style.speaker_colors || {};
@@ -1767,17 +1828,17 @@
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
     html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
-    html += `<p class="muted" style="font-size:.74rem">Push styles from Branding tab via <strong>Apply → Timeline</strong>, or edit captions here.</p>`;
-    const st = tl.style || {};
+    html += `<p class="muted" style="font-size:.74rem">Seeded from <strong>Caption look</strong> when empty. Push updates via <strong>Apply → Timeline</strong>, or edit here.</p>`;
+    const st = normalizeTlStyle(tl.style || {});
     html += `<div class="tl-prop-grid">
-      ${propSelect("__cap_font", "Caption font", st.font || "Anton", FONT_OPTS)}
-      ${propNum("__cap_size", "Caption size", st.size != null ? st.size : 64, 24, 120, 1)}
+      ${propSelect("__cap_font", "Caption font", st.font_name || st.font || "Anton", FONT_OPTS)}
+      ${propNum("__cap_size", "Caption size", st.font_size != null ? st.font_size : (st.size != null ? st.size : 64), 24, 120, 1)}
     </div>`;
     html += `<div class="tl-prop-grid">
-      ${propColor("__cap_primary", "Primary", st.primary || "#FFFFFF")}
-      ${propColor("__cap_highlight", "Highlight", st.highlight || "#FFD60A")}
+      ${propColor("__cap_primary", "Primary", st.primary_color || st.primary || "#FFFFFF")}
+      ${propColor("__cap_highlight", "Highlight", st.highlight_color || st.highlight || "#FFD60A")}
     </div>`;
-    html += propColor("__cap_accent", "Accent", st.accent || "#00FF88");
+    html += propColor("__cap_accent", "Accent", st.accent_color || st.accent || "#00FF88");
     if (tl.ai_edit) {
       html += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
     }
@@ -1814,11 +1875,23 @@
           if (tl.style) tl.style.headline_banner = t;
         } else if (key === "__cap_font" || key === "__cap_size" || key === "__cap_primary" || key === "__cap_highlight" || key === "__cap_accent") {
           tl.style = tl.style || {};
-          if (key === "__cap_font") tl.style.font = inp.value;
-          else if (key === "__cap_size") tl.style.size = parseFloat(inp.value) || 64;
-          else if (key === "__cap_primary") tl.style.primary = inp.value;
-          else if (key === "__cap_highlight") tl.style.highlight = inp.value;
-          else if (key === "__cap_accent") tl.style.accent = inp.value;
+          if (key === "__cap_font") {
+            tl.style.font_name = inp.value;
+            tl.style.font = inp.value;
+          } else if (key === "__cap_size") {
+            const n = parseFloat(inp.value) || 64;
+            tl.style.font_size = n;
+            tl.style.size = n;
+          } else if (key === "__cap_primary") {
+            tl.style.primary_color = inp.value;
+            tl.style.primary = inp.value;
+          } else if (key === "__cap_highlight") {
+            tl.style.highlight_color = inp.value;
+            tl.style.highlight = inp.value;
+          } else if (key === "__cap_accent") {
+            tl.style.accent_color = inp.value;
+            tl.style.accent = inp.value;
+          }
           updateStageCompositor();
         } else {
           if (!tl.logo) return;
@@ -2290,7 +2363,7 @@
       fps: d.fps || 30,
       bg: d.bg || "#000000",
       logo: d.logo || null,
-      style: d.style || null,
+      style: d.style ? normalizeTlStyle(d.style) : null,
       ai_edit: d.ai_edit || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
@@ -2726,7 +2799,7 @@
       return false;
     }
     pushHistory();
-    style = style || {};
+    style = normalizeTlStyle(style || {});
     opts = opts || {};
     tl.style = Object.assign({}, tl.style || {}, style);
     const sc = style.speaker_colors || {};
@@ -2773,6 +2846,10 @@
       _skipAutoOpenOnce = true;
     }
     try {
+      // Flush Caption look so job.style matches the Branding panel before we seed.
+      if (typeof window.flushCaptionLookToJob === "function" && (seedJobId || (typeof window.currentJobId !== "undefined" && window.currentJobId))) {
+        try { await window.flushCaptionLookToJob(); } catch (e) { /* best-effort */ }
+      }
       if (typeof window.setActiveTab === "function") {
         window.setActiveTab("editor");
       } else {
@@ -2789,6 +2866,9 @@
       if (opts.seedTimeline && tl) {
         pushHistory();
         applySeedTimeline(opts.seedTimeline, opts.label);
+        // AI packs use short keys — normalize; if still empty, Caption look.
+        if (tl.style) tl.style = normalizeTlStyle(tl.style);
+        seedStyleFromCaptionLook(opts.seedTimeline.source_job_id || seedJobId);
         await loadSources();
         await refreshMaxTrims();
         renderTimeline();
@@ -2814,6 +2894,7 @@
             : (item.out != null ? Number(item.out) : null);
           await addMainClip(jid, inS, outS, { skipRender: true, skipHistory: true });
         }
+        seedStyleFromCaptionLook(clips[0] && (clips[0].source_job_id || clips[0].job_id));
         renderTimeline();
         scheduleSave();
         return;
@@ -2828,6 +2909,9 @@
           selected = null;
         }
         await addMainClip(seedJobId, opts.in, opts.out);
+        seedStyleFromCaptionLook(seedJobId);
+        renderTimeline();
+        scheduleSave();
       }
     } finally {
       window._tlDeferAutoOpen = false;
@@ -2841,7 +2925,7 @@
     tl.fit = seed.fit || tl.fit || "cover";
     tl.fps = seed.fps || tl.fps || 30;
     tl.bg = seed.bg || tl.bg || "#000000";
-    if (seed.style) tl.style = seed.style;
+    if (seed.style) tl.style = normalizeTlStyle(seed.style);
     if (seed.ai_edit) tl.ai_edit = seed.ai_edit;
     if (label) {
       tl.label = label;
@@ -3073,13 +3157,13 @@
       if (!name) continue;
       try {
         if (name === "set_caption_style") {
-          tl.style = Object.assign({}, tl.style || {}, {
-            font: op.font || (tl.style && tl.style.font),
-            size: op.size != null ? Number(op.size) : (tl.style && tl.style.size),
-            primary: op.primary || (tl.style && tl.style.primary),
-            highlight: op.highlight || (tl.style && tl.style.highlight),
-            accent: op.accent || (tl.style && tl.style.accent),
-          });
+          tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}, {
+            font: op.font || (tl.style && (tl.style.font || tl.style.font_name)),
+            size: op.size != null ? Number(op.size) : (tl.style && (tl.style.size || tl.style.font_size)),
+            primary: op.primary || (tl.style && (tl.style.primary || tl.style.primary_color)),
+            highlight: op.highlight || (tl.style && (tl.style.highlight || tl.style.highlight_color)),
+            accent: op.accent || (tl.style && (tl.style.accent || tl.style.accent_color)),
+          }));
           applied++;
         } else if (name === "delete_shot") {
           const i = Number(op.index);

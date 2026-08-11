@@ -300,7 +300,7 @@
       <h2 style="margin:0">🎨 Caption look</h2>
       <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
     </div>
-    <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">Caption fonts and colors for this video. Used by Edit words preview, Shorts export, and Timeline (unless the timeline overrides).</p>
+    <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">Caption fonts and colors for this video. Instant Export, Export clip, and Timeline seed from this look (Timeline can still override).</p>
 
     <!-- CapCut Master Viral Templates -->
     <div class="row" style="margin-bottom:16px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
@@ -1415,8 +1415,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tabBtn) tabBtn.click();
     });
   });
-  // Header Instant Export button handler
+  // Header Instant Export — primary handler lives in app.js (flushes Caption look).
+  // Fallback only if the studio script failed to load.
   document.getElementById("headerExportBtn")?.addEventListener("click", () => {
+    if (typeof flushCaptionLookToJob === "function") return; // app.js Smart Export owns this
     if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
       alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
       if (typeof setActiveTab === "function") setActiveTab("ingest");

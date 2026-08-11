@@ -135,6 +135,66 @@ CAPCUT_TEMPLATES = {
     }
 }
 
+# Canonical Caption look schema used by build_ass / Instant Export / Shorts.
+# Timeline UI and AI Edit packs historically used short aliases (font, size,
+# primary, …); _normalize_caption_style merges those into this shape.
+_DEFAULT_CAPTION_STYLE = {
+    "font_name": "Montserrat Thin Black",
+    "font_size": 64,
+    "primary_color": "#FFFFFF",
+    "highlight_color": "#FFD60A",
+    "accent_color": "#FF6B35",
+    "outline_color": "#000000",
+    "outline_width": 3,
+    "shadow": 1,
+    "position_y": 82,
+    "all_caps": True,
+    "group_size": 3,
+    "smooth_timings": True,
+    "punchword_emphasis": True,
+}
+
+_STYLE_SHORT_TO_LONG = {
+    "font": "font_name",
+    "size": "font_size",
+    "primary": "primary_color",
+    "highlight": "highlight_color",
+    "accent": "accent_color",
+    "outline": "outline_color",
+    "group": "group_size",
+}
+
+
+def _normalize_caption_style(style) -> dict:
+    """Return Caption look keys so burns never miss AI-pack / Timeline aliases."""
+    if not isinstance(style, dict):
+        return dict(_DEFAULT_CAPTION_STYLE)
+    out = dict(style)
+    for short, long in _STYLE_SHORT_TO_LONG.items():
+        if out.get(long) in (None, "") and out.get(short) not in (None, ""):
+            out[long] = out[short]
+    # Mirror canonical → short so Timeline props / co-editor keep working.
+    for short, long in _STYLE_SHORT_TO_LONG.items():
+        if out.get(long) not in (None, "") and out.get(short) in (None, ""):
+            out[short] = out[long]
+    for k, v in _DEFAULT_CAPTION_STYLE.items():
+        if out.get(k) in (None, ""):
+            out[k] = v
+    return out
+
+
+def _style_has_caption_fields(style) -> bool:
+    if not isinstance(style, dict) or not style:
+        return False
+    return any(
+        style.get(k) not in (None, "")
+        for k in (
+            "font_name", "font", "primary_color", "primary",
+            "font_size", "size", "highlight_color", "highlight",
+        )
+    )
+
+
 # Captions-style AI Edit recipes. Intensity scales cut/zoom/B-roll density.
 # These seed timeline JSON — they are not full generative Mirage styles.
 AI_EDIT_STYLE_PACKS = {
@@ -2258,6 +2318,7 @@ def _smooth_word_timings(words: list,
 
 
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
+    style = _normalize_caption_style(style)
     font = style.get("font_name", "Montserrat Thin Black")
     font_size = int(style.get("font_size", 72))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
@@ -4754,7 +4815,7 @@ def suggest_clips():
     return jsonify({"clips": cleaned, "format": format_type})
 
 
-def _create_clip_from_job(source_job_id: str, start: float, end: float, label: str) -> str:
+def _create_clip_from_job(source_job_id: str, start: float, end: float, label: str, style=None) -> str:
     if not source_job_id or source_job_id not in jobs:
         raise ValueError("Source job not found")
     src_video = find_video_path(source_job_id)
@@ -4804,13 +4865,15 @@ def _create_clip_from_job(source_job_id: str, start: float, end: float, label: s
     base_stem = Path(src_filename).stem if src_filename else "clip"
     new_filename = f"{base_stem} — {label or 'highlight'}.{ext}"
 
+    # Caption look: prefer explicit style (UI flush), else source job.style.
+    inherited = style if _style_has_caption_fields(style) else src_job.get("style")
     jobs[new_job_id] = {
         "status": "awaiting_edit",
         "progress": 100,
         "output": None,
         "error": None,
         "words": new_words,
-        "style": src_job.get("style"),
+        "style": _normalize_caption_style(inherited) if inherited else None,
         "audio": None,
         "emoji_rules": src_job.get("emoji_rules"),
         "created_at": time.time(),
@@ -4943,10 +5006,10 @@ def suggest_effects():
 def clip_from_job():
     """Spawn a new job that's a trimmed slice of an existing job's source video.
 
-    Body: {source_job_id, start_time, end_time, label}
-    Inherits the source job's style, emoji_rules, and transcript words
-    (filtered + offset to the new range). The new job lands at
-    awaiting_edit so the user can immediately tweak and render.
+    Body: {source_job_id, start_time, end_time, label, style?}
+    Inherits Caption look (explicit style or source job.style), emoji_rules,
+    and transcript words (filtered + offset to the new range). The new job
+    lands at awaiting_edit so the user can immediately tweak and render.
     """
     data = request.get_json(force=True) or {}
     source_job_id = data.get("source_job_id")
@@ -4956,9 +5019,10 @@ def clip_from_job():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid start/end time"}), 400
     label = (data.get("label") or "").strip()[:80]
+    style = data.get("style")
 
     try:
-        new_job_id = _create_clip_from_job(source_job_id, start, end, label)
+        new_job_id = _create_clip_from_job(source_job_id, start, end, label, style=style)
         return jsonify({"job_id": new_job_id, "filename": jobs[new_job_id]["filename"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -5083,12 +5147,12 @@ def batch_render_clips():
             title = c.get("title", f"clip_{i}")
             headline = c.get("headline", "")
             
-            new_job_id = _create_clip_from_job(source_job_id, start, end, title)
+            new_job_id = _create_clip_from_job(source_job_id, start, end, title, style=style)
             
             job = jobs[new_job_id]
-            job_style = dict(style)
+            job_style = _normalize_caption_style(style if _style_has_caption_fields(style) else job.get("style"))
             if headline:
-                job_style["headline_banner"] = {"enabled": True, "text": headline}
+                job_style["headline_banner"] = str(headline).strip()
             job["style"] = job_style
             _db_save_job(new_job_id)
             
@@ -5915,7 +5979,7 @@ def render():
         return jsonify({"error": "Original video not found on server"}), 404
 
     jobs[job_id]["words"] = words
-    jobs[job_id]["style"] = style
+    jobs[job_id]["style"] = _normalize_caption_style(style)
     jobs[job_id]["audio"] = audio
     jobs[job_id]["emoji_rules"] = emoji_rules
     jobs[job_id]["status"] = "queued"
@@ -5926,7 +5990,7 @@ def render():
 
     t = threading.Thread(
         target=render_job,
-        args=(job_id, video_path, words, style, audio, emoji_rules),
+        args=(job_id, video_path, words, jobs[job_id]["style"], audio, emoji_rules),
     )
     t.daemon = True
     t.start()
@@ -5969,7 +6033,10 @@ def save_draft():
 
     for key in ("style", "audio", "emoji_rules"):
         if key in data:
-            jobs[job_id][key] = data.get(key) or {}
+            val = data.get(key) or {}
+            if key == "style":
+                val = _normalize_caption_style(val) if val else {}
+            jobs[job_id][key] = val
 
     if "clip_suggestions" in data and isinstance(data.get("clip_suggestions"), list):
         jobs[job_id]["clip_suggestions"] = data.get("clip_suggestions") or []
@@ -7039,14 +7106,7 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
     return header + "\n".join(events) + "\n"
 
 
-_TL_DEFAULT_CAPTION_STYLE = {
-    "font_name": "Montserrat Thin Black", "font_size": 64,
-    "primary_color": "#FFFFFF", "highlight_color": "#FFD60A",
-    "accent_color": "#FF6B35", "outline_color": "#000000",
-    "outline_width": 3, "shadow": 1, "position_y": 82,
-    "all_caps": True, "group_size": 3,
-    "smooth_timings": True, "punchword_emphasis": True,
-}
+_TL_DEFAULT_CAPTION_STYLE = _DEFAULT_CAPTION_STYLE
 
 
 def _tl_compose_ass(W: int, H: int, *ass_docs: str) -> str:
@@ -7156,7 +7216,10 @@ def _normalize_timeline(timeline: dict) -> dict:
     else:
         tl["headline_banner"] = None
     style = tl.get("style")
-    tl["style"] = style if isinstance(style, dict) else {}
+    if isinstance(style, dict) and style:
+        tl["style"] = _normalize_caption_style(style)
+    else:
+        tl["style"] = {}
     ts = tl.get("track_states")
     tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
@@ -7186,6 +7249,15 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         bg = tl["bg"]
         tracks = tl["tracks"]
         style = tl.get("style") or jobs[job_id].get("style") or {}
+        if not _style_has_caption_fields(style):
+            # Fall back to Caption look on the first main source job.
+            for c in (tracks.get("main") or []):
+                sjid = c.get("source_job_id")
+                if sjid and jobs.get(sjid) and _style_has_caption_fields(jobs[sjid].get("style")):
+                    style = jobs[sjid]["style"]
+                    break
+        style = _normalize_caption_style(style) if _style_has_caption_fields(style) else dict(_DEFAULT_CAPTION_STYLE)
+        tl["style"] = style
 
         main_clips = tracks["main"]
         if not main_clips:
@@ -7286,8 +7358,10 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             words = sjob.get("words") or []
             if not words:
                 continue
-            if not caption_style:
-                caption_style = sjob.get("style") or _TL_DEFAULT_CAPTION_STYLE
+            if not _style_has_caption_fields(caption_style):
+                caption_style = _normalize_caption_style(
+                    sjob.get("style") or _TL_DEFAULT_CAPTION_STYLE
+                )
             if caption_emoji is None:
                 caption_emoji = sjob.get("emoji_rules") or {}
             seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
@@ -7648,7 +7722,15 @@ def timeline_render():
     if not timeline["tracks"]["main"]:
         return jsonify({"error": "Add at least one clip to the main track first."}), 400
 
-    style = data.get("style") or jobs[job_id].get("style") or {}
+    style = data.get("style") or timeline.get("style") or jobs[job_id].get("style") or {}
+    # Timeline project may have empty style — seed from first main source's Caption look.
+    if not _style_has_caption_fields(style):
+        for c in timeline["tracks"]["main"]:
+            sjid = c.get("source_job_id")
+            if sjid and jobs.get(sjid) and _style_has_caption_fields(jobs[sjid].get("style")):
+                style = jobs[sjid]["style"]
+                break
+    style = _normalize_caption_style(style) if _style_has_caption_fields(style) else _normalize_caption_style({})
     timeline["style"] = style
     jobs[job_id]["style"] = style
     jobs[job_id]["timeline"] = timeline
@@ -7968,7 +8050,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "fit": "cover",
         "fps": 30,
         "bg": "#000000",
-        "style": pack.get("style") or {},
+        "style": _normalize_caption_style(pack.get("style") or {}),
         "caption_preset": pack.get("caption_preset"),
         "ai_edit": {
             "style_pack": pack.get("label"),
@@ -8199,9 +8281,9 @@ def ai_edit_seed():
         work_job_id, work_in, work_out, pack, intensity, cuts, effects,
         label=label, words=words, insert_media=insert_media,
     )
-    # Persist style onto the working job for caption burns.
+    # Persist style onto the working job for caption burns (canonical Caption look).
     if pack.get("style"):
-        jobs[work_job_id]["style"] = dict(pack["style"])
+        jobs[work_job_id]["style"] = _normalize_caption_style(pack["style"])
         _db_save_job(work_job_id)
 
     return jsonify({

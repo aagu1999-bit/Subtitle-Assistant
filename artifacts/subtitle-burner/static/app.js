@@ -1044,6 +1044,50 @@ function syncSpeakerColorPickers(speakerIds) {
 }
 
 // ---- Helpers: collect style / audio ----
+/** Caption look is canonical (font_name, primary_color, …). Timeline / AI packs
+ *  may still send short aliases (font, primary). Merge so burns + seeds agree. */
+function normalizeCaptionStyle(style) {
+  if (!style || typeof style !== "object") return {};
+  const out = Object.assign({}, style);
+  const map = [
+    ["font", "font_name"],
+    ["size", "font_size"],
+    ["primary", "primary_color"],
+    ["highlight", "highlight_color"],
+    ["accent", "accent_color"],
+    ["outline", "outline_color"],
+    ["group", "group_size"],
+  ];
+  for (const [short, long] of map) {
+    if ((out[long] == null || out[long] === "") && out[short] != null && out[short] !== "") {
+      out[long] = out[short];
+    }
+    if ((out[short] == null || out[short] === "") && out[long] != null && out[long] !== "") {
+      out[short] = out[long];
+    }
+  }
+  return out;
+}
+
+function styleHasCaptionFields(style) {
+  if (!style || typeof style !== "object") return false;
+  return !!(
+    style.font_name || style.font || style.primary_color || style.primary ||
+    style.font_size || style.size || style.highlight_color || style.highlight
+  );
+}
+
+/** Current Caption look from the Branding panel (always the export source). */
+function captionLookStyle() {
+  return normalizeCaptionStyle(typeof getStyle === "function" ? getStyle() : {});
+}
+
+async function flushCaptionLookToJob() {
+  if (!currentJobId || typeof saveDraftNow !== "function") return captionLookStyle();
+  try { await saveDraftNow(); } catch { /* best-effort */ }
+  return captionLookStyle();
+}
+
 function getStyle() {
   const speakerColorsEnabled = $("speakerColorsEnabled") && $("speakerColorsEnabled").checked;
   const bgMusicDuck = $("bgMusicDuck") ? $("bgMusicDuck").checked : false;
@@ -1239,6 +1283,7 @@ function getEmojiRules() {
 }
 
 function applyStyle(style = {}) {
+  style = normalizeCaptionStyle(style);
   if (!style || typeof style !== "object") return;
   if (style.font_name) $("font").value = style.font_name;
   if (style.font_size) sizeEl.value = style.font_size;
@@ -2815,6 +2860,21 @@ const jobsListEl = $("jobsList");
 const jobsCountEl = $("jobsCount");
 let jobsById = {};
 
+// Caption look helpers for Timeline + Instant Export (Phase 3 plumbing).
+window.normalizeCaptionStyle = normalizeCaptionStyle;
+window.styleHasCaptionFields = styleHasCaptionFields;
+window.captionLookStyle = captionLookStyle;
+window.flushCaptionLookToJob = flushCaptionLookToJob;
+window.getStyle = getStyle;
+Object.defineProperty(window, "currentJobId", {
+  get() { return currentJobId; },
+  configurable: true,
+});
+Object.defineProperty(window, "jobsById", {
+  get() { return jobsById; },
+  configurable: true,
+});
+
 function _loadJobIds() {
   try {
     const raw = localStorage.getItem("subtitleBurner:jobIds");
@@ -3427,6 +3487,7 @@ function renderHighlights(clips, format) {
       exportBtn.disabled = true;
       exportBtn.textContent = "Exporting…";
       try {
+        const style = await flushCaptionLookToJob();
         const res = await fetch("/clip-from-job", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3435,6 +3496,7 @@ function renderHighlights(clips, format) {
             start_time: editedStart,
             end_time: editedEnd,
             label: editedTitle || "highlight",
+            style,
           }),
         });
         const j = await res.json();
@@ -4653,7 +4715,7 @@ renderCompileQueue();
 //
 // User clicks ▶ Preview on a Highlights card → switches to the Edit tab
 // and opens this panel under the source video. The panel mirrors the card:
-// editable Start/End (mm:ss.s), Add to compilation, Make a clip — plus
+// editable Start/End (mm:ss.s), Add to compilation, Export clip — plus
 // Replay and Save & back. Edits live-sync to the Highlights card so both
 // representations stay aligned.
 
@@ -4884,6 +4946,7 @@ if (_peMakeClip) {
     _peMakeClip.disabled = true;
     _peSetStatus("Exporting clip…");
     try {
+      const style = await flushCaptionLookToJob();
       const res = await fetch("/clip-from-job", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4892,6 +4955,7 @@ if (_peMakeClip) {
           start_time: t.s,
           end_time: t.e,
           label: _activePreview.title || "highlight",
+          style,
         }),
       });
       const j = await res.json();
@@ -5435,12 +5499,23 @@ function _renderAssemblyBar() {
   const headerBtn = $("headerExportBtn");
   if (!headerBtn) return;
 
-  headerBtn.addEventListener("click", () => {
+  headerBtn.addEventListener("click", async () => {
     // Determine active tab
     const activeTabBtn = document.querySelector(".main-tab.active");
     const tabName = activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "edit";
 
     if (window.StudioLogger) StudioLogger.action("headerExportBtn", "click", `tab:${tabName}`);
+
+    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+      if (typeof setActiveTab === "function") setActiveTab("ingest");
+      return;
+    }
+
+    // Flush Caption look so Instant Export / Timeline / batch always burn current fonts.
+    if (typeof flushCaptionLookToJob === "function" && currentJobId) {
+      try { await flushCaptionLookToJob(); } catch { /* best-effort */ }
+    }
 
     if (tabName === "highlights") {
       const batchBtn = $("batchExportBtn");
@@ -5508,7 +5583,7 @@ function _renderAssemblyBar() {
 
       if (clipsToRender.length === 0) throw new Error("No valid clips found to export.");
 
-      const style = getStyle();
+      const style = await flushCaptionLookToJob();
       const res = await fetch("/batch-render-clips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -5666,7 +5741,9 @@ window._brandLogoAssetId = window._brandLogoAssetId || null;
 })();
 
 async function applyBrandingToTimeline() {
-  const style = typeof getStyle === "function" ? getStyle() : {};
+  const style = typeof flushCaptionLookToJob === "function"
+    ? await flushCaptionLookToJob()
+    : (typeof captionLookStyle === "function" ? captionLookStyle() : getStyle());
   if (typeof window.ensureTimelineInit === "function") {
     await window.ensureTimelineInit();
   }
