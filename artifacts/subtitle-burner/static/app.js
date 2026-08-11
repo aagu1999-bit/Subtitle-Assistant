@@ -1980,6 +1980,39 @@ function fmtTime(sec) {
   return `${m}:${s}`;
 }
 
+let _proxyWatchTimer = null;
+/** Reload #sourcePlayer once the H.264 edit proxy is ready (HEVC → playable). */
+function _watchEditProxy(jobId) {
+  if (_proxyWatchTimer) {
+    clearInterval(_proxyWatchTimer);
+    _proxyWatchTimer = null;
+  }
+  if (!jobId || !sourcePlayer) return;
+  let tries = 0;
+  _proxyWatchTimer = setInterval(async () => {
+    tries += 1;
+    if (tries > 40 || currentJobId !== jobId) {
+      clearInterval(_proxyWatchTimer);
+      _proxyWatchTimer = null;
+      return;
+    }
+    try {
+      const res = await fetch("/status/" + jobId);
+      if (!res.ok) return;
+      const s = await res.json();
+      if (s.edit_proxy) {
+        const t = sourcePlayer.currentTime || 0;
+        sourcePlayer.src = "/raw-upload/" + jobId + "?proxy=1&t=" + Date.now();
+        sourcePlayer.addEventListener("loadedmetadata", () => {
+          try { sourcePlayer.currentTime = t; } catch { /* ignore */ }
+        }, { once: true });
+        clearInterval(_proxyWatchTimer);
+        _proxyWatchTimer = null;
+      }
+    } catch { /* ignore */ }
+  }, 3000);
+}
+
 function showEditor(words, saved = {}) {
   // Never present an empty Transcript Cut as "ready" — that produced the
   // black player + "0 phrases" + "No active job" dead-end.
@@ -2017,7 +2050,7 @@ function showEditor(words, saved = {}) {
   // For HEVC iPhone MOVs Chrome-on-Windows is often black until the H.264
   // edit proxy lands — keep refreshing briefly until /raw-upload serves it.
   sourcePlayer.src = "/raw-upload/" + currentJobId + "?t=" + Date.now();
-  _watchEditProxy(currentJobId);
+  if (typeof _watchEditProxy === "function") _watchEditProxy(currentJobId);
 
   // Populate the editable subtitle list
   currentWords = words;
@@ -3450,8 +3483,20 @@ async function _runFindHighlights({ avoid }) {
         avoid_ranges: avoid || [],
       }),
     });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    const raw = await res.text();
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        res.status === 404
+          ? "Shorts API not found — restart the app after pulling the latest branch."
+          : res.status >= 500
+            ? "Server error while finding highlights (often missing GEMINI_API_KEY or Gemini timeout). Check Replit secrets."
+            : `Shorts response was not JSON (HTTP ${res.status}).`
+      );
+    }
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
     const clips = data.clips || [];
     renderHighlights(clips, data.format || hlFormatEl.value);
     // Accumulate every range we've shown so the next "More options" excludes them all.
