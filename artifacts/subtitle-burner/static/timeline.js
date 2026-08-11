@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-20-media-fix";
+  const TL_BUILD = "studio-editor-build-21-overlay-kb-coeditor";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -859,6 +859,11 @@
       layout: ref.layout || null,
       keyword: ref.keyword || null,
       source: ref.source || null,
+      ken_burns: ref.ken_burns
+        ? Object.assign({}, ref.ken_burns)
+        : (ref.source === "photo" || (asset && asset.kind === "image")
+          ? { enabled: true, direction: "in", intensity: "med" }
+          : null),
     };
     // Legacy auto-fetch used percent coords / scale — normalize if needed.
     if (oc.x > 1.5) oc.x = Math.min(1, oc.x / 100);
@@ -1107,17 +1112,18 @@
       const name = a ? (a.filename || a.ext || "music") : "music";
       return `🎵 ${String(name).replace(/\.[^.]+$/, "")} ${fmtTime(clipDuration(c))}`;
     }
-    if (c.keyword) return `🖼 ${c.keyword}`;
+    let ovBadge = (c.ken_burns && c.ken_burns.enabled) ? " 🔍" : "";
+    if (c.keyword) return `🖼 ${c.keyword}${ovBadge}`;
     if (c.asset_id) {
       const a = assets.find((x) => x.asset_id === c.asset_id);
-      if (a && a.filename) return `🖼 ${String(a.filename).replace(/\.[^.]+$/, "")}`;
-      return `🖼 asset ${String(c.asset_id).slice(0, 6)}`;
+      if (a && a.filename) return `🖼 ${String(a.filename).replace(/\.[^.]+$/, "")}${ovBadge}`;
+      return `🖼 asset ${String(c.asset_id).slice(0, 6)}${ovBadge}`;
     }
     if (c.source_job_id) {
       const s = sources.find((x) => x.job_id === c.source_job_id);
-      if (s && s.filename) return `🖼 ${String(s.filename).replace(/\.[^.]+$/, "")}`;
+      if (s && s.filename) return `🖼 ${String(s.filename).replace(/\.[^.]+$/, "")}${ovBadge}`;
     }
-    return `🖼 overlay ${fmtTime(clipDuration(c))}`;
+    return `🖼 overlay ${fmtTime(clipDuration(c))}${ovBadge}`;
   }
 
   // ---- Selection + properties ----
@@ -1319,7 +1325,7 @@
   function applyLiveGrade(clip) {
     const v = $("tlPreviewVideo");
     if (!v) return;
-    v.style.filter = cssFilterForColor(clip && clip.color);
+    v.style.filter = cssFilterForColor(clip && (clip.color || clip.color_grade));
   }
 
   function stopMusicPreview() {
@@ -1501,12 +1507,27 @@
   // decoder and makes the overlay stutter.
   function syncOverlayVideos(ot, playing) {
     for (const o of ovEntries) {
+      if (!o.isVideo) continue;
       const want = o.srcIn + Math.max(0, ot - o.start);
       if (Math.abs((o.el.currentTime || 0) - want) > 0.30) {
         try { o.el.currentTime = want; } catch (e) {}
       }
       if (playing && o.el.paused) { o.el.play().catch(() => {}); }
       else if (!playing && !o.el.paused) { o.el.pause(); }
+    }
+  }
+
+  function syncOverlayKenBurns(ot) {
+    for (const o of ovEntries) {
+      if (!o.el) continue;
+      const tRel = Math.max(0, ot - o.start);
+      const scale = kenBurnsScaleAt(o.ken_burns, tRel, o.dur || 1);
+      o.el.style.transformOrigin = "50% 50%";
+      if (Math.abs(scale - 1) > 0.001) {
+        o.el.style.transform = `scale(${scale.toFixed(4)})`;
+      } else {
+        o.el.style.transform = "";
+      }
     }
   }
 
@@ -1649,6 +1670,7 @@
     if (!(seqPreview && seqPreview.running)) applyLiveGrade(active);
     applyPunchZoom(v, ot);   // must run every frame, not only on rebuild
     syncOverlayVideos(ot, !v.paused && !v.ended);
+    syncOverlayKenBurns(ot);
     updatePlayhead();
     if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
 
@@ -1732,17 +1754,18 @@
       const start = item.start || 0;
       const dur = clipDuration(item);
       if (ot >= start && ot <= start + dur) {
-        let el;
+        const wrap = document.createElement("div");
+        let media;
         if (item.source_job_id) {
-          el = document.createElement("video");
-          el.src = "/raw-upload/" + item.source_job_id;
-          el.muted = true;
-          el.playsInline = true;
-          try { el.currentTime = Math.max(0, (ot - start) + (item.in || 0)); } catch (e) {}
+          media = document.createElement("video");
+          media.src = "/raw-upload/" + item.source_job_id;
+          media.muted = true;
+          media.playsInline = true;
+          try { media.currentTime = Math.max(0, (ot - start) + (item.in || 0)); } catch (e) {}
         } else {
-          el = document.createElement("img");
-          if (item.asset_id) el.src = "/asset/" + item.asset_id;
-          else if (item.src) el.src = item.src;
+          media = document.createElement("img");
+          if (item.asset_id) media.src = "/asset/" + item.asset_id;
+          else if (item.src) media.src = item.src;
         }
         const localT = Math.max(0, ot - start);
         const fadeIn = Number(item.fade_in) || 0;
@@ -1751,27 +1774,45 @@
         if (fadeIn > 0 && localT < fadeIn) fadeMul = Math.max(0, localT / fadeIn);
         if (fadeOut > 0 && localT > dur - fadeOut) fadeMul = Math.min(fadeMul, Math.max(0, (dur - localT) / fadeOut));
         const baseOp = item.opacity != null ? item.opacity : 1.0;
-        el.style.position = "absolute";
-        el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
-        el.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
-        el.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
-        if (item.h != null) el.style.height = (item.h * 100) + "%";
-        else el.style.aspectRatio = "16 / 9";
-        el.style.opacity = baseOp * fadeMul;
-        el.style.objectFit = item.fit || "cover";
-        el.style.pointerEvents = "auto";
-        el.style.cursor = "move";
+        wrap.style.position = "absolute";
+        wrap.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+        wrap.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
+        wrap.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
+        if (item.h != null) wrap.style.height = (item.h * 100) + "%";
+        else wrap.style.aspectRatio = "16 / 9";
+        wrap.style.opacity = baseOp * fadeMul;
+        wrap.style.overflow = "hidden";
+        wrap.style.pointerEvents = "auto";
+        wrap.style.cursor = "move";
         if (item.border_px) {
-          el.style.boxShadow = `0 0 0 ${item.border_px}px #fff`;
+          wrap.style.boxShadow = `0 0 0 ${item.border_px}px #fff`;
         }
-        el.addEventListener("pointerdown", (e) => {
+        media.style.position = "absolute";
+        media.style.inset = "0";
+        media.style.width = "100%";
+        media.style.height = "100%";
+        media.style.objectFit = item.fit || "cover";
+        media.style.pointerEvents = "none";
+        wrap.appendChild(media);
+        wrap.addEventListener("pointerdown", (e) => {
           selectClip("overlay", item.id);
-          startBoxDrag(e, "overlay", item, el);
+          startBoxDrag(e, "overlay", item, wrap);
         });
 
-        layer.appendChild(el);
-        if (el.tagName === "VIDEO") {
-          ovEntries.push({ el, start, srcIn: item.in || 0 });
+        layer.appendChild(wrap);
+        ovEntries.push({
+          el: media,
+          start,
+          srcIn: item.in || 0,
+          dur,
+          ken_burns: item.ken_burns || null,
+          isVideo: media.tagName === "VIDEO",
+        });
+        // Apply this frame's Ken Burns immediately so rebuild doesn't flash at 1x.
+        const kbScale = kenBurnsScaleAt(item.ken_burns, localT, dur);
+        media.style.transformOrigin = "50% 50%";
+        if (Math.abs(kbScale - 1) > 0.001) {
+          media.style.transform = `scale(${kbScale.toFixed(4)})`;
         }
       }
     });
@@ -2075,6 +2116,14 @@
       html += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
       html += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
       html += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
+      // Ken Burns on B-roll / photo overlays (moment inserts — not whole Main).
+      const ovKb = c.ken_burns || {};
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (B-roll motion)</label>`;
+      html += propCheck("ken_burns.enabled", "Slow zoom on this overlay moment", ovKb.enabled);
+      if (ovKb.enabled) {
+        html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", ovKb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", ovKb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+        html += `<p class="muted" style="font-size:.72rem">Best on photo B-roll and short inserts — keeps still frames alive for the beat.</p>`;
+      }
     } else { // main
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
@@ -3549,7 +3598,7 @@
     const log = $("coEditorLog");
     if (log && !log.dataset.booted) {
       log.dataset.booted = "1";
-      appendCoMsg("bot", "Describe an edit — e.g. “make captions bigger”, “remove the third shot”, “add a title”.");
+      appendCoMsg("bot", "I can change caption colors/fonts, speaker colors, canvas, transitions, punch zoom / Ken Burns (Main or Overlay), color grade, titles, cuts, merge/reorder shots. Ask in plain language — then click ▶ Render to bake it in.");
     }
     try { if ($("coEditorInput")) $("coEditorInput").focus(); } catch (e) {}
   }
@@ -3578,6 +3627,7 @@
       canvas: tl.canvas,
       fit: tl.fit,
       style: tl.style || {},
+      speaker_colors: tl.speaker_colors || {},
       tracks: {
         main: tl.tracks.main,
         overlay: tl.tracks.overlay,
@@ -3587,30 +3637,77 @@
     };
   }
 
+  function coerceHexColor(val, fallback) {
+    if (val == null || val === "") return fallback;
+    let s = String(val).trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toUpperCase();
+    if (/^[0-9a-fA-F]{6}$/.test(s)) return ("#" + s).toUpperCase();
+    const named = {
+      white: "#FFFFFF", black: "#000000", yellow: "#FFD60A", gold: "#FFD700",
+      cyan: "#00E5FF", red: "#FF0055", green: "#00FF88", blue: "#3B82F6",
+      pink: "#EC4899", orange: "#F97316", purple: "#8B5CF6",
+    };
+    const key = s.toLowerCase().replace(/\s+/g, "");
+    if (named[key]) return named[key];
+    return fallback;
+  }
+
   async function applyCoEditorOps(ops) {
     if (!tl || !Array.isArray(ops) || !ops.length) return 0;
     pushHistory();
     historySuspended = true;
     let applied = 0;
+    const notes = [];
     try {
     for (const op of ops) {
       const name = op && op.op;
       if (!name) continue;
       try {
         if (name === "set_caption_style") {
-          tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}, {
-            font: op.font || (tl.style && (tl.style.font || tl.style.font_name)),
-            size: op.size != null ? Number(op.size) : (tl.style && (tl.style.size || tl.style.font_size)),
-            primary: op.primary || (tl.style && (tl.style.primary || tl.style.primary_color)),
-            highlight: op.highlight || (tl.style && (tl.style.highlight || tl.style.highlight_color)),
-            accent: op.accent || (tl.style && (tl.style.accent || tl.style.accent_color)),
-          }));
+          const prev = tl.style || {};
+          const patch = {
+            font: op.font || op.font_name || prev.font || prev.font_name,
+            size: op.size != null ? Number(op.size)
+              : (op.font_size != null ? Number(op.font_size) : (prev.size != null ? prev.size : prev.font_size)),
+            primary: coerceHexColor(
+              op.primary || op.primary_color,
+              prev.primary || prev.primary_color || "#FFFFFF"
+            ),
+            highlight: coerceHexColor(
+              op.highlight || op.highlight_color,
+              prev.highlight || prev.highlight_color || "#FFD60A"
+            ),
+            accent: coerceHexColor(
+              op.accent || op.accent_color,
+              prev.accent || prev.accent_color || "#00FF88"
+            ),
+          };
+          if (op.group != null || op.group_size != null) {
+            patch.group = Number(op.group != null ? op.group : op.group_size) || 3;
+          }
+          tl.style = normalizeTlStyle(Object.assign({}, prev, patch));
+          notes.push("caption style");
+          applied++;
+        } else if (name === "set_speaker_colors") {
+          tl.speaker_colors = Object.assign({}, tl.speaker_colors || {});
+          const host = coerceHexColor(op.SPEAKER_00 || op.host || op.Host, null);
+          const guest = coerceHexColor(op.SPEAKER_01 || op.guest || op.Guest, null);
+          if (host) tl.speaker_colors.SPEAKER_00 = host;
+          if (guest) tl.speaker_colors.SPEAKER_01 = guest;
+          if (op.colors && typeof op.colors === "object") {
+            Object.keys(op.colors).forEach((k) => {
+              const hx = coerceHexColor(op.colors[k], null);
+              if (hx) tl.speaker_colors[k] = hx;
+            });
+          }
+          notes.push("speaker colors");
           applied++;
         } else if (name === "delete_shot") {
           const i = Number(op.index);
           if (i >= 0 && i < tl.tracks.main.length) {
             const id = tl.tracks.main[i].id;
             deleteClip("main", id);
+            notes.push(`deleted shot ${i}`);
             applied++;
           }
         } else if (name === "set_transition") {
@@ -3629,20 +3726,29 @@
             applied++;
           }
         } else if (name === "enable_ken_burns") {
+          const track = (op.track === "overlay") ? "overlay" : "main";
           const i = Number(op.index);
-          if (i >= 0 && i < tl.tracks.main.length) {
-            tl.tracks.main[i].ken_burns = {
+          const arr = tl.tracks[track] || [];
+          if (i >= 0 && i < arr.length) {
+            arr[i].ken_burns = {
               enabled: true,
               intensity: op.intensity || "med",
               direction: op.direction || "in",
             };
+            notes.push(`Ken Burns on ${track}[${i}]`);
             applied++;
           }
         } else if (name === "clear_effects") {
+          const track = (op.track === "overlay") ? "overlay" : "main";
           const i = Number(op.index);
-          if (i >= 0 && i < tl.tracks.main.length) {
-            tl.tracks.main[i].punch_zoom = null;
-            tl.tracks.main[i].ken_burns = null;
+          const arr = tl.tracks[track] || [];
+          if (i >= 0 && i < arr.length) {
+            if (track === "main") {
+              arr[i].punch_zoom = null;
+              arr[i].ken_burns = null;
+            } else {
+              arr[i].ken_burns = null;
+            }
             applied++;
           }
         } else if (name === "set_canvas") {
@@ -3656,7 +3762,11 @@
         } else if (name === "set_color_grade") {
           const i = Number(op.index);
           if (i >= 0 && i < tl.tracks.main.length) {
-            tl.tracks.main[i].color_grade = { preset: op.preset || "warm" };
+            // Render + preview read `color` (not the legacy `color_grade` alias).
+            const grade = { preset: op.preset || "warm" };
+            tl.tracks.main[i].color = grade;
+            tl.tracks.main[i].color_grade = grade;
+            notes.push(`color grade shot ${i}`);
             applied++;
           }
         } else if (name === "add_title") {
@@ -3716,8 +3826,14 @@
       historySuspended = false;
     }
     renderTimeline();
+    updateStageCompositor();
+    try {
+      const v = $("tlPreviewVideo");
+      const ot = playheadOutputTime();
+      updateLiveCaptions(ot != null ? ot : (v ? v.currentTime || 0 : 0));
+    } catch (e) {}
     scheduleSave();
-    return applied;
+    return { applied, notes };
   }
 
   async function sendCoEditorPrompt() {
@@ -3745,8 +3861,14 @@
       const data = await res.json();
       if (thinking) thinking.remove();
       if (data.error) throw new Error(data.error);
-      const n = await applyCoEditorOps(data.ops || []);
-      appendCoMsg("bot", (data.message || `Applied ${n} edit(s).`) + (n ? "" : " (no ops)"));
+      const result = await applyCoEditorOps(data.ops || []);
+      const n = typeof result === "number" ? result : (result && result.applied) || 0;
+      const notes = (result && result.notes) || [];
+      let msg = data.message || (n ? `Applied ${n} edit(s).` : "No edits applied.");
+      if (n && notes.length) msg += " · " + notes.join(", ");
+      if (n) msg += " · Click ▶ Render to burn into the export.";
+      else if (!(data.ops || []).length) msg += " (no ops returned)";
+      appendCoMsg("bot", msg);
     } catch (e) {
       if (thinking) thinking.remove();
       appendCoMsg("bot", "Error: " + e.message);

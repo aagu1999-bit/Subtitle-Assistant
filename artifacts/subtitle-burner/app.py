@@ -4892,6 +4892,10 @@ def fetch_auto_overlays():
             "fade_out": 0.25,
             "border_px": 2 if source == "photo" else 0,
             "layout": pos["layout"],
+            "ken_burns": (
+                {"enabled": True, "direction": "in", "intensity": "med"}
+                if source == "photo" else None
+            ),
         })
 
     return jsonify({
@@ -7289,11 +7293,12 @@ def _tl_overlay_scale_filter(ow: int, oh: int, fit: str) -> str:
 
 
 def _tl_composite_overlays(base: Path, overlay_clips: list,
-                           W: int, H: int, out_path: Path) -> None:
+                           W: int, H: int, out_path: Path,
+                           fps: int = 30) -> None:
     """Composite B-roll / PiP / image overlays onto *base* (audio copied).
 
     Honors: start, in/out, x, y, w, h, opacity, fit (cover|contain|fill),
-    fade_in / fade_out, border_px.
+    fade_in / fade_out, border_px, ken_burns (slow zoom on the PiP box).
     """
     resolved = []
     for ov in overlay_clips:
@@ -7311,6 +7316,7 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
     filt = []
     cur = "[0:v]"
     in_idx = 1
+    fps = max(15, min(60, int(fps or 30)))
     for n, (ov, path, kind) in enumerate(resolved, start=1):
         start = max(0.0, float(ov.get("start", 0)))
         o_in = max(0.0, float(ov.get("in", 0)))
@@ -7354,6 +7360,10 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         else:
             inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
             prep = f"[{in_idx}:v]{scale},setpts=PTS-STARTPTS"
+        # Ken Burns on the PiP box (photo / short B-roll moments).
+        kb = _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
+        if kb:
+            prep += "," + kb
         if border > 0:
             prep += (
                 f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
@@ -7675,7 +7685,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
             ken = c.get("ken_burns")
             punch = c.get("punch_zoom")
-            color = c.get("color")
+            # AI Edit / co-editor historically wrote `color_grade`; inspector uses `color`.
+            color = c.get("color") or c.get("color_grade")
             split = c.get("split") or {}
             split_src = _timeline_clip_source(split) if split.get("enabled") else None
 
@@ -7780,7 +7791,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _stage("compositing overlays", 70)
             comp = UPLOAD_DIR / f"{job_id}_tlovl.mp4"
             work.append(comp)
-            _tl_composite_overlays(base, tracks["overlay"], W, H, comp)
+            _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
             base = comp
 
         # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
@@ -8294,6 +8305,19 @@ def _uid_short() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _clip_color_from_pack(pack: dict) -> dict:
+    """Normalize pack color_grade into the `color` shape Render actually reads."""
+    raw = pack.get("color_grade") if isinstance(pack, dict) else None
+    if not isinstance(raw, dict):
+        return {"preset": "none"}
+    preset = str(raw.get("preset") or "none")
+    if preset not in _TL_COLOR_PRESETS:
+        preset = "none"
+    # Older packs stored tiny deltas (contrast: 0.1) that destroy the image if
+    # treated as absolute ffmpeg eq values — keep preset only.
+    return {"preset": preset}
+
+
 def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             pack: dict, intensity: str,
                             cuts: list, effects: list,
@@ -8302,6 +8326,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             insert_media: bool = True) -> dict:
     """Assemble a Captions-style seeded timeline project from a style pack."""
     main_id = _uid_short()
+    grade = _clip_color_from_pack(pack)
     main_clip = {
         "id": main_id,
         "source_job_id": job_id,
@@ -8310,7 +8335,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "transition": None,
         "burn_captions": True,
         "cuts": cuts or [],
-        "color_grade": pack.get("color_grade") or {"preset": "none"},
+        "color": grade,
+        "color_grade": grade,
     }
     # Apply up to budget punch/Ken Burns by splitting the main clip.
     budget = _intensity_effect_budget(intensity)
@@ -8341,13 +8367,13 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     "id": _uid_short(), "source_job_id": job_id,
                     "in": cursor, "out": fs, "transition": None,
                     "burn_captions": True, "cuts": [],
-                    "color_grade": pack.get("color_grade") or {"preset": "none"},
+                    "color": grade, "color_grade": grade,
                 })
             mid = {
                 "id": _uid_short(), "source_job_id": job_id,
                 "in": fs, "out": fe, "transition": None,
                 "burn_captions": True, "cuts": [],
-                "color_grade": pack.get("color_grade") or {"preset": "none"},
+                "color": grade, "color_grade": grade,
             }
             ftype = fx.get("type")
             if ftype == "punch_zoom":
@@ -8372,7 +8398,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                 "id": _uid_short(), "source_job_id": job_id,
                 "in": cursor, "out": t_out, "transition": None,
                 "burn_captions": True, "cuts": [],
-                "color_grade": pack.get("color_grade") or {"preset": "none"},
+                "color": grade, "color_grade": grade,
             })
         # Redistribute original cuts onto pieces by intersection.
         if cuts:
@@ -8779,6 +8805,9 @@ def co_editor():
         return jsonify({"error": "Timeline is required"}), 400
 
     main = (timeline.get("tracks") or {}).get("main") or []
+    overlays = (timeline.get("tracks") or {}).get("overlay") or []
+    style = timeline.get("style") or {}
+    speaker_colors = timeline.get("speaker_colors") or {}
     summary = {
         "canvas": timeline.get("canvas"),
         "main_clip_count": len(main),
@@ -8790,18 +8819,44 @@ def co_editor():
                 "out": c.get("out"),
                 "has_punch_zoom": bool((c.get("punch_zoom") or {}).get("enabled")),
                 "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
+                "color_preset": ((c.get("color") or c.get("color_grade") or {}).get("preset")),
                 "cut_count": len(c.get("cuts") or []),
                 "transition": (c.get("transition") or {}).get("type") if isinstance(c.get("transition"), dict) else c.get("transition"),
             }
             for i, c in enumerate(main[:24])
         ],
-        "overlay_count": len((timeline.get("tracks") or {}).get("overlay") or []),
+        "overlay_count": len(overlays),
+        "overlay_clips": [
+            {
+                "index": i,
+                "keyword": c.get("keyword"),
+                "source": c.get("source"),
+                "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
+                "start": c.get("start"),
+                "duration": (float(c.get("out") or 0) - float(c.get("in") or 0)) if c.get("out") is not None else None,
+            }
+            for i, c in enumerate(overlays[:16])
+        ],
         "text_count": len((timeline.get("tracks") or {}).get("text") or []),
         "music_count": len((timeline.get("tracks") or {}).get("music") or []),
-        "style": timeline.get("style") or {},
+        "caption_style": {
+            "font": style.get("font") or style.get("font_name"),
+            "size": style.get("size") or style.get("font_size"),
+            "primary": style.get("primary") or style.get("primary_color"),
+            "highlight": style.get("highlight") or style.get("highlight_color"),
+            "accent": style.get("accent") or style.get("accent_color"),
+        },
+        "speaker_colors": speaker_colors,
     }
 
-    system_prompt = f"""You are a video-editor co-pilot. Convert the user's request into JSON ops that mutate a timeline.
+    system_prompt = f"""You are a Timeline co-editor. Convert the user's request into JSON ops that mutate THIS timeline.
+
+You can ONLY change timeline project state via the ops below. You cannot invent new features.
+Caption style changes update the Timeline project's burn style (primary/highlight/accent/font/size).
+Speaker colors (Host/Guest) are separate — use set_speaker_colors for those.
+Ken Burns on Overlay is preferred for photo B-roll moments; punch zoom stays on Main.
+Color grades must use presets: none, neutral, warm, cool, vivid, bw.
+After ops apply in the UI, the user still must click Render to bake captions/effects into the export MP4.
 
 Current timeline summary:
 {json.dumps(summary, indent=2)}
@@ -8809,12 +8864,15 @@ Current timeline summary:
 Return ONLY JSON:
 {{
   "ops": [
-    {{"op": "set_caption_style", "font": "...", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}},
     {{"op": "delete_shot", "index": 2}},
     {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
     {{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}},
     {{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}},
+    {{"op": "enable_ken_burns", "track": "overlay", "index": 0, "intensity": "med", "direction": "in"}},
     {{"op": "clear_effects", "index": 0}},
+    {{"op": "clear_effects", "track": "overlay", "index": 0}},
     {{"op": "set_canvas", "canvas": "9x16"}},
     {{"op": "set_color_grade", "index": 0, "preset": "warm"}},
     {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
@@ -8822,14 +8880,16 @@ Return ONLY JSON:
     {{"op": "merge_shots", "index": 0}},
     {{"op": "reorder_shot", "from": 2, "to": 0}}
   ],
-  "message": "Short confirmation of what you changed"
+  "message": "Short confirmation of what you changed (mention Render if captions/styles changed)"
 }}
 
 Rules:
 - Use only the ops listed above.
-- Shot indexes refer to main track clips (0-based).
+- Shot indexes refer to main track clips (0-based) unless track is "overlay".
 - Prefer 1-5 ops. If the request is unclear, return ops: [] and explain in message.
 - Colors must be #RRGGBB. Canvas must be one of 9x16, 16x9, 1x1, 4x5.
+- For "make captions yellow/blue/…" prefer set_caption_style primary/highlight. For Host/Guest colors use set_speaker_colors.
+- For B-roll / overlay motion requests, use enable_ken_burns with track:"overlay".
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -8845,9 +8905,10 @@ Rules:
         message = str(result.get("message") or "")[:400]
 
     allowed = {
-        "set_caption_style", "delete_shot", "set_transition", "enable_punch_zoom",
-        "enable_ken_burns", "clear_effects", "set_canvas", "set_color_grade",
-        "add_title", "apply_recommended_cuts", "merge_shots", "reorder_shot",
+        "set_caption_style", "set_speaker_colors", "delete_shot", "set_transition",
+        "enable_punch_zoom", "enable_ken_burns", "clear_effects", "set_canvas",
+        "set_color_grade", "add_title", "apply_recommended_cuts", "merge_shots",
+        "reorder_shot",
     }
     ops = []
     for op in raw_ops:
