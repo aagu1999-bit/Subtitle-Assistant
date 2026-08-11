@@ -4610,49 +4610,85 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 
 # ---- Routes ----
 
+def _make_keyword_badge_png(text: str, dest: Path) -> bool:
+    """Render a simple keyword badge PNG via ffmpeg (no Pillow required)."""
+    label = re.sub(r"[^\w\s\-']", "", str(text or "")).strip()[:28] or "B-roll"
+    # Escape drawtext specials
+    safe = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    vf = (
+        f"drawbox=x=0:y=0:w=iw:h=ih:color=0x10131d@1:t=fill,"
+        f"drawbox=x=16:y=16:w=iw-32:h=ih-32:color=0x6c5cff@1:t=6,"
+        f"drawtext=text='{safe}':fontcolor=white:fontsize=54:"
+        f"x=(w-text_w)/2:y=(h-text_h)/2:font=Sans"
+    )
+    cmd = [
+        FFMPEG, "-y", "-f", "lavfi", "-i", "color=c=0x10131d:s=640x360:d=0.1",
+        "-frames:v", "1", "-update", "1", "-vf", vf, str(dest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode == 0 and dest.exists() and dest.stat().st_size > 100
+
+
 @app.route('/fetch-auto-overlays', methods=['POST'])
 def fetch_auto_overlays():
-    data = request.json or {}
-    words = data.get("words", [])
-    
-    VISUAL_KEYWORDS = {
-        "coffee", "candle", "festival", "money", "growth", "craft", "food", "music",
-        "car", "house", "dog", "cat", "computer", "phone", "book", "water", "fire",
-        "earth", "sky", "sun", "moon", "star", "city", "tree", "flower", "people",
-        "business", "love", "happy", "sad", "angry", "time", "day", "night", "world",
-        "life", "school", "family", "friend", "party", "game", "sport", "art",
-        "nature", "technology", "health", "travel", "work", "home",
-        "success", "power", "brand", "product", "design", "video", "photo"
-    }
-    stop_words = {"the", "and", "a", "to", "of", "in", "i", "is", "that", "it", "on", "you", "this", "for", "but", "with", "are", "have", "be", "at", "or", "as", "was", "so", "if", "out", "not", "we", "my", "they", "your", "all", "do", "can", "will", "about", "which", "up", "one", "there", "what", "would", "when", "an", "she", "he", "their", "her", "his", "has", "who", "from", "by", "some", "me", "how", "like", "just", "know", "then", "them", "now", "well", "think"}
-    
+    """Suggest keyword B-roll badges timed to transcript words.
+
+    Returns timeline-shaped overlay clips (local PNG assets) — no Unsplash.
+    Body: { words?: [...], job_id?: str, budget?: int }
+    """
+    data = request.get_json(force=True) or {}
+    words = data.get("words") or []
+    job_id = data.get("job_id")
+    if (not words) and job_id and job_id in jobs:
+        words = jobs[job_id].get("words") or []
+    try:
+        budget = max(1, min(8, int(data.get("budget") or 5)))
+    except (TypeError, ValueError):
+        budget = 5
+
+    callouts = _keyword_callouts_for_window(words, 0.0, 1e9, budget)
+    # Fallback: if keyword helper is defined later in file... it's at module level
+    # after this route in source order — but Python resolves at call time. OK.
+
     overlays = []
-    seen = set()
-    for w in words:
-        if len(overlays) >= 8:
-            break
-            
-        text = w.get("word", "").strip()
-        clean_text = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
-        
-        if clean_text and clean_text not in stop_words and clean_text not in seen:
-            if clean_text in VISUAL_KEYWORDS or len(clean_text) > 4:
-                seen.add(clean_text)
-                uid = uuid.uuid4().hex[:8]
-                word_start = w.get("start", 0)
-                
-                overlay = {
-                    "id": "overlay_" + uid,
-                    "keyword": text,
-                    "start": word_start,
-                    "out": word_start + 2.5,
-                    "label": "🖼️ " + text.capitalize(),
-                    "src": f"https://source.unsplash.com/400x300/?{quote_plus(text)}",
-                    "x": 50, "y": 20, "scale": 35, "opacity": 0.9
-                }
-                overlays.append(overlay)
-                
-    return jsonify({"ok": True, "overlays": overlays})
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    for co in callouts:
+        asset_id = uuid.uuid4().hex
+        dest = ASSET_DIR / f"{asset_id}.png"
+        label = str(co.get("text") or "B-roll")
+        if not _make_keyword_badge_png(label, dest):
+            _safe_unlink(dest)
+            continue
+        start = float(co.get("start") or 0)
+        dur = float(co.get("duration") or 1.8)
+        # Alternate corners so badges don't stack.
+        corner = len(overlays) % 4
+        layouts = {
+            0: {"x": 0.58, "y": 0.06},
+            1: {"x": 0.04, "y": 0.06},
+            2: {"x": 0.58, "y": 0.62},
+            3: {"x": 0.04, "y": 0.62},
+        }
+        pos = layouts[corner]
+        overlays.append({
+            "asset_id": asset_id,
+            "keyword": label,
+            "in": 0,
+            "out": max(1.2, dur),
+            "start": max(0.0, start),
+            "x": pos["x"],
+            "y": pos["y"],
+            "w": 0.38,
+            "h": 0.22,
+            "opacity": 0.95,
+            "fit": "contain",
+            "fade_in": 0.15,
+            "fade_out": 0.2,
+            "border_px": 0,
+            "layout": "pip_auto",
+        })
+
+    return jsonify({"ok": True, "overlays": overlays, "count": len(overlays)})
 
 @app.route("/jobs")
 def list_jobs():
@@ -6962,9 +6998,30 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     )
 
 
+def _tl_overlay_scale_filter(ow: int, oh: int, fit: str) -> str:
+    """FFmpeg scale/crop/pad chain for overlay fit modes."""
+    fit = (fit or "cover").lower()
+    if fit == "contain":
+        return (
+            f"scale={ow}:{oh}:force_original_aspect_ratio=decrease,"
+            f"pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+        )
+    if fit == "fill":
+        return f"scale={ow}:{oh},setsar=1"
+    # cover (default): fill box, crop overflow
+    return (
+        f"scale={ow}:{oh}:force_original_aspect_ratio=increase,"
+        f"crop={ow}:{oh},setsar=1"
+    )
+
+
 def _tl_composite_overlays(base: Path, overlay_clips: list,
                            W: int, H: int, out_path: Path) -> None:
-    """Composite B-roll / PiP / image overlays onto *base* (audio copied)."""
+    """Composite B-roll / PiP / image overlays onto *base* (audio copied).
+
+    Honors: start, in/out, x, y, w, h, opacity, fit (cover|contain|fill),
+    fade_in / fade_out, border_px.
+    """
     resolved = []
     for ov in overlay_clips:
         path = _timeline_clip_source(ov)
@@ -6987,19 +7044,60 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         o_out = float(ov.get("out", o_in + 4))
         length = max(0.2, o_out - o_in)
         wfrac = min(1.0, max(0.05, float(ov.get("w", 0.4))))
+        if ov.get("h") is not None:
+            try:
+                hfrac = min(1.0, max(0.05, float(ov.get("h"))))
+            except (TypeError, ValueError):
+                hfrac = wfrac * 9 / 16
+        else:
+            # Default PiP box ≈ 16:9 relative to canvas width.
+            hfrac = min(1.0, max(0.05, (wfrac * W * 9 / 16) / max(1, H)))
         ow = max(2, int(W * wfrac) // 2 * 2)
+        oh = max(2, int(H * hfrac) // 2 * 2)
         x = int(W * float(ov.get("x", 0.5)))
         y = int(H * float(ov.get("y", 0.5)))
+        # Keep overlay on-canvas
+        x = max(0, min(W - ow, x))
+        y = max(0, min(H - oh, y))
         opacity = min(1.0, max(0.0, float(ov.get("opacity", 1.0))))
+        fit = str(ov.get("fit") or "cover")
+        try:
+            fade_in = max(0.0, min(length / 2, float(ov.get("fade_in") or 0)))
+        except (TypeError, ValueError):
+            fade_in = 0.0
+        try:
+            fade_out = max(0.0, min(length / 2, float(ov.get("fade_out") or 0)))
+        except (TypeError, ValueError):
+            fade_out = 0.0
+        try:
+            border = max(0, min(24, int(ov.get("border_px") or 0)))
+        except (TypeError, ValueError):
+            border = 0
 
+        scale = _tl_overlay_scale_filter(ow, oh, fit)
         if kind == "image":
             inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1"
+            prep = f"[{in_idx}:v]{scale}"
         else:
             inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1,setpts=PTS-STARTPTS"
-        if opacity < 1.0:
-            prep += f",format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+            prep = f"[{in_idx}:v]{scale},setpts=PTS-STARTPTS"
+        if border > 0:
+            prep += (
+                f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
+            )
+            # Re-clamp position for padded size
+            x = max(0, min(W - (ow + border * 2), x - border))
+            y = max(0, min(H - (oh + border * 2), y - border))
+        need_alpha = opacity < 1.0 or fade_in > 0 or fade_out > 0
+        if need_alpha:
+            prep += ",format=yuva420p"
+            if opacity < 1.0:
+                prep += f",colorchannelmixer=aa={opacity:.3f}"
+            if fade_in > 0:
+                prep += f",fade=t=in:st=0:d={fade_in:.3f}:alpha=1"
+            if fade_out > 0:
+                st = max(0.0, length - fade_out)
+                prep += f",fade=t=out:st={st:.3f}:d={fade_out:.3f}:alpha=1"
         # Delay the overlay so it lands at `start` on the timeline.
         prep += f",tpad=start_duration={start:.3f}"
         prep += f"[ov{n}]"
@@ -8021,28 +8119,60 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "anchor": pieces[0]["id"] if pieces else None,
         })
 
-    # Keyword callouts as text-track "B-roll titles" (Captions insert-media lite).
+    # Keyword callouts → text track + optional badge overlays (Phase 5).
+    overlay_track = []
     if insert_media and words:
         media_budget = {"low": 1, "med": 3, "high": 5}.get((intensity or "med").lower(), 3)
         callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
         style = pack.get("style") or {}
-        for co in callouts:
+        for i, co in enumerate(callouts):
             # Map source time into output time roughly as offset from t_in
             # (before cut compression — good enough for seed placement).
             start = max(0.0, float(co["start"]) - t_in)
+            dur = min(2.2, max(1.2, float(co.get("duration") or 1.8)))
             text_track.append({
                 "id": _uid_short(),
                 "text": str(co["text"])[:40],
                 "start": start,
-                "out": min(2.2, max(1.2, float(co.get("duration") or 1.8))),
-                "x": 0.72, "y": 0.18, "size": int(style.get("size") or 56) - 8,
-                "color": style.get("highlight") or "#FFD60A",
-                "font": style.get("font") or "Anton",
+                "out": start + dur,  # absolute end (ASS builder expects end, not duration)
+                "x": 0.72, "y": 0.18, "size": int(style.get("size") or style.get("font_size") or 56) - 8,
+                "color": style.get("highlight") or style.get("highlight_color") or "#FFD60A",
+                "font": style.get("font") or style.get("font_name") or "Anton",
                 "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.55,
                 "outline_color": "#000000", "outline_width": 0, "shadow": 0,
                 "bold": True, "align": 2, "anim": "slideup",
                 "anchor": pieces[0]["id"] if pieces else None,
             })
+            # Also seed a PiP keyword badge on the overlay track when possible.
+            try:
+                asset_id = uuid.uuid4().hex
+                dest = ASSET_DIR / f"{asset_id}.png"
+                if _make_keyword_badge_png(str(co["text"]), dest):
+                    corners = [
+                        {"x": 0.58, "y": 0.06}, {"x": 0.04, "y": 0.06},
+                        {"x": 0.58, "y": 0.62}, {"x": 0.04, "y": 0.62},
+                    ]
+                    pos = corners[i % 4]
+                    overlay_track.append({
+                        "id": _uid_short(),
+                        "asset_id": asset_id,
+                        "in": 0,
+                        "out": dur,
+                        "start": start,
+                        "x": pos["x"], "y": pos["y"],
+                        "w": 0.36, "h": 0.20,
+                        "opacity": 0.92,
+                        "fit": "contain",
+                        "fade_in": 0.15, "fade_out": 0.2,
+                        "border_px": 0,
+                        "layout": "pip_auto",
+                        "anchor": pieces[0]["id"] if pieces else None,
+                        "anchor_offset": start,
+                    })
+                else:
+                    _safe_unlink(dest)
+            except Exception:
+                pass
 
     music_track = []
     # Auto-attach previously uploaded bg music for this job, if present.
@@ -8066,13 +8196,14 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         },
         "tracks": {
             "main": pieces,
-            "overlay": [],
+            "overlay": overlay_track,
             "text": text_track,
             "music": music_track,
         },
         "media_hints": {
             "bg_music_available": bool(bg_music_files),
             "callout_count": max(0, len(text_track) - (1 if pack.get("add_title") and label else 0)),
+            "overlay_count": len(overlay_track),
         },
     }
 

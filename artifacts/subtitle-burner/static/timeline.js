@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-18-transcript-edit";
+  const TL_BUILD = "studio-editor-build-19-overlays";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -807,22 +807,65 @@
   }
 
   async function addOverlayClip(ref, asset) {
-    if (!(await ensureProject())) return;
+    if (!(await ensureProject())) return null;
     pushHistory();
     let max = 4;
     if (ref.source_job_id) {
       try { max = await getSourceDuration(ref.source_job_id); } catch (e) {}
     } else if (asset && asset.duration) {
       max = asset.duration || 4;
+    } else if (ref.out != null && ref.in != null) {
+      max = Math.max(4, Number(ref.out) - Number(ref.in) || 4);
     }
-    const out = ref.asset_id && asset && asset.kind === "image" ? 4 : Math.min(max, 5);
+    const out = ref.out != null
+      ? Number(ref.out)
+      : (ref.asset_id && asset && asset.kind === "image" ? 4 : Math.min(max, 5));
     const oc = {
-      id: uid(), ...ref, in: 0, out, _max: max,
-      start: 0, x: 0.62, y: 0.06, w: 0.34, opacity: 1.0,
+      id: uid(),
+      source_job_id: ref.source_job_id || null,
+      asset_id: ref.asset_id || null,
+      in: ref.in != null ? Number(ref.in) : 0,
+      out: out > 0 ? out : Math.min(max, 5),
+      _max: max,
+      start: ref.start != null ? Number(ref.start) : 0,
+      x: ref.x != null ? Number(ref.x) : 0.58,
+      y: ref.y != null ? Number(ref.y) : 0.06,
+      w: ref.w != null ? Number(ref.w) : 0.34,
+      h: ref.h != null ? Number(ref.h) : null,
+      opacity: ref.opacity != null ? Number(ref.opacity) : 1.0,
+      fit: ref.fit || "cover",
+      fade_in: ref.fade_in != null ? Number(ref.fade_in) : 0.15,
+      fade_out: ref.fade_out != null ? Number(ref.fade_out) : 0.2,
+      border_px: ref.border_px != null ? Number(ref.border_px) : 0,
+      layout: ref.layout || null,
     };
+    // Legacy auto-fetch used percent coords / scale — normalize if needed.
+    if (oc.x > 1.5) oc.x = Math.min(1, oc.x / 100);
+    if (oc.y > 1.5) oc.y = Math.min(1, oc.y / 100);
+    if (ref.scale != null && ref.w == null) oc.w = Math.min(1, Number(ref.scale) / 100);
     reanchor(oc);
     tl.tracks.overlay.push(oc);
     selectClip("overlay", oc.id);
+    renderTimeline();
+    scheduleSave();
+    return oc;
+  }
+
+  const OVERLAY_LAYOUTS = {
+    pip_tr: { x: 0.58, y: 0.06, w: 0.36, h: 0.22, fit: "cover", label: "PiP TR" },
+    pip_tl: { x: 0.04, y: 0.06, w: 0.36, h: 0.22, fit: "cover", label: "PiP TL" },
+    pip_br: { x: 0.58, y: 0.68, w: 0.36, h: 0.22, fit: "cover", label: "PiP BR" },
+    pip_bl: { x: 0.04, y: 0.68, w: 0.36, h: 0.22, fit: "cover", label: "PiP BL" },
+    full:   { x: 0, y: 0, w: 1, h: 1, fit: "cover", label: "Full-bleed" },
+    lower:  { x: 0.08, y: 0.62, w: 0.84, h: 0.28, fit: "cover", label: "Lower media" },
+  };
+
+  function applyOverlayLayout(clip, layoutId) {
+    const L = OVERLAY_LAYOUTS[layoutId];
+    if (!clip || !L) return;
+    pushHistory();
+    clip.layout = layoutId;
+    clip.x = L.x; clip.y = L.y; clip.w = L.w; clip.h = L.h; clip.fit = L.fit;
     renderTimeline();
     scheduleSave();
   }
@@ -1650,24 +1693,32 @@
           if (item.asset_id) el.src = "/asset/" + item.asset_id;
           else if (item.src) el.src = item.src;
         }
+        const localT = Math.max(0, ot - start);
+        const fadeIn = Number(item.fade_in) || 0;
+        const fadeOut = Number(item.fade_out) || 0;
+        let fadeMul = 1;
+        if (fadeIn > 0 && localT < fadeIn) fadeMul = Math.max(0, localT / fadeIn);
+        if (fadeOut > 0 && localT > dur - fadeOut) fadeMul = Math.min(fadeMul, Math.max(0, (dur - localT) / fadeOut));
+        const baseOp = item.opacity != null ? item.opacity : 1.0;
         el.style.position = "absolute";
         el.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
         el.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
         el.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
-        el.style.opacity = item.opacity != null ? item.opacity : 1.0;
-        el.style.objectFit = "cover";
+        if (item.h != null) el.style.height = (item.h * 100) + "%";
+        else el.style.aspectRatio = "16 / 9";
+        el.style.opacity = baseOp * fadeMul;
+        el.style.objectFit = item.fit || "cover";
         el.style.pointerEvents = "auto";
         el.style.cursor = "move";
-        
+        if (item.border_px) {
+          el.style.boxShadow = `0 0 0 ${item.border_px}px #fff`;
+        }
         el.addEventListener("pointerdown", (e) => {
           selectClip("overlay", item.id);
           startBoxDrag(e, "overlay", item, el);
         });
 
         layer.appendChild(el);
-        // B-roll video: the layer is no longer rebuilt every frame, so keep the
-        // element playing in step with the main preview instead of freezing on
-        // the frame it was created at.
         if (el.tagName === "VIDEO") {
           ovEntries.push({ el, start, srcIn: item.in || 0 });
         }
@@ -1841,7 +1892,8 @@
       box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
       box.style.top = (obj.y != null ? obj.y : 0.1) * 100 + "%";
       box.style.width = (obj.w != null ? obj.w : 0.3) * 100 + "%";
-      box.style.aspectRatio = "16 / 9";
+      if (obj.h != null) box.style.height = (obj.h * 100) + "%";
+      else box.style.aspectRatio = "16 / 9";
       const lbl = document.createElement("div");
       lbl.className = "tl-pbox-label";
       lbl.textContent = labelText;
@@ -1956,12 +2008,22 @@
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += propCheck("duck", "Duck under voice (auto-lower during speech)", c.duck);
     } else if (t === "overlay") {
-      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity, 0, 1, 0.05)}</div>`;
+      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity != null ? c.opacity : 1, 0, 1, 0.05)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
-      html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
-      html += propRange("w", "Size (width %)", c.w, 0.05, 2.0, 0.01);
-      const fitOpts = [["cover", "Cover / Crop Fill"], ["contain", "Contain / Fit Aspect"], ["fill", "Stretch / Custom Box"]];
-      html += propSelect("fit", "Crop & Fit Mode", c.fit || "cover", fitOpts);
+      html += `<label class="tl-prop-sectlabel">Layout presets</label>`;
+      html += `<div class="tl-layout-presets">`;
+      Object.keys(OVERLAY_LAYOUTS).forEach((id) => {
+        const L = OVERLAY_LAYOUTS[id];
+        const active = c.layout === id ? " active" : "";
+        html += `<button type="button" class="tl-chip-btn${active}" data-act="ovlayout" data-layout="${id}">${L.label}</button>`;
+      });
+      html += `</div>`;
+      html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x != null ? c.x : 0.5, 0, 1, 0.01)}${propRange("y", "Position Y", c.y != null ? c.y : 0.1, 0, 1, 0.01)}</div>`;
+      html += `<div class="tl-prop-grid">${propRange("w", "Width", c.w != null ? c.w : 0.34, 0.05, 1.0, 0.01)}${propRange("h", "Height", c.h != null ? c.h : 0.22, 0.05, 1.0, 0.01)}</div>`;
+      const fitOpts = [["cover", "Cover / Crop"], ["contain", "Contain / Fit"], ["fill", "Stretch"]];
+      html += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
+      html += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
+      html += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
     } else { // main
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
@@ -2272,6 +2334,9 @@
       const intensity = (wrap.querySelector("[data-restyle-intensity]") || {}).value || "med";
       restyleSelectedShot(pack, intensity);
     };
+    wrap.querySelectorAll('[data-act="ovlayout"]').forEach((btn) => {
+      btn.onclick = () => applyOverlayLayout(c, btn.dataset.layout);
+    });
   }
 
   // ---- AI camera moves -------------------------------------------------
@@ -3021,6 +3086,7 @@
         document.addEventListener("pointerup", onBoxUp);
         wireScrub();
         wireTranscriptToolbar();
+        on("tlAutoOverlaysBtn", "onclick", () => suggestKeywordOverlays());
         setLeftTab("media");
         setSaveState(TL_BUILD);
         updateHistoryButtons();
@@ -3056,6 +3122,44 @@
 
   // Expose for setActiveTab("editor") — both header + main nav entry points.
   window.ensureTimelineInit = ensureInit;
+  window.addOverlayClip = addOverlayClip;
+
+  async function suggestKeywordOverlays() {
+    if (!(await ensureProject())) return;
+    const btn = $("tlAutoOverlaysBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Suggesting…"; }
+    try {
+      // Prefer words from selected/first main clip source.
+      let jobId = null;
+      if (selected && selected.track === "main") {
+        const c = findClip("main", selected.id);
+        jobId = c && c.source_job_id;
+      }
+      if (!jobId && tl.tracks.main[0]) jobId = tl.tracks.main[0].source_job_id;
+      if (!jobId && typeof window.currentJobId !== "undefined") jobId = window.currentJobId;
+      const body = { budget: 5 };
+      if (jobId) body.job_id = jobId;
+      const data = await api("/fetch-auto-overlays", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const list = data.overlays || [];
+      if (!list.length) {
+        alert("No keyword overlay moments found in this transcript.");
+        return;
+      }
+      for (const ov of list) {
+        await addOverlayClip(ov);
+      }
+      setSaveState(`Added ${list.length} keyword overlay${list.length === 1 ? "" : "s"}`);
+      if (window.StudioLogger) StudioLogger.clip("auto_overlays", String(list.length));
+    } catch (e) {
+      alert("Could not suggest overlays: " + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest keyword overlays"; }
+    }
+  }
 
   // Branding tab → Timeline: caption style, speaker colors, headline, logo.
   window.applyTimelineBranding = function (style, opts) {

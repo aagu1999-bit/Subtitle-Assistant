@@ -446,6 +446,17 @@
 .tl-clip.selected { outline: 2px solid #fff; z-index: 5; }
 .tl-clip-main    { background: linear-gradient(135deg,#3a6df0,#2b53c0); }
 .tl-clip-overlay { background: linear-gradient(135deg,#19a974,#0f7a54); }
+.tl-layout-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.tl-layout-presets .tl-chip-btn.active {
+  background: #6c5cff;
+  color: #fff;
+  border-color: #6c5cff;
+}
 .tl-clip-text    { background: linear-gradient(135deg,#e0992a,#bd7610); }
 .tl-clip-music   { background: linear-gradient(135deg,#9785ff,#6c5cff); }
 .tl-clip-label {

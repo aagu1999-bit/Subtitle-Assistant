@@ -5808,37 +5808,39 @@ window.loadCustomBrandPreset = function() {
   }
 };
 
-// ---- Auto-Fetch B-Roll & Overlays Button Handler ----
+// ---- Auto-Fetch B-Roll & Overlays (legacy branding button, if present) ----
 const autoFetchOverlaysBtn = document.getElementById("autoFetchOverlaysBtn");
 if (autoFetchOverlaysBtn) {
   autoFetchOverlaysBtn.addEventListener("click", async () => {
     try {
       autoFetchOverlaysBtn.disabled = true;
       autoFetchOverlaysBtn.textContent = "Fetching...";
-      
-      let wordsToUse = [];
-      if (typeof currentWords !== "undefined" && currentWords.length > 0) {
-        wordsToUse = currentWords;
+      if (typeof window.ensureTimelineInit === "function") {
+        await window.ensureTimelineInit();
       }
-      
+      if (typeof window.addOverlayClip !== "function") {
+        throw new Error("Timeline overlays are not available yet.");
+      }
+      const body = {
+        job_id: currentJobId || undefined,
+        words: (typeof currentWords !== "undefined" && currentWords.length) ? currentWords : undefined,
+        budget: 5,
+      };
       const res = await fetch("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ words: wordsToUse }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      
-      if (data.overlays && Array.isArray(data.overlays)) {
-        if (typeof window.addOverlayClip === "function") {
-          data.overlays.forEach(overlay => window.addOverlayClip(overlay));
-        } else if (typeof window.populateOverlaysList === "function") {
-          window.populateOverlaysList(data.overlays);
-        } else {
-          console.log("Fetched overlays:", data.overlays);
-          alert("Overlays fetched but no handler found to display them. Check console.");
-        }
+      const list = data.overlays || [];
+      for (const overlay of list) {
+        await window.addOverlayClip(overlay);
       }
+      if (typeof setActiveTab === "function") setActiveTab("editor");
+      alert(list.length
+        ? `Added ${list.length} keyword overlay${list.length === 1 ? "" : "s"} to the Timeline.`
+        : "No keyword moments found to overlay.");
     } catch (e) {
       alert("Failed to fetch overlays: " + e.message);
     } finally {
