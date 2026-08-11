@@ -19,18 +19,19 @@ args = ["pnpm", "store", "prune"]
 env = { "CI" = "true" }
 
 [workflows]
-runButton = "Start application"
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd artifacts/subtitle-burner && PORT=8091 python app.py"
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd /home/runner/workspace/artifacts/subtitle-burner && PORT=8081 python app.py"
+waitForPort = 8081
 
 [[workflows.workflow]]
 name = "artifacts/api-server: API Server"
@@ -53,27 +54,6 @@ router = "path"
 PORT = "8080"
 
 [[workflows.workflow]]
-name = "artifacts/mockup-sandbox: Start application"
-author = "agent"
-mode = "sequential"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-artifactId = "XegfDyZt7HqfW2Bb8Ghoy"
-isCanvasWorkflow = true
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd artifacts/subtitle-burner && PORT=8081 python app.py"
-cwd = "./artifacts/mockup-sandbox"
-waitForPort = 8081
-ensurePreviewReachable = "/"
-router = "path"
-
-[workflows.workflow.tasks.env]
-PORT = "8081"
-
-[[workflows.workflow]]
 name = "artifacts/mockup-sandbox: Component Preview Server"
 author = "agent"
 mode = "sequential"
@@ -94,6 +74,19 @@ router = "path"
 [workflows.workflow.tasks.env]
 PORT = "8082"
 BASE_PATH = "/__mockup"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "artifacts/api-server: API Server"
 
 [agent]
 stack = "PNPM_WORKSPACE"

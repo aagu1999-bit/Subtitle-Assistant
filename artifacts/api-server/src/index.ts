@@ -15,7 +15,7 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
+const server = app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
@@ -23,3 +23,9 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 });
+
+// The Subtitle Burner proxy streams multi-hundred-MB video uploads and
+// long-running render responses through this server. Node's default
+// requestTimeout (300s) would kill slow uploads mid-stream, so disable it;
+// keepAliveTimeout/headersTimeout stay at their defaults.
+server.requestTimeout = 0;
