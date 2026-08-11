@@ -2147,7 +2147,7 @@ async function maybeAutoGenerateShorts(jobId, opts) {
     renderHighlights(clips, format);
     if (hlStatus) {
       hlStatus.textContent = clips.length
-        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open any as a project.`
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open in Timeline or Export clip.`
         : "Auto-generate returned no clips — try Find highlights with different lengths.";
     }
     const badge = document.querySelector('.main-tab[data-tab="highlights"]');
