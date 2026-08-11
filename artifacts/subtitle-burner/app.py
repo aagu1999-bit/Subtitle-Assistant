@@ -7929,6 +7929,29 @@ def list_assets():
     return jsonify({"assets": out})
 
 
+@app.route("/delete-asset/<asset_id>", methods=["POST", "DELETE"])
+def delete_asset(asset_id: str):
+    """Remove an uploaded timeline asset and its metadata sidecar."""
+    if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
+        return jsonify({"error": "Invalid asset id"}), 400
+    removed = 0
+    for p in list(ASSET_DIR.glob(f"{asset_id}.*")):
+        if not p.is_file():
+            continue
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+    # Waveform companion uses a different stem pattern.
+    wave = ASSET_DIR / f"{asset_id}_wave.png"
+    if wave.exists():
+        _safe_unlink(wave)
+    if removed == 0:
+        return jsonify({"error": "Asset not found"}), 404
+    return jsonify({"ok": True, "asset_id": asset_id, "removed": removed})
+
+
 @app.route("/asset/<asset_id>")
 def serve_asset(asset_id: str):
     """Serve an asset file for in-browser preview."""

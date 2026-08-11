@@ -6,12 +6,13 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-23-merge-gap-cut";
+  const TL_BUILD = "studio-editor-build-24-playhead-merge-media";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
   let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
+  const TRACK_LABEL_W = 78; // must match .tl-track-label width in timeline.css
   const LANE_OFFSET = 0;   // lanes start at x=0 within their container
   const MAX_UNDO = 50;
   const SNAP_PX = 10;      // magnetic snap threshold in screen pixels
@@ -398,10 +399,83 @@
       ov.textContent = "🖼";
       ov.title = "Add as overlay / picture-in-picture";
       ov.onclick = () => addOverlayClip({ source_job_id: s.job_id });
+      const del = document.createElement("button");
+      del.className = "tl-chip-btn tl-chip-danger";
+      del.textContent = "✕";
+      del.title = "Remove from Media list (and drop timeline clips that use it)";
+      del.onclick = (e) => {
+        e.stopPropagation();
+        removeSourceFromMedia(s);
+      };
       div.appendChild(add);
       div.appendChild(ov);
+      div.appendChild(del);
       wrap.appendChild(div);
     });
+  }
+
+  function removeSourceFromMedia(s) {
+    if (!s || !s.job_id) return;
+    const used = tl && ["main", "overlay"].some((k) =>
+      (tl.tracks[k] || []).some((c) => c.source_job_id === s.job_id));
+    const msg = used
+      ? `Remove "${s.filename || s.job_id.slice(0, 8)}" from Media and delete timeline clips that use it?`
+      : `Remove "${s.filename || s.job_id.slice(0, 8)}" from Media?`;
+    if (!confirm(msg)) return;
+    if (tl && used) {
+      pushHistory();
+      ["main", "overlay"].forEach((k) => {
+        const kept = [];
+        (tl.tracks[k] || []).forEach((c) => {
+          if (c.source_job_id === s.job_id) {
+            if (k === "main") {
+              ["overlay", "text", "music"].forEach((tk) => {
+                tl.tracks[tk] = (tl.tracks[tk] || []).filter((x) => x.anchor !== c.id);
+              });
+            }
+          } else kept.push(c);
+        });
+        tl.tracks[k] = kept;
+      });
+      if (selected && findClip(selected.track, selected.id) == null) selected = null;
+      renderTimeline();
+      scheduleSave();
+    }
+    sources = sources.filter((x) => x.job_id !== s.job_id);
+    renderSourceList();
+    if (typeof window.removeJobFromList === "function") {
+      window.removeJobFromList(s.job_id);
+    }
+    setSaveState("Removed from Media");
+  }
+
+  async function removeAssetFromMedia(a) {
+    if (!a || !a.asset_id) return;
+    const used = tl && ["overlay", "music"].some((k) =>
+      (tl.tracks[k] || []).some((c) => c.asset_id === a.asset_id));
+    const label = a.filename || a.keyword || a.asset_id.slice(0, 6);
+    const msg = used
+      ? `Delete asset "${label}" and remove timeline clips that use it?`
+      : `Delete asset "${label}"?`;
+    if (!confirm(msg)) return;
+    try {
+      await api("/delete-asset/" + a.asset_id, { method: "POST" });
+    } catch (e) {
+      alert("Could not delete asset: " + e.message);
+      return;
+    }
+    if (tl && used) {
+      pushHistory();
+      ["overlay", "music"].forEach((k) => {
+        tl.tracks[k] = (tl.tracks[k] || []).filter((c) => c.asset_id !== a.asset_id);
+      });
+      if (tl.logo && tl.logo.asset_id === a.asset_id) tl.logo = null;
+      if (selected && findClip(selected.track, selected.id) == null) selected = null;
+      renderTimeline();
+      scheduleSave();
+    }
+    await loadAssets();
+    setSaveState("Asset deleted");
   }
 
   function renderAssetList() {
@@ -435,6 +509,15 @@
         o.onclick = () => addOverlayClip({ asset_id: a.asset_id }, a);
         div.appendChild(o);
       }
+      const del = document.createElement("button");
+      del.className = "tl-chip-btn tl-chip-danger";
+      del.textContent = "✕";
+      del.title = "Delete this asset";
+      del.onclick = (e) => {
+        e.stopPropagation();
+        removeAssetFromMedia(a);
+      };
+      div.appendChild(del);
       // Clicking the row itself selects/highlights — also jump to Media tab.
       div.addEventListener("click", (e) => {
         if (e.target.closest("button")) return;
@@ -1194,7 +1277,7 @@
     const ot = playheadOutputTime();
     if (ot == null) { ph.style.display = "none"; return; }
     ph.style.display = "block";
-    ph.style.left = (70 + 8 + ot * PPS) + "px";  // 70 label + 8 padding
+    ph.style.left = (TRACK_LABEL_W + ot * PPS) + "px";
     const lab = $("tlPlayheadTime");
     if (lab) lab.textContent = fmtTime(ot);
   }
@@ -1436,7 +1519,7 @@
               const srcT = v.currentTime || 0;
               const ot = baseOut + played + Math.max(0, srcT - start);
               const ph = $("tlPlayhead");
-              if (ph) { ph.style.display = "block"; ph.style.left = (70 + 8 + ot * PPS) + "px"; }
+              if (ph) { ph.style.display = "block"; ph.style.left = (TRACK_LABEL_W + ot * PPS) + "px"; }
               const lab = $("tlPlayheadTime");
               if (lab) lab.textContent = fmtTime(ot);
               highlightTranscriptAt(srcT);
@@ -3436,10 +3519,10 @@
   }
 
   // ---- Merge adjacent Main shots ----
-  // Same source only. Contiguous pieces rejoin cleanly. If there's a source gap
-  // (highlight A then later highlight B), keep both as one clip and skip the
-  // middle by adding a cut over the gap — same play result as two Main bars.
-  function mergeSelectedWithNext() {
+  // Same source: union in/out; source gaps become cuts (skip middle).
+  // Different sources: stitch via /compile-clips into a new job, replace A+B
+  // with one Main clip pointing at that stitched source.
+  async function mergeSelectedWithNext() {
     if (!tl || !selected || selected.track !== "main") {
       alert("Select a Main clip to merge with the next shot.");
       return;
@@ -3451,11 +3534,13 @@
     }
     const a = tl.tracks.main[idx];
     const b = tl.tracks.main[idx + 1];
-    if (!a.source_job_id || a.source_job_id !== b.source_job_id) {
-      alert(
-        "Can't merge clips from different source videos into one trim.\n\n" +
-        "Keep them as two Main shots (they already play in order), or stitch/export later."
-      );
+    if (!a.source_job_id || !b.source_job_id) {
+      alert("Both shots need a source video to merge.");
+      return;
+    }
+
+    if (a.source_job_id !== b.source_job_id) {
+      await mergeDifferentSources(idx, a, b);
       return;
     }
 
@@ -3468,7 +3553,6 @@
       return;
     }
 
-    // Order by source time so gap/cut math is stable regardless of timeline order.
     const earlyIn = Math.min(aIn, bIn);
     const earlyOut = aIn <= bIn ? aOut : bOut;
     const lateIn = aIn <= bIn ? bIn : aIn;
@@ -3476,14 +3560,9 @@
     const gap = lateIn - earlyOut;
     const beforeDur = clipDuration(a) + clipDuration(b);
 
-    // Next shot already fully inside this clip's source range → just remove B.
     if (bIn >= aIn - 0.05 && bOut <= aOut + 0.05) {
       pushHistory();
-      ["overlay", "text", "music"].forEach((k) => {
-        (tl.tracks[k] || []).forEach((c) => {
-          if (c.anchor === b.id) c.anchor = a.id;
-        });
-      });
+      reanchorFromClip(b.id, a.id);
       tl.tracks.main.splice(idx + 1, 1);
       selectClip("main", a.id);
       renderTimeline();
@@ -3495,9 +3574,6 @@
     pushHistory();
     a.in = earlyIn;
     a.out = lateOut;
-
-    // Existing word cuts from both pieces, plus a skip-cut over any source gap
-    // so Preview/Render play A then jump to B (never the middle dead zone).
     const cuts = [...(a.cuts || []), ...(b.cuts || [])];
     let gapCut = null;
     if (gap > 0.05) {
@@ -3505,9 +3581,7 @@
       cuts.push(gapCut);
     }
     a.cuts = mergeCuts(cuts);
-
     a.word_overrides = Object.assign({}, b.word_overrides || {}, a.word_overrides || {});
-    // Internal join is a hard cut (gap skip); keep an outgoing transition if either had one.
     a.transition = b.transition || a.transition || null;
     if (!a.punch_zoom && b.punch_zoom) a.punch_zoom = b.punch_zoom;
     if (!a.ken_burns && b.ken_burns) a.ken_burns = b.ken_burns;
@@ -3516,14 +3590,8 @@
       a.color_grade = a.color;
     }
     a._max = Math.max(Number(a._max) || 0, Number(b._max) || 0, a.out);
-
-    ["overlay", "text", "music"].forEach((k) => {
-      (tl.tracks[k] || []).forEach((c) => {
-        if (c.anchor === b.id) c.anchor = a.id;
-      });
-    });
+    reanchorFromClip(b.id, a.id);
     tl.tracks.main.splice(idx + 1, 1);
-
     selectClip("main", a.id);
     renderTimeline();
     scheduleSave();
@@ -3531,13 +3599,99 @@
     if (gapCut) {
       setRenderStatus(
         `Merged with ${fmtTime(gap)} gap skipped as cut · ` +
-        `${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible` +
-        (Math.abs(afterDur - beforeDur) > 0.08 ? ` (was ${fmtTime(beforeDur)} across 2)` : "")
+        `${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible`
       );
     } else {
       setRenderStatus(
         `Merged continuous stretch → ${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible`
       );
+    }
+  }
+
+  function reanchorFromClip(fromId, toId) {
+    ["overlay", "text", "music"].forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (c.anchor === fromId) c.anchor = toId;
+      });
+    });
+  }
+
+  async function mergeDifferentSources(idx, a, b) {
+    const btn = $("tlMergeBtn");
+    const aName = (sources.find((s) => s.job_id === a.source_job_id) || {}).filename || "clip A";
+    const bName = (sources.find((s) => s.job_id === b.source_job_id) || {}).filename || "clip B";
+    if (!confirm(
+      `These are different source videos.\n\n` +
+      `Merge will stitch them into a new combined clip:\n` +
+      `• ${aName}\n• ${bName}\n\nContinue?`
+    )) return;
+
+    if (btn) { btn.disabled = true; btn.textContent = "⛓ Stitching…"; }
+    setRenderStatus("Stitching different sources into one clip…");
+    try {
+      const label = `merged ${String(aName).replace(/\.[^.]+$/, "").slice(0, 24)}+${String(bName).replace(/\.[^.]+$/, "").slice(0, 24)}`;
+      const res = await fetch("/compile-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label,
+          clips: [
+            {
+              source_job_id: a.source_job_id,
+              start_time: Number(a.in) || 0,
+              end_time: Number(a.out) || 0,
+              source_filename: aName,
+            },
+            {
+              source_job_id: b.source_job_id,
+              start_time: Number(b.in) || 0,
+              end_time: Number(b.out) || 0,
+              source_filename: bName,
+            },
+          ],
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Stitch failed");
+      const newId = data.job_id;
+      let dur = 0;
+      try {
+        const info = await api("/source-info/" + newId);
+        dur = Number(info.duration) || 0;
+      } catch (e) {}
+      if (!dur) {
+        dur = clipDuration(a) + clipDuration(b);
+      }
+      srcDur[newId] = dur;
+      pushHistory();
+      const merged = {
+        id: uid(),
+        source_job_id: newId,
+        in: 0,
+        out: dur,
+        _max: dur,
+        transition: b.transition || a.transition || null,
+        burn_captions: a.burn_captions !== false,
+        cuts: [],
+        color: a.color || a.color_grade || b.color || b.color_grade || null,
+        color_grade: a.color || a.color_grade || b.color || b.color_grade || null,
+        punch_zoom: a.punch_zoom || null,
+        ken_burns: a.ken_burns || null,
+      };
+      reanchorFromClip(a.id, merged.id);
+      reanchorFromClip(b.id, merged.id);
+      tl.tracks.main.splice(idx, 2, merged);
+      if (typeof window.addJobToList === "function") window.addJobToList(newId);
+      await loadSources();
+      selectClip("main", merged.id);
+      renderTimeline();
+      scheduleSave();
+      setRenderStatus(`Stitched different sources → ${fmtTime(dur)} · ${data.filename || "merged clip"}`);
+    } catch (e) {
+      alert("Merge/stitch failed: " + (e.message || e));
+      setRenderStatus("Merge failed");
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "⛓ Merge"; }
     }
   }
 
@@ -3944,6 +4098,14 @@
     if (mergeBtn && !mergeBtn._wired) {
       mergeBtn._wired = true;
       mergeBtn.onclick = () => mergeSelectedWithNext();
+    }
+    const delBtn = $("tlDeleteBtn");
+    if (delBtn && !delBtn._wired) {
+      delBtn._wired = true;
+      delBtn.onclick = () => {
+        if (!selected) { alert("Select a clip to delete."); return; }
+        deleteClip(selected.track, selected.id);
+      };
     }
     const shotsBtn = $("tlDetectShotsBtn");
     if (shotsBtn && !shotsBtn._wired) {

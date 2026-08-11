@@ -488,7 +488,7 @@
 .tl-ruler {
   position: relative;
   height: 18px;
-  margin-left: 70px;
+  margin-left: 78px; /* = .tl-track-label width */
   border-bottom: 1px solid #2a2f3a;
   color: #6b7280;
   font-size: .65rem;
@@ -730,8 +730,10 @@
   white-space: nowrap;
   opacity: 0.9;
 }
-.tl-chip-btn.active-co {
-  background: #2a2450;
-  border-color: #6c5cff;
-  color: #e8e4ff;
+.tl-chip-btn.tl-chip-danger {
+  color: #ff8a9b;
+}
+.tl-chip-btn.tl-chip-danger:hover:not(:disabled) {
+  background: #3a1e24;
+  color: #fff;
 }

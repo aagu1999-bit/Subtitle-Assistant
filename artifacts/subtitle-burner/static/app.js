@@ -2913,6 +2913,8 @@ function removeJobFromList(jobId) {
   }
   renderJobsList();
 }
+window.removeJobFromList = removeJobFromList;
+window.addJobToList = addJobToList;
 
 function _statusBadgeClass(status) {
   if (!status) return "";

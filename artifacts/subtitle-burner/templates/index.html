@@ -1327,8 +1327,9 @@
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
           <div class="tl-tltoolbar">
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
-            <button id="tlMergeBtn" class="tl-chip-btn" title="Join selected Main shot with the next (same source). Contiguous = rejoin. Gap = one clip with the middle skipped as a cut. Different sources stay separate.">⛓ Merge</button>
-            <button id="tlDetectShotsBtn" class="tl-chip-btn" title="Detect shot changes and split Main at scene cuts">🎞 Detect shots</button>
+            <button id="tlMergeBtn" class="tl-chip-btn" title="Join selected Main shot with the next. Same source: rejoin / skip gap as cut. Different sources: stitch into a new combined clip.">⛓ Merge</button>
+            <button id="tlDetectShotsBtn" class="tl-chip-btn" title="Detect scene changes in the selected Main clip and split it into separate shots">🎞 Detect shots</button>
+            <button id="tlDeleteBtn" class="tl-chip-btn" title="Delete selected clip (Del / Backspace)">🗑 Delete</button>
             <button id="tlCopyBtn" class="tl-chip-btn" title="Copy selected clip (Cmd/Ctrl+C)">📋 Copy</button>
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
