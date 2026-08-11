@@ -135,6 +135,146 @@ CAPCUT_TEMPLATES = {
     }
 }
 
+# Canonical Caption look schema used by build_ass / Instant Export / Shorts.
+# Timeline UI and AI Edit packs historically used short aliases (font, size,
+# primary, …); _normalize_caption_style merges those into this shape.
+_DEFAULT_CAPTION_STYLE = {
+    "font_name": "Montserrat Thin Black",
+    "font_size": 64,
+    "primary_color": "#FFFFFF",
+    "highlight_color": "#FFD60A",
+    "accent_color": "#FF6B35",
+    "outline_color": "#000000",
+    "outline_width": 3,
+    "shadow": 1,
+    "position_y": 82,
+    "all_caps": True,
+    "group_size": 3,
+    "smooth_timings": True,
+    "punchword_emphasis": True,
+}
+
+_STYLE_SHORT_TO_LONG = {
+    "font": "font_name",
+    "size": "font_size",
+    "primary": "primary_color",
+    "highlight": "highlight_color",
+    "accent": "accent_color",
+    "outline": "outline_color",
+    "group": "group_size",
+}
+
+
+def _normalize_caption_style(style) -> dict:
+    """Return Caption look keys so burns never miss AI-pack / Timeline aliases."""
+    if not isinstance(style, dict):
+        return dict(_DEFAULT_CAPTION_STYLE)
+    out = dict(style)
+    for short, long in _STYLE_SHORT_TO_LONG.items():
+        if out.get(long) in (None, "") and out.get(short) not in (None, ""):
+            out[long] = out[short]
+    # Mirror canonical → short so Timeline props / co-editor keep working.
+    for short, long in _STYLE_SHORT_TO_LONG.items():
+        if out.get(long) not in (None, "") and out.get(short) in (None, ""):
+            out[short] = out[long]
+    for k, v in _DEFAULT_CAPTION_STYLE.items():
+        if out.get(k) in (None, ""):
+            out[k] = v
+    return out
+
+
+def _style_has_caption_fields(style) -> bool:
+    if not isinstance(style, dict) or not style:
+        return False
+    return any(
+        style.get(k) not in (None, "")
+        for k in (
+            "font_name", "font", "primary_color", "primary",
+            "font_size", "size", "highlight_color", "highlight",
+        )
+    )
+
+
+# Captions-style AI Edit recipes. Intensity scales cut/zoom/B-roll density.
+# These seed timeline JSON — they are not full generative Mirage styles.
+AI_EDIT_STYLE_PACKS = {
+    "pulse": {
+        "label": "Pulse",
+        "blurb": "Fast social pacing — punch zooms, hard cuts, bold captions",
+        "canvas": "9x16",
+        "transition": "crossfade",
+        "caption_preset": "mrbeast",
+        "style": {
+            "font": "Integral CF", "size": 68, "primary": "#FFFFFF",
+            "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
+        },
+        "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
+    },
+    "clarity": {
+        "label": "Clarity",
+        "blurb": "Clean talking-head — light trim, subtle zoom, readable captions",
+        "canvas": "9x16",
+        "transition": "dissolve",
+        "caption_preset": "hormozi",
+        "style": {
+            "font": "Montserrat Black", "size": 64, "primary": "#FFFFFF",
+            "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
+        },
+        "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
+    },
+    "magazine": {
+        "label": "Magazine",
+        "blurb": "Editorial polish — soft Ken Burns, warm grade, lower-third titles",
+        "canvas": "9x16",
+        "transition": "fade_black",
+        "caption_preset": "karaoke",
+        "style": {
+            "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
+            "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
+        },
+        "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
+        "add_title": True,
+    },
+    "velocity": {
+        "label": "Velocity",
+        "blurb": "High intensity — dense zooms, silence cuts, energetic captions",
+        "canvas": "9x16",
+        "transition": "slide",
+        "caption_preset": "neon",
+        "style": {
+            "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
+            "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
+        },
+        "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
+    },
+    "film": {
+        "label": "Film",
+        "blurb": "Cinematic slow push — muted grade, sparse cuts, elegant type",
+        "canvas": "16x9",
+        "transition": "dissolve",
+        "caption_preset": "karaoke",
+        "style": {
+            "font": "DM Sans", "size": 52, "primary": "#F5F0E8",
+            "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
+        },
+        "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
+    },
+}
+
+_FILLER_SINGLE_WORDS = {
+    "um", "uh", "uhh", "uhm", "umm", "er", "erm",
+    "ah", "ahh", "hm", "hmm", "mm", "mhm",
+    "like", "basically", "literally", "actually",
+    "kinda", "sorta", "anyway", "anyways",
+    "okay", "ok", "right", "well",
+}
+_FILLER_PAIR_WORDS = [
+    ("you", "know"), ("i", "mean"), ("sort", "of"), ("kind", "of"),
+]
+
+# Long-form threshold matching Captions AI Shorts (4 minutes).
+LONG_FORM_SECONDS = 240.0
+
 
 # ---- Config ----
 BASE_DIR = Path(__file__).parent
@@ -560,57 +700,251 @@ def _get_whisper_model():
 threading.Thread(target=_get_whisper_model, daemon=True).start()
 
 
-def _media_has_audio(path: Path) -> bool:
-    """True if ffprobe finds at least one audio stream."""
+# Phone MOVs / large MP4s often put the moov atom at the end. Default ffprobe
+# probesize can miss streams and look like "no audio" even when sound exists.
+_FFPROBE_DEEP = ["-analyzeduration", "100M", "-probesize", "100M"]
+
+
+def _probe_media_streams(path: Path) -> dict:
+    """Return stream/format info from a deep ffprobe.
+
+    Never treats probe failure as "no audio" — callers decide. Truncated
+    uploads and odd phone containers commonly fail a shallow probe.
+
+    Also reports video_codec / audio_codec so we can tip users about iPhone
+    HEVC (plays on Drive after Drive re-encodes; Windows often needs codecs).
+    """
+    info = {
+        "has_audio": False,
+        "has_video": False,
+        "duration": 0.0,
+        "error": None,
+        "size": 0,
+        "video_codec": None,
+        "audio_codec": None,
+        "is_hevc": False,
+        "format_name": None,
+    }
+    try:
+        info["size"] = path.stat().st_size if path.exists() else 0
+    except OSError as e:
+        info["error"] = f"cannot read file: {e}"
+        return info
     try:
         out = subprocess.check_output(
             [
                 "ffprobe", "-v", "error",
-                "-select_streams", "a",
-                "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0",
+                *_FFPROBE_DEEP,
+                "-show_entries",
+                "stream=codec_type,codec_name:format=duration,format_name",
+                "-of", "json",
                 str(path),
             ],
             stderr=subprocess.STDOUT,
             text=True,
+            timeout=60,
         )
-        return "audio" in (out or "").lower()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
+        data = json.loads(out or "{}")
+        for stream in data.get("streams") or []:
+            ctype = (stream.get("codec_type") or "").lower()
+            cname = (stream.get("codec_name") or "").lower()
+            if ctype == "audio":
+                info["has_audio"] = True
+                if not info["audio_codec"]:
+                    info["audio_codec"] = cname
+            elif ctype == "video":
+                info["has_video"] = True
+                if not info["video_codec"]:
+                    info["video_codec"] = cname
+                if cname in ("hevc", "h265", "hev1", "hvc1"):
+                    info["is_hevc"] = True
+        fmt = data.get("format") or {}
+        info["format_name"] = fmt.get("format_name")
+        try:
+            info["duration"] = float(fmt.get("duration") or 0)
+        except (TypeError, ValueError):
+            info["duration"] = 0.0
+        # Tag-only HEVC sometimes reports codec_name oddly — also sniff format.
+        if not info["is_hevc"] and info.get("video_codec") in ("hevc", "h265"):
+            info["is_hevc"] = True
+    except subprocess.TimeoutExpired:
+        info["error"] = "ffprobe timed out (file may still be writing or corrupt)"
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError) as e:
+        info["error"] = str(e) or e.__class__.__name__
+    return info
+
+
+def _media_has_audio(path: Path) -> bool:
+    """True if ffprobe finds at least one audio stream (deep probe)."""
+    return bool(_probe_media_streams(path).get("has_audio"))
+
+
+def _validate_uploaded_media(path: Path, expected_bytes: int | None = None) -> dict:
+    """Reject truncated / empty / video-only uploads before Whisper starts.
+
+    Returns the probe dict on success; raises RuntimeError with a user-facing
+    message on failure.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        raise RuntimeError(f"Upload could not be read on the server: {e}") from e
+
+    # Empty MP4 shells from aborted transfers are often a few hundred bytes.
+    if size < 8_192:
+        raise RuntimeError(
+            "Upload looks incomplete (file is nearly empty on the server). "
+            "Your connection may have dropped mid-transfer — try uploading again."
+        )
+    if expected_bytes and expected_bytes > 0 and size < int(expected_bytes * 0.95):
+        raise RuntimeError(
+            f"Upload incomplete: server received {size // 1024} KB but the browser "
+            f"sent ~{expected_bytes // 1024} KB. Re-upload on a stable connection."
+        )
+
+    probe = _probe_media_streams(path)
+    if probe.get("error") and not probe.get("has_video") and not probe.get("has_audio"):
+        raise RuntimeError(
+            "Upload could not be read as a media file (corrupt or truncated). "
+            f"Re-upload the original export. ({probe['error']})"
+        )
+    if not probe.get("has_video") and not probe.get("has_audio"):
+        raise RuntimeError(
+            "Upload has no video or audio streams — the file is likely truncated "
+            "or not a real media export. Re-upload and try again."
+        )
+    return probe
 
 
 def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
     """Extract 16 kHz mono PCM for Whisper.
 
-    Always go through FFmpeg — feeding the raw container to faster-whisper/PyAV
-    crashes with ``tuple index out of range`` on video-only files (no audio
-    stream) and on some phone MOV variants.
+    Always go through FFmpeg — feeding the raw container to faster-whisper/PyAv
+    crashes on video-only files and some phone MOV variants.
+
+    Tries several extract strategies (iPhone .MOV / HE-AAC are picky). Probe is
+    advisory only — we never short-circuit to "no audio" before attempting
+    extract. Truncated uploads get a different message than true silent video.
     """
-    if not _media_has_audio(video_path):
-        raise RuntimeError(
-            "This video has no audio track. Whisper needs sound to transcribe — "
-            "export/upload a file that includes microphone or system audio."
-        )
+    probe = _probe_media_streams(video_path)
     wav = video_path.with_name(f".{video_path.stem}.whisper.wav")
     af = (
         "afftdn=nf=-25,dynaudnorm=p=0.95:m=12:s=12"
         if pre_clean else "anull"
     )
-    proc = subprocess.run(
+
+    def _wav_ok() -> bool:
+        try:
+            return wav.exists() and wav.stat().st_size >= 64
+        except OSError:
+            return False
+
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    # Strategy list: phone MOVs often fail optional -map tricks but succeed
+    # when FFmpeg picks the default audio stream (no -map).
+    attempts: list[list[str]] = [
+        # 1) Default audio stream (best for IMG_*.MOV / QuickTime)
         [
-            FFMPEG, "-y", "-i", str(video_path),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-af", af,
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn",
+            "-ac", "1", "-ar", "16000", "-af", af,
             "-c:a", "pcm_s16le", str(wav),
         ],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0 or not wav.exists() or wav.stat().st_size < 64:
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()
-        tail = err[-1] if err else f"ffmpeg exit {proc.returncode}"
-        raise RuntimeError(f"Could not extract audio for transcription: {tail}")
-    return wav
+        # 2) Explicit first audio stream
+        [
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn", "-map", "0:a:0",
+            "-ac", "1", "-ar", "16000", "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+        # 3) Any audio stream(s), take first via -ac 1
+        [
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-vn", "-sn", "-dn", "-map", "0:a",
+            "-ac", "1", "-ar", "16000", "-af", af,
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+    ]
 
+    last: subprocess.CompletedProcess | None = None
+    for cmd in attempts:
+        _safe_unlink(wav)
+        last = _run(cmd)
+        if last.returncode == 0 and _wav_ok():
+            return wav
+
+    # 4) Remux to a clean MP4 then extract — recovers some QuickTime layouts
+    # where direct PCM extract fails but streams are present.
+    remux = video_path.with_name(f".{video_path.stem}.audioremux.mp4")
+    try:
+        _safe_unlink(remux)
+        remux_proc = _run([
+            FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(video_path),
+            "-c", "copy", "-movflags", "+faststart", str(remux),
+        ])
+        if remux_proc.returncode == 0 and remux.exists() and remux.stat().st_size > 64:
+            _safe_unlink(wav)
+            last = _run([
+                FFMPEG, "-y", *_FFPROBE_DEEP, "-i", str(remux),
+                "-vn", "-sn", "-dn",
+                "-ac", "1", "-ar", "16000", "-af", af,
+                "-c:a", "pcm_s16le", str(wav),
+            ])
+            if last.returncode == 0 and _wav_ok():
+                return wav
+    finally:
+        _safe_unlink(remux)
+
+    _safe_unlink(wav)
+    err_blob = ""
+    if last is not None:
+        err_blob = ((last.stderr or "") + "\n" + (last.stdout or "")).lower()
+    no_stream = any(
+        needle in err_blob
+        for needle in (
+            "does not contain any stream",
+            "output file does not contain any stream",
+            "matches no streams",
+            "stream map '0:a",
+        )
+    )
+    size_kb = int((probe.get("size") or 0) / 1024)
+    dur = float(probe.get("duration") or 0)
+
+    # Truncated / unreadable upload — common on large iPhone MOVs mid-transfer.
+    if probe.get("error") or (not probe.get("has_audio") and not probe.get("has_video")):
+        raise RuntimeError(
+            "Could not read audio from this upload — the file on the server looks "
+            f"incomplete or unreadable ({size_kb} KB). Re-upload IMG/MOV and try again."
+            + (f" Detail: {probe.get('error')}" if probe.get("error") else "")
+        )
+    if not probe.get("has_audio") and probe.get("has_video") and dur <= 0:
+        raise RuntimeError(
+            "Upload looks incomplete (video stream found but no usable audio / duration). "
+            f"Server file is {size_kb} KB — re-upload the full original recording."
+        )
+    if not probe.get("has_audio") and (probe.get("has_video") or no_stream):
+        tip = ""
+        if probe.get("is_hevc"):
+            tip = (
+                " Note: this looks like iPhone HEVC — Google Drive can still play it "
+                "because Drive re-encodes for streaming; upload the original file "
+                "(or export Most Compatible / H.264 MP4) and wait for 100% transfer."
+            )
+        raise RuntimeError(
+            "This video has no audio track Whisper can read "
+            f"({size_kb} KB, duration {dur:.1f}s"
+            + (f", video={probe.get('video_codec')}" if probe.get("video_codec") else "")
+            + (f", audio={probe.get('audio_codec') or 'none'}")
+            + "). If you hear sound on your phone, re-upload the original recording "
+            "or tap Re-drop after a full transfer."
+            + tip
+        )
+    err = (last.stderr or last.stdout or "").strip().splitlines() if last else []
+    tail = err[-1] if err else "ffmpeg extract failed"
+    raise RuntimeError(f"Could not extract audio for transcription: {tail}")
 
 def _edit_proxy_path(job_id: str) -> Path:
     return UPLOAD_DIR / f"{job_id}_editproxy.mp4"
@@ -620,13 +954,16 @@ def build_edit_proxy(job_id: str, video_path: Path) -> None:
     """Background: small H.264 proxy so Transcript Cut seeks fast on phone MOVs.
 
     Burns / renders always use the original upload — this is editor playback only.
+    Started AFTER Whisper finishes so encode does not steal CPU from transcription.
     """
     out = _edit_proxy_path(job_id)
     try:
-        # ultrafast + downscale keeps this off the critical Whisper path.
+        # ultrafast + downscale — playback aid only, not on the Whisper critical path.
         proc = subprocess.run(
             [
-                FFMPEG, "-y", "-i", str(video_path),
+                FFMPEG, "-y",
+                *_FFPROBE_DEEP,
+                "-i", str(video_path),
                 "-vf", "scale=-2:'min(720,ih)'",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", "-b:a", "96k",
@@ -1981,6 +2318,7 @@ def _smooth_word_timings(words: list,
 
 
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
+    style = _normalize_caption_style(style)
     font = style.get("font_name", "Montserrat Thin Black")
     font_size = int(style.get("font_size", 72))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
@@ -3746,19 +4084,32 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
     try:
         jobs[job_id]["status"] = "transcribing"
         jobs[job_id]["progress"] = 30
+        jobs[job_id]["error"] = None
+        probe = _probe_media_streams(video_path)
+        jobs[job_id]["media_info"] = probe
         _db_save_job(job_id)
-        # Build a lightweight seek proxy in parallel — phone MOVs are huge and
-        # made Transcript Cut feel "stuck loading" after Whisper was already done.
-        threading.Thread(
-            target=build_edit_proxy, args=(job_id, video_path), daemon=True
-        ).start()
+        # iPhone HEVC / HDR MOVs often black-screen in Chrome on Windows until we
+        # have an H.264 edit proxy. Start that early for HEVC only; otherwise wait
+        # until after Whisper so we don't steal CPU from transcription.
+        proxy_started_early = False
+        if probe.get("is_hevc") or (video_path.suffix.lower() == ".mov" and probe.get("has_video")):
+            threading.Thread(
+                target=build_edit_proxy, args=(job_id, video_path), daemon=True
+            ).start()
+            proxy_started_early = True
+            print(f"[proxy] {job_id} early start (hevc/mov preview)", flush=True)
         words = transcribe(video_path, pre_clean=pre_clean, job_id=job_id)
         if not words:
             raise RuntimeError("No speech detected in the video.")
         jobs[job_id]["words"] = words
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
+        if not proxy_started_early:
+            threading.Thread(
+                target=build_edit_proxy, args=(job_id, video_path), daemon=True
+            ).start()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -3767,6 +4118,10 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         # Keep the short message for the UI; full traceback goes to the server log.
         jobs[job_id]["error"] = str(e) or e.__class__.__name__
         jobs[job_id]["completed_at"] = time.time()
+        try:
+            jobs[job_id]["media_info"] = _probe_media_streams(video_path)
+        except Exception:
+            pass
         _db_save_job(job_id)
         # Keep the upload on disk so the user can retry Re-transcribe without
         # re-uploading. Orphan cleanup can happen later via job delete.
@@ -3847,10 +4202,18 @@ def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["burn_cache_key"] = None
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
+        jobs[job_id]["error"] = None
         _db_save_job(job_id)
+        threading.Thread(
+            target=build_edit_proxy, args=(job_id, video_path), daemon=True
+        ).start()
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = f"Re-transcribe failed: {e}"
+        try:
+            jobs[job_id]["media_info"] = _probe_media_streams(video_path)
+        except Exception:
+            pass
         _db_save_job(job_id)
 
 
@@ -4247,49 +4610,318 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 
 # ---- Routes ----
 
+# ---- B-roll / photo overlay helpers (Phase 5+) ----
+# Pipeline: transcript keywords → image provider → ASSET_DIR → Timeline overlay
+# track → existing FFmpeg composite. We deliberately do NOT use Playwright to
+# scrape Google (ToS/fragile) or MoviePy (duplicates the FFmpeg render path).
+
+def _broll_provider_status() -> dict:
+    return {
+        "google_cse": bool(os.environ.get("GOOGLE_CSE_API_KEY") and os.environ.get("GOOGLE_CSE_CX")),
+        "pexels": bool(os.environ.get("PEXELS_API_KEY")),
+        "unsplash": bool(os.environ.get("UNSPLASH_ACCESS_KEY")),
+        "badge": True,
+    }
+
+
+def _broll_any_photo_provider() -> bool:
+    st = _broll_provider_status()
+    return bool(st["google_cse"] or st["pexels"] or st["unsplash"])
+
+
+def _download_url_to_asset(url: str, dest_stem: Path, timeout: int = 25) -> Path | None:
+    """Download an image URL next to dest_stem. Returns the saved Path or None."""
+    if not url:
+        return None
+    try:
+        import requests as _req
+        headers = {
+            "User-Agent": "SubtitleAssistantBroll/1.0",
+            "Accept": "image/*,*/*",
+        }
+        r = _req.get(url, headers=headers, timeout=timeout, stream=True)
+        if r.status_code >= 400:
+            return None
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        ext = "jpg"
+        if "png" in ctype:
+            ext = "png"
+        elif "webp" in ctype:
+            ext = "webp"
+        elif "gif" in ctype:
+            ext = "gif"
+        dest = dest_stem.with_suffix(f".{ext}")
+        written = 0
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(64 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                written += len(chunk)
+                if written > 12 * 1024 * 1024:
+                    break
+        if dest.exists() and dest.stat().st_size > 800:
+            return dest
+        _safe_unlink(dest)
+        return None
+    except Exception as e:
+        ai_logger.warning(f"B-roll download failed: {e}")
+        return None
+
+
+def _search_broll_google_cse(query: str) -> str | None:
+    key = os.environ.get("GOOGLE_CSE_API_KEY", "")
+    cx = os.environ.get("GOOGLE_CSE_CX", "")
+    if not key or not cx:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": key, "cx": cx, "q": query,
+                "searchType": "image", "num": 1, "safe": "active",
+            },
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        items = (r.json() or {}).get("items") or []
+        if not items:
+            return None
+        return items[0].get("link")
+    except Exception as e:
+        ai_logger.warning(f"Google CSE B-roll search failed: {e}")
+        return None
+
+
+def _search_broll_pexels(query: str) -> str | None:
+    key = os.environ.get("PEXELS_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://api.pexels.com/v1/search",
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            headers={"Authorization": key},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        photos = (r.json() or {}).get("photos") or []
+        if not photos:
+            return None
+        src = photos[0].get("src") or {}
+        return src.get("large") or src.get("medium") or src.get("original")
+    except Exception as e:
+        ai_logger.warning(f"Pexels B-roll search failed: {e}")
+        return None
+
+
+def _search_broll_unsplash(query: str) -> str | None:
+    key = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://api.unsplash.com/search/photos",
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            headers={"Authorization": f"Client-ID {key}", "Accept-Version": "v1"},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        results = (r.json() or {}).get("results") or []
+        if not results:
+            return None
+        urls = results[0].get("urls") or {}
+        return urls.get("regular") or urls.get("small") or urls.get("full")
+    except Exception as e:
+        ai_logger.warning(f"Unsplash B-roll search failed: {e}")
+        return None
+
+
+def _fetch_broll_image_for_keyword(query: str, dest_stem: Path) -> Path | None:
+    """Search providers in order and download the first hit next to dest_stem."""
+    q = (query or "").strip()
+    if not q:
+        return None
+    url = (
+        _search_broll_google_cse(q)
+        or _search_broll_pexels(q)
+        or _search_broll_unsplash(q)
+    )
+    if not url:
+        return None
+    return _download_url_to_asset(url, dest_stem)
+
+
+def _overlay_layout_for_index(i: int, placement: str = "pip") -> dict:
+    placement = (placement or "pip").lower()
+    if placement in ("center", "centre", "full"):
+        return {
+            "x": 0.12, "y": 0.18, "w": 0.76, "h": 0.52,
+            "fit": "contain", "layout": "center",
+        }
+    corners = [
+        {"x": 0.58, "y": 0.06},
+        {"x": 0.04, "y": 0.06},
+        {"x": 0.58, "y": 0.62},
+        {"x": 0.04, "y": 0.62},
+    ]
+    pos = corners[i % 4]
+    return {
+        "x": pos["x"], "y": pos["y"], "w": 0.38, "h": 0.24,
+        "fit": "cover", "layout": "pip_auto",
+    }
+
+
+def _make_keyword_badge_png(text: str, dest: Path) -> bool:
+    """Render a simple keyword badge PNG via ffmpeg (no Pillow required)."""
+    label = re.sub(r"[^\w\s\-']", "", str(text or "")).strip()[:28] or "B-roll"
+    safe = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    vf = (
+        f"drawbox=x=0:y=0:w=iw:h=ih:color=0x10131d@1:t=fill,"
+        f"drawbox=x=16:y=16:w=iw-32:h=ih-32:color=0x6c5cff@1:t=6,"
+        f"drawtext=text='{safe}':fontcolor=white:fontsize=54:"
+        f"x=(w-text_w)/2:y=(h-text_h)/2:font=Sans"
+    )
+    cmd = [
+        FFMPEG, "-y", "-f", "lavfi", "-i", "color=c=0x10131d:s=640x360:d=0.1",
+        "-frames:v", "1", "-update", "1", "-vf", vf, str(dest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode == 0 and dest.exists() and dest.stat().st_size > 100
+
+
 @app.route('/fetch-auto-overlays', methods=['POST'])
 def fetch_auto_overlays():
-    data = request.json or {}
-    words = data.get("words", [])
-    
-    VISUAL_KEYWORDS = {
-        "coffee", "candle", "festival", "money", "growth", "craft", "food", "music",
-        "car", "house", "dog", "cat", "computer", "phone", "book", "water", "fire",
-        "earth", "sky", "sun", "moon", "star", "city", "tree", "flower", "people",
-        "business", "love", "happy", "sad", "angry", "time", "day", "night", "world",
-        "life", "school", "family", "friend", "party", "game", "sport", "art",
-        "nature", "technology", "health", "travel", "work", "home",
-        "success", "power", "brand", "product", "design", "video", "photo"
+    """Suggest timed B-roll overlays from transcript keywords.
+
+    Body: {
+      words?: [...], job_id?: str, budget?: int,
+      mode?: "auto"|"photo"|"badge",
+      placement?: "pip"|"center"
     }
-    stop_words = {"the", "and", "a", "to", "of", "in", "i", "is", "that", "it", "on", "you", "this", "for", "but", "with", "are", "have", "be", "at", "or", "as", "was", "so", "if", "out", "not", "we", "my", "they", "your", "all", "do", "can", "will", "about", "which", "up", "one", "there", "what", "would", "when", "an", "she", "he", "their", "her", "his", "has", "who", "from", "by", "some", "me", "how", "like", "just", "know", "then", "them", "now", "well", "think"}
-    
+    """
+    data = request.get_json(force=True) or {}
+    words = data.get("words") or []
+    job_id = data.get("job_id")
+    if (not words) and job_id and job_id in jobs:
+        words = jobs[job_id].get("words") or []
+    try:
+        budget = max(1, min(8, int(data.get("budget") or 5)))
+    except (TypeError, ValueError):
+        budget = 5
+    mode = str(data.get("mode") or "auto").lower().strip()
+    if mode not in ("auto", "photo", "badge"):
+        mode = "auto"
+    placement = str(data.get("placement") or "pip").lower().strip()
+
+    callouts = _keyword_callouts_for_window(words, 0.0, 1e9, budget)
     overlays = []
-    seen = set()
-    for w in words:
-        if len(overlays) >= 8:
-            break
-            
-        text = w.get("word", "").strip()
-        clean_text = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
-        
-        if clean_text and clean_text not in stop_words and clean_text not in seen:
-            if clean_text in VISUAL_KEYWORDS or len(clean_text) > 4:
-                seen.add(clean_text)
-                uid = uuid.uuid4().hex[:8]
-                word_start = w.get("start", 0)
-                
-                overlay = {
-                    "id": "overlay_" + uid,
-                    "keyword": text,
-                    "start": word_start,
-                    "out": word_start + 2.5,
-                    "label": "🖼️ " + text.capitalize(),
-                    "src": f"https://source.unsplash.com/400x300/?{quote_plus(text)}",
-                    "x": 50, "y": 20, "scale": 35, "opacity": 0.9
-                }
-                overlays.append(overlay)
-                
-    return jsonify({"ok": True, "overlays": overlays})
+    providers = _broll_provider_status()
+    used_photo = 0
+    used_badge = 0
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+    for co in callouts:
+        label = str(co.get("text") or "B-roll").strip() or "B-roll"
+        start = float(co.get("start") or 0)
+        dur = float(co.get("duration") or 1.8)
+        asset_id = uuid.uuid4().hex
+        asset_path = None
+        source = "badge"
+
+        want_photo = mode in ("photo", "auto") and _broll_any_photo_provider()
+        if want_photo:
+            asset_path = _fetch_broll_image_for_keyword(label, ASSET_DIR / asset_id)
+            if asset_path:
+                source = "photo"
+                used_photo += 1
+                final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
+                if asset_path.resolve() != final.resolve():
+                    try:
+                        if final.exists():
+                            _safe_unlink(final)
+                        asset_path.replace(final)
+                        asset_path = final
+                    except OSError:
+                        pass
+
+        if asset_path is None:
+            if mode == "photo":
+                continue
+            dest = ASSET_DIR / f"{asset_id}.png"
+            if not _make_keyword_badge_png(label, dest):
+                _safe_unlink(dest)
+                continue
+            asset_path = dest
+            source = "badge"
+            used_badge += 1
+
+        stem = asset_path.stem
+        if stem != asset_id:
+            asset_id = stem
+
+        display_name = f"{label}{asset_path.suffix.lower()}"
+        _write_asset_meta(
+            asset_id,
+            filename=display_name,
+            keyword=label,
+            source=source,
+        )
+
+        pos = _overlay_layout_for_index(len(overlays), placement)
+        overlays.append({
+            "asset_id": asset_id,
+            "keyword": label,
+            "source": source,
+            "in": 0,
+            "out": max(1.2, dur),
+            "start": max(0.0, start),
+            "x": pos["x"],
+            "y": pos["y"],
+            "w": pos["w"],
+            "h": pos["h"],
+            "opacity": 0.95 if source == "badge" else 1.0,
+            "fit": pos["fit"],
+            "fade_in": 0.15,
+            "fade_out": 0.25,
+            "border_px": 2 if source == "photo" else 0,
+            "layout": pos["layout"],
+            "ken_burns": (
+                {"enabled": True, "direction": "in", "intensity": "med"}
+                if source == "photo" else None
+            ),
+        })
+
+    return jsonify({
+        "ok": True,
+        "overlays": overlays,
+        "count": len(overlays),
+        "mode": mode,
+        "placement": placement,
+        "providers": providers,
+        "stats": {"photo": used_photo, "badge": used_badge},
+    })
+
+
+@app.route("/broll/status", methods=["GET"])
+def broll_status():
+    """Which B-roll image providers are configured."""
+    st = _broll_provider_status()
+    return jsonify({
+        "providers": st,
+        "photo_ready": _broll_any_photo_provider(),
+        "hint": (
+            "Set PEXELS_API_KEY and/or UNSPLASH_ACCESS_KEY and/or "
+            "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll."
+        ),
+    })
+
 
 @app.route("/jobs")
 def list_jobs():
@@ -4452,7 +5084,7 @@ def suggest_clips():
     return jsonify({"clips": cleaned, "format": format_type})
 
 
-def _create_clip_from_job(source_job_id: str, start: float, end: float, label: str) -> str:
+def _create_clip_from_job(source_job_id: str, start: float, end: float, label: str, style=None) -> str:
     if not source_job_id or source_job_id not in jobs:
         raise ValueError("Source job not found")
     src_video = find_video_path(source_job_id)
@@ -4502,13 +5134,15 @@ def _create_clip_from_job(source_job_id: str, start: float, end: float, label: s
     base_stem = Path(src_filename).stem if src_filename else "clip"
     new_filename = f"{base_stem} — {label or 'highlight'}.{ext}"
 
+    # Caption look: prefer explicit style (UI flush), else source job.style.
+    inherited = style if _style_has_caption_fields(style) else src_job.get("style")
     jobs[new_job_id] = {
         "status": "awaiting_edit",
         "progress": 100,
         "output": None,
         "error": None,
         "words": new_words,
-        "style": src_job.get("style"),
+        "style": _normalize_caption_style(inherited) if inherited else None,
         "audio": None,
         "emoji_rules": src_job.get("emoji_rules"),
         "created_at": time.time(),
@@ -4641,10 +5275,10 @@ def suggest_effects():
 def clip_from_job():
     """Spawn a new job that's a trimmed slice of an existing job's source video.
 
-    Body: {source_job_id, start_time, end_time, label}
-    Inherits the source job's style, emoji_rules, and transcript words
-    (filtered + offset to the new range). The new job lands at
-    awaiting_edit so the user can immediately tweak and render.
+    Body: {source_job_id, start_time, end_time, label, style?}
+    Inherits Caption look (explicit style or source job.style), emoji_rules,
+    and transcript words (filtered + offset to the new range). The new job
+    lands at awaiting_edit so the user can immediately tweak and render.
     """
     data = request.get_json(force=True) or {}
     source_job_id = data.get("source_job_id")
@@ -4654,9 +5288,10 @@ def clip_from_job():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid start/end time"}), 400
     label = (data.get("label") or "").strip()[:80]
+    style = data.get("style")
 
     try:
-        new_job_id = _create_clip_from_job(source_job_id, start, end, label)
+        new_job_id = _create_clip_from_job(source_job_id, start, end, label, style=style)
         return jsonify({"job_id": new_job_id, "filename": jobs[new_job_id]["filename"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -4683,6 +5318,21 @@ def auto_process_job():
     if not video_path:
         return jsonify({"error": "Video missing"}), 404
 
+    # Accept the same target_durations shape as /suggest-clips (UI checkboxes).
+    raw_durations = data.get("target_durations")
+    if raw_durations is None and "target_duration" in data:
+        raw_durations = [data.get("target_duration")]
+    durations: list[int] = []
+    for d in (raw_durations or []):
+        try:
+            v = int(d)
+            if 5 <= v <= 180:
+                durations.append(v)
+        except (TypeError, ValueError):
+            continue
+    if not durations:
+        durations = [30, 60]
+
     try:
         # a. Transcript must already exist (normal upload path). Do not
         # re-run Whisper here — that doubled wait when Auto-Shorts was on.
@@ -4702,7 +5352,7 @@ def auto_process_job():
 
         # c. Gemini clip suggestions (the actual Shorts work).
         transcript_text = _format_transcript_for_llm(job["words"])
-        prompt = _build_clip_suggestion_prompt(transcript_text, format_type, [60], num_clips)
+        prompt = _build_clip_suggestion_prompt(transcript_text, format_type, durations, num_clips)
         result = _gemini_generate_clip_suggestions(prompt)
         clips = result.get("clips", [])
 
@@ -4727,15 +5377,16 @@ def auto_process_job():
                 })
             except (TypeError, ValueError):
                 continue
-        _snap_clip_to_target_durations(cleaned, job["words"], [60])
+        _snap_clip_to_target_durations(cleaned, job["words"], durations)
         cleaned = [c for c in cleaned if (c["end_time"] - c["start_time"]) >= 3]
         cleaned.sort(key=lambda c: c["start_time"])
         _detect_overlap_groups(cleaned, threshold=0.90)
 
         job["clip_suggestions"] = cleaned
+        job["clip_format"] = format_type
         _db_save_job(job_id)
 
-        return jsonify({"ok": True, "job_id": job_id, "clips": cleaned})
+        return jsonify({"ok": True, "job_id": job_id, "clips": cleaned, "format": format_type})
     except Exception as e:
         ai_logger.error(f"[{job_id}] Auto-process failed: {e}")
         return jsonify({"error": str(e)}), 500
@@ -4765,12 +5416,12 @@ def batch_render_clips():
             title = c.get("title", f"clip_{i}")
             headline = c.get("headline", "")
             
-            new_job_id = _create_clip_from_job(source_job_id, start, end, title)
+            new_job_id = _create_clip_from_job(source_job_id, start, end, title, style=style)
             
             job = jobs[new_job_id]
-            job_style = dict(style)
+            job_style = _normalize_caption_style(style if _style_has_caption_fields(style) else job.get("style"))
             if headline:
-                job_style["headline_banner"] = {"enabled": True, "text": headline}
+                job_style["headline_banner"] = str(headline).strip()
             job["style"] = job_style
             _db_save_job(new_job_id)
             
@@ -5076,6 +5727,8 @@ def index():
     elevenlabs_enabled = bool(os.environ.get("ELEVENLABS_API_KEY"))
     dolby_enabled = bool(os.environ.get("DOLBY_API_KEY"))
     gemini_enabled = bool(os.environ.get("GEMINI_API_KEY"))
+    broll_providers = _broll_provider_status()
+    broll_photo_ready = _broll_any_photo_provider()
     # Cache-bust static assets whenever they change on disk (e.g. after a
     # `git pull`). Browsers caching old app.js/style.css was producing
     # phantom layout bugs (e.g. tab content appearing blank).
@@ -5094,6 +5747,8 @@ def index():
         elevenlabs_enabled=elevenlabs_enabled,
         dolby_enabled=dolby_enabled,
         gemini_enabled=gemini_enabled,
+        broll_photo_ready=broll_photo_ready,
+        broll_providers=broll_providers,
         asset_version=asset_version,
     )
     # Never let the browser cache the HTML shell. The ?v=asset_version on the
@@ -5104,6 +5759,18 @@ def index():
     resp.headers["Cache-Control"] = "no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     return resp
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Tiny SVG favicon so browsers stop 404-spamming the console."""
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+        "<rect width='32' height='32' rx='8' fill='#6c5cff'/>"
+        "<text x='16' y='22' text-anchor='middle' font-size='16' "
+        "font-family='system-ui,sans-serif' fill='white'>S</text></svg>"
+    )
+    return Response(svg, mimetype="image/svg+xml")
 
 
 @app.route("/transcribe-only", methods=["POST"])
@@ -5132,7 +5799,28 @@ def transcribe_only():
     job_id = uuid.uuid4().hex
     ext = f.filename.rsplit(".", 1)[1].lower()
     video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    # Prefer the part's declared size; Content-Length is the whole multipart body.
+    expected_bytes = None
+    try:
+        if getattr(f, "content_length", None):
+            expected_bytes = int(f.content_length)
+    except (TypeError, ValueError):
+        expected_bytes = None
     f.save(str(video_path))
+    try:
+        probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
+        print(
+            f"[upload] {job_id} ok size={video_path.stat().st_size} "
+            f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
+            f"dur={probe.get('duration'):.1f}s name={f.filename!r}",
+            flush=True,
+        )
+        # Do NOT reject on !has_audio here — shallow/odd probes false-negative on
+        # phone MOVs. Whisper extract is the ground truth (with a clear error).
+    except Exception as e:
+        _safe_unlink(video_path)
+        print(f"[upload] {job_id} rejected after save: {e}", flush=True)
+        return jsonify({"error": str(e)}), 400
 
     jobs[job_id] = {
         "status": "queued",
@@ -5145,6 +5833,7 @@ def transcribe_only():
         "emoji_rules": None,
         "created_at": time.time(),
         "filename": f.filename,
+        "media_info": probe,
     }
     _db_save_job(job_id)
     pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
@@ -5152,7 +5841,18 @@ def transcribe_only():
     t.daemon = True
     t.start()
 
-    return jsonify({"job_id": job_id})
+    return jsonify({
+        "job_id": job_id,
+        "media_info": {
+            "size": probe.get("size"),
+            "duration": probe.get("duration"),
+            "has_audio": probe.get("has_audio"),
+            "has_video": probe.get("has_video"),
+            "video_codec": probe.get("video_codec"),
+            "audio_codec": probe.get("audio_codec"),
+            "is_hevc": probe.get("is_hevc"),
+        },
+    })
 
 
 @app.route("/analyze-reframe", methods=["POST"])
@@ -5552,7 +6252,7 @@ def render():
         return jsonify({"error": "Original video not found on server"}), 404
 
     jobs[job_id]["words"] = words
-    jobs[job_id]["style"] = style
+    jobs[job_id]["style"] = _normalize_caption_style(style)
     jobs[job_id]["audio"] = audio
     jobs[job_id]["emoji_rules"] = emoji_rules
     jobs[job_id]["status"] = "queued"
@@ -5563,7 +6263,7 @@ def render():
 
     t = threading.Thread(
         target=render_job,
-        args=(job_id, video_path, words, style, audio, emoji_rules),
+        args=(job_id, video_path, words, jobs[job_id]["style"], audio, emoji_rules),
     )
     t.daemon = True
     t.start()
@@ -5597,10 +6297,24 @@ def save_draft():
         if error:
             return jsonify({"error": error}), 400
         jobs[job_id]["words"] = words
+        # Recover from a prior transcription miss (e.g. silent upload) once
+        # a usable transcript exists — needed for demo/UI workflows.
+        if words and jobs[job_id].get("status") == "error":
+            jobs[job_id]["status"] = "awaiting_edit"
+            jobs[job_id]["error"] = None
+            jobs[job_id]["progress"] = 100
 
     for key in ("style", "audio", "emoji_rules"):
         if key in data:
-            jobs[job_id][key] = data.get(key) or {}
+            val = data.get(key) or {}
+            if key == "style":
+                val = _normalize_caption_style(val) if val else {}
+            jobs[job_id][key] = val
+
+    if "clip_suggestions" in data and isinstance(data.get("clip_suggestions"), list):
+        jobs[job_id]["clip_suggestions"] = data.get("clip_suggestions") or []
+        if data.get("clip_format"):
+            jobs[job_id]["clip_format"] = data.get("clip_format")
 
     _db_save_job(job_id)
     return jsonify({"ok": True})
@@ -5643,7 +6357,91 @@ def status(job_id):
     # actionable (after a render, the source is intentionally deleted).
     payload = dict(job)
     payload["video_available"] = find_video_path(job_id) is not None
+    # When stuck in error, attach a fresh probe so the UI can say "Retry" vs
+    # "re-drop the full file" instead of a dead-end Transcribe alert.
+    if payload.get("status") == "error" and payload["video_available"]:
+        try:
+            path = find_video_path(job_id)
+            if path:
+                payload["media_info"] = _probe_media_streams(path)
+        except Exception:
+            pass
     return jsonify(payload)
+
+
+@app.route("/replace-and-transcribe", methods=["POST"])
+def replace_and_transcribe():
+    """Replace the source file on an existing (usually failed) job and re-run Whisper.
+
+    Use this when Retry keeps saying "no audio" — the file on disk is often a
+    truncated iPhone MOV; re-dropping onto the same job clears that dead-end.
+    Form: job_id, video, optional pre_clean.
+
+    Saves the new file to a temp path and validates BEFORE deleting the old
+    source, so a bad second drop cannot leave the job with zero media.
+    """
+    job_id = (request.form.get("job_id") or "").strip()
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    if "video" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["video"]
+    if not f.filename or not allowed_file(f.filename):
+        return jsonify({"error": "Unsupported or empty file"}), 400
+
+    ext = f.filename.rsplit(".", 1)[1].lower()
+    staging = UPLOAD_DIR / f".{job_id}.replace_staging.{ext}"
+    _safe_unlink(staging)
+    expected_bytes = None
+    try:
+        if getattr(f, "content_length", None):
+            expected_bytes = int(f.content_length)
+    except (TypeError, ValueError):
+        expected_bytes = None
+    f.save(str(staging))
+    try:
+        probe = _validate_uploaded_media(staging, expected_bytes=expected_bytes)
+        print(
+            f"[replace] {job_id} ok size={staging.stat().st_size} "
+            f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
+            f"name={f.filename!r}",
+            flush=True,
+        )
+    except Exception as e:
+        _safe_unlink(staging)
+        return jsonify({"error": str(e)}), 400
+
+    # Validated — now swap in as the job source.
+    old = find_video_path(job_id)
+    if old:
+        _safe_unlink(old)
+    for extra in UPLOAD_DIR.glob(f".{job_id}.*"):
+        # Keep the staging file until we rename it.
+        if extra == staging:
+            continue
+        _safe_unlink(extra)
+    _safe_unlink(_edit_proxy_path(job_id))
+
+    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    try:
+        staging.replace(video_path)
+    except OSError:
+        shutil.move(str(staging), str(video_path))
+    _safe_unlink(staging)
+
+    jobs[job_id]["filename"] = f.filename
+    jobs[job_id]["status"] = "queued"
+    jobs[job_id]["progress"] = 0
+    jobs[job_id]["error"] = None
+    jobs[job_id]["words"] = None
+    jobs[job_id]["media_info"] = probe
+    jobs[job_id]["edit_proxy"] = False
+    _db_save_job(job_id)
+    pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
+    t = threading.Thread(target=retranscribe_job, args=(job_id, video_path, pre_clean))
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id, "status": "re-transcribing", "replaced": True})
 
 
 def _format_srt_timestamp(seconds: float) -> str:
@@ -5953,12 +6751,52 @@ def _asset_kind(ext: str) -> str | None:
     return None
 
 
+def _asset_meta_path(asset_id: str) -> Path:
+    return ASSET_DIR / f"{asset_id}.meta.json"
+
+
+def _write_asset_meta(asset_id: str, **fields) -> None:
+    """Persist display metadata (original filename, keyword, source) beside an asset."""
+    if not asset_id:
+        return
+    path = _asset_meta_path(asset_id)
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+    for k, v in fields.items():
+        if v is not None and v != "":
+            data[k] = v
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_asset_meta(asset_id: str) -> dict:
+    path = _asset_meta_path(asset_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _find_asset_path(asset_id: str) -> Path | None:
     """Resolve an uploaded asset id to its file on disk (extension agnostic)."""
     if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
         return None
     for p in ASSET_DIR.glob(f"{asset_id}.*"):
-        if p.is_file():
+        if not p.is_file():
+            continue
+        # Skip sidecar metadata / non-media companions.
+        if p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
+            continue
+        if _asset_kind(p.suffix):
             return p
     return None
 
@@ -6437,9 +7275,31 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     )
 
 
+def _tl_overlay_scale_filter(ow: int, oh: int, fit: str) -> str:
+    """FFmpeg scale/crop/pad chain for overlay fit modes."""
+    fit = (fit or "cover").lower()
+    if fit == "contain":
+        return (
+            f"scale={ow}:{oh}:force_original_aspect_ratio=decrease,"
+            f"pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+        )
+    if fit == "fill":
+        return f"scale={ow}:{oh},setsar=1"
+    # cover (default): fill box, crop overflow
+    return (
+        f"scale={ow}:{oh}:force_original_aspect_ratio=increase,"
+        f"crop={ow}:{oh},setsar=1"
+    )
+
+
 def _tl_composite_overlays(base: Path, overlay_clips: list,
-                           W: int, H: int, out_path: Path) -> None:
-    """Composite B-roll / PiP / image overlays onto *base* (audio copied)."""
+                           W: int, H: int, out_path: Path,
+                           fps: int = 30) -> None:
+    """Composite B-roll / PiP / image overlays onto *base* (audio copied).
+
+    Honors: start, in/out, x, y, w, h, opacity, fit (cover|contain|fill),
+    fade_in / fade_out, border_px, ken_burns (slow zoom on the PiP box).
+    """
     resolved = []
     for ov in overlay_clips:
         path = _timeline_clip_source(ov)
@@ -6456,25 +7316,71 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
     filt = []
     cur = "[0:v]"
     in_idx = 1
+    fps = max(15, min(60, int(fps or 30)))
     for n, (ov, path, kind) in enumerate(resolved, start=1):
         start = max(0.0, float(ov.get("start", 0)))
         o_in = max(0.0, float(ov.get("in", 0)))
         o_out = float(ov.get("out", o_in + 4))
         length = max(0.2, o_out - o_in)
         wfrac = min(1.0, max(0.05, float(ov.get("w", 0.4))))
+        if ov.get("h") is not None:
+            try:
+                hfrac = min(1.0, max(0.05, float(ov.get("h"))))
+            except (TypeError, ValueError):
+                hfrac = wfrac * 9 / 16
+        else:
+            # Default PiP box ≈ 16:9 relative to canvas width.
+            hfrac = min(1.0, max(0.05, (wfrac * W * 9 / 16) / max(1, H)))
         ow = max(2, int(W * wfrac) // 2 * 2)
+        oh = max(2, int(H * hfrac) // 2 * 2)
         x = int(W * float(ov.get("x", 0.5)))
         y = int(H * float(ov.get("y", 0.5)))
+        # Keep overlay on-canvas
+        x = max(0, min(W - ow, x))
+        y = max(0, min(H - oh, y))
         opacity = min(1.0, max(0.0, float(ov.get("opacity", 1.0))))
+        fit = str(ov.get("fit") or "cover")
+        try:
+            fade_in = max(0.0, min(length / 2, float(ov.get("fade_in") or 0)))
+        except (TypeError, ValueError):
+            fade_in = 0.0
+        try:
+            fade_out = max(0.0, min(length / 2, float(ov.get("fade_out") or 0)))
+        except (TypeError, ValueError):
+            fade_out = 0.0
+        try:
+            border = max(0, min(24, int(ov.get("border_px") or 0)))
+        except (TypeError, ValueError):
+            border = 0
 
+        scale = _tl_overlay_scale_filter(ow, oh, fit)
         if kind == "image":
             inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1"
+            prep = f"[{in_idx}:v]{scale}"
         else:
             inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]scale={ow}:-2,setsar=1,setpts=PTS-STARTPTS"
-        if opacity < 1.0:
-            prep += f",format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+            prep = f"[{in_idx}:v]{scale},setpts=PTS-STARTPTS"
+        # Ken Burns on the PiP box (photo / short B-roll moments).
+        kb = _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
+        if kb:
+            prep += "," + kb
+        if border > 0:
+            prep += (
+                f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
+            )
+            # Re-clamp position for padded size
+            x = max(0, min(W - (ow + border * 2), x - border))
+            y = max(0, min(H - (oh + border * 2), y - border))
+        need_alpha = opacity < 1.0 or fade_in > 0 or fade_out > 0
+        if need_alpha:
+            prep += ",format=yuva420p"
+            if opacity < 1.0:
+                prep += f",colorchannelmixer=aa={opacity:.3f}"
+            if fade_in > 0:
+                prep += f",fade=t=in:st=0:d={fade_in:.3f}:alpha=1"
+            if fade_out > 0:
+                st = max(0.0, length - fade_out)
+                prep += f",fade=t=out:st={st:.3f}:d={fade_out:.3f}:alpha=1"
         # Delay the overlay so it lands at `start` on the timeline.
         prep += f",tpad=start_duration={start:.3f}"
         prep += f"[ov{n}]"
@@ -6581,14 +7487,7 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
     return header + "\n".join(events) + "\n"
 
 
-_TL_DEFAULT_CAPTION_STYLE = {
-    "font_name": "Montserrat Thin Black", "font_size": 64,
-    "primary_color": "#FFFFFF", "highlight_color": "#FFD60A",
-    "accent_color": "#FF6B35", "outline_color": "#000000",
-    "outline_width": 3, "shadow": 1, "position_y": 82,
-    "all_caps": True, "group_size": 3,
-    "smooth_timings": True, "punchword_emphasis": True,
-}
+_TL_DEFAULT_CAPTION_STYLE = _DEFAULT_CAPTION_STYLE
 
 
 def _tl_compose_ass(W: int, H: int, *ass_docs: str) -> str:
@@ -6698,17 +7597,130 @@ def _normalize_timeline(timeline: dict) -> dict:
     else:
         tl["headline_banner"] = None
     style = tl.get("style")
-    tl["style"] = style if isinstance(style, dict) else {}
+    if isinstance(style, dict) and style:
+        tl["style"] = _normalize_caption_style(style)
+    else:
+        tl["style"] = {}
     ts = tl.get("track_states")
     tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
     if not isinstance(tracks, dict):
         tracks = {}
-    for key in ("main", "overlay", "text", "music"):
+    for key in ("main", "overlay", "effects", "text", "music"):
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
+    # Effect-lane clips: type + start + out(duration). Coerce common shapes.
+    _fx_types = {"split_screen", "punch_zoom", "ken_burns", "color"}
+    cleaned_fx = []
+    for fx in tracks["effects"]:
+        if not isinstance(fx, dict):
+            continue
+        ftype = str(fx.get("type") or "")
+        if ftype not in _fx_types:
+            continue
+        try:
+            start = max(0.0, float(fx.get("start", 0)))
+        except (TypeError, ValueError):
+            start = 0.0
+        try:
+            # `out` is duration on the effects lane (same convention as titles).
+            dur = float(fx.get("out", fx.get("duration", 2)))
+        except (TypeError, ValueError):
+            dur = 2.0
+        dur = max(0.2, min(120.0, dur))
+        row = dict(fx)
+        row["type"] = ftype
+        row["start"] = start
+        row["out"] = dur
+        if "id" not in row or not row["id"]:
+            row["id"] = uuid.uuid4().hex[:8]
+        cleaned_fx.append(row)
+    tracks["effects"] = cleaned_fx
     tl["tracks"] = tracks
     return tl
+
+
+def _tl_effect_span(fx: dict) -> tuple[float, float]:
+    """Return (start, end) in output time for an effects-lane clip."""
+    try:
+        start = max(0.0, float(fx.get("start", 0)))
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        dur = max(0.2, float(fx.get("out", fx.get("duration", 2))))
+    except (TypeError, ValueError):
+        dur = 2.0
+    return start, start + dur
+
+
+def _tl_effects_overlapping(effects: list, t0: float, t1: float) -> list:
+    """Effects whose [start, end) overlaps output interval [t0, t1)."""
+    out = []
+    for fx in effects or []:
+        if not isinstance(fx, dict):
+            continue
+        a, b = _tl_effect_span(fx)
+        if b > t0 + 0.001 and a < t1 - 0.001:
+            out.append(fx)
+    return out
+
+
+def _tl_effect_cut_points(effects: list, t0: float, t1: float) -> list[float]:
+    """Sorted unique boundaries inside (t0, t1) where an effect starts or ends."""
+    pts = {round(t0, 4), round(t1, 4)}
+    for fx in effects or []:
+        if not isinstance(fx, dict):
+            continue
+        a, b = _tl_effect_span(fx)
+        if t0 < a < t1:
+            pts.add(round(a, 4))
+        if t0 < b < t1:
+            pts.add(round(b, 4))
+    return sorted(pts)
+
+
+def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
+    """Fold overlapping effects-lane clips into ken/punch/color/split props.
+
+    Later clips of the same type win. Returns (ken, punch, color, split).
+    """
+    ken = None
+    punch = None
+    color = None
+    split = None
+    for fx in lane_fxs or []:
+        ftype = fx.get("type")
+        if ftype == "ken_burns":
+            ken = {
+                "enabled": True,
+                "intensity": fx.get("intensity") or "med",
+                "direction": fx.get("direction") or "in",
+            }
+        elif ftype == "punch_zoom":
+            punch = {
+                "enabled": True,
+                "intensity": fx.get("intensity") or "med",
+                "hit": float(fx.get("hit") or 0),
+                "decay": float(fx.get("decay") or 0.45),
+            }
+            if isinstance(fx.get("anchor"), dict):
+                punch["anchor"] = fx["anchor"]
+        elif ftype == "color":
+            color = {
+                "preset": fx.get("preset") or "none",
+                "brightness": fx.get("brightness", 0),
+                "contrast": fx.get("contrast", 1),
+                "saturation": fx.get("saturation", 1),
+            }
+        elif ftype == "split_screen":
+            split = {
+                "enabled": True,
+                "source_job_id": fx.get("source_job_id"),
+                "asset_id": fx.get("asset_id"),
+                "in": float(fx.get("in") or 0),
+                "layout": fx.get("layout") or "auto",
+            }
+    return ken, punch, color, split
 
 
 def render_timeline_job(job_id: str, timeline: dict) -> None:
@@ -6728,21 +7740,34 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         bg = tl["bg"]
         tracks = tl["tracks"]
         style = tl.get("style") or jobs[job_id].get("style") or {}
+        if not _style_has_caption_fields(style):
+            # Fall back to Caption look on the first main source job.
+            for c in (tracks.get("main") or []):
+                sjid = c.get("source_job_id")
+                if sjid and jobs.get(sjid) and _style_has_caption_fields(jobs[sjid].get("style")):
+                    style = jobs[sjid]["style"]
+                    break
+        style = _normalize_caption_style(style) if _style_has_caption_fields(style) else dict(_DEFAULT_CAPTION_STYLE)
+        tl["style"] = style
 
         main_clips = tracks["main"]
         if not main_clips:
             raise RuntimeError("Add at least one clip to the main track before rendering.")
 
+        lane_effects = tracks.get("effects") or []
+
         # ---- Pass 1: normalize + stitch the main video track ----
         # Each main clip may expand into several segments: text-based editing
         # cuts split it into keep-ranges, and split-screen / Ken Burns change how
-        # each piece is rendered. Transitions live on clip *boundaries* only;
-        # cut-internal boundaries are hard cuts.
+        # each piece is rendered. Effects-lane clips further subdivide by time.
+        # Transitions live on clip *boundaries* only; cut-internal boundaries
+        # are hard cuts.
         _stage("building main track", 10)
         segments = []        # [(path, dur)]
         transitions = []     # len == len(segments) - 1
         seg_meta = []        # per-segment caption source info, aligned to segments
         seg_counter = 0
+        out_cursor = 0.0     # output time so far (before xfade), matches Effects lane
         for i, c in enumerate(main_clips):
             src = _timeline_clip_source(c)
             if not src:
@@ -6772,11 +7797,11 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             if not keeps:
                 continue  # entire clip was cut away via text editing
 
-            ken = c.get("ken_burns")
-            punch = c.get("punch_zoom")
-            color = c.get("color")
-            split = c.get("split") or {}
-            split_src = _timeline_clip_source(split) if split.get("enabled") else None
+            # Clip-level FX (legacy / inspector) — Effects lane overrides when set.
+            clip_ken = c.get("ken_burns")
+            clip_punch = c.get("punch_zoom")
+            clip_color = c.get("color") or c.get("color_grade")
+            clip_split = c.get("split") or {}
 
             clip_tr = c.get("transition") or {}
             clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
@@ -6785,27 +7810,53 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             burn_caps = c.get("burn_captions", True) and bool(c.get("source_job_id"))
 
             for k, (ks, ke) in enumerate(keeps):
-                seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
                 kdur = ke - ks
-                if split_src:
-                    s_in = max(0.0, float(split.get("in", 0))) + (ks - t_in)
-                    dur = _tl_split_segment(src, ks, split_src, s_in, kdur,
-                                            split.get("layout", "auto"),
-                                            W, H, fps, seg_path, color=color)
-                else:
-                    dur = _tl_normalize_segment(src, ks, ke, W, H, fps, fit, bg,
-                                                seg_path, ken=ken, color=color, punch=punch)
-                segments.append((seg_path, dur))
-                seg_meta.append({
-                    "source_job_id": c.get("source_job_id"),
-                    "src_in": ks, "src_out": ke, "burn_captions": burn_caps,
-                })
-                work.append(seg_path)
-                # Boundary transition only at the START of a new clip's first
-                # kept piece (not the very first segment overall).
-                if segments and len(segments) > 1:
-                    transitions.append(clip_tr if k == 0 else 0)
-                seg_counter += 1
+                keep_ot0 = out_cursor
+                keep_ot1 = out_cursor + kdur
+                cuts = _tl_effect_cut_points(lane_effects, keep_ot0, keep_ot1)
+                for bi in range(len(cuts) - 1):
+                    ot0, ot1 = cuts[bi], cuts[bi + 1]
+                    sub_dur = ot1 - ot0
+                    if sub_dur < 0.04:
+                        continue
+                    src_off = ot0 - keep_ot0
+                    sub_ks = ks + src_off
+                    sub_ke = sub_ks + sub_dur
+
+                    lane_fxs = _tl_effects_overlapping(lane_effects, ot0, ot1)
+                    fx_ken, fx_punch, fx_color, fx_split = _tl_props_from_lane_effects(lane_fxs)
+
+                    ken = fx_ken if fx_ken else clip_ken
+                    punch = fx_punch if fx_punch else clip_punch
+                    color = fx_color if fx_color else clip_color
+                    split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
+                    split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
+
+                    seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
+                    if split_src:
+                        # Second-source in-point advances with source time on A.
+                        base_in = max(0.0, float((split or {}).get("in", 0)))
+                        s_in = base_in + (sub_ks - t_in)
+                        dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
+                                                (split or {}).get("layout", "auto"),
+                                                W, H, fps, seg_path, color=color)
+                    else:
+                        dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
+                                                    seg_path, ken=ken, color=color, punch=punch)
+                    segments.append((seg_path, dur))
+                    seg_meta.append({
+                        "source_job_id": c.get("source_job_id"),
+                        "src_in": sub_ks, "src_out": sub_ke, "burn_captions": burn_caps,
+                        "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
+                    })
+                    work.append(seg_path)
+                    # Boundary transition only at the START of a new clip's first
+                    # kept piece (not the very first segment overall).
+                    if segments and len(segments) > 1:
+                        transitions.append(clip_tr if (k == 0 and bi == 0) else 0)
+                    seg_counter += 1
+
+                out_cursor += kdur
 
             jobs[job_id]["progress"] = 10 + int(25 * (i + 1) / len(main_clips))
             _db_save_job(job_id)
@@ -6828,11 +7879,14 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             words = sjob.get("words") or []
             if not words:
                 continue
-            if not caption_style:
-                caption_style = sjob.get("style") or _TL_DEFAULT_CAPTION_STYLE
+            if not _style_has_caption_fields(caption_style):
+                caption_style = _normalize_caption_style(
+                    sjob.get("style") or _TL_DEFAULT_CAPTION_STYLE
+                )
             if caption_emoji is None:
                 caption_emoji = sjob.get("emoji_rules") or {}
             seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+            overrides = meta.get("word_overrides") or {}
             for w in words:
                 try:
                     ws = float(w.get("start", 0))
@@ -6843,8 +7897,13 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     continue
                 local_s = max(0.0, ws - meta["src_in"])
                 local_e = max(local_s, min(meta["src_out"], we) - meta["src_in"])
+                text = w.get("word", "")
+                # Clip-local caption renames (Phase 4) keyed by source start time.
+                key = f"{ws:.3f}"
+                if key in overrides and str(overrides[key]).strip():
+                    text = str(overrides[key]).strip()
                 caption_words.append({
-                    "word": w.get("word", ""),
+                    "word": text,
                     "start": seg_start + local_s,
                     "end": seg_start + local_e,
                 })
@@ -6870,7 +7929,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _stage("compositing overlays", 70)
             comp = UPLOAD_DIR / f"{job_id}_tlovl.mp4"
             work.append(comp)
-            _tl_composite_overlays(base, tracks["overlay"], W, H, comp)
+            _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
             base = comp
 
         # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
@@ -6969,6 +8028,7 @@ def upload_asset():
     asset_id = uuid.uuid4().hex
     dest = ASSET_DIR / f"{asset_id}.{ext}"
     f.save(str(dest))
+    _write_asset_meta(asset_id, filename=f.filename, source="upload")
     return jsonify({
         "asset_id": asset_id,
         "kind": kind,
@@ -6984,18 +8044,50 @@ def list_assets():
     for p in ASSET_DIR.glob("*"):
         if not p.is_file():
             continue
+        if p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
+            continue
         kind = _asset_kind(p.suffix)
         if not kind:
             continue
+        meta = _read_asset_meta(p.stem)
+        filename = meta.get("filename") or meta.get("keyword") or None
+        if not filename and meta.get("keyword"):
+            filename = f"{meta['keyword']}.{p.suffix.lstrip('.')}"
         out.append({
             "asset_id": p.stem,
             "kind": kind,
             "ext": p.suffix.lstrip("."),
+            "filename": filename,
+            "keyword": meta.get("keyword"),
+            "source": meta.get("source"),
             "duration": _media_duration(p) if kind in ("video", "audio") else 0.0,
             "mtime": p.stat().st_mtime,
         })
     out.sort(key=lambda a: a["mtime"], reverse=True)
     return jsonify({"assets": out})
+
+
+@app.route("/delete-asset/<asset_id>", methods=["POST", "DELETE"])
+def delete_asset(asset_id: str):
+    """Remove an uploaded timeline asset and its metadata sidecar."""
+    if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
+        return jsonify({"error": "Invalid asset id"}), 400
+    removed = 0
+    for p in list(ASSET_DIR.glob(f"{asset_id}.*")):
+        if not p.is_file():
+            continue
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+    # Waveform companion uses a different stem pattern.
+    wave = ASSET_DIR / f"{asset_id}_wave.png"
+    if wave.exists():
+        _safe_unlink(wave)
+    if removed == 0:
+        return jsonify({"error": "Asset not found"}), 404
+    return jsonify({"ok": True, "asset_id": asset_id, "removed": removed})
 
 
 @app.route("/asset/<asset_id>")
@@ -7190,7 +8282,15 @@ def timeline_render():
     if not timeline["tracks"]["main"]:
         return jsonify({"error": "Add at least one clip to the main track first."}), 400
 
-    style = data.get("style") or jobs[job_id].get("style") or {}
+    style = data.get("style") or timeline.get("style") or jobs[job_id].get("style") or {}
+    # Timeline project may have empty style — seed from first main source's Caption look.
+    if not _style_has_caption_fields(style):
+        for c in timeline["tracks"]["main"]:
+            sjid = c.get("source_job_id")
+            if sjid and jobs.get(sjid) and _style_has_caption_fields(jobs[sjid].get("style")):
+                style = jobs[sjid]["style"]
+                break
+    style = _normalize_caption_style(style) if _style_has_caption_fields(style) else _normalize_caption_style({})
     timeline["style"] = style
     jobs[job_id]["style"] = style
     jobs[job_id]["timeline"] = timeline
@@ -7223,6 +8323,790 @@ def timeline_list():
         })
     out.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
     return jsonify({"timelines": out})
+
+
+# =====================================================================
+# Captions-aligned pipeline: AI Edit seed, recommended cuts, shots, co-editor
+# =====================================================================
+
+def _strip_filler_token(s: str) -> str:
+    return re.sub(r"[^a-z']", "", (s or "").lower())
+
+
+def _filler_indices(words: list) -> set:
+    flagged = set()
+    if not words:
+        return flagged
+    for i, w in enumerate(words):
+        tok = _strip_filler_token(str(w.get("word", "")))
+        if not tok:
+            continue
+        if tok in _FILLER_SINGLE_WORDS:
+            flagged.add(i)
+            continue
+        if i + 1 < len(words):
+            nxt = _strip_filler_token(str(words[i + 1].get("word", "")))
+            for a, b in _FILLER_PAIR_WORDS:
+                if tok == a and nxt == b:
+                    flagged.add(i)
+                    flagged.add(i + 1)
+                    break
+    return flagged
+
+
+def _merge_cut_ranges(ranges: list) -> list:
+    if not ranges:
+        return []
+    norm = []
+    for r in ranges:
+        try:
+            a, b = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b > a:
+            norm.append([a, b])
+    if not norm:
+        return []
+    norm.sort(key=lambda x: x[0])
+    out = [norm[0]]
+    for a, b in norm[1:]:
+        if a <= out[-1][1] + 0.05:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
+                                max_gap: float = 1.0,
+                                include_fillers: bool = True,
+                                include_silence: bool = True) -> dict:
+    """Build filler + silence cut ranges (source seconds) for AI Trim parity."""
+    window = [w for w in (words or [])
+              if float(w.get("end", 0) or 0) > t_in
+              and float(w.get("start", 0) or 0) < t_out]
+    cuts = []
+    filler_count = 0
+    if include_fillers and window:
+        flagged = _filler_indices(window)
+        for i in flagged:
+            try:
+                ws = max(t_in, float(window[i].get("start", 0)))
+                we = min(t_out, float(window[i].get("end", 0)))
+            except (TypeError, ValueError):
+                continue
+            if we > ws:
+                cuts.append([ws, we])
+                filler_count += 1
+    silence_gaps = []
+    if include_silence and len(window) >= 2:
+        silence = compute_silence_compression(window, max_gap=max_gap, target_gap=0.25)
+        for g in silence.get("gaps") or []:
+            if g.get("preserved"):
+                continue
+            try:
+                gs = max(t_in, float(g["start"]))
+                ge = min(t_out, float(g["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Cut the middle of the gap, leave target_gap/2 on each side.
+            cut_len = (ge - gs) - 0.25
+            if cut_len < 0.15:
+                continue
+            mid_start = gs + 0.125
+            mid_end = ge - 0.125
+            if mid_end > mid_start:
+                cuts.append([mid_start, mid_end])
+                silence_gaps.append({
+                    "start": gs, "end": ge, "duration": ge - gs,
+                    "context_before": g.get("context_before", ""),
+                    "context_after": g.get("context_after", ""),
+                })
+    merged = _merge_cut_ranges(cuts)
+    cut_total = sum(b - a for a, b in merged)
+    labeled = []
+    for a, b in merged:
+        kind = "silence"
+        for g in silence_gaps:
+            if a < g["end"] and b > g["start"]:
+                kind = "silence"
+                labeled.append({
+                    "start": a, "end": b,
+                    "kind": kind,
+                    "context_before": g.get("context_before", ""),
+                    "context_after": g.get("context_after", ""),
+                })
+                break
+        else:
+            labeled.append({
+                "start": a, "end": b,
+                "kind": "filler",
+                "context_before": "",
+                "context_after": "",
+            })
+    return {
+        "cuts": merged,
+        "cut_details": labeled,
+        "filler_count": filler_count,
+        "silence_gaps": silence_gaps,
+        "stats": {
+            "cut_count": len(merged),
+            "seconds_removed": round(cut_total, 2),
+            "window_in": t_in,
+            "window_out": t_out,
+        },
+    }
+
+
+def _intensity_effect_budget(intensity: str) -> int:
+    return {"low": 2, "med": 4, "high": 8}.get((intensity or "med").lower(), 4)
+
+
+def _uid_short() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _clip_color_from_pack(pack: dict) -> dict:
+    """Normalize pack color_grade into the `color` shape Render actually reads."""
+    raw = pack.get("color_grade") if isinstance(pack, dict) else None
+    if not isinstance(raw, dict):
+        return {"preset": "none"}
+    preset = str(raw.get("preset") or "none")
+    if preset not in _TL_COLOR_PRESETS:
+        preset = "none"
+    # Older packs stored tiny deltas (contrast: 0.1) that destroy the image if
+    # treated as absolute ffmpeg eq values — keep preset only.
+    return {"preset": preset}
+
+
+def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
+                            pack: dict, intensity: str,
+                            cuts: list, effects: list,
+                            label: str = "",
+                            words: list | None = None,
+                            insert_media: bool = True) -> dict:
+    """Assemble a Captions-style seeded timeline project from a style pack."""
+    main_id = _uid_short()
+    grade = _clip_color_from_pack(pack)
+    main_clip = {
+        "id": main_id,
+        "source_job_id": job_id,
+        "in": t_in,
+        "out": t_out,
+        "transition": None,
+        "burn_captions": True,
+        "cuts": cuts or [],
+        "color": grade,
+        "color_grade": grade,
+    }
+    # Apply up to budget punch/Ken Burns by splitting the main clip.
+    budget = _intensity_effect_budget(intensity)
+    pieces = [main_clip]
+    usable = []
+    for fx in effects or []:
+        try:
+            fs = float(fx.get("start_time"))
+            fe = float(fx.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        if fe <= fs or fs < t_in - 0.05 or fe > t_out + 0.05:
+            continue
+        usable.append(fx)
+        if len(usable) >= budget:
+            break
+
+    if usable:
+        # Split chronologically into effect mid-segments.
+        usable.sort(key=lambda e: float(e["start_time"]))
+        pieces = []
+        cursor = t_in
+        for fx in usable:
+            fs = max(t_in, float(fx["start_time"]))
+            fe = min(t_out, float(fx["end_time"]))
+            if fs - cursor > 0.08:
+                pieces.append({
+                    "id": _uid_short(), "source_job_id": job_id,
+                    "in": cursor, "out": fs, "transition": None,
+                    "burn_captions": True, "cuts": [],
+                    "color": grade, "color_grade": grade,
+                })
+            mid = {
+                "id": _uid_short(), "source_job_id": job_id,
+                "in": fs, "out": fe, "transition": None,
+                "burn_captions": True, "cuts": [],
+                "color": grade, "color_grade": grade,
+            }
+            ftype = fx.get("type")
+            if ftype == "punch_zoom":
+                mid["punch_zoom"] = {
+                    "enabled": True,
+                    "intensity": fx.get("intensity") or ("high" if intensity == "high" else "med"),
+                }
+                if fx.get("anchor"):
+                    mid["punch_zoom"]["anchor"] = fx["anchor"]
+            elif ftype == "ken_burns":
+                mid["ken_burns"] = {
+                    "enabled": True,
+                    "intensity": fx.get("intensity") or "med",
+                    "direction": fx.get("direction") or "in",
+                }
+            elif ftype == "split_screen":
+                mid["split"] = {"enabled": True}
+            pieces.append(mid)
+            cursor = fe
+        if t_out - cursor > 0.08:
+            pieces.append({
+                "id": _uid_short(), "source_job_id": job_id,
+                "in": cursor, "out": t_out, "transition": None,
+                "burn_captions": True, "cuts": [],
+                "color": grade, "color_grade": grade,
+            })
+        # Redistribute original cuts onto pieces by intersection.
+        if cuts:
+            for p in pieces:
+                p["cuts"] = [
+                    [max(p["in"], c[0]), min(p["out"], c[1])]
+                    for c in cuts
+                    if c[1] > p["in"] and c[0] < p["out"] and min(p["out"], c[1]) - max(p["in"], c[0]) > 0.05
+                ]
+        # Transitions between pieces
+        tr = pack.get("transition") or "crossfade"
+        for i, p in enumerate(pieces[:-1]):
+            p["transition"] = {"type": tr, "duration": 0.25 if intensity != "high" else 0.15}
+
+    text_track = []
+    if pack.get("add_title") and label:
+        text_track.append({
+            "id": _uid_short(),
+            "text": label[:80],
+            "start": 0,
+            "out": 2.5,
+            "x": 0.5, "y": 0.12, "size": 64,
+            "color": "#FFFFFF", "font": pack.get("style", {}).get("font") or "Anton",
+            "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.45,
+            "outline_color": "#000000", "outline_width": 0, "shadow": 0,
+            "bold": True, "align": 2, "anim": "fade",
+            "anchor": pieces[0]["id"] if pieces else None,
+        })
+
+    # Keyword callouts → text track + optional badge overlays (Phase 5).
+    overlay_track = []
+    if insert_media and words:
+        media_budget = {"low": 1, "med": 3, "high": 5}.get((intensity or "med").lower(), 3)
+        callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
+        style = pack.get("style") or {}
+        for i, co in enumerate(callouts):
+            # Map source time into output time roughly as offset from t_in
+            # (before cut compression — good enough for seed placement).
+            start = max(0.0, float(co["start"]) - t_in)
+            dur = min(2.2, max(1.2, float(co.get("duration") or 1.8)))
+            text_track.append({
+                "id": _uid_short(),
+                "text": str(co["text"])[:40],
+                "start": start,
+                "out": start + dur,  # absolute end (ASS builder expects end, not duration)
+                "x": 0.72, "y": 0.18, "size": int(style.get("size") or style.get("font_size") or 56) - 8,
+                "color": style.get("highlight") or style.get("highlight_color") or "#FFD60A",
+                "font": style.get("font") or style.get("font_name") or "Anton",
+                "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.55,
+                "outline_color": "#000000", "outline_width": 0, "shadow": 0,
+                "bold": True, "align": 2, "anim": "slideup",
+                "anchor": pieces[0]["id"] if pieces else None,
+            })
+            # Also seed a PiP keyword badge on the overlay track when possible.
+            try:
+                asset_id = uuid.uuid4().hex
+                dest = ASSET_DIR / f"{asset_id}.png"
+                if _make_keyword_badge_png(str(co["text"]), dest):
+                    corners = [
+                        {"x": 0.58, "y": 0.06}, {"x": 0.04, "y": 0.06},
+                        {"x": 0.58, "y": 0.62}, {"x": 0.04, "y": 0.62},
+                    ]
+                    pos = corners[i % 4]
+                    overlay_track.append({
+                        "id": _uid_short(),
+                        "asset_id": asset_id,
+                        "in": 0,
+                        "out": dur,
+                        "start": start,
+                        "x": pos["x"], "y": pos["y"],
+                        "w": 0.36, "h": 0.20,
+                        "opacity": 0.92,
+                        "fit": "contain",
+                        "fade_in": 0.15, "fade_out": 0.2,
+                        "border_px": 0,
+                        "layout": "pip_auto",
+                        "anchor": pieces[0]["id"] if pieces else None,
+                        "anchor_offset": start,
+                    })
+                else:
+                    _safe_unlink(dest)
+            except Exception:
+                pass
+
+    music_track = []
+    # Auto-attach previously uploaded bg music for this job, if present.
+    bg_music_files = list(UPLOAD_DIR.glob(f"{job_id}_bgmusic.*"))
+    if bg_music_files and intensity != "low":
+        # Music assets on the timeline use asset_id from /upload-asset.
+        # For job-scoped bg music we keep a hint the UI can surface.
+        pass
+
+    return {
+        "canvas": pack.get("canvas") or "9x16",
+        "fit": "cover",
+        "fps": 30,
+        "bg": "#000000",
+        "style": _normalize_caption_style(pack.get("style") or {}),
+        "caption_preset": pack.get("caption_preset"),
+        "ai_edit": {
+            "style_pack": pack.get("label"),
+            "intensity": intensity,
+            "insert_media": bool(insert_media),
+        },
+        "tracks": {
+            "main": pieces,
+            "overlay": overlay_track,
+            "text": text_track,
+            "music": music_track,
+        },
+        "media_hints": {
+            "bg_music_available": bool(bg_music_files),
+            "callout_count": max(0, len(text_track) - (1 if pack.get("add_title") and label else 0)),
+            "overlay_count": len(overlay_track),
+        },
+    }
+
+
+_VISUAL_KEYWORDS = {
+    "coffee", "candle", "festival", "money", "growth", "craft", "food", "music",
+    "car", "house", "dog", "cat", "computer", "phone", "book", "water", "fire",
+    "earth", "sky", "sun", "moon", "star", "city", "tree", "flower", "people",
+    "business", "love", "happy", "sad", "angry", "time", "day", "night", "world",
+    "life", "school", "family", "friend", "party", "game", "sport", "art",
+    "nature", "technology", "health", "travel", "work", "home",
+    "success", "power", "brand", "product", "design", "video", "photo",
+    "founder", "vendor", "market", "customer", "sale", "shop",
+}
+
+
+def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
+                                 budget: int) -> list:
+    """Pick visual keywords inside [t_in, t_out] for text-track callouts."""
+    stop = {
+        "the", "and", "a", "to", "of", "in", "i", "is", "that", "it", "on", "you",
+        "this", "for", "but", "with", "are", "have", "be", "at", "or", "as", "was",
+        "so", "if", "out", "not", "we", "my", "they", "your", "all", "do", "can",
+        "will", "about", "which", "up", "one", "there", "what", "would", "when",
+        "an", "she", "he", "their", "her", "his", "has", "who", "from", "by",
+        "some", "me", "how", "like", "just", "know", "then", "them", "now", "well",
+        "think", "um", "uh", "okay", "ok", "right",
+    }
+    out = []
+    seen = set()
+    for w in words or []:
+        if len(out) >= max(0, budget):
+            break
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if we <= t_in or ws >= t_out:
+            continue
+        text = str(w.get("word", "")).strip()
+        clean = re.sub(r"[^a-zA-Z0-9]", "", text).lower()
+        if not clean or clean in stop or clean in seen:
+            continue
+        if clean in _VISUAL_KEYWORDS or len(clean) > 5:
+            seen.add(clean)
+            out.append({
+                "text": text.strip(".,!?").capitalize(),
+                "start": ws,
+                "duration": 1.8,
+            })
+    return out
+
+
+def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
+                         t_in: float | None = None,
+                         t_out: float | None = None) -> list:
+    """Scene-change timestamps via ffmpeg select=gt(scene,N)."""
+    cmd = [
+        FFMPEG, "-hide_banner",
+    ]
+    if t_in is not None and t_in > 0:
+        cmd += ["-ss", f"{float(t_in):.3f}"]
+    cmd += ["-i", str(video_path)]
+    if t_out is not None and t_in is not None and t_out > t_in:
+        cmd += ["-t", f"{float(t_out - (t_in or 0)):.3f}"]
+    cmd += [
+        "-filter:v", f"select='gt(scene,{threshold})',showinfo",
+        "-f", "null", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    # showinfo lands on stderr
+    times = []
+    for line in (proc.stderr or "").splitlines():
+        # pts_time:12.345
+        m = re.search(r"pts_time:([0-9.]+)", line)
+        if m:
+            t = float(m.group(1))
+            if t_in:
+                t += float(t_in)
+            times.append(round(t, 3))
+    # Dedupe near-duplicates
+    cleaned = []
+    for t in times:
+        if not cleaned or t - cleaned[-1] >= 0.35:
+            cleaned.append(t)
+    return cleaned
+
+
+@app.route("/ai-edit/style-packs", methods=["GET"])
+def ai_edit_style_packs():
+    packs = []
+    for key, pack in AI_EDIT_STYLE_PACKS.items():
+        packs.append({
+            "id": key,
+            "label": pack.get("label", key),
+            "blurb": pack.get("blurb", ""),
+            "canvas": pack.get("canvas", "9x16"),
+        })
+    return jsonify({"packs": packs})
+
+
+@app.route("/recommended-cuts", methods=["POST"])
+def recommended_cuts():
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words") or []
+    if not words:
+        return jsonify({"error": "Transcript not available"}), 400
+    try:
+        t_in = float(data.get("in", data.get("start_time", 0)) or 0)
+        t_out = float(data.get("out", data.get("end_time", words[-1].get("end", 0))) or 0)
+        max_gap = float(data.get("max_gap", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid in/out"}), 400
+    if t_out <= t_in:
+        t_out = float(words[-1].get("end", 0) or 0)
+    result = _recommended_cuts_for_words(
+        words, t_in, t_out, max_gap=max_gap,
+        include_fillers=bool(data.get("include_fillers", True)),
+        include_silence=bool(data.get("include_silence", True)),
+    )
+    return jsonify(result)
+
+
+@app.route("/ai-edit-seed", methods=["POST"])
+def ai_edit_seed():
+    """Captions-style AI Edit: style pack + intensity → seeded timeline JSON.
+
+    Body: {
+      source_job_id, start_time?, end_time?, style_pack, intensity,
+      label?, apply_cuts?, create_clip?, max_effects?
+    }
+    """
+    data = request.get_json(force=True) or {}
+    source_job_id = data.get("source_job_id") or data.get("job_id")
+    if not source_job_id or source_job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src = jobs[source_job_id]
+    words = src.get("words") or []
+    if not words:
+        return jsonify({"error": "Transcript not available"}), 400
+
+    pack_id = (data.get("style_pack") or "pulse").lower()
+    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    intensity = (data.get("intensity") or "med").lower()
+    if intensity not in ("low", "med", "high"):
+        intensity = "med"
+    label = (data.get("label") or src.get("filename") or "AI Edit")[:120]
+
+    try:
+        t_in = float(data.get("start_time", data.get("in", 0)) or 0)
+        default_out = float(words[-1].get("end", 0) or 0)
+        t_out = float(data.get("end_time", data.get("out", default_out)) or default_out)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid start/end"}), 400
+    t_in = max(0.0, t_in)
+    if t_out <= t_in + 0.5:
+        return jsonify({"error": "Clip window too short"}), 400
+
+    apply_cuts = bool(data.get("apply_cuts", True))
+    create_clip = bool(data.get("create_clip", False))
+    insert_media = bool(data.get("insert_media", True))
+
+    # Optional: materialize a chopped child job (Captions "individual clip").
+    work_job_id = source_job_id
+    work_in, work_out = t_in, t_out
+    if create_clip:
+        try:
+            work_job_id = _create_clip_from_job(source_job_id, t_in, t_out, label)
+            # Child job words are remapped to 0..duration
+            work_in, work_out = 0.0, t_out - t_in
+            words = jobs[work_job_id].get("words") or []
+        except Exception as e:
+            return jsonify({"error": f"Could not create clip: {e}"}), 400
+
+    rec = _recommended_cuts_for_words(words, work_in, work_out)
+    # Client may send an outline-reviewed subset of cuts (Captions "revert" flow).
+    raw_cuts = data.get("cuts")
+    if isinstance(raw_cuts, list):
+        cuts = _merge_cut_ranges(raw_cuts) if apply_cuts else []
+    else:
+        cuts = rec["cuts"] if apply_cuts else []
+
+    # Effect suggestions (Gemini when available; empty otherwise).
+    effects = []
+    gemini_warning = None
+    try:
+        max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity))
+    except (TypeError, ValueError):
+        max_fx = _intensity_effect_budget(intensity)
+    try:
+        total = float(words[-1].get("end", 0) or work_out)
+        result = _gemini_generate_clip_suggestions(
+            _build_effect_suggestion_prompt(
+                _format_transcript_for_llm(words), total, max_fx
+            )
+        )
+        effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
+        for fx in effects:
+            if fx.get("type") == "punch_zoom":
+                anchor = _face_anchor_at(work_job_id, fx["start_time"])
+                if anchor:
+                    fx["anchor"] = anchor
+    except RuntimeError as exc:
+        gemini_warning = str(exc)
+    except Exception as exc:
+        gemini_warning = str(exc)
+
+    timeline = _build_ai_edit_timeline(
+        work_job_id, work_in, work_out, pack, intensity, cuts, effects,
+        label=label, words=words, insert_media=insert_media,
+    )
+    # Persist style onto the working job for caption burns (canonical Caption look).
+    if pack.get("style"):
+        jobs[work_job_id]["style"] = _normalize_caption_style(pack["style"])
+        _db_save_job(work_job_id)
+
+    return jsonify({
+        "ok": True,
+        "source_job_id": source_job_id,
+        "clip_job_id": work_job_id if create_clip else None,
+        "job_id": work_job_id,
+        "style_pack": pack_id,
+        "intensity": intensity,
+        "label": label,
+        "in": work_in,
+        "out": work_out,
+        "recommended_cuts": rec,
+        "applied_cuts": cuts,
+        "effects": effects,
+        "timeline": timeline,
+        "warning": gemini_warning,
+    })
+
+
+@app.route("/detect-shots", methods=["POST"])
+def detect_shots():
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Video missing"}), 404
+    try:
+        threshold = float(data.get("threshold", 0.35) or 0.35)
+        t_in = data.get("in")
+        t_out = data.get("out")
+        t_in = float(t_in) if t_in is not None else None
+        t_out = float(t_out) if t_out is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid parameters"}), 400
+    try:
+        times = _detect_shots_ffmpeg(video_path, threshold=threshold, t_in=t_in, t_out=t_out)
+    except Exception as e:
+        return jsonify({"error": f"Shot detection failed: {e}"}), 500
+
+    # Build shot spans covering [t_in,t_out] or full duration.
+    if t_in is None:
+        t_in = 0.0
+    if t_out is None:
+        words = jobs[job_id].get("words") or []
+        t_out = float(words[-1].get("end", 0) or 0) if words else _ffprobe_duration(video_path)
+    bounds = [t_in] + [t for t in times if t_in < t < t_out] + [t_out]
+    shots = []
+    for i in range(len(bounds) - 1):
+        if bounds[i + 1] - bounds[i] < 0.2:
+            continue
+        shots.append({
+            "index": len(shots),
+            "start": bounds[i],
+            "end": bounds[i + 1],
+            "duration": round(bounds[i + 1] - bounds[i], 3),
+        })
+    return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
+
+
+@app.route("/co-editor", methods=["POST"])
+def co_editor():
+    """Natural-language → validated timeline mutation ops (Captions Co-editor)."""
+    data = request.get_json(force=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    timeline = data.get("timeline") or {}
+    if not prompt:
+        return jsonify({"error": "Prompt is required"}), 400
+    if not timeline:
+        return jsonify({"error": "Timeline is required"}), 400
+
+    main = (timeline.get("tracks") or {}).get("main") or []
+    overlays = (timeline.get("tracks") or {}).get("overlay") or []
+    style = timeline.get("style") or {}
+    speaker_colors = timeline.get("speaker_colors") or {}
+    summary = {
+        "canvas": timeline.get("canvas"),
+        "main_clip_count": len(main),
+        "main_clips": [
+            {
+                "index": i,
+                "id": c.get("id"),
+                "in": c.get("in"),
+                "out": c.get("out"),
+                "has_punch_zoom": bool((c.get("punch_zoom") or {}).get("enabled")),
+                "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
+                "color_preset": ((c.get("color") or c.get("color_grade") or {}).get("preset")),
+                "cut_count": len(c.get("cuts") or []),
+                "transition": (c.get("transition") or {}).get("type") if isinstance(c.get("transition"), dict) else c.get("transition"),
+            }
+            for i, c in enumerate(main[:24])
+        ],
+        "overlay_count": len(overlays),
+        "overlay_clips": [
+            {
+                "index": i,
+                "keyword": c.get("keyword"),
+                "source": c.get("source"),
+                "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
+                "start": c.get("start"),
+                "duration": (float(c.get("out") or 0) - float(c.get("in") or 0)) if c.get("out") is not None else None,
+            }
+            for i, c in enumerate(overlays[:16])
+        ],
+        "text_count": len((timeline.get("tracks") or {}).get("text") or []),
+        "music_count": len((timeline.get("tracks") or {}).get("music") or []),
+        "caption_style": {
+            "font": style.get("font") or style.get("font_name"),
+            "size": style.get("size") or style.get("font_size"),
+            "primary": style.get("primary") or style.get("primary_color"),
+            "highlight": style.get("highlight") or style.get("highlight_color"),
+            "accent": style.get("accent") or style.get("accent_color"),
+        },
+        "speaker_colors": speaker_colors,
+    }
+
+    system_prompt = f"""You are a Timeline co-editor. Convert the user's request into JSON ops that mutate THIS timeline.
+
+You can ONLY change timeline project state via the ops below. You cannot invent new features.
+Caption style changes update the Timeline project's burn style (primary/highlight/accent/font/size).
+Speaker colors (Host/Guest) are separate — use set_speaker_colors for those.
+Ken Burns on Overlay is preferred for photo B-roll moments; punch zoom stays on Main.
+Color grades must use presets: none, neutral, warm, cool, vivid, bw.
+After ops apply in the UI, the user still must click Render to bake captions/effects into the export MP4.
+
+Current timeline summary:
+{json.dumps(summary, indent=2)}
+
+Return ONLY JSON:
+{{
+  "ops": [
+    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}},
+    {{"op": "delete_shot", "index": 2}},
+    {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
+    {{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}},
+    {{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}},
+    {{"op": "enable_ken_burns", "track": "overlay", "index": 0, "intensity": "med", "direction": "in"}},
+    {{"op": "clear_effects", "index": 0}},
+    {{"op": "clear_effects", "track": "overlay", "index": 0}},
+    {{"op": "set_canvas", "canvas": "9x16"}},
+    {{"op": "set_color_grade", "index": 0, "preset": "warm"}},
+    {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
+    {{"op": "apply_recommended_cuts", "index": 0}},
+    {{"op": "merge_shots", "index": 0}},
+    {{"op": "reorder_shot", "from": 2, "to": 0}}
+  ],
+  "message": "Short confirmation of what you changed (mention Render if captions/styles changed)"
+}}
+
+Rules:
+- Use only the ops listed above.
+- Shot indexes refer to main track clips (0-based) unless track is "overlay".
+- Prefer 1-5 ops. If the request is unclear, return ops: [] and explain in message.
+- Colors must be #RRGGBB. Canvas must be one of 9x16, 16x9, 1x1, 4x5.
+- For "make captions yellow/blue/…" prefer set_caption_style primary/highlight. For Host/Guest colors use set_speaker_colors.
+- For B-roll / overlay motion requests, use enable_ken_burns with track:"overlay".
+"""
+    try:
+        result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    raw_ops = result.get("ops") if isinstance(result, dict) else None
+    if raw_ops is None and isinstance(result, list):
+        raw_ops = result
+    raw_ops = raw_ops or []
+    message = ""
+    if isinstance(result, dict):
+        message = str(result.get("message") or "")[:400]
+
+    allowed = {
+        "set_caption_style", "set_speaker_colors", "delete_shot", "set_transition",
+        "enable_punch_zoom", "enable_ken_burns", "clear_effects", "set_canvas",
+        "set_color_grade", "add_title", "apply_recommended_cuts", "merge_shots",
+        "reorder_shot",
+    }
+    ops = []
+    for op in raw_ops:
+        if not isinstance(op, dict):
+            continue
+        name = str(op.get("op") or "")
+        if name not in allowed:
+            continue
+        ops.append(op)
+        if len(ops) >= 8:
+            break
+
+    return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
+
+
+@app.route("/job-duration/<job_id>", methods=["GET"])
+def job_duration(job_id):
+    """Duration helper for long-form routing (words end, else ffprobe)."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words") or []
+    dur = 0.0
+    if words:
+        try:
+            dur = float(words[-1].get("end", 0) or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+    if dur <= 0:
+        path = find_video_path(job_id)
+        if path:
+            dur = _ffprobe_duration(path)
+    return jsonify({
+        "job_id": job_id,
+        "duration": dur,
+        "is_long_form": dur >= LONG_FORM_SECONDS,
+        "long_form_threshold": LONG_FORM_SECONDS,
+    })
 
 
 if __name__ == "__main__":

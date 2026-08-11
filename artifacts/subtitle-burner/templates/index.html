@@ -76,11 +76,11 @@
 </script>
 
 <!-- Empty state: hero welcome shown when there are no jobs yet -->
-<div id="emptyState" class="empty-state hidden">
+<div id="emptyState" class="empty-state">
   <div class="empty-hero">
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
-    <p class="empty-tagline">Drop a video, transcribe it, edit the words, then burn captions.<br>AI audio enhancement, intelligent clip suggestions, and multi-video compilation built in.</p>
+    <p class="empty-tagline">Drop a video, transcribe it, find AI Shorts, then finish on the Timeline.<br>Edit words and caption look stay one click away after transcription.</p>
     <!-- Input INSIDE the label is the most reliable picker pattern across
          browsers (for= alone can fail if app.js never finishes wiring). -->
     <label id="emptyDropBtn" class="btn btn-primary btn-lg empty-pick-btn" style="cursor:pointer;position:relative;overflow:hidden">
@@ -148,28 +148,27 @@
 <header class="app-header" id="appHeader">
   <div class="logo">🎬 Subtitle Assistant Studio</div>
   <div class="workflow-steps" id="workflowSteps">
-    <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
-    <button class="main-tab" data-tab="transcript">2. ✂️ Transcript Cut</button>
-    <button class="main-tab" data-tab="highlights">3. 🔥 AI Shorts</button>
-    <button class="main-tab" data-tab="branding">4. 🎨 Branding &amp; Styles</button>
-    <button class="main-tab" data-tab="editor">5. 🎬 Multitrack Timeline</button>
+    <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
+    <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
+    <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
   </div>
   <div class="header-actions">
     <button class="btn-export" id="headerExportBtn" type="button">⚡ Instant Export MP4</button>
   </div>
 </header>
 
-<!-- Main app shell: full-width main area -->
-<div id="appShell" class="app-shell" style="display:block;">
+<!-- Main app shell: full-width main area (hidden until a job exists) -->
+<div id="appShell" class="app-shell hidden">
   <main class="main-area" style="width:100%;">
-    <!-- Tab navigation: 5 Unified Production Steps -->
+    <!-- Primary story: Ingest → AI Shorts → Timeline. Transcript + Branding stay as panels opened via Edit words / Caption look. -->
     <nav class="main-tabs" id="mainTabs">
-      <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
-      <button class="main-tab" data-tab="transcript">2. ✂️ Transcript Cut</button>
-      <button class="main-tab" data-tab="highlights">3. 🔥 AI Shorts</button>
-      <button class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
-      <button class="main-tab" data-tab="branding">4. 🎨 Branding &amp; Styles</button>
-      <button class="main-tab" data-tab="editor">5. 🎬 Multitrack Timeline</button>
+      <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
+      <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
+      <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
+      <button class="main-tab" data-tab="compilation" title="Queue clips from AI Shorts">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
+      <!-- Secondary panels — not numbered steps; opened from ready CTAs -->
+      <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav">✂️ Edit words</button>
+      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav">🎨 Caption look</button>
       <button class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
     </nav>
 
@@ -195,8 +194,8 @@
               <label class="toggle-label">
                 <input type="checkbox" id="autoGenerateShorts">
                 <span class="toggle-text">
-                  <strong>⚡ Auto-Generate Shorts on Upload</strong>
-                  <span class="muted">Optional Gemini pass after Whisper (does not block Transcript Cut). Leave off for the fastest path. Use <strong>Analyze</strong> separately for speaker diarization.</span>
+                  <strong>⚡ Auto-Generate Shorts after transcription</strong>
+                  <span class="muted">Optional. Off by default — use the AI Shorts tab anytime after the transcript is ready.</span>
                 </span>
               </label>
             </div>
@@ -217,12 +216,30 @@
             </h2>
             <div id="jobsList"></div>
           </section>
-          <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this if you staged a file manually">Transcribe Video</button>
-          <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video and upload starts automatically.</p>
+          <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this to retry a failed job or if a file was staged manually">Transcribe Video</button>
+          <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video to upload + transcribe. If a job shows <strong>error</strong>, use <strong>Re-drop video</strong> (not only Retry).</p>
+          <p class="muted" style="font-size:.72rem;margin:8px 0 0;line-height:1.45;padding:8px 10px;background:rgba(30,41,59,0.45);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
+            <strong>iPhone / Windows tip:</strong> Many phone clips are <strong>HEVC</strong>. Windows often needs extra codecs to play them, while Google Drive works because it <em>re-encodes for streaming</em>. That does not mean the original has no audio — upload the full original file (or export <em>Most Compatible</em> / H.264 MP4 from the phone) and wait until upload hits 100%.
+          </p>
           <div id="progress" class="progress hidden" style="margin-top:10px">
             <div class="bar"><div id="barFill" class="fill"></div></div>
             <p id="statusText" class="muted">Starting…</p>
+            <button id="retryTranscribeBtn" class="btn btn-primary btn-sm hidden" type="button" style="margin-top:10px;width:100%" title="Re-run Whisper on the file already on the server — no re-upload">↻ Retry transcription (keeps this upload)</button>
+            <button id="redropVideoBtn" class="btn btn-secondary btn-sm hidden" type="button" style="margin-top:8px;width:100%" title="Replace the broken server file with a fresh copy of your video">↑ Re-drop video (fixes incomplete uploads)</button>
+            <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If Retry keeps saying “no audio,” the file on the server is usually truncated — use <strong>Re-drop video</strong> and wait until upload hits 100%.</p>
           </div>
+          <section id="readyActions" class="panel hidden" style="margin-top:14px;padding:14px">
+            <div class="section-title" style="margin-bottom:6px">✅ Transcript ready</div>
+            <p id="readyActionsHint" class="muted" style="font-size:.78rem;line-height:1.45;margin:0 0 10px">
+              Next: fix words, set caption look, find shorts, or open the timeline.
+            </p>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <button type="button" id="readyEditWordsBtn" class="btn btn-primary btn-sm">Edit words</button>
+              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
+              <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
+              <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">Open in Timeline</button>
+            </div>
+          </section>
         </div>
         <div style="flex:1;min-width:300px;">
           <section class="panel">
@@ -236,7 +253,7 @@
             </p>
             <div id="ingestSpeakerCards">
               <p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-                No speakers yet. Click <strong>Analyze</strong> (or Analyze on Transcript Cut) — live cards appear after diarization. Auto-Generate Shorts is Gemini-only and does not run speakers.
+                No speakers yet. Click <strong>Analyze</strong> when you want diarization — it does not run on upload. AI Shorts and Enhance Audio are also opt-in after transcription.
               </p>
             </div>
             <div class="row" id="speakerColorRow" style="align-items:center;gap:12px;padding:10px 14px;background:#181c28;border:1px solid #2a2f3a;border-radius:10px;margin-top:14px">
@@ -274,12 +291,16 @@
     </div>
     <!-- /Tab: Ingest -->
 
-    <!-- Tab 4: Branding -->
+    <!-- Panel: Caption look (was step 4 — opened via ready CTA / Timeline) -->
     <div class="tab-content hidden" data-tab-group="branding">
 
   <!-- Style panel -->
   <section class="panel">
-    <h2>Style &amp; Caption Presets</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h2 style="margin:0">🎨 Caption look</h2>
+      <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
+    </div>
+    <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">Caption fonts and colors for this video. Instant Export, Export clip, and Timeline seed from this look (Timeline can still override).</p>
 
     <!-- CapCut Master Viral Templates -->
     <div class="row" style="margin-bottom:16px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
@@ -775,7 +796,7 @@
     </div>
     <!-- /Tab: Branding -->
 
-    <!-- Tab 2: Transcript Cut -->
+    <!-- Panel: Edit words (was step 2 — opened via ready CTA) -->
     <div class="tab-content hidden" data-tab-group="transcript">
       <!-- Subtitle editor (shown after transcription) -->
       <div id="transcriptEditor" class="transcript-editor">
@@ -787,7 +808,11 @@
         <section class="panel source-video-section">
           <div class="editor-header">
             <h2>Source Video</h2>
-            <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
+              <button type="button" id="transcriptBackIngestBtn" class="btn btn-secondary btn-sm">← Ingest</button>
+              <button type="button" id="transcriptCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
+            </div>
           </div>
           <div class="video-preview-wrapper" style="position:relative;width:100%;">
             <video id="sourcePlayer" controls playsinline style="width:100%;display:block;border-radius:12px;"></video>
@@ -905,10 +930,11 @@
         Edits sync back to the ✨ Highlights card automatically.
       </p>
       <div class="row" style="margin-bottom:0;gap:8px;flex-wrap:wrap">
-        <button id="previewEditReplay" class="btn btn-secondary">▶ Replay</button>
-        <button id="previewEditAdd" class="btn btn-secondary">+ Add to compilation</button>
-        <button id="previewEditToTimeline" class="btn btn-secondary" title="Open the multi-track editor with this range on the Main track">🎬 To timeline</button>
-        <button id="previewEditMakeClip" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Make a clip</button>
+        <button id="previewEditReplay" class="btn btn-secondary">Preview</button>
+        <button id="previewEditToTimeline" class="btn btn-primary" title="Put this range on the Timeline">Open in Timeline</button>
+        <button id="previewEditAiEdit" class="btn btn-secondary" title="Advanced: style + intensity → seeded Timeline project">AI Edit…</button>
+        <button id="previewEditMakeClip" class="btn btn-secondary">Export clip</button>
+        <button id="previewEditAdd" class="btn btn-secondary">Add to compilation</button>
         <button id="previewEditSave" class="btn btn-secondary" style="margin-left:auto">💾 Save &amp; back</button>
       </div>
       <div id="previewEditStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
@@ -1015,9 +1041,15 @@
       </div>
     </section>
 
+    <div id="aiEditNudge" class="ai-edit-nudge hidden">
+      <span>Short clip ready — run <strong>AI Edit</strong> for Captions-style cuts, zooms, and captions in one step.</span>
+      <button type="button" id="aiEditNudgeBtn" class="btn btn-secondary" style="background:linear-gradient(135deg,#2a2450,#1a1e2a);border-color:#6c5cff88;color:#e8e4ff">✨ AI Edit now</button>
+    </div>
+
     <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
       <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1;min-width:240px">Render with Edits</button>
-      <button id="editToTimelineBtn" class="btn btn-secondary" title="Open the multi-track Editor with this video on the Main track">🎬 Edit in timeline</button>
+      <button id="aiEditJobBtn" class="btn btn-secondary" title="Advanced: style + intensity → seeded Timeline project" style="background:linear-gradient(135deg,#2a2450,#1a1e2a);border-color:#6c5cff88;color:#e8e4ff">AI Edit…</button>
+      <button id="editToTimelineBtn" class="btn btn-secondary" title="Open in Timeline with this video on the Main track">Open in Timeline</button>
       <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
       <button id="exportSrtBtn" class="btn btn-secondary" title="Download the current transcript as an SRT subtitle file (works with YouTube, Premiere, CapCut).">⬇ .srt</button>
       <button id="exportVttBtn" class="btn btn-secondary" title="Download the current transcript as a WebVTT subtitle file (works with HTML5 video, web players).">⬇ .vtt</button>
@@ -1028,12 +1060,13 @@
     </div>
     <!-- /Tab: Transcript Cut -->
 
-    <!-- Tab 3: Highlights -->
+    <!-- Tab 3: Highlights / AI Shorts (Captions-aligned gallery) -->
     <div class="tab-content hidden" data-tab-group="highlights">
     <section id="highlightsPanel" class="panel" style="margin-top:0">
-      <h2 style="display:flex;align-items:center;gap:10px">
-        <span>✨ Find highlights</span>
-        <span class="muted" style="font-size:.78rem;font-weight:normal">AI clip suggestions</span>
+      <h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>✨ AI Shorts</span>
+        <span class="muted" style="font-size:.78rem;font-weight:normal">Chop long videos into individual clips</span>
+        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:#6c5cff33;border:1px solid #6c5cff88;color:#c8c0ff">Long-form · AI Shorts available</span>
       </h2>
       {% if not gemini_enabled %}
       <div id="hlGeminiDisabled" class="panel" style="margin:0 0 14px;border-color:#bf616a;background:#1a1216">
@@ -1044,9 +1077,10 @@
       </div>
       {% endif %}
       <p class="muted panel-desc">
-        Pick a format and target length — Gemini scans the transcript and picks the most engaging segments.
-        Click <strong>Make a clip</strong> on any suggestion to spawn a new pre-trimmed job that inherits this video's style.
-        Preview opens the Transcript player so you can trim Start/End live.
+        Pick a format and target length — Gemini finds hook-first moments. On each card:
+        <strong>Preview</strong> → <strong>Open in Timeline</strong> (primary) →
+        <strong>AI Edit…</strong> (advanced) → <strong>Export clip</strong> →
+        <strong>Add to compilation</strong>.
       </p>
 
       <div class="row">
@@ -1093,7 +1127,7 @@
       </div>
 
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
-      <div id="hlResults" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
+      <div id="hlResults" class="hl-gallery" style="margin-top:14px"></div>
 
       <!-- Clip Assembly Bar (shown when multi-segment clip is active) -->
       <div id="clipAssemblyBar" class="hidden" style="margin-top:20px;padding:16px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
@@ -1124,15 +1158,16 @@
       <span id="compileCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
     </h2>
     <p class="muted panel-desc">
-      Clips you've added from any video. They'll be stitched in this order into a single new job that
-      goes through the normal subtitle/audio pipeline. Style is inherited from the first source.
+      Prefer <strong>Send to timeline</strong> to edit on Main (Preview cut → Render), or
+      <strong>Compile</strong> to stitch into one job first — you'll be offered Timeline next.
+      In Timeline, <strong>Stitch Main</strong> bakes the track into one source.
     </p>
     <div id="compileList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
     <div class="row" style="gap:8px;flex-wrap:wrap">
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;min-width:180px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
       <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
-      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track">🎬 Send to timeline</button>
-      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
+      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track — edit there, then Preview cut / Render (or Stitch Main)">🎬 Send to timeline</button>
+      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff" title="Stitch queue into one job, then optionally open Timeline">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
@@ -1180,8 +1215,47 @@
             </select>
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
-          <button id="tlPlaySeqBtn" class="btn btn-secondary" title="Play Main-track clips in order without a full FFmpeg render">▶ Preview cut</button>
-          <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
+          <span class="muted tl-workflow-hint" title="Typical Captions-style path">Media → edit Main → Preview cut → Render</span>
+          <button id="tlStitchMainBtn" class="btn btn-secondary" type="button"
+            title="Bake the whole Main track into one combined source (word cuts applied). Then Preview cut / Render.">🎞 Stitch Main</button>
+          <button id="tlPlaySeqBtn" class="btn btn-secondary tl-tipbtn" type="button"
+            aria-describedby="tlPreviewTip">
+            ▶ Preview cut
+            <span id="tlPreviewTip" class="tl-tippanel" role="tooltip">
+              <strong>Preview cut</strong> — fast live approx (no FFmpeg)
+              <ul>
+                <li>✓ Word cuts / keep-ranges</li>
+                <li>✓ Color grades (CSS)</li>
+                <li>✓ Ken Burns / punch / Effects lane (CSS)</li>
+                <li>✓ Music bed (crude duck)</li>
+                <li>✓ Video + image overlays / titles / logo</li>
+                <li>✓ Captions karaoke (DOM approx)</li>
+                <li>~ Soft opacity dissolves only</li>
+                <li>~ Split-screen guide (exact on Render)</li>
+              </ul>
+              <em>Use to check pacing. Click Render for the real export.</em>
+            </span>
+          </button>
+          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Caption fonts and colors for this project">Caption look</button>
+          <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
+            aria-describedby="tlRenderTip"
+            style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">
+            ▶ Render
+            <span id="tlRenderTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
+              <strong>Render</strong> — full FFmpeg export (exact)
+              <ul>
+                <li>✓ Exact keep-ranges / word cuts</li>
+                <li>✓ Exact color grades</li>
+                <li>✓ Exact Ken Burns / punch / Effects lane</li>
+                <li>✓ Full music mix + duck</li>
+                <li>✓ Burned video + image overlays / titles / logo</li>
+                <li>✓ ASS caption burn (project style)</li>
+                <li>✓ Real xfade transitions</li>
+                <li>✓ Split-screen / reframe</li>
+              </ul>
+              <em>Required after Co-editor / Caption look / B-roll changes.</em>
+            </span>
+          </button>
         </div>
       </div>
 
@@ -1194,7 +1268,14 @@
           </div>
 
           <div class="tl-leftpanel" data-lpanel="transcript">
-            <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit its words. Click a word to strike it out — struck words are cut from the video.</p>
+            <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit its words. Click to seek · Shift+click to cut · Double-click to rename.</p>
+            <div id="tlTranscriptToolbar" class="tl-transcript-toolbar hidden">
+              <span id="tlTranscriptMeta" class="muted tl-transcript-meta"></span>
+              <div class="tl-transcript-actions">
+                <button type="button" id="tlTranscriptFillersBtn" class="btn btn-secondary btn-sm" title="Strike common filler words (um, uh, like, you know…)">Cut fillers</button>
+                <button type="button" id="tlTranscriptRestoreBtn" class="btn btn-secondary btn-sm" title="Restore every struck word in this clip">Restore all</button>
+              </div>
+            </div>
             <div id="tlTranscriptDoc" class="tl-transcript-doc"></div>
           </div>
 
@@ -1206,6 +1287,29 @@
             <div class="tl-asset-upload">
               <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" class="offscreen-file">
               <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
+              <div class="tl-broll-controls" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+                <label class="muted" style="font-size:.74rem">Auto B-roll from transcript
+                  <select id="tlBrollMode" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
+                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured, else badges)</option>
+                    <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (Pexels / Unsplash / Google CSE)</option>
+                    <option value="badge" {% if not broll_photo_ready %}selected{% endif %}>Keyword badges only</option>
+                  </select>
+                </label>
+                <label class="muted" style="font-size:.74rem">Placement
+                  <select id="tlBrollPlacement" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
+                    <option value="pip" selected>Corner PiP</option>
+                    <option value="center">Center overlay</option>
+                  </select>
+                </label>
+                <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Fetch timed B-roll images or badges from transcript keywords">✨ Suggest B-roll overlays</button>
+                <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
+                  {% if broll_photo_ready %}
+                    Photo providers ready. Suggest pulls stock images timed to visual words.
+                  {% else %}
+                    No photo API keys yet — badges still work. Set <code>PEXELS_API_KEY</code>, <code>UNSPLASH_ACCESS_KEY</code>, or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> for real B-roll.
+                  {% endif %}
+                </p>
+              </div>
             </div>
             <div id="tlAssetList" class="tl-source-list"></div>
           </div>
@@ -1227,11 +1331,16 @@
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
           <div class="tl-tltoolbar">
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
+            <button id="tlMergeBtn" class="tl-chip-btn" title="Join selected Main shot with the next. Same source: rejoin / skip gap as cut. Different sources: stitch into a new combined clip.">⛓ Merge</button>
+            <button id="tlDetectShotsBtn" class="tl-chip-btn" title="Detect scene changes in the selected Main clip and split it into separate shots">🎞 Detect shots</button>
+            <button id="tlDeleteBtn" class="tl-chip-btn" title="Delete selected clip (Del / Backspace)">🗑 Delete</button>
             <button id="tlCopyBtn" class="tl-chip-btn" title="Copy selected clip (Cmd/Ctrl+C)">📋 Copy</button>
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
+            <button id="tlAddEffectBtn" class="tl-chip-btn" title="Add a timed effect on the Effects lane (split-screen, punch, Ken Burns, color)">+ Effect</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
+            <button id="tlCoEditorBtn" class="tl-chip-btn" title="Chat-based co-editor — describe edits in plain language">💬 Co-editor</button>
             <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/dup">⌨ Space · S · Del · ←→ · ⌘Z · Snap · ⌘C/V/D</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
@@ -1250,6 +1359,10 @@
               <div class="tl-track" data-track="overlay">
                 <div class="tl-track-label">🖼 Overlay</div>
                 <div class="tl-track-lane" data-lane="overlay"></div>
+              </div>
+              <div class="tl-track" data-track="effects">
+                <div class="tl-track-label">✨ Effects</div>
+                <div class="tl-track-lane" data-lane="effects"></div>
               </div>
               <div class="tl-track" data-track="text">
                 <div class="tl-track-label">🔤 Titles</div>
@@ -1274,6 +1387,73 @@
     </div>
   </div>
   <!-- /Tab: Editor -->
+
+  <!-- AI Edit plan modal (Captions-style style + intensity → timeline seed) -->
+  <div id="aiEditModal" class="ai-edit-modal hidden" aria-hidden="true">
+    <div class="ai-edit-modal-card">
+      <div class="ai-edit-modal-head">
+        <strong>AI Edit</strong>
+        <span class="muted" style="font-size:.78rem">Pick a style + intensity, review recommended cuts, then open as a timeline project</span>
+        <button type="button" id="aiEditClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+      </div>
+      <div class="ai-edit-modal-body">
+        <div class="row" style="align-items:flex-start">
+          <label style="min-width:100px;padding-top:6px">Style</label>
+          <div id="aiEditPacks" class="ai-edit-packs"></div>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">Intensity</label>
+          <select id="aiEditIntensity">
+            <option value="low">Low — light trim &amp; sparse zooms</option>
+            <option value="med" selected>Med — balanced social edit</option>
+            <option value="high">High — dense cuts &amp; zooms</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">AI Trim</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="aiEditApplyCuts" checked>
+            Apply recommended filler + silence cuts
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">Clip job</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="aiEditCreateClip" checked>
+            Chop into a standalone clip job first
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:100px">Media</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="aiEditInsertMedia" checked>
+            Insert keyword callouts / B-roll titles by intensity
+          </label>
+        </div>
+        <div id="aiEditCutsPreview" class="muted" style="font-size:.82rem;margin:8px 0 0;min-height:1.2em"></div>
+        <div id="aiEditOutline" class="ai-edit-outline"></div>
+        <div id="aiEditStatus" class="muted" style="font-size:.82rem;margin-top:8px"></div>
+      </div>
+      <div class="ai-edit-modal-foot">
+        <button type="button" id="aiEditCancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="aiEditGenerate" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Create project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Co-editor chat drawer -->
+  <div id="coEditorDrawer" class="co-editor-drawer hidden" aria-hidden="true">
+    <div class="co-editor-head">
+      <strong>💬 Co-editor</strong>
+      <span class="muted" style="font-size:.72rem">Describe edits — “make captions bigger”, “remove the third shot”</span>
+      <button type="button" id="coEditorClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+    </div>
+    <div id="coEditorLog" class="co-editor-log"></div>
+    <div class="co-editor-compose">
+      <input type="text" id="coEditorInput" placeholder="Describe a change…" maxlength="400">
+      <button type="button" id="coEditorSend" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Send</button>
+    </div>
+  </div>
 
   <!-- Tab: Result -->
   <div class="tab-content hidden" data-tab-group="result">
@@ -1310,12 +1490,20 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tabBtn) tabBtn.click();
     });
   });
-  // Header Instant Export button handler
+  // Header Instant Export — primary handler lives in app.js (flushes Caption look).
+  // Fallback only if the studio script failed to load.
   document.getElementById("headerExportBtn")?.addEventListener("click", () => {
+    if (typeof flushCaptionLookToJob === "function") return; // app.js Smart Export owns this
+    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+      if (typeof setActiveTab === "function") setActiveTab("ingest");
+      return;
+    }
     const r = document.getElementById("renderBtn");
     const g = document.getElementById("go");
     if (r && !r.disabled && r.offsetParent !== null) r.click();
     else if (g && !g.disabled) g.click();
+    else alert("Open Transcript Cut / Branding and click Render when your edits are ready.");
   });
 });
 </script>

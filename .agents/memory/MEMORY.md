@@ -1,0 +1,1 @@
+- [Canvas artifact routing & preview ports](canvas-artifact-routing.md) — known-good port/workflow setup for Subtitle Burner preview; branch switches can regress it (fix recipe inside).

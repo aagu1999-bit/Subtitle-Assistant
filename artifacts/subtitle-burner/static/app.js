@@ -148,6 +148,9 @@ const groupEl = $("group"), groupVal = $("groupVal");
 const primaryEl = $("primary"), highlightEl = $("highlight"), outlineEl = $("outlineColor");
 const accentEl = $("accent");
 const go = $("go"), progress = $("progress"), barFill = $("barFill"), statusText = $("statusText");
+const retryTranscribeBtn = $("retryTranscribeBtn");
+const redropVideoBtn = $("redropVideoBtn");
+const retryTranscribeHint = $("retryTranscribeHint");
 const result = $("result"), player = $("player"), dl = $("dl");
 const editor = $("editor"), rowCount = $("rowCount");
 const renderBtn = $("renderBtn"), reEditBtn = $("reEditBtn");
@@ -874,6 +877,21 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
+  // Large iPhone MOVs often truncate mid-upload on slow links — warn up front.
+  const bigMov = videos.find((f) => {
+    const name = (f.name || "").toLowerCase();
+    return (name.endsWith(".mov") || name.endsWith(".m4v")) && f.size > 80 * 1024 * 1024;
+  });
+  if (bigMov) {
+    const mb = Math.round(bigMov.size / (1024 * 1024));
+    const ok = confirm(
+      `"${bigMov.name}" is ~${mb} MB (common for iPhone HEVC).\n\n` +
+      "Keep this tab open until upload shows 100%. If Windows can't play it, that's normal — Drive re-encodes for streaming.\n\n" +
+      "OK = upload now.\nCancel = export Most Compatible / H.264 MP4 on the phone first (smaller + more reliable)."
+    );
+    if (!ok) return;
+  }
+
   // Leave the empty hero immediately so the user sees Ingest progress.
   _ingestBusy += 1;
   const emptyEl = document.getElementById("emptyState");
@@ -1026,6 +1044,50 @@ function syncSpeakerColorPickers(speakerIds) {
 }
 
 // ---- Helpers: collect style / audio ----
+/** Caption look is canonical (font_name, primary_color, …). Timeline / AI packs
+ *  may still send short aliases (font, primary). Merge so burns + seeds agree. */
+function normalizeCaptionStyle(style) {
+  if (!style || typeof style !== "object") return {};
+  const out = Object.assign({}, style);
+  const map = [
+    ["font", "font_name"],
+    ["size", "font_size"],
+    ["primary", "primary_color"],
+    ["highlight", "highlight_color"],
+    ["accent", "accent_color"],
+    ["outline", "outline_color"],
+    ["group", "group_size"],
+  ];
+  for (const [short, long] of map) {
+    if ((out[long] == null || out[long] === "") && out[short] != null && out[short] !== "") {
+      out[long] = out[short];
+    }
+    if ((out[short] == null || out[short] === "") && out[long] != null && out[long] !== "") {
+      out[short] = out[long];
+    }
+  }
+  return out;
+}
+
+function styleHasCaptionFields(style) {
+  if (!style || typeof style !== "object") return false;
+  return !!(
+    style.font_name || style.font || style.primary_color || style.primary ||
+    style.font_size || style.size || style.highlight_color || style.highlight
+  );
+}
+
+/** Current Caption look from the Branding panel (always the export source). */
+function captionLookStyle() {
+  return normalizeCaptionStyle(typeof getStyle === "function" ? getStyle() : {});
+}
+
+async function flushCaptionLookToJob() {
+  if (!currentJobId || typeof saveDraftNow !== "function") return captionLookStyle();
+  try { await saveDraftNow(); } catch { /* best-effort */ }
+  return captionLookStyle();
+}
+
 function getStyle() {
   const speakerColorsEnabled = $("speakerColorsEnabled") && $("speakerColorsEnabled").checked;
   const bgMusicDuck = $("bgMusicDuck") ? $("bgMusicDuck").checked : false;
@@ -1221,6 +1283,7 @@ function getEmojiRules() {
 }
 
 function applyStyle(style = {}) {
+  style = normalizeCaptionStyle(style);
   if (!style || typeof style !== "object") return;
   if (style.font_name) $("font").value = style.font_name;
   if (style.font_size) sizeEl.value = style.font_size;
@@ -1516,7 +1579,7 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
       barFill.style.width = pct + "%";
       statusText.textContent = frac >= 1
-        ? "Upload complete — starting transcription…"
+        ? "Upload complete — extracting audio & transcribing…"
         : `Uploading… ${Math.round(frac * 100)}%`;
     });
 
@@ -1526,7 +1589,19 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       currentFile = null; // consumed — don't re-upload on accidental Transcribe click
       _progressPhase = "transcribe";
       barFill.style.width = "42%";
-      statusText.textContent = "Starting transcription…";
+      const mi = job.media_info || {};
+      const bits = [
+        mi.is_hevc ? "HEVC" : (mi.video_codec || null),
+        mi.audio_codec ? `audio:${mi.audio_codec}` : (mi.has_audio === false ? "audio:none" : null),
+        mi.size ? `${Math.round(mi.size / 1024)} KB on server` : null,
+        mi.duration ? `${Number(mi.duration).toFixed(1)}s` : null,
+      ].filter(Boolean);
+      statusText.textContent = bits.length
+        ? `Server received file (${bits.join(" · ")}) — extracting audio & transcribing…`
+        : "Starting transcription…";
+      if (mi.has_audio === false) {
+        statusText.textContent += " Warning: no audio stream detected — if this fails, Re-drop the original.";
+      }
       pollTranscription(job.job_id);
     }
     refreshJobsList();
@@ -1547,15 +1622,41 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
 }
 
 go.onclick = async () => {
-  // No staged file: the video was auto-queued on drop or restored from a
-  // previous session. Silently returning made the button look dead, so tell
-  // the user what to do instead.
+  // No staged file: either a job is already in flight / ready / failed.
+  // Never claim "already transcribed" for an error job — that dead-ends the flow.
   if (!currentFile) {
-    if (currentJobId) {
-      alert("This video is already transcribed. Pick it under \"Your videos\" to edit it, or use Re-transcribe to run Whisper again.");
-    } else {
-      alert("Drop a video first, then click Transcribe.");
+    const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+    const st = meta && meta.status;
+    if (currentJobId && st === "error") {
+      const redo = confirm(
+        "This video failed transcription (it is NOT ready to edit).\n\n" +
+        "OK = Retry Whisper on the file already on the server.\n" +
+        "Cancel = close this, then use “Re-drop video” or drop the file again."
+      );
+      if (redo) {
+        go.disabled = true;
+        try {
+          await startRetranscribe(currentJobId, { label: "Retrying transcription…" });
+        } finally {
+          go.disabled = false;
+        }
+      }
+      return;
     }
+    if (currentJobId && (st === "transcribing" || st === "queued" || st === "re-transcribing" || st === "extracting audio")) {
+      alert("Still working on this video — wait for transcription to finish (or pick it under Your videos).");
+      return;
+    }
+    if (currentJobId && (meta.has_words || st === "awaiting_edit" || st === "done" || st === "timeline_edit")) {
+      const again = confirm(
+        "This video is already transcribed.\n\n" +
+        "OK = open it for editing.\n" +
+        "Cancel = stay here (drop a new file to upload another, or use Re-transcribe in the editor)."
+      );
+      if (again) switchToJob(currentJobId, { force: true, tab: "ingest" });
+      return;
+    }
+    alert("Drop a video first, then click Transcribe.");
     return;
   }
   go.disabled = true;
@@ -1605,6 +1706,9 @@ async function pollTranscription(jobId) {
     _progressPhase = null;
     barFill.style.width = "100%";
     statusText.textContent = "Transcription complete!";
+    if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+    if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+    if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
     if (fn) fn.textContent = "";   // clear the "…transcribing" upload label
     currentWords = _sanitizeWords(s.words);
     setTimeout(() => {
@@ -1618,7 +1722,12 @@ async function pollTranscription(jobId) {
 
   if (s.status === "error") {
     _progressPhase = null;
-    showError("Transcription error: " + s.error);
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    showError("Transcription error: " + s.error, {
+      allowRetry: true,
+      jobId: jobId,
+      mediaInfo: s.media_info || null,
+    });
     go.disabled = false;
     return;
   }
@@ -1626,7 +1735,10 @@ async function pollTranscription(jobId) {
   // Live status: "extracting audio" / "transcribing" with % so a 2‑min clip
   // never looks frozen at 30% for minutes.
   const label = capitalize(s.status || "transcribing");
-  statusText.textContent = `${label}… ${serverPct}%  (usually under a minute for a 2‑min video)`;
+  statusText.textContent = `${label}… ${serverPct}%`;
+  if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+  if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+  if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
   setTimeout(() => pollTranscription(jobId), 1500);
 }
 
@@ -1766,24 +1878,36 @@ function renderPhraseList(words) {
 }
 
 // One-click filler cleanup: drop every flagged word from currentWords,
-// re-render, and persist. Pure caption edit — the underlying audio still
-// says "um", we just no longer caption it. If the user wants the audio
-// trimmed too, that's a follow-up (silence-tightening per-word).
+// re-render, and persist. Optionally apply AI Trim (real keep-range cuts)
+// via the timeline — Captions AI Trim parity.
 const fillerCleanBtn = $("fillerCleanBtn");
 if (fillerCleanBtn) {
-  fillerCleanBtn.onclick = () => {
+  fillerCleanBtn.onclick = async () => {
     if (!currentWords || !currentWords.length) return;
     const flagged = _detectFillerIndices(currentWords);
     if (flagged.size === 0) return;
-    if (!confirm(
-      `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"} from captions? ` +
-      `The audio in the video stays untouched; this just drops them from the burned subtitles.`
-    )) return;
+    const cutVideo = confirm(
+      `Remove ${flagged.size} filler word${flagged.size === 1 ? "" : "s"}?\n\n` +
+      `OK = remove from captions AND open AI Edit with AI Trim (cuts audio/video).\n` +
+      `Cancel = captions only (audio unchanged).`
+    );
     pushEditHistory();
+    // Always strip from captions first.
+    const cutRanges = [];
+    flagged.forEach((i) => {
+      const w = currentWords[i];
+      if (!w) return;
+      cutRanges.push([Number(w.start), Number(w.end)]);
+    });
     currentWords = currentWords.filter((_, i) => !flagged.has(i));
     renderPhraseList(currentWords);
     updateRowCount();
     if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+    if (cutVideo && currentJobId && typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Trim",
+      });
+    }
   };
 }
 
@@ -1901,7 +2025,61 @@ function fmtTime(sec) {
   return `${m}:${s}`;
 }
 
+let _proxyWatchTimer = null;
+/** Reload #sourcePlayer once the H.264 edit proxy is ready (HEVC → playable). */
+function _watchEditProxy(jobId) {
+  if (_proxyWatchTimer) {
+    clearInterval(_proxyWatchTimer);
+    _proxyWatchTimer = null;
+  }
+  if (!jobId || !sourcePlayer) return;
+  let tries = 0;
+  _proxyWatchTimer = setInterval(async () => {
+    tries += 1;
+    if (tries > 40 || currentJobId !== jobId) {
+      clearInterval(_proxyWatchTimer);
+      _proxyWatchTimer = null;
+      return;
+    }
+    try {
+      const res = await fetch("/status/" + jobId);
+      if (!res.ok) return;
+      const s = await res.json();
+      if (s.edit_proxy) {
+        const t = sourcePlayer.currentTime || 0;
+        sourcePlayer.src = "/raw-upload/" + jobId + "?proxy=1&t=" + Date.now();
+        sourcePlayer.addEventListener("loadedmetadata", () => {
+          try { sourcePlayer.currentTime = t; } catch { /* ignore */ }
+        }, { once: true });
+        clearInterval(_proxyWatchTimer);
+        _proxyWatchTimer = null;
+      }
+    } catch { /* ignore */ }
+  }, 3000);
+}
+
 function showEditor(words, saved = {}) {
+  // Never present an empty Transcript Cut as "ready" — that produced the
+  // black player + "0 phrases" + "No active job" dead-end.
+  if (!currentJobId || !Array.isArray(words) || !words.length) {
+    if (editor) editor.classList.add("hidden");
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+    if (meta && meta.status === "error") {
+      showError("Transcription error: " + (meta.error || "unknown"), {
+        allowRetry: true,
+        jobId: currentJobId,
+        mediaInfo: meta.media_info || null,
+      });
+    } else {
+      showError(
+        "No transcript yet. Drop a video on Ingest and wait for Whisper to finish.",
+        { allowRetry: false }
+      );
+    }
+    return;
+  }
+
   if (retranscribeBtn) retranscribeBtn.disabled = false;
   if (saved.style) applyStyle(saved.style);
   if (saved.audio) applyAudio(saved.audio);
@@ -1913,10 +2091,14 @@ function showEditor(words, saved = {}) {
     if (resultBtn) resultBtn.classList.remove("hidden");
   }
 
-  // Load the original uploaded video into the source player
-  sourcePlayer.src = "/raw-upload/" + currentJobId;
+  // Load the original uploaded video into the source player.
+  // For HEVC iPhone MOVs Chrome-on-Windows is often black until the H.264
+  // edit proxy lands — keep refreshing briefly until /raw-upload serves it.
+  sourcePlayer.src = "/raw-upload/" + currentJobId + "?t=" + Date.now();
+  if (typeof _watchEditProxy === "function") _watchEditProxy(currentJobId);
 
   // Populate the editable subtitle list
+  currentWords = words;
   renderPhraseList(words);
   updateRowCount();
   clearEditHistory();
@@ -1927,48 +2109,82 @@ function showEditor(words, saved = {}) {
   editor.classList.remove("hidden");
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
 
-  // Studio flow: land on Transcript Cut after transcription so the player +
-  // phrase list are visible (Ingest does not host #sourcePlayer).
-  setActiveTab("transcript");
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  // After first transcription, stay on Ingest with ready CTAs (Phase 1 shell).
+  // Edit words / Caption look / Shorts / Timeline are explicit next actions.
+  const jobDur = _jobDurationFromWords(words);
+  const isLongForm = jobDur >= 240;
+  const longBadge = $("hlLongFormBadge");
+  if (longBadge) longBadge.style.display = isLongForm ? "" : "none";
+
+  const landOn = (saved && saved._landOn) || "ingest";
+  setActiveTab(landOn === "transcript" ? "transcript" : "ingest");
+  if (typeof updateAiEditNudge === "function") updateAiEditNudge(isLongForm);
+  if (landOn === "transcript") {
+    editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (typeof updateReadyActions === "function") {
+    updateReadyActions();
+    const ready = $("readyActions");
+    if (ready) ready.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 
   // Restore prior AI Shorts suggestions if the job already has them.
   if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
     renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
+    if (hlStatus) {
+      hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — Open in Timeline or Export clip.`;
+    }
   }
 
-  // Optional: Auto-Generate Shorts on Upload (Ingest checkbox).
-  maybeAutoGenerateShorts(currentJobId);
+  // Only if the Ingest checkbox is explicitly checked — never force Gemini
+  // Shorts on first transcription just because the clip is long-form.
+  maybeAutoGenerateShorts(currentJobId, { force: false, switchTab: false });
 }
 
-async function maybeAutoGenerateShorts(jobId) {
+function _jobDurationFromWords(words) {
+  if (!words || !words.length) return 0;
+  try {
+    return Math.max(0, Number(words[words.length - 1].end) || 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function maybeAutoGenerateShorts(jobId, opts) {
+  opts = opts || {};
   const cb = $("autoGenerateShorts");
-  if (!cb || !cb.checked || !jobId) return;
+  const force = !!opts.force;
+  if (!force && (!cb || !cb.checked)) return;
+  if (!jobId) return;
   if ($("hlGeminiDisabled")) {
     if (hlStatus) hlStatus.textContent = "Auto-Generate Shorts needs GEMINI_API_KEY.";
     return;
   }
-  // Already have suggestions (restored from job) — leave the user on Transcript
-  // with the player loaded; they can open AI Shorts when ready.
+  // Already have suggestions (restored from job).
   if (hlResults && hlResults.children.length) {
     if (hlStatus) {
       hlStatus.textContent = `⚡ ${hlResults.children.length} short${hlResults.children.length === 1 ? "" : "s"} ready — open AI Shorts when you want them.`;
     }
+    if (opts.switchTab) setActiveTab("highlights");
     return;
   }
 
-  // Generate in the background. Do NOT yank the user off Transcript Cut —
-  // that made uploads look broken (video never "loaded" because we jumped
-  // to Highlights before the player was visible).
-  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts in the background…";
+  if (hlStatus) hlStatus.textContent = "⚡ Auto-generating shorts…";
   if (hlFindBtn) hlFindBtn.disabled = true;
   try {
     const format = (hlFormatEl && hlFormatEl.value) || "auto";
     const num = (hlCountEl && parseInt(hlCountEl.value, 10)) || 5;
+    const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
+      .map((el) => parseInt(el.value, 10))
+      .filter((n) => !isNaN(n));
     const res = await fetch("/auto-process-job", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: jobId, format, num_clips: num }),
+      body: JSON.stringify({
+        job_id: jobId,
+        format,
+        num_clips: num,
+        target_durations: durations.length ? durations : [30, 60],
+      }),
     });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || res.statusText);
@@ -1976,14 +2192,14 @@ async function maybeAutoGenerateShorts(jobId) {
     renderHighlights(clips, format);
     if (hlStatus) {
       hlStatus.textContent = clips.length
-        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open AI Shorts to preview.`
+        ? `⚡ Auto-generated ${clips.length} short${clips.length === 1 ? "" : "s"}. Open in Timeline or Export clip.`
         : "Auto-generate returned no clips — try Find highlights with different lengths.";
     }
-    // Soft nudge on the Transcript tab without stealing focus.
     const badge = document.querySelector('.main-tab[data-tab="highlights"]');
     if (badge && clips.length) {
       badge.title = `${clips.length} shorts ready`;
     }
+    if (opts.switchTab && clips.length) setActiveTab("highlights");
     try { await refreshReframeStatus(); } catch { /* optional */ }
   } catch (e) {
     if (hlStatus) hlStatus.textContent = "Auto-generate failed: " + e.message;
@@ -1993,6 +2209,7 @@ async function maybeAutoGenerateShorts(jobId) {
 }
 
 // ---- Phase 2: Render ----
+// (legacy maybeAutoGenerateShorts replaced above; keep render wiring)
 renderBtn.onclick = async () => {
   const editedWords = collectEditedWords();
 
@@ -2072,10 +2289,14 @@ async function pollRender(jobId) {
   setTimeout(() => pollRender(jobId), 2000);
 }
 
-// "Edit transcript again" — scroll back up to editor
+// "Edit transcript again" — open Edit words panel
 reEditBtn.onclick = () => {
   result.classList.add("hidden");
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (typeof openEditWords === "function") openEditWords();
+  else {
+    setActiveTab("transcript");
+    editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 };
 
 // "Re-transcribe" — discard current words and re-run Whisper on the video.
@@ -2085,30 +2306,12 @@ if (retranscribeBtn) {
   retranscribeBtn.onclick = async () => {
     if (!currentJobId) return;
     const ok = confirm(
-      "Re-transcribe this video? Your current transcript edits will be discarded and replaced with a fresh Whisper pass. This usually takes 20–60 seconds."
+      "Re-transcribe this video? Your current transcript edits will be discarded and replaced with a fresh Whisper pass."
     );
     if (!ok) return;
     retranscribeBtn.disabled = true;
-    try {
-      const res = await fetch("/retranscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: currentJobId }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      // Swap the editor for the progress UI and let pollTranscription drive
-      // the rest. When it completes, showEditor() repopulates the new words.
-      editor.classList.add("hidden");
-      result.classList.add("hidden");
-      progress.classList.remove("hidden");
-      barFill.style.width = "30%";
-      statusText.textContent = "Re-transcribing…";
-      pollTranscription(currentJobId);
-    } catch (e) {
-      alert("Re-transcribe failed: " + e.message);
-      retranscribeBtn.disabled = false;
-    }
+    const okRun = await startRetranscribe(currentJobId);
+    if (!okRun) retranscribeBtn.disabled = false;
   };
 }
 
@@ -2423,12 +2626,222 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-function showError(msg) {
+function _mediaNeedsRedrop(mediaInfo, errMsg) {
+  if (!mediaInfo && !errMsg) return false;
+  const msg = String(errMsg || "").toLowerCase();
+  if (
+    msg.includes("incomplete") ||
+    msg.includes("truncated") ||
+    msg.includes("nearly empty") ||
+    msg.includes("unreadable") ||
+    msg.includes("could not extract audio") ||
+    msg.includes("could not read audio") ||
+    msg.includes("source video missing")
+  ) {
+    return true;
+  }
+  if (mediaInfo && mediaInfo.has_audio === false) {
+    return true;
+  }
+  if (msg.includes("no audio")) return true;
+  return false;
+}
+
+function showError(msg, opts) {
+  opts = opts || {};
   progress.classList.remove("hidden");
-  statusText.textContent = msg;
+  const readyBox = $("readyActions");
+  if (readyBox) readyBox.classList.add("hidden");
+  const media = opts.mediaInfo || null;
+  let text = msg;
+  if (media) {
+    const kb = Math.round((media.size || 0) / 1024);
+    const bits = [
+      kb ? `${kb} KB on server` : null,
+      media.has_audio ? "audio:yes" : "audio:no",
+      media.has_video ? "video:yes" : "video:no",
+      media.video_codec ? `v:${media.video_codec}` : null,
+      media.audio_codec ? `a:${media.audio_codec}` : (media.has_audio === false ? "a:none" : null),
+      media.is_hevc ? "HEVC" : null,
+      media.duration ? `${Number(media.duration).toFixed(1)}s` : null,
+    ].filter(Boolean);
+    if (bits.length) text += `  [${bits.join(" · ")}]`;
+    if (media.is_hevc && !media.has_audio) {
+      text += " — HEVC iPhone files often play on Drive (re-encoded) but Windows needs codecs; Re-drop the full original if transfer was cut off.";
+    }
+  }
+  statusText.textContent = text;
   barFill.style.width = "0%";
-  // Keep soft notes out of the floating red toast so navigation stays clear.
-  // Real script failures still use window.__studioError via the global handlers.
+  const jobId = opts.jobId || currentJobId;
+  const showRetry = !!opts.allowRetry && !!jobId;
+  const needsRedrop = showRetry && _mediaNeedsRedrop(media, msg);
+  if (retryTranscribeBtn) {
+    // Prefer re-drop when server file has no audio — Retry will fail the same way.
+    retryTranscribeBtn.classList.toggle("hidden", !showRetry || needsRedrop);
+    retryTranscribeBtn.disabled = false;
+    if (showRetry) retryTranscribeBtn.dataset.jobId = jobId;
+  }
+  if (redropVideoBtn) {
+    redropVideoBtn.classList.toggle("hidden", !showRetry);
+    redropVideoBtn.disabled = false;
+    if (showRetry) redropVideoBtn.dataset.jobId = jobId;
+    if (needsRedrop) {
+      redropVideoBtn.classList.remove("btn-secondary");
+      redropVideoBtn.classList.add("btn-primary");
+      retryTranscribeBtn && retryTranscribeBtn.classList.add("hidden");
+    } else {
+      redropVideoBtn.classList.add("btn-secondary");
+      redropVideoBtn.classList.remove("btn-primary");
+    }
+  }
+  if (retryTranscribeHint) {
+    retryTranscribeHint.classList.toggle("hidden", !showRetry);
+    if (needsRedrop) {
+      retryTranscribeHint.textContent =
+        "The file on the server has no readable audio (often a cut-off iPhone .MOV upload). Use Re-drop video and wait until upload reaches 100%.";
+    } else {
+      retryTranscribeHint.textContent =
+        "Retry re-runs Whisper on the file already uploaded. If it fails again with “no audio,” use Re-drop video.";
+    }
+  }
+}
+
+/** Re-run Whisper on a job already on the server (clears the error tag). */
+async function startRetranscribe(jobId, opts) {
+  opts = opts || {};
+  if (!jobId) return false;
+  try {
+    const res = await fetch("/retranscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: jobId,
+        pre_clean: typeof getPreCleanFlag === "function" ? getPreCleanFlag() : false,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    currentJobId = jobId;
+    localStorage.setItem("subtitleBurner:lastJobId", jobId);
+    if (jobsById[jobId]) {
+      jobsById[jobId].status = "re-transcribing";
+      jobsById[jobId].error = null;
+    }
+    renderJobsList();
+    editor.classList.add("hidden");
+    result.classList.add("hidden");
+    progress.classList.remove("hidden");
+    if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+    if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+    if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
+    barFill.style.width = "30%";
+    statusText.textContent = opts.label || "Re-transcribing…";
+    pollTranscription(jobId);
+    return true;
+  } catch (e) {
+    alert("Re-transcribe failed: " + e.message);
+    return false;
+  }
+}
+
+if (retryTranscribeBtn) {
+  retryTranscribeBtn.onclick = async () => {
+    const jobId = retryTranscribeBtn.dataset.jobId || currentJobId;
+    if (!jobId) return;
+    retryTranscribeBtn.disabled = true;
+    await startRetranscribe(jobId, { label: "Retrying transcription…" });
+    retryTranscribeBtn.disabled = false;
+  };
+}
+
+/** Replace the broken server file on an error job, then re-run Whisper. */
+async function replaceAndTranscribe(jobId, file) {
+  if (!jobId || !file) return null;
+  const fd = new FormData();
+  fd.append("job_id", jobId);
+  fd.append("video", file);
+  if (getPreCleanFlag()) fd.append("pre_clean", "true");
+
+  progress.classList.remove("hidden");
+  if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+  if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+  if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
+  _progressPhase = "upload";
+  barFill.style.width = "3%";
+  statusText.textContent = "Re-uploading " + (file.name || "video") + "…";
+
+  const job = await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/replace-and-transcribe");
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable || _progressPhase !== "upload") return;
+      const pct = 3 + Math.round(Math.max(0, Math.min(1, e.loaded / e.total)) * 37);
+      barFill.style.width = pct + "%";
+      statusText.textContent = e.loaded / e.total >= 1
+        ? "Upload complete — starting transcription…"
+        : `Re-uploading… ${Math.round((e.loaded / e.total) * 100)}%`;
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); }
+      catch (err) { reject(new Error(`Server returned ${xhr.status}`)); return; }
+      if (xhr.status >= 400 || (data && data.error)) {
+        reject(new Error((data && data.error) || `Replace failed (${xhr.status})`));
+      } else resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("Network error during re-upload."));
+    xhr.send(fd);
+  });
+
+  currentJobId = jobId;
+  localStorage.setItem("subtitleBurner:lastJobId", jobId);
+  if (jobsById[jobId]) {
+    jobsById[jobId].status = "re-transcribing";
+    jobsById[jobId].error = null;
+    jobsById[jobId].filename = file.name;
+  }
+  renderJobsList();
+  _progressPhase = "transcribe";
+  barFill.style.width = "42%";
+  statusText.textContent = "Starting transcription…";
+  pollTranscription(jobId);
+  return jobId;
+}
+
+if (redropVideoBtn) {
+  redropVideoBtn.onclick = () => {
+    const jobId = redropVideoBtn.dataset.jobId || currentJobId;
+    if (!jobId) return;
+    pickFileAndReplace(jobId);
+  };
+}
+
+/** Open a file picker and replace the source on *jobId*, then re-transcribe. */
+function pickFileAndReplace(jobId) {
+  if (!jobId) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ACCEPTED_VIDEO_EXT.map((e) => "." + e).join(",");
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (redropVideoBtn) redropVideoBtn.disabled = true;
+    _ingestBusy += 1;
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    try {
+      await replaceAndTranscribe(jobId, file);
+    } catch (e) {
+      showError("Re-drop failed: " + e.message, {
+        allowRetry: true,
+        jobId: jobId,
+      });
+    } finally {
+      if (redropVideoBtn) redropVideoBtn.disabled = false;
+      _ingestBusy = Math.max(0, _ingestBusy - 1);
+      renderJobsList();
+    }
+  };
+  input.click();
 }
 
 // =====================================================================
@@ -2446,6 +2859,21 @@ const jobsPanel = $("jobsPanel");
 const jobsListEl = $("jobsList");
 const jobsCountEl = $("jobsCount");
 let jobsById = {};
+
+// Caption look helpers for Timeline + Instant Export (Phase 3 plumbing).
+window.normalizeCaptionStyle = normalizeCaptionStyle;
+window.styleHasCaptionFields = styleHasCaptionFields;
+window.captionLookStyle = captionLookStyle;
+window.flushCaptionLookToJob = flushCaptionLookToJob;
+window.getStyle = getStyle;
+Object.defineProperty(window, "currentJobId", {
+  get() { return currentJobId; },
+  configurable: true,
+});
+Object.defineProperty(window, "jobsById", {
+  get() { return jobsById; },
+  configurable: true,
+});
 
 function _loadJobIds() {
   try {
@@ -2485,6 +2913,8 @@ function removeJobFromList(jobId) {
   }
   renderJobsList();
 }
+window.removeJobFromList = removeJobFromList;
+window.addJobToList = addJobToList;
 
 function _statusBadgeClass(status) {
   if (!status) return "";
@@ -2565,8 +2995,8 @@ function renderJobsList() {
     if (meta.video_available) {
       const toTl = document.createElement("button");
       toTl.className = "job-rename job-to-timeline";
-      toTl.textContent = "🎬 Timeline";
-      toTl.title = "Edit in timeline (open the multi-track editor with this clip)";
+      toTl.textContent = "Open in Timeline";
+      toTl.title = "Open in Timeline with this clip";
       toTl.onclick = (e) => {
         e.stopPropagation();
         // timeline.js loads after app.js, so guard at click time, not render.
@@ -2574,6 +3004,46 @@ function renderJobsList() {
         else alert("Editor is still loading — try again in a second.");
       };
       div.appendChild(toTl);
+    }
+
+    if (meta.has_words || meta.status === "awaiting_edit" || meta.status === "done") {
+      const editWords = document.createElement("button");
+      editWords.className = "job-rename job-edit-words";
+      editWords.textContent = "Edit words";
+      editWords.title = "Edit words — fillers, fixes, tighten silences";
+      editWords.onclick = (e) => {
+        e.stopPropagation();
+        switchToJob(jobId, { force: true, tab: "transcript" });
+      };
+      div.appendChild(editWords);
+    }
+
+    if (meta.status === "error") {
+      const errTitle = meta.error || "Transcription failed";
+      const needsDrop = _mediaNeedsRedrop(null, errTitle) || !meta.video_available;
+      if (meta.video_available && !needsDrop) {
+        const retry = document.createElement("button");
+        retry.className = "job-rename job-retry";
+        retry.textContent = "↻ Retry";
+        retry.title = errTitle + " — re-run Whisper without re-uploading";
+        retry.onclick = async (e) => {
+          e.stopPropagation();
+          retry.disabled = true;
+          await startRetranscribe(jobId, { label: "Retrying transcription…" });
+        };
+        div.appendChild(retry);
+      }
+      const redrop = document.createElement("button");
+      redrop.className = "job-rename job-redrop";
+      redrop.textContent = "↑ Re-drop";
+      redrop.title = needsDrop
+        ? errTitle + " — replace the server file with a full re-upload"
+        : "Replace this upload and re-transcribe";
+      redrop.onclick = (e) => {
+        e.stopPropagation();
+        pickFileAndReplace(jobId);
+      };
+      div.appendChild(redrop);
     }
 
     const del = document.createElement("button");
@@ -2616,7 +3086,13 @@ async function switchToJob(jobId, opts) {
     window.dispatchEvent(new CustomEvent("subtitleBurner:jobChanged"));
     if (s.words && s.words.length) {
       currentWords = _sanitizeWords(s.words);
-      showEditor(currentWords, s);
+      const landOn = opts.tab === "transcript" || opts.tab === "branding" || opts.tab === "highlights" || opts.tab === "editor"
+        ? opts.tab
+        : "ingest";
+      // showEditor only understands ingest vs transcript for landing; other tabs set after.
+      showEditor(currentWords, Object.assign({}, s, {
+        _landOn: (landOn === "transcript") ? "transcript" : "ingest",
+      }));
       if (s.output && s.status === "done") {
         result.classList.remove("hidden");
         player.src = "/preview/" + s.output;
@@ -2624,18 +3100,37 @@ async function switchToJob(jobId, opts) {
       } else {
         result.classList.add("hidden");
       }
-      setActiveTab(opts.tab || "transcript");
+      if (landOn !== "ingest" && landOn !== "transcript") {
+        setActiveTab(landOn);
+      }
+    } else if (s.status === "error") {
+      editor.classList.add("hidden");
+      result.classList.add("hidden");
+      if (typeof setActiveTab === "function") setActiveTab(opts.tab || "ingest");
+      showError(
+        "Transcription error: " + (s.error || "unknown"),
+        {
+          // Always allow recovery UI — Re-drop works even if the prior file is gone.
+          allowRetry: true,
+          jobId: jobId,
+          mediaInfo: s.media_info || null,
+        }
+      );
     } else {
       // Still transcribing — show the progress UI for this job
       editor.classList.add("hidden");
       result.classList.add("hidden");
       progress.classList.remove("hidden");
+      if (retryTranscribeBtn) retryTranscribeBtn.classList.add("hidden");
+      if (redropVideoBtn) redropVideoBtn.classList.add("hidden");
+      if (retryTranscribeHint) retryTranscribeHint.classList.add("hidden");
       barFill.style.width = (s.progress || 10) + "%";
       statusText.textContent = capitalize(s.status || "loading") + "…";
       pollTranscription(jobId);
       setActiveTab(opts.tab || "ingest");
     }
     renderJobsList();
+    if (typeof updateReadyActions === "function") updateReadyActions();
   } catch (e) {
     console.error("switchToJob failed", e);
   }
@@ -2669,12 +3164,14 @@ async function refreshJobsList() {
 
 async function initJobs() {
   await refreshJobsList();
-  // Auto-restore the most recently active job into the editor (if it's
-  // still in a usable state). Skip errored jobs and abandoned uploads.
+  // Auto-restore the most recently active job. Error jobs open Ingest with
+  // Retry / Re-drop — skipping them left users staring at a red badge only.
   const lastId = localStorage.getItem("subtitleBurner:lastJobId");
   if (lastId && jobsById[lastId]) {
     const meta = jobsById[lastId];
-    if (meta.status !== "error" && (meta.status === "done" || meta.video_available !== false)) {
+    if (meta.status === "error") {
+      await switchToJob(lastId, { force: true, tab: "ingest" });
+    } else if (meta.status === "done" || meta.video_available !== false) {
       await switchToJob(lastId);
     }
   }
@@ -2916,16 +3413,15 @@ function renderHighlights(clips, format) {
 
     card.appendChild(timeRow);
 
-    // ---- Action buttons ----
+    // ---- Action buttons (Phase 2 verb set, fixed order) ----
+    // Preview → Open in Timeline → AI Edit… → Export clip → Add to compilation
     const actions = document.createElement("div");
     actions.className = "hl-actions";
 
     const previewBtn = document.createElement("button");
-    previewBtn.textContent = "▶ Preview";
+    previewBtn.textContent = "Preview";
+    previewBtn.title = "Play and nudge this range";
     previewBtn.onclick = () => {
-      // Open the preview-edit panel on the Edit tab. onUpdate is called on
-      // every input change in the panel (live sync back to this card) plus
-      // on Save / Make-a-clip / Add-to-compilation actions.
       openPreviewEditor({
         title: editedTitle,
         hookQuote: editedQuote,
@@ -2942,21 +3438,85 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(previewBtn);
 
-    const addSegBtn = document.createElement("button");
-    addSegBtn.textContent = "🔗 Add to assembly";
-    addSegBtn.title = "Add this clip as a segment in the assembly bar";
-    addSegBtn.onclick = () => {
-      if (editedEnd <= editedStart) { alert("End time must be greater than start time."); return; }
-      _addClipToAssembly({ title: editedTitle, start: editedStart, end: editedEnd, quote: editedQuote });
-      addSegBtn.textContent = "✓ Added";
-      addSegBtn.disabled = true;
-      setTimeout(() => { addSegBtn.disabled = false; addSegBtn.textContent = "🔗 Add to assembly"; }, 1500);
-      if (window.StudioLogger) StudioLogger.clip("segment_added", `"${editedTitle}" ${editedStart.toFixed(1)}-${editedEnd.toFixed(1)}s`);
+    const openTlBtn = document.createElement("button");
+    openTlBtn.className = "primary hl-open-timeline";
+    openTlBtn.textContent = "Open in Timeline";
+    openTlBtn.title = "Put this range on the Timeline (Main track)";
+    openTlBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      if (typeof window.openTimelineEditor === "function") {
+        window.openTimelineEditor(currentJobId, {
+          in: editedStart,
+          out: editedEnd,
+          newProject: true,
+          replace: true,
+        });
+      } else {
+        alert("Timeline is not available yet — try again in a second.");
+      }
     };
-    actions.appendChild(addSegBtn);
+    actions.appendChild(openTlBtn);
+
+    const aiEditBtn = document.createElement("button");
+    aiEditBtn.className = "hl-ai-edit";
+    aiEditBtn.textContent = "AI Edit…";
+    aiEditBtn.title = "Advanced: style + intensity → seeded Timeline project";
+    aiEditBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      openAiEditPlan({
+        source_job_id: currentJobId,
+        start_time: editedStart,
+        end_time: editedEnd,
+        label: editedTitle || "highlight",
+      });
+    };
+    actions.appendChild(aiEditBtn);
+
+    const exportBtn = document.createElement("button");
+    exportBtn.textContent = "Export clip";
+    exportBtn.title = "Trim this range into a standalone video job";
+    exportBtn.onclick = async () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      exportBtn.disabled = true;
+      exportBtn.textContent = "Exporting…";
+      try {
+        const style = await flushCaptionLookToJob();
+        const res = await fetch("/clip-from-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_job_id: currentJobId,
+            start_time: editedStart,
+            end_time: editedEnd,
+            label: editedTitle || "highlight",
+            style,
+          }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        addJobToList(j.job_id);
+        await refreshJobsList();
+        await switchToJob(j.job_id, { force: true, tab: "ingest" });
+      } catch (e) {
+        alert("Could not export clip: " + e.message);
+        exportBtn.disabled = false;
+        exportBtn.textContent = "Export clip";
+      }
+    };
+    actions.appendChild(exportBtn);
 
     const addBtn = document.createElement("button");
-    addBtn.textContent = "+ Add to compilation";
+    addBtn.textContent = "Add to compilation";
+    addBtn.title = "Queue this clip for the Compilation tab";
     addBtn.onclick = () => {
       if (editedEnd <= editedStart) {
         alert("End time must be greater than start time.");
@@ -2974,60 +3534,10 @@ function renderHighlights(clips, format) {
       addBtn.disabled = true;
       setTimeout(() => {
         addBtn.disabled = false;
-        addBtn.textContent = "+ Add to compilation";
+        addBtn.textContent = "Add to compilation";
       }, 1500);
     };
     actions.appendChild(addBtn);
-
-    const makeBtn = document.createElement("button");
-    makeBtn.className = "primary";
-    makeBtn.textContent = "Make a clip";
-    makeBtn.onclick = async () => {
-      if (editedEnd <= editedStart) {
-        alert("End time must be greater than start time.");
-        return;
-      }
-      makeBtn.disabled = true;
-      makeBtn.textContent = "Trimming…";
-      try {
-        const res = await fetch("/clip-from-job", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            source_job_id: currentJobId,
-            start_time: editedStart,
-            end_time: editedEnd,
-            label: editedTitle || "highlight",
-          }),
-        });
-        const j = await res.json();
-        if (j.error) throw new Error(j.error);
-        addJobToList(j.job_id);
-        await refreshJobsList();
-        await switchToJob(j.job_id);
-      } catch (e) {
-        alert("Could not create clip: " + e.message);
-        makeBtn.disabled = false;
-        makeBtn.textContent = "Make a clip";
-      }
-    };
-    actions.appendChild(makeBtn);
-
-    const tlBtn = document.createElement("button");
-    tlBtn.textContent = "🎬 Open in Timeline";
-    tlBtn.title = "Open the timeline editor with this highlight as a clip";
-    tlBtn.onclick = () => {
-      if (editedEnd <= editedStart) {
-        alert("End time must be greater than start time.");
-        return;
-      }
-      if (typeof window.openTimelineEditor === "function") {
-        window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd });
-      } else {
-        alert("Timeline Editor is not available.");
-      }
-    };
-    actions.appendChild(tlBtn);
 
     card.appendChild(actions);
     hlResults.appendChild(card);
@@ -3040,10 +3550,7 @@ let _hlAvoidRanges = [];
 const hlMoreBtn = $("hlMoreBtn");
 
 async function _runFindHighlights({ avoid }) {
-  if (!currentJobId) {
-    alert("No active job. Transcribe a video first.");
-    return;
-  }
+  if (!requireReadyTranscript("AI Shorts")) return;
   const durations = Array.from(document.querySelectorAll(".hl-dur:checked"))
     .map(el => parseInt(el.value, 10));
   if (!durations.length) {
@@ -3066,8 +3573,20 @@ async function _runFindHighlights({ avoid }) {
         avoid_ranges: avoid || [],
       }),
     });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    const raw = await res.text();
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        res.status === 404
+          ? "Shorts API not found — restart the app after pulling the latest branch."
+          : res.status >= 500
+            ? "Server error while finding highlights (often missing GEMINI_API_KEY or Gemini timeout). Check Replit secrets."
+            : `Shorts response was not JSON (HTTP ${res.status}).`
+      );
+    }
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
     const clips = data.clips || [];
     renderHighlights(clips, data.format || hlFormatEl.value);
     // Accumulate every range we've shown so the next "More options" excludes them all.
@@ -3094,6 +3613,270 @@ if (hlFindBtn) {
 }
 if (hlMoreBtn) {
   hlMoreBtn.onclick = () => _runFindHighlights({ avoid: _hlAvoidRanges.slice() });
+}
+
+// =====================================================================
+// AI Edit plan modal — style + intensity → seeded timeline project
+// =====================================================================
+let _aiEditCtx = null;
+let _aiEditPackId = "pulse";
+let _aiEditRecCuts = []; // full recommended cuts from preview
+
+async function openAiEditPlan(ctx) {
+  _aiEditCtx = ctx || null;
+  _aiEditRecCuts = [];
+  const modal = $("aiEditModal");
+  if (!modal || !_aiEditCtx) return;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  const createClipEl = $("aiEditCreateClip");
+  if (createClipEl) {
+    // Highlight chops prefer a child clip job; whole-job AI Edit does not.
+    const preferClip = _aiEditCtx.create_clip !== false
+      && (_aiEditCtx.start_time != null && _aiEditCtx.end_time != null
+          && Number(_aiEditCtx.end_time) - Number(_aiEditCtx.start_time) < 180);
+    createClipEl.checked = preferClip;
+  }
+  const status = $("aiEditCutsPreview");
+  if (status) status.textContent = "Loading style packs…";
+  const outline = $("aiEditOutline");
+  if (outline) {
+    outline.innerHTML = "";
+    outline.classList.remove("has-cuts");
+  }
+  try {
+    const res = await fetch("/ai-edit/style-packs");
+    const data = await res.json();
+    const packs = data.packs || [];
+    const host = $("aiEditPacks");
+    if (host) {
+      host.innerHTML = "";
+      packs.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ai-edit-pack" + (p.id === _aiEditPackId ? " active" : "");
+        btn.dataset.pack = p.id;
+        btn.innerHTML = `<strong>${p.label}</strong><span>${p.blurb || ""}</span>`;
+        btn.onclick = () => {
+          _aiEditPackId = p.id;
+          host.querySelectorAll(".ai-edit-pack").forEach((el) => el.classList.toggle("active", el.dataset.pack === p.id));
+          previewAiEditCuts();
+        };
+        host.appendChild(btn);
+      });
+      if (!packs.find((p) => p.id === _aiEditPackId) && packs[0]) {
+        _aiEditPackId = packs[0].id;
+      }
+    }
+    await previewAiEditCuts();
+  } catch (e) {
+    if (status) status.textContent = "Could not load style packs: " + e.message;
+  }
+}
+
+function closeAiEditPlan() {
+  const modal = $("aiEditModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  _aiEditCtx = null;
+  _aiEditRecCuts = [];
+}
+
+function _fmtCutTime(t) {
+  const v = Math.max(0, Number(t) || 0);
+  const m = Math.floor(v / 60);
+  const s = (v - m * 60).toFixed(1);
+  return `${m}:${s.padStart(4, "0")}`;
+}
+
+function renderAiEditOutline(rec) {
+  const outline = $("aiEditOutline");
+  if (!outline) return;
+  const cuts = (rec && rec.cuts) || [];
+  _aiEditRecCuts = cuts.map((c) => [Number(c[0]), Number(c[1])]);
+  if (!_aiEditRecCuts.length) {
+    outline.innerHTML = "";
+    outline.classList.remove("has-cuts");
+    return;
+  }
+  outline.classList.add("has-cuts");
+  const details = (rec && rec.cut_details) || [];
+  let html = `<div class="ai-edit-outline-head">
+    <span>Outline · recommended cuts (uncheck to keep)</span>
+    <button type="button" class="tl-chip-btn" id="aiEditRestoreCuts">Restore all</button>
+  </div>`;
+  _aiEditRecCuts.forEach((c, i) => {
+    const dur = (c[1] - c[0]).toFixed(1);
+    const d = details[i] || {};
+    const kind = d.kind === "silence" ? "silence" : "filler";
+    const ctx = (d.context_before || d.context_after)
+      ? `${d.context_before || ""} … ${d.context_after || ""}`.trim()
+      : kind;
+    html += `<label class="ai-edit-cut-row">
+      <input type="checkbox" class="ai-edit-cut-check" data-idx="${i}" checked>
+      <span><span class="cut-meta">${_fmtCutTime(c[0])}–${_fmtCutTime(c[1])} · ${dur}s · ${kind}</span><br>${ctx}</span>
+    </label>`;
+  });
+  outline.innerHTML = html;
+  const restore = $("aiEditRestoreCuts");
+  if (restore) {
+    restore.onclick = () => {
+      outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => { cb.checked = true; });
+    };
+  }
+}
+
+function selectedAiEditCuts() {
+  const outline = $("aiEditOutline");
+  if (!outline || !_aiEditRecCuts.length) return _aiEditRecCuts.slice();
+  const selected = [];
+  outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => {
+    if (!cb.checked) return;
+    const i = parseInt(cb.dataset.idx, 10);
+    if (!isNaN(i) && _aiEditRecCuts[i]) selected.push(_aiEditRecCuts[i]);
+  });
+  return selected;
+}
+
+async function previewAiEditCuts() {
+  if (!_aiEditCtx) return;
+  const el = $("aiEditCutsPreview");
+  if (!el) return;
+  el.textContent = "Estimating recommended cuts…";
+  try {
+    const res = await fetch("/recommended-cuts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: _aiEditCtx.source_job_id,
+        start_time: _aiEditCtx.start_time,
+        end_time: _aiEditCtx.end_time,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const st = data.stats || {};
+    el.textContent = `Recommended AI Trim: ${st.cut_count || 0} cut(s) · ~${st.seconds_removed || 0}s removed`
+      + (data.filler_count ? ` · ${data.filler_count} filler word(s)` : "")
+      + ((data.silence_gaps || []).length ? ` · ${(data.silence_gaps || []).length} silence gap(s)` : "");
+    renderAiEditOutline(data);
+  } catch (e) {
+    el.textContent = "Cut preview unavailable: " + e.message;
+    renderAiEditOutline({ cuts: [] });
+  }
+}
+
+async function runAiEditGenerate() {
+  if (!_aiEditCtx) return;
+  const btn = $("aiEditGenerate");
+  const status = $("aiEditStatus");
+  if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
+  if (status) status.textContent = "Building AI Edit project…";
+  try {
+    const intensity = ($("aiEditIntensity") && $("aiEditIntensity").value) || "med";
+    const applyCuts = !($("aiEditApplyCuts") && !$("aiEditApplyCuts").checked);
+    const createClip = !($("aiEditCreateClip") && !$("aiEditCreateClip").checked);
+    const insertMedia = !($("aiEditInsertMedia") && !$("aiEditInsertMedia").checked);
+    const cuts = applyCuts ? selectedAiEditCuts() : [];
+    const res = await fetch("/ai-edit-seed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_job_id: _aiEditCtx.source_job_id,
+        start_time: _aiEditCtx.start_time,
+        end_time: _aiEditCtx.end_time,
+        label: _aiEditCtx.label || "AI Edit",
+        style_pack: _aiEditPackId,
+        intensity,
+        apply_cuts: applyCuts,
+        create_clip: createClip,
+        insert_media: insertMedia,
+        cuts,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    if (data.clip_job_id) {
+      try {
+        addJobToList(data.clip_job_id);
+        await refreshJobsList();
+      } catch { /* non-fatal */ }
+    }
+    closeAiEditPlan();
+    if (typeof window.openTimelineEditor === "function") {
+      await window.openTimelineEditor(data.job_id, {
+        newProject: true,
+        replace: true,
+        seedTimeline: data.timeline,
+        label: data.label || "AI Edit",
+      });
+    } else {
+      alert("Timeline Editor is not available.");
+    }
+    if (data.warning) console.warn("[ai-edit]", data.warning);
+  } catch (e) {
+    if (status) status.textContent = "Error: " + e.message;
+    alert("AI Edit failed: " + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Create project"; }
+  }
+}
+
+(function wireAiEditModal() {
+  const close = () => closeAiEditPlan();
+  if ($("aiEditClose")) $("aiEditClose").onclick = close;
+  if ($("aiEditCancel")) $("aiEditCancel").onclick = close;
+  if ($("aiEditGenerate")) $("aiEditGenerate").onclick = () => runAiEditGenerate();
+  const modal = $("aiEditModal");
+  if (modal) {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) close();
+    });
+  }
+  const applyCutsEl = $("aiEditApplyCuts");
+  if (applyCutsEl) {
+    applyCutsEl.addEventListener("change", () => {
+      const outline = $("aiEditOutline");
+      if (!outline) return;
+      outline.style.opacity = applyCutsEl.checked ? "1" : "0.45";
+      outline.querySelectorAll(".ai-edit-cut-check").forEach((cb) => {
+        cb.disabled = !applyCutsEl.checked;
+      });
+    });
+  }
+  // Also expose for short-clip path: AI Edit whole current job from Transcript.
+  window.openAiEditPlanForJob = function (jobId, opts) {
+    opts = opts || {};
+    openAiEditPlan({
+      source_job_id: jobId || currentJobId,
+      start_time: opts.start_time != null ? opts.start_time : 0,
+      end_time: opts.end_time,
+      label: opts.label || "AI Edit",
+      create_clip: opts.create_clip === true ? true : false,
+    });
+  };
+})();
+
+function updateAiEditNudge(isLongForm) {
+  const nudge = $("aiEditNudge");
+  if (!nudge) return;
+  if (isLongForm) {
+    nudge.classList.add("hidden");
+    return;
+  }
+  nudge.classList.remove("hidden");
+}
+const aiEditNudgeBtn = $("aiEditNudgeBtn");
+if (aiEditNudgeBtn) {
+  aiEditNudgeBtn.onclick = () => {
+    if (!currentJobId) return;
+    if (typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Edit",
+      });
+    }
+  };
 }
 
 // =====================================================================
@@ -3168,7 +3951,7 @@ function renderCompileQueue() {
     const hint = document.createElement("p");
     hint.className = "muted";
     hint.style.cssText = "text-align:center;padding:24px 12px;font-size:.9rem";
-    hint.innerHTML = "Nothing queued yet. Open the <strong>✨ Highlights</strong> tab on any video and click <strong>+ Add to compilation</strong> on the suggestions you want to stitch together.";
+    hint.innerHTML = "Nothing queued yet. On <strong>AI Shorts</strong>, click <strong>Add to compilation</strong> on the clips you want to stitch together.";
     compileListEl.appendChild(hint);
     return;
   }
@@ -3545,6 +4328,16 @@ if (compileGoBtn) {
       await refreshJobsList();
       refreshPastCompiles();
       await switchToJob(j.job_id);
+      // Close the Captions-style loop: offer Timeline as the edit surface.
+      if (typeof window.openTimelineEditor === "function") {
+        const goTl = confirm(
+          `Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"}.\n\n` +
+          `Open in Timeline to edit captions, B-roll, and Render?`
+        );
+        if (goTl) {
+          window.openTimelineEditor(j.job_id, { replace: true, newProject: true });
+        }
+      }
     } catch (e) {
       compileStatus.textContent = "Error: " + e.message;
     } finally {
@@ -3693,20 +4486,75 @@ const tabResultBtn = $("tabResult");
 const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
 
+function hasReadyTranscript() {
+  return !!(currentJobId && Array.isArray(currentWords) && currentWords.length);
+}
+
+function requireReadyTranscript(actionLabel) {
+  if (hasReadyTranscript()) return true;
+  const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+  if (meta && meta.status === "error") {
+    alert(
+      (actionLabel || "That step") +
+      " needs a finished transcript.\n\nThis video failed transcription — go to Ingest and use Re-drop video (or Retry)."
+    );
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    switchToJob(currentJobId, { force: true, tab: "ingest" });
+    return false;
+  }
+  alert(
+    (actionLabel || "That step") +
+    " needs a transcribed video first.\n\nDrop a video on Ingest and wait until it shows ready (not error)."
+  );
+  if (typeof setActiveTab === "function") setActiveTab("ingest");
+  return false;
+}
+
 function setActiveTab(tab) {
+  // Tabs that only make sense after Whisper produced words.
+  const needsTranscript = {
+    transcript: "Edit words",
+    highlights: "AI Shorts",
+    branding: "Caption look",
+    compilation: "Compilation",
+    editor: "Timeline",
+    result: "Result",
+  };
+  if (needsTranscript[tab] && !hasReadyTranscript()) {
+    const wanted = needsTranscript[tab];
+    tab = "ingest";
+    const statusEl = $("statusText");
+    const prog = $("progress");
+    if (prog) prog.classList.remove("hidden");
+    if (statusEl) {
+      const errMeta = currentJobId ? (jobsById[currentJobId] || {}) : null;
+      statusEl.textContent = (errMeta && errMeta.status === "error")
+        ? `${wanted} is locked — this video failed transcription. Use Re-drop video below.`
+        : `${wanted} unlocks after Whisper finishes. Drop a video on Ingest (wait for ready, not error).`;
+    }
+  }
+
+  // Primary story steps: 1 Ingest → 2 Shorts → 3 Timeline.
+  // transcript/branding are secondary panels (Edit words / Caption look).
   const stepMap = {
     ingest: "1",
-    transcript: "2",
-    highlights: "3",
-    compilation: "3",
-    branding: "4",
-    editor: "5",
-    result: "5",
+    highlights: "2",
+    compilation: "2",
+    editor: "3",
+    result: "3",
+    transcript: "1",
+    branding: "1",
   };
   const step = stepMap[tab];
 
   document.querySelectorAll(".main-tab").forEach(b => {
-    b.classList.toggle("active", b.dataset.tab === tab);
+    const isSecondary = b.classList.contains("main-tab-secondary");
+    const isMatch = b.dataset.tab === tab;
+    b.classList.toggle("active", isMatch);
+    // Reveal secondary nav chips only while that panel is open.
+    if (isSecondary) {
+      b.classList.toggle("hidden", !isMatch);
+    }
   });
 
   document.querySelectorAll(".step-badge").forEach(b => {
@@ -3737,10 +4585,72 @@ function setActiveTab(tab) {
       window.ensureTimelineInit();
     }
   }
+
+  if (typeof updateReadyActions === "function") updateReadyActions();
 }
 
 // Used by timeline.js openTimelineEditor / other modules.
 window.setActiveTab = setActiveTab;
+
+function updateReadyActions() {
+  const box = $("readyActions");
+  if (!box) return;
+  const ready = hasReadyTranscript();
+  box.classList.toggle("hidden", !ready);
+  const hint = $("readyActionsHint");
+  if (hint && ready) {
+    const name = (jobsById[currentJobId] && jobsById[currentJobId].filename) || "This video";
+    hint.textContent = `${name} is transcribed. Fix words, set caption look, find shorts, or open the timeline.`;
+  }
+}
+
+function openEditWords() {
+  if (!requireReadyTranscript("Edit words")) return;
+  setActiveTab("transcript");
+  if (editor) editor.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function openCaptionLook() {
+  if (!requireReadyTranscript("Caption look")) return;
+  setActiveTab("branding");
+}
+
+function openFindShorts() {
+  if (!requireReadyTranscript("AI Shorts")) return;
+  setActiveTab("highlights");
+}
+
+function openTimelineFromReady() {
+  if (!requireReadyTranscript("Timeline")) return;
+  if (typeof window.openTimelineEditor === "function" && currentJobId) {
+    window.openTimelineEditor(currentJobId);
+  } else {
+    setActiveTab("editor");
+  }
+}
+
+window.openEditWords = openEditWords;
+window.openCaptionLook = openCaptionLook;
+
+[
+  ["readyEditWordsBtn", openEditWords],
+  ["readyCaptionLookBtn", openCaptionLook],
+  ["readyFindShortsBtn", openFindShorts],
+  ["readyOpenTimelineBtn", openTimelineFromReady],
+  ["transcriptBackIngestBtn", () => setActiveTab("ingest")],
+  ["transcriptCaptionLookBtn", openCaptionLook],
+  ["brandingBackIngestBtn", () => setActiveTab("ingest")],
+].forEach(([id, fn]) => {
+  const el = $(id);
+  if (el) el.onclick = fn;
+});
+
+// Timeline toolbar Caption look (element may appear after timeline.js mounts).
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest && e.target.closest("#tlCaptionLookBtn");
+  if (!btn) return;
+  openCaptionLook();
+});
 
 if (mainTabs) {
   mainTabs.addEventListener("click", (e) => {
@@ -3761,10 +4671,8 @@ if (workflowSteps) {
     if (!badge || !badge.dataset.step) return;
     const stepToTab = {
       "1": "ingest",
-      "2": "transcript",
-      "3": "highlights",
-      "4": "branding",
-      "5": "editor"
+      "2": "highlights",
+      "3": "editor",
     };
     const tab = stepToTab[badge.dataset.step];
     if (tab) setActiveTab(tab);
@@ -3819,7 +4727,7 @@ renderCompileQueue();
 //
 // User clicks ▶ Preview on a Highlights card → switches to the Edit tab
 // and opens this panel under the source video. The panel mirrors the card:
-// editable Start/End (mm:ss.s), Add to compilation, Make a clip — plus
+// editable Start/End (mm:ss.s), Add to compilation, Export clip — plus
 // Replay and Save & back. Edits live-sync to the Highlights card so both
 // representations stay aligned.
 
@@ -3974,10 +4882,34 @@ if (_peToTimeline) {
     }
     _peSyncToCard();
     if (typeof window.openTimelineEditor !== "function") {
-      alert("Editor is still loading — try again in a second.");
+      alert("Timeline is still loading — try again in a second.");
       return;
     }
-    window.openTimelineEditor(currentJobId, { in: t.s, out: t.e });
+    window.openTimelineEditor(currentJobId, {
+      in: t.s,
+      out: t.e,
+      newProject: true,
+      replace: true,
+    });
+  };
+}
+
+const _peAiEdit = $("previewEditAiEdit");
+if (_peAiEdit) {
+  _peAiEdit.onclick = () => {
+    if (!_activePreview || !currentJobId) return;
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
+      return;
+    }
+    _peSyncToCard();
+    openAiEditPlan({
+      source_job_id: currentJobId,
+      start_time: t.s,
+      end_time: t.e,
+      label: (_activePreview && _activePreview.title) || "highlight",
+    });
   };
 }
 
@@ -3996,6 +4928,23 @@ if (editToTimelineBtn) {
   };
 }
 
+const aiEditJobBtn = $("aiEditJobBtn");
+if (aiEditJobBtn) {
+  aiEditJobBtn.onclick = () => {
+    if (!currentJobId) {
+      alert("No active video. Transcribe a video first.");
+      return;
+    }
+    if (typeof window.openAiEditPlanForJob === "function") {
+      window.openAiEditPlanForJob(currentJobId, {
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Edit",
+      });
+    } else {
+      alert("AI Edit is still loading — try again in a second.");
+    }
+  };
+}
+
 const _peMakeClip = $("previewEditMakeClip");
 if (_peMakeClip) {
   _peMakeClip.onclick = async () => {
@@ -4007,8 +4956,9 @@ if (_peMakeClip) {
     }
     _peSyncToCard();
     _peMakeClip.disabled = true;
-    _peSetStatus("Trimming clip…");
+    _peSetStatus("Exporting clip…");
     try {
+      const style = await flushCaptionLookToJob();
       const res = await fetch("/clip-from-job", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4017,6 +4967,7 @@ if (_peMakeClip) {
           start_time: t.s,
           end_time: t.e,
           label: _activePreview.title || "highlight",
+          style,
         }),
       });
       const j = await res.json();
@@ -4024,9 +4975,9 @@ if (_peMakeClip) {
       addJobToList(j.job_id);
       await refreshJobsList();
       closePreviewEditor();
-      await switchToJob(j.job_id);
+      await switchToJob(j.job_id, { force: true, tab: "ingest" });
     } catch (err) {
-      _peSetStatus("Could not create clip: " + err.message, false);
+      _peSetStatus("Could not export clip: " + err.message, false);
     } finally {
       _peMakeClip.disabled = false;
     }
@@ -4560,12 +5511,23 @@ function _renderAssemblyBar() {
   const headerBtn = $("headerExportBtn");
   if (!headerBtn) return;
 
-  headerBtn.addEventListener("click", () => {
+  headerBtn.addEventListener("click", async () => {
     // Determine active tab
     const activeTabBtn = document.querySelector(".main-tab.active");
     const tabName = activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "edit";
 
     if (window.StudioLogger) StudioLogger.action("headerExportBtn", "click", `tab:${tabName}`);
+
+    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+      if (typeof setActiveTab === "function") setActiveTab("ingest");
+      return;
+    }
+
+    // Flush Caption look so Instant Export / Timeline / batch always burn current fonts.
+    if (typeof flushCaptionLookToJob === "function" && currentJobId) {
+      try { await flushCaptionLookToJob(); } catch { /* best-effort */ }
+    }
 
     if (tabName === "highlights") {
       const batchBtn = $("batchExportBtn");
@@ -4633,7 +5595,7 @@ function _renderAssemblyBar() {
 
       if (clipsToRender.length === 0) throw new Error("No valid clips found to export.");
 
-      const style = getStyle();
+      const style = await flushCaptionLookToJob();
       const res = await fetch("/batch-render-clips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4791,7 +5753,9 @@ window._brandLogoAssetId = window._brandLogoAssetId || null;
 })();
 
 async function applyBrandingToTimeline() {
-  const style = typeof getStyle === "function" ? getStyle() : {};
+  const style = typeof flushCaptionLookToJob === "function"
+    ? await flushCaptionLookToJob()
+    : (typeof captionLookStyle === "function" ? captionLookStyle() : getStyle());
   if (typeof window.ensureTimelineInit === "function") {
     await window.ensureTimelineInit();
   }
@@ -4856,37 +5820,41 @@ window.loadCustomBrandPreset = function() {
   }
 };
 
-// ---- Auto-Fetch B-Roll & Overlays Button Handler ----
+// ---- Auto-Fetch B-Roll & Overlays (legacy branding button, if present) ----
 const autoFetchOverlaysBtn = document.getElementById("autoFetchOverlaysBtn");
 if (autoFetchOverlaysBtn) {
   autoFetchOverlaysBtn.addEventListener("click", async () => {
     try {
       autoFetchOverlaysBtn.disabled = true;
       autoFetchOverlaysBtn.textContent = "Fetching...";
-      
-      let wordsToUse = [];
-      if (typeof currentWords !== "undefined" && currentWords.length > 0) {
-        wordsToUse = currentWords;
+      if (typeof window.ensureTimelineInit === "function") {
+        await window.ensureTimelineInit();
       }
-      
+      if (typeof window.addOverlayClip !== "function") {
+        throw new Error("Timeline overlays are not available yet.");
+      }
+      const body = {
+        job_id: currentJobId || undefined,
+        words: (typeof currentWords !== "undefined" && currentWords.length) ? currentWords : undefined,
+        budget: 5,
+        mode: "auto",
+        placement: "pip",
+      };
       const res = await fetch("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ words: wordsToUse }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      
-      if (data.overlays && Array.isArray(data.overlays)) {
-        if (typeof window.addOverlayClip === "function") {
-          data.overlays.forEach(overlay => window.addOverlayClip(overlay));
-        } else if (typeof window.populateOverlaysList === "function") {
-          window.populateOverlaysList(data.overlays);
-        } else {
-          console.log("Fetched overlays:", data.overlays);
-          alert("Overlays fetched but no handler found to display them. Check console.");
-        }
+      const list = data.overlays || [];
+      for (const overlay of list) {
+        await window.addOverlayClip(overlay);
       }
+      if (typeof setActiveTab === "function") setActiveTab("editor");
+      alert(list.length
+        ? `Added ${list.length} keyword overlay${list.length === 1 ? "" : "s"} to the Timeline.`
+        : "No keyword moments found to overlay.");
     } catch (e) {
       alert("Failed to fetch overlays: " + e.message);
     } finally {
