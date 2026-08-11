@@ -250,6 +250,7 @@
             <p class="muted" style="font-size:.72rem;line-height:1.45;margin:0 0 8px">
               Optional. Uses a cached PyAnnote pipeline; set <code>DIARIZATION_DEVICE=cuda</code> (or <code>mps</code>) for a large speedup.
               CPU still works — first run warms the model, later Analyzes are faster.
+              Speaker labels work even if face tracking (mediapipe) is unavailable on the host.
             </p>
             <div id="ingestSpeakerCards">
               <p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">

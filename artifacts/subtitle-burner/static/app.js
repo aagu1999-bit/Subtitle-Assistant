@@ -2402,8 +2402,13 @@ async function refreshReframeStatus() {
     const data = await res.json();
     if (data.ready && data.stats) {
       if (reframeStatus) {
+        const faceN = data.stats.face_samples || 0;
+        const faceNote = data.stats.faces_skipped
+          ? " · faces skipped (speakers still OK)"
+          : `, ${faceN} face samples`;
         reframeStatus.textContent =
-          `✓ ${data.stats.speaker_count} speakers, ${data.stats.face_samples || 0} face samples`;
+          `✓ ${data.stats.speaker_count} speakers${faceNote}`;
+        reframeStatus.style.color = "";
       }
       if (reframeEnabled) {
         reframeEnabled.disabled = false;
@@ -2500,11 +2505,27 @@ async function startReframeAnalyze(triggerBtn) {
       );
     }
     if (!res.ok || (data && data.error)) {
-      throw new Error((data && data.error) || `Analyze failed (${res.status})`);
+      let msg = (data && data.error) || `Analyze failed (${res.status})`;
+      if (data && data.deps) {
+        const d = data.deps;
+        msg += `\n\nDeps in this process:\n` +
+          `• HF_TOKEN: ${d.hf_token ? "present" : "MISSING"}\n` +
+          `• pyannote: ${d.pyannote}\n` +
+          `• mediapipe: ${d.mediapipe}` +
+          (d.faces_ok === false ? "\n(Face crops optional — speakers should still work after update.)" : "");
+      }
+      throw new Error(msg);
     }
     const deviceHint = data.diarization_device ? ` · ${data.diarization_device}` : "";
+    if (data.faces_note) {
+      if (reframeStatus) reframeStatus.textContent = data.faces_note;
+      if (empty) empty.textContent = data.faces_note;
+    }
     if (reframeStatus) reframeStatus.textContent = `Analysing speakers + faces${deviceHint}…`;
     if (empty) empty.textContent = `Analysing speakers + faces${deviceHint}…`;
+    if (data.faces_note && empty) {
+      empty.textContent = `Analysing speakers${deviceHint}… (${data.faces_note})`;
+    }
 
     let pollFails = 0;
     _reframePollTimer = setInterval(async () => {

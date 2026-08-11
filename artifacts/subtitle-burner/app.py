@@ -1225,38 +1225,69 @@ def _warm_diarization_pipeline() -> None:
 threading.Thread(target=_warm_diarization_pipeline, daemon=True).start()
 
 
-def _reframe_deps_available() -> tuple[bool, str]:
-    """Return (ok, msg). Tries to import the heavy deps without crashing the
-    app if they're missing — the reframe feature is opt-in.
-
-    Reports the actual ImportError reason (e.g. missing libGL.so.1) instead
-    of pretending the package isn't installed. mediapipe in particular
-    installs cleanly but fails to import on minimal Linux sandboxes (Replit,
-    Docker slim) because its native module links against libGL at runtime.
-    """
-    try:
-        import mediapipe  # noqa: F401
-    except ImportError as e:
-        return False, f"mediapipe failed to import: {e}"
-    except Exception as e:
-        return False, f"mediapipe import raised {type(e).__name__}: {e}"
-    try:
-        import pyannote.audio  # noqa: F401
-    except ImportError as e:
-        return False, f"pyannote.audio failed to import: {e}"
-    except Exception as e:
-        return False, f"pyannote.audio import raised {type(e).__name__}: {e}"
-    if not (
+def _hf_token_present() -> bool:
+    return bool(
         os.environ.get(HUGGINGFACE_TOKEN_ENV)
         or os.environ.get("HUGGINGFACE_TOKEN")
         or os.environ.get("HF_TOKEN")
-    ):
-        return False, (
-            f"{HUGGINGFACE_TOKEN_ENV} env var missing. Get a free token at "
-            f"https://huggingface.co/settings/tokens and accept the model "
-            f"licence at https://huggingface.co/pyannote/speaker-diarization-3.1"
+    )
+
+
+def _probe_analyze_deps() -> dict:
+    """Structured Analyze dependency probe (diarization vs faces are independent).
+
+    Speaker colors / diarization only need pyannote + HF token.
+    9:16 reframe crops also need mediapipe (often broken on headless Linux
+    without libGL) — that must not block Analyze for speakers.
+    """
+    out = {
+        "diarization_ok": False,
+        "faces_ok": False,
+        "hf_token": _hf_token_present(),
+        "pyannote": None,
+        "mediapipe": None,
+        "error": None,
+        "faces_error": None,
+    }
+    try:
+        import pyannote.audio  # noqa: F401
+        out["pyannote"] = "ok"
+    except ImportError as e:
+        out["pyannote"] = f"import failed: {e}"
+    except Exception as e:
+        out["pyannote"] = f"{type(e).__name__}: {e}"
+
+    try:
+        import mediapipe  # noqa: F401
+        out["mediapipe"] = "ok"
+        out["faces_ok"] = True
+    except ImportError as e:
+        out["mediapipe"] = f"import failed: {e}"
+        out["faces_error"] = out["mediapipe"]
+    except Exception as e:
+        out["mediapipe"] = f"{type(e).__name__}: {e}"
+        out["faces_error"] = out["mediapipe"]
+
+    if out["pyannote"] != "ok":
+        out["error"] = f"pyannote.audio unavailable ({out['pyannote']})"
+    elif not out["hf_token"]:
+        out["error"] = (
+            f"{HUGGINGFACE_TOKEN_ENV} env var missing in the running Studio process. "
+            f"Set it in the host env / .env.local and restart the server "
+            f"(accept licences at https://huggingface.co/pyannote/speaker-diarization-3.1 "
+            f"and https://huggingface.co/pyannote/segmentation-3.0)."
         )
-    return True, ""
+    else:
+        out["diarization_ok"] = True
+    return out
+
+
+def _reframe_deps_available() -> tuple[bool, str]:
+    """Return (ok, msg). Speakers-only Analyze is ok without mediapipe."""
+    d = _probe_analyze_deps()
+    if d["diarization_ok"]:
+        return True, ""
+    return False, d["error"] or "Analyze dependencies unavailable"
 
 
 def _extract_audio_for_diarization(video_path: Path, out_path: Path) -> None:
@@ -1520,13 +1551,17 @@ def analyze_reframe(
     Diarization (torch) and face sampling (MediaPipe/OpenCV) run in parallel
     so wall-clock time is closer to max(diar, faces) instead of sum.
 
+    Face tracking is best-effort: if mediapipe/OpenCV isn't available (common
+    on headless Linux without libGL), we still return speaker diarization so
+    Ingest Analyze / speaker colors work.
+
     Returns a JSON-serializable payload that's cached per job for the
     compositor to consume. Caller is responsible for spawning this in a
     background thread — both passes are CPU-heavy.
     """
-    ok, msg = _reframe_deps_available()
-    if not ok:
-        raise RuntimeError(msg)
+    deps = _probe_analyze_deps()
+    if not deps["diarization_ok"]:
+        raise RuntimeError(deps["error"] or "Diarization dependencies unavailable")
 
     def _progress(pct: int, status: str) -> None:
         if progress_cb:
@@ -1540,6 +1575,7 @@ def analyze_reframe(
 
     diar: list[dict] = []
     faces: list[dict] = []
+    faces_warning: str | None = None
     errors: list[BaseException] = []
 
     def _run_diar():
@@ -1551,27 +1587,39 @@ def analyze_reframe(
         )
 
     def _run_faces():
+        if not deps["faces_ok"]:
+            raise RuntimeError(deps.get("faces_error") or "Face tracking unavailable")
         return detect_face_tracks(video_path, sample_fps=fps)
 
-    # Overlap wall time: pyannote (GIL-heavy but releases in native ops) +
-    # OpenCV/MediaPipe face pass on another thread.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="reframe") as pool:
-        fut_diar = pool.submit(_run_diar)
-        fut_faces = pool.submit(_run_faces)
-        for fut in as_completed([fut_diar, fut_faces]):
-            try:
-                if fut is fut_diar:
-                    diar = fut.result()
-                    _progress(55, "speakers labelled — tracking faces")
-                else:
-                    faces = fut.result()
-                    _progress(70, "faces sampled — finishing diarization")
-            except BaseException as e:
-                errors.append(e)
-
-    if errors:
-        # Prefer the first failure; cancel isn't needed — both already done/failed.
-        raise errors[0]
+    if deps["faces_ok"]:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="reframe") as pool:
+            fut_diar = pool.submit(_run_diar)
+            fut_faces = pool.submit(_run_faces)
+            for fut in as_completed([fut_diar, fut_faces]):
+                try:
+                    if fut is fut_diar:
+                        diar = fut.result()
+                        _progress(55, "speakers labelled — tracking faces")
+                    else:
+                        faces = fut.result()
+                        _progress(70, "faces sampled — finishing diarization")
+                except BaseException as e:
+                    if fut is fut_diar:
+                        errors.append(e)
+                    else:
+                        faces_warning = str(e)
+                        faces = []
+                        _progress(70, "speakers labelled — faces skipped")
+        if errors:
+            raise errors[0]
+    else:
+        # Speakers-only path (no mediapipe / libGL).
+        faces_warning = deps.get("faces_error") or "Face tracking unavailable"
+        try:
+            diar = _run_diar()
+        except BaseException as e:
+            raise
+        _progress(70, "speakers labelled — faces skipped (no mediapipe)")
 
     overlaps = find_overlap_regions(diar)
     speakers = sorted({s["speaker"] for s in diar})
@@ -1587,6 +1635,8 @@ def analyze_reframe(
             "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
             "diarization_device": _diarization_device_resolved,
             "face_sample_fps": fps,
+            "faces_skipped": bool(faces_warning),
+            "faces_warning": faces_warning,
         },
     }
 
@@ -5889,7 +5939,25 @@ def analyze_reframe_endpoint():
         return jsonify({"error": "Source video missing for this job"}), 404
     ok, msg = _reframe_deps_available()
     if not ok:
-        return jsonify({"error": msg}), 400
+        deps = _probe_analyze_deps()
+        return jsonify({
+            "error": msg,
+            "deps": {
+                "hf_token": deps["hf_token"],
+                "pyannote": deps["pyannote"],
+                "mediapipe": deps["mediapipe"],
+                "diarization_ok": deps["diarization_ok"],
+                "faces_ok": deps["faces_ok"],
+            },
+        }), 400
+
+    deps = _probe_analyze_deps()
+    faces_note = None
+    if not deps["faces_ok"]:
+        faces_note = (
+            "Speaker diarization will run; face/reframe crops skipped "
+            f"({deps.get('faces_error') or 'mediapipe unavailable'})."
+        )
 
     def _opt_int(key: str) -> int | None:
         raw = data.get(key)
@@ -5930,6 +5998,26 @@ def analyze_reframe_endpoint():
     return jsonify({
         "job_id": job_id,
         "status": "started",
+        "diarization_device": _diarization_device_resolved or DIARIZATION_DEVICE,
+        "diarization_model": DIARIZATION_MODEL,
+        "faces_ok": deps["faces_ok"],
+        "faces_note": faces_note,
+    })
+
+
+@app.route("/analyze-deps", methods=["GET"])
+def analyze_deps_endpoint():
+    """Diagnostic: what Analyze can run in this process (HF / pyannote / mediapipe)."""
+    deps = _probe_analyze_deps()
+    return jsonify({
+        "ok": deps["diarization_ok"],
+        "hf_token_present": deps["hf_token"],
+        "diarization_ok": deps["diarization_ok"],
+        "faces_ok": deps["faces_ok"],
+        "pyannote": deps["pyannote"],
+        "mediapipe": deps["mediapipe"],
+        "error": deps["error"],
+        "faces_error": deps["faces_error"],
         "diarization_device": _diarization_device_resolved or DIARIZATION_DEVICE,
         "diarization_model": DIARIZATION_MODEL,
     })
