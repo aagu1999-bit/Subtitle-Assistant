@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-22-merge-fix";
+  const TL_BUILD = "studio-editor-build-23-merge-gap-cut";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -3435,7 +3435,10 @@
     applyStage();
   }
 
-  // ---- Merge adjacent Main shots (Captions split/merge parity) ----
+  // ---- Merge adjacent Main shots ----
+  // Same source only. Contiguous pieces rejoin cleanly. If there's a source gap
+  // (highlight A then later highlight B), keep both as one clip and skip the
+  // middle by adding a cut over the gap — same play result as two Main bars.
   function mergeSelectedWithNext() {
     if (!tl || !selected || selected.track !== "main") {
       alert("Select a Main clip to merge with the next shot.");
@@ -3449,7 +3452,10 @@
     const a = tl.tracks.main[idx];
     const b = tl.tracks.main[idx + 1];
     if (!a.source_job_id || a.source_job_id !== b.source_job_id) {
-      alert("Can only merge adjacent shots from the same source video.");
+      alert(
+        "Can't merge clips from different source videos into one trim.\n\n" +
+        "Keep them as two Main shots (they already play in order), or stitch/export later."
+      );
       return;
     }
 
@@ -3462,16 +3468,15 @@
       return;
     }
 
-    // Order by source time to measure gap / coverage.
+    // Order by source time so gap/cut math is stable regardless of timeline order.
     const earlyIn = Math.min(aIn, bIn);
     const earlyOut = aIn <= bIn ? aOut : bOut;
-    const lateIn = Math.max(aIn, bIn);
+    const lateIn = aIn <= bIn ? bIn : aIn;
     const lateOut = Math.max(aOut, bOut);
     const gap = lateIn - earlyOut;
     const beforeDur = clipDuration(a) + clipDuration(b);
 
-    // Next shot already fully inside this clip's source range → deleting B is
-    // the only thing to do; say so instead of pretending we "merged".
+    // Next shot already fully inside this clip's source range → just remove B.
     if (bIn >= aIn - 0.05 && bOut <= aOut + 0.05) {
       pushHistory();
       ["overlay", "text", "music"].forEach((k) => {
@@ -3483,28 +3488,26 @@
       selectClip("main", a.id);
       renderTimeline();
       scheduleSave();
-      setRenderStatus("Removed next shot — it was already inside this clip’s source range (not a real merge)");
-      return;
-    }
-
-    // Only rejoin pieces of one continuous stretch (Split / Detect shots / AI pieces).
-    if (gap > 0.35) {
-      alert(
-        `Can't merge — these shots have a ${gap.toFixed(1)}s gap in the source.\n` +
-        `Merge only rejoins pieces that were split apart (same continuous stretch).\n\n` +
-        `A: ${fmtTime(aIn)}–${fmtTime(aOut)} · B: ${fmtTime(bIn)}–${fmtTime(bOut)}`
-      );
+      setRenderStatus("Removed next shot — it was already inside this clip’s source range");
       return;
     }
 
     pushHistory();
-    // Union source range so B's footage is actually kept (old code only grew
-    // `out`, so an earlier-in-source "next" shot could be deleted silently).
     a.in = earlyIn;
     a.out = lateOut;
-    a.cuts = mergeCuts([...(a.cuts || []), ...(b.cuts || [])]);
+
+    // Existing word cuts from both pieces, plus a skip-cut over any source gap
+    // so Preview/Render play A then jump to B (never the middle dead zone).
+    const cuts = [...(a.cuts || []), ...(b.cuts || [])];
+    let gapCut = null;
+    if (gap > 0.05) {
+      gapCut = [earlyOut, lateIn];
+      cuts.push(gapCut);
+    }
+    a.cuts = mergeCuts(cuts);
+
     a.word_overrides = Object.assign({}, b.word_overrides || {}, a.word_overrides || {});
-    // Boundary between A|B disappears; keep an outgoing transition if either had one.
+    // Internal join is a hard cut (gap skip); keep an outgoing transition if either had one.
     a.transition = b.transition || a.transition || null;
     if (!a.punch_zoom && b.punch_zoom) a.punch_zoom = b.punch_zoom;
     if (!a.ken_burns && b.ken_burns) a.ken_burns = b.ken_burns;
@@ -3525,10 +3528,17 @@
     renderTimeline();
     scheduleSave();
     const afterDur = clipDuration(a);
-    setRenderStatus(
-      `Merged shots → ${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible` +
-      (Math.abs(afterDur - beforeDur) > 0.05 ? ` (was ${fmtTime(beforeDur)} across 2)` : "")
-    );
+    if (gapCut) {
+      setRenderStatus(
+        `Merged with ${fmtTime(gap)} gap skipped as cut · ` +
+        `${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible` +
+        (Math.abs(afterDur - beforeDur) > 0.08 ? ` (was ${fmtTime(beforeDur)} across 2)` : "")
+      );
+    } else {
+      setRenderStatus(
+        `Merged continuous stretch → ${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible`
+      );
+    }
   }
 
   async function detectShotsOnSelected() {
