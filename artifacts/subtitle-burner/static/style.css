@@ -1177,6 +1177,15 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   color: #ffd60a;
   border-bottom-color: #ffd60a;
 }
+.main-tab.main-tab-secondary {
+  font-size: 0.85rem;
+  opacity: 0.92;
+  margin-left: auto;
+}
+.main-tab.main-tab-secondary.active {
+  color: #c8c0ff;
+  border-bottom-color: #6c5cff;
+}
 .tab-badge {
   display: inline-block;
   background: #6c5cff;

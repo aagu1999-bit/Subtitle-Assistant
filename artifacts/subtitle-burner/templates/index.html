@@ -80,7 +80,7 @@
   <div class="empty-hero">
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
-    <p class="empty-tagline">Drop a video, transcribe it, edit the words, then burn captions.<br>AI audio enhancement, intelligent clip suggestions, and multi-video compilation built in.</p>
+    <p class="empty-tagline">Drop a video, transcribe it, find AI Shorts, then finish on the Timeline.<br>Edit words and caption look stay one click away after transcription.</p>
     <!-- Input INSIDE the label is the most reliable picker pattern across
          browsers (for= alone can fail if app.js never finishes wiring). -->
     <label id="emptyDropBtn" class="btn btn-primary btn-lg empty-pick-btn" style="cursor:pointer;position:relative;overflow:hidden">
@@ -148,11 +148,9 @@
 <header class="app-header" id="appHeader">
   <div class="logo">🎬 Subtitle Assistant Studio</div>
   <div class="workflow-steps" id="workflowSteps">
-    <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
-    <button class="main-tab" data-tab="transcript">2. ✂️ Transcript Cut</button>
-    <button class="main-tab" data-tab="highlights">3. 🔥 AI Shorts</button>
-    <button class="main-tab" data-tab="branding">4. 🎨 Branding &amp; Styles</button>
-    <button class="main-tab" data-tab="editor">5. 🎬 Multitrack Timeline</button>
+    <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
+    <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
+    <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
   </div>
   <div class="header-actions">
     <button class="btn-export" id="headerExportBtn" type="button">⚡ Instant Export MP4</button>
@@ -162,14 +160,15 @@
 <!-- Main app shell: full-width main area (hidden until a job exists) -->
 <div id="appShell" class="app-shell hidden">
   <main class="main-area" style="width:100%;">
-    <!-- Tab navigation: 5 Unified Production Steps -->
+    <!-- Primary story: Ingest → AI Shorts → Timeline. Transcript + Branding stay as panels opened via Edit words / Caption look. -->
     <nav class="main-tabs" id="mainTabs">
-      <button class="main-tab active" data-tab="ingest">1. 📁 Ingest &amp; Diarize</button>
-      <button class="main-tab" data-tab="transcript">2. ✂️ Transcript Cut</button>
-      <button class="main-tab" data-tab="highlights">3. 🔥 AI Shorts</button>
-      <button class="main-tab" data-tab="compilation">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
-      <button class="main-tab" data-tab="branding">4. 🎨 Branding &amp; Styles</button>
-      <button class="main-tab" data-tab="editor">5. 🎬 Multitrack Timeline</button>
+      <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
+      <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
+      <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
+      <button class="main-tab" data-tab="compilation" title="Queue clips from AI Shorts">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
+      <!-- Secondary panels — not numbered steps; opened from ready CTAs -->
+      <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav">✂️ Edit words</button>
+      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav">🎨 Caption look</button>
       <button class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
     </nav>
 
@@ -229,6 +228,18 @@
             <button id="redropVideoBtn" class="btn btn-secondary btn-sm hidden" type="button" style="margin-top:8px;width:100%" title="Replace the broken server file with a fresh copy of your video">↑ Re-drop video (fixes incomplete uploads)</button>
             <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If Retry keeps saying “no audio,” the file on the server is usually truncated — use <strong>Re-drop video</strong> and wait until upload hits 100%.</p>
           </div>
+          <section id="readyActions" class="panel hidden" style="margin-top:14px;padding:14px">
+            <div class="section-title" style="margin-bottom:6px">✅ Transcript ready</div>
+            <p id="readyActionsHint" class="muted" style="font-size:.78rem;line-height:1.45;margin:0 0 10px">
+              Next: fix words, set caption look, find shorts, or open the timeline.
+            </p>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <button type="button" id="readyEditWordsBtn" class="btn btn-primary btn-sm">✂️ Edit words</button>
+              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">🎨 Caption look</button>
+              <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">🔥 Find Shorts</button>
+              <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">🎬 Open Timeline</button>
+            </div>
+          </section>
         </div>
         <div style="flex:1;min-width:300px;">
           <section class="panel">
@@ -280,12 +291,16 @@
     </div>
     <!-- /Tab: Ingest -->
 
-    <!-- Tab 4: Branding -->
+    <!-- Panel: Caption look (was step 4 — opened via ready CTA / Timeline) -->
     <div class="tab-content hidden" data-tab-group="branding">
 
   <!-- Style panel -->
   <section class="panel">
-    <h2>Style &amp; Caption Presets</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h2 style="margin:0">🎨 Caption look</h2>
+      <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
+    </div>
+    <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">Caption fonts and colors for this video. Used by Edit words preview, Shorts export, and Timeline (unless the timeline overrides).</p>
 
     <!-- CapCut Master Viral Templates -->
     <div class="row" style="margin-bottom:16px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
@@ -781,7 +796,7 @@
     </div>
     <!-- /Tab: Branding -->
 
-    <!-- Tab 2: Transcript Cut -->
+    <!-- Panel: Edit words (was step 2 — opened via ready CTA) -->
     <div class="tab-content hidden" data-tab-group="transcript">
       <!-- Subtitle editor (shown after transcription) -->
       <div id="transcriptEditor" class="transcript-editor">
@@ -793,7 +808,11 @@
         <section class="panel source-video-section">
           <div class="editor-header">
             <h2>Source Video</h2>
-            <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
+              <button type="button" id="transcriptBackIngestBtn" class="btn btn-secondary btn-sm">← Ingest</button>
+              <button type="button" id="transcriptCaptionLookBtn" class="btn btn-secondary btn-sm">🎨 Caption look</button>
+            </div>
           </div>
           <div class="video-preview-wrapper" style="position:relative;width:100%;">
             <video id="sourcePlayer" controls playsinline style="width:100%;display:block;border-radius:12px;"></video>
@@ -1194,6 +1213,7 @@
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
           <button id="tlPlaySeqBtn" class="btn btn-secondary" title="Play Main-track clips in order without a full FFmpeg render">▶ Preview cut</button>
+          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Open caption fonts and colors for this project">🎨 Caption look</button>
           <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
         </div>
       </div>

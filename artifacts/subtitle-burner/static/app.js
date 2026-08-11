@@ -1608,7 +1608,7 @@ go.onclick = async () => {
         "OK = open it for editing.\n" +
         "Cancel = stay here (drop a new file to upload another, or use Re-transcribe in the editor)."
       );
-      if (again) switchToJob(currentJobId, { force: true, tab: "transcript" });
+      if (again) switchToJob(currentJobId, { force: true, tab: "ingest" });
       return;
     }
     alert("Drop a video first, then click Transcribe.");
@@ -2064,16 +2064,23 @@ function showEditor(words, saved = {}) {
   editor.classList.remove("hidden");
   localStorage.setItem("subtitleBurner:lastJobId", currentJobId);
 
-  // After first transcription, land on Transcript Cut. Analyze / Enhance /
-  // AI Shorts are opt-in via their own buttons — do not auto-run them here.
+  // After first transcription, stay on Ingest with ready CTAs (Phase 1 shell).
+  // Edit words / Caption look / Shorts / Timeline are explicit next actions.
   const jobDur = _jobDurationFromWords(words);
   const isLongForm = jobDur >= 240;
   const longBadge = $("hlLongFormBadge");
   if (longBadge) longBadge.style.display = isLongForm ? "" : "none";
 
-  setActiveTab("transcript");
+  const landOn = (saved && saved._landOn) || "ingest";
+  setActiveTab(landOn === "transcript" ? "transcript" : "ingest");
   if (typeof updateAiEditNudge === "function") updateAiEditNudge(isLongForm);
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (landOn === "transcript") {
+    editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (typeof updateReadyActions === "function") {
+    updateReadyActions();
+    const ready = $("readyActions");
+    if (ready) ready.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 
   // Restore prior AI Shorts suggestions if the job already has them.
   if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
@@ -2594,6 +2601,8 @@ function _mediaNeedsRedrop(mediaInfo, errMsg) {
 function showError(msg, opts) {
   opts = opts || {};
   progress.classList.remove("hidden");
+  const readyBox = $("readyActions");
+  if (readyBox) readyBox.classList.add("hidden");
   const media = opts.mediaInfo || null;
   let text = msg;
   if (media) {
@@ -2931,6 +2940,18 @@ function renderJobsList() {
       div.appendChild(toTl);
     }
 
+    if (meta.has_words || meta.status === "awaiting_edit" || meta.status === "done") {
+      const editWords = document.createElement("button");
+      editWords.className = "job-rename job-edit-words";
+      editWords.textContent = "✂️ Words";
+      editWords.title = "Edit transcript words (fillers, fixes, tighten)";
+      editWords.onclick = (e) => {
+        e.stopPropagation();
+        switchToJob(jobId, { force: true, tab: "transcript" });
+      };
+      div.appendChild(editWords);
+    }
+
     if (meta.status === "error") {
       const errTitle = meta.error || "Transcription failed";
       const needsDrop = _mediaNeedsRedrop(null, errTitle) || !meta.video_available;
@@ -2999,7 +3020,13 @@ async function switchToJob(jobId, opts) {
     window.dispatchEvent(new CustomEvent("subtitleBurner:jobChanged"));
     if (s.words && s.words.length) {
       currentWords = _sanitizeWords(s.words);
-      showEditor(currentWords, s);
+      const landOn = opts.tab === "transcript" || opts.tab === "branding" || opts.tab === "highlights" || opts.tab === "editor"
+        ? opts.tab
+        : "ingest";
+      // showEditor only understands ingest vs transcript for landing; other tabs set after.
+      showEditor(currentWords, Object.assign({}, s, {
+        _landOn: (landOn === "transcript") ? "transcript" : "ingest",
+      }));
       if (s.output && s.status === "done") {
         result.classList.remove("hidden");
         player.src = "/preview/" + s.output;
@@ -3007,7 +3034,9 @@ async function switchToJob(jobId, opts) {
       } else {
         result.classList.add("hidden");
       }
-      setActiveTab(opts.tab || "transcript");
+      if (landOn !== "ingest" && landOn !== "transcript") {
+        setActiveTab(landOn);
+      }
     } else if (s.status === "error") {
       editor.classList.add("hidden");
       result.classList.add("hidden");
@@ -3035,6 +3064,7 @@ async function switchToJob(jobId, opts) {
       setActiveTab(opts.tab || "ingest");
     }
     renderJobsList();
+    if (typeof updateReadyActions === "function") updateReadyActions();
   } catch (e) {
     console.error("switchToJob failed", e);
   }
@@ -4413,9 +4443,9 @@ function requireReadyTranscript(actionLabel) {
 function setActiveTab(tab) {
   // Tabs that only make sense after Whisper produced words.
   const needsTranscript = {
-    transcript: "Transcript Cut",
+    transcript: "Edit words",
     highlights: "AI Shorts",
-    branding: "Branding",
+    branding: "Caption look",
     compilation: "Compilation",
     editor: "Timeline",
     result: "Result",
@@ -4434,19 +4464,27 @@ function setActiveTab(tab) {
     }
   }
 
+  // Primary story steps: 1 Ingest → 2 Shorts → 3 Timeline.
+  // transcript/branding are secondary panels (Edit words / Caption look).
   const stepMap = {
     ingest: "1",
-    transcript: "2",
-    highlights: "3",
-    compilation: "3",
-    branding: "4",
-    editor: "5",
-    result: "5",
+    highlights: "2",
+    compilation: "2",
+    editor: "3",
+    result: "3",
+    transcript: "1",
+    branding: "1",
   };
   const step = stepMap[tab];
 
   document.querySelectorAll(".main-tab").forEach(b => {
-    b.classList.toggle("active", b.dataset.tab === tab);
+    const isSecondary = b.classList.contains("main-tab-secondary");
+    const isMatch = b.dataset.tab === tab;
+    b.classList.toggle("active", isMatch);
+    // Reveal secondary nav chips only while that panel is open.
+    if (isSecondary) {
+      b.classList.toggle("hidden", !isMatch);
+    }
   });
 
   document.querySelectorAll(".step-badge").forEach(b => {
@@ -4477,10 +4515,72 @@ function setActiveTab(tab) {
       window.ensureTimelineInit();
     }
   }
+
+  if (typeof updateReadyActions === "function") updateReadyActions();
 }
 
 // Used by timeline.js openTimelineEditor / other modules.
 window.setActiveTab = setActiveTab;
+
+function updateReadyActions() {
+  const box = $("readyActions");
+  if (!box) return;
+  const ready = hasReadyTranscript();
+  box.classList.toggle("hidden", !ready);
+  const hint = $("readyActionsHint");
+  if (hint && ready) {
+    const name = (jobsById[currentJobId] && jobsById[currentJobId].filename) || "This video";
+    hint.textContent = `${name} is transcribed. Fix words, set caption look, find shorts, or open the timeline.`;
+  }
+}
+
+function openEditWords() {
+  if (!requireReadyTranscript("Edit words")) return;
+  setActiveTab("transcript");
+  if (editor) editor.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function openCaptionLook() {
+  if (!requireReadyTranscript("Caption look")) return;
+  setActiveTab("branding");
+}
+
+function openFindShorts() {
+  if (!requireReadyTranscript("AI Shorts")) return;
+  setActiveTab("highlights");
+}
+
+function openTimelineFromReady() {
+  if (!requireReadyTranscript("Timeline")) return;
+  if (typeof window.openTimelineEditor === "function" && currentJobId) {
+    window.openTimelineEditor(currentJobId);
+  } else {
+    setActiveTab("editor");
+  }
+}
+
+window.openEditWords = openEditWords;
+window.openCaptionLook = openCaptionLook;
+
+[
+  ["readyEditWordsBtn", openEditWords],
+  ["readyCaptionLookBtn", openCaptionLook],
+  ["readyFindShortsBtn", openFindShorts],
+  ["readyOpenTimelineBtn", openTimelineFromReady],
+  ["transcriptBackIngestBtn", () => setActiveTab("ingest")],
+  ["transcriptCaptionLookBtn", openCaptionLook],
+  ["brandingBackIngestBtn", () => setActiveTab("ingest")],
+].forEach(([id, fn]) => {
+  const el = $(id);
+  if (el) el.onclick = fn;
+});
+
+// Timeline toolbar Caption look (element may appear after timeline.js mounts).
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest && e.target.closest("#tlCaptionLookBtn");
+  if (!btn) return;
+  openCaptionLook();
+});
 
 if (mainTabs) {
   mainTabs.addEventListener("click", (e) => {
@@ -4501,10 +4601,8 @@ if (workflowSteps) {
     if (!badge || !badge.dataset.step) return;
     const stepToTab = {
       "1": "ingest",
-      "2": "transcript",
-      "3": "highlights",
-      "4": "branding",
-      "5": "editor"
+      "2": "highlights",
+      "3": "editor",
     };
     const tab = stepToTab[badge.dataset.step];
     if (tab) setActiveTab(tab);
