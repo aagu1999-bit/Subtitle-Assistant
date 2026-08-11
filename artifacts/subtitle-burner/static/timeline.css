@@ -106,6 +106,12 @@
   border: 1px solid #2a2f3a;
   flex-shrink: 0;
 }
+.tl-asset-thumb-ph {
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  color: #aeb4c0;
+}
 
 /* Transcript document (text-based editing) */
 .tl-transcript-toolbar {
