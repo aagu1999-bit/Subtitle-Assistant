@@ -416,12 +416,12 @@
       const div = document.createElement("div");
       div.className = "tl-source-item";
       const icon = a.kind === "audio" ? "🎵" : a.kind === "image" ? "🖼" : "🎞";
-      const label = a.filename || `${a.ext || a.kind} ${String(a.asset_id || "").slice(0, 6)}`;
+      const label = a.filename || a.keyword || `${a.ext || a.kind} ${String(a.asset_id || "").slice(0, 6)}`;
       const thumb = (a.kind === "image" || a.kind === "video")
         ? `<img class="tl-asset-thumb" src="/asset/${a.asset_id}" alt="" loading="lazy">`
-        : "";
+        : `<span class="tl-asset-thumb tl-asset-thumb-ph" aria-hidden="true">${icon}</span>`;
       div.innerHTML =
-        `${thumb}<span class="tl-source-name" title="${esc(label)}">${icon} ${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
+        `${thumb}<span class="tl-source-name" title="${esc(label)}">${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
       if (a.kind === "audio") {
         const m = document.createElement("button");
         m.className = "tl-chip-btn";
@@ -1149,7 +1149,7 @@
       renderTranscript(c);
     }
     // Selecting overlay/music/text keeps Media open so you can see the library.
-    if ((track === "overlay" || track === "music") && leftTabPinned !== "transcript") {
+    if ((track === "overlay" || track === "music" || track === "text") && leftTabPinned !== "transcript") {
       setLeftTab("media");
     }
     applyStage();
