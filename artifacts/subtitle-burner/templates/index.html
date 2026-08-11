@@ -1158,8 +1158,9 @@
       <span id="compileCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
     </h2>
     <p class="muted panel-desc">
-      Clips you've added from any video. They'll be stitched in this order into a single new job that
-      goes through the normal subtitle/audio pipeline. Style is inherited from the first source.
+      Prefer <strong>Send to timeline</strong> to edit on Main (Preview cut → Render), or
+      <strong>Compile</strong> to stitch into one job first — you'll be offered Timeline next.
+      In Timeline, <strong>Stitch Main</strong> bakes the track into one source.
     </p>
     <div id="compileList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
     <div class="row" style="gap:8px;flex-wrap:wrap">
@@ -1225,12 +1226,12 @@
               <ul>
                 <li>✓ Word cuts / keep-ranges</li>
                 <li>✓ Color grades (CSS)</li>
-                <li>✓ Ken Burns / punch zoom (CSS)</li>
+                <li>✓ Ken Burns / punch / Effects lane (CSS)</li>
                 <li>✓ Music bed (crude duck)</li>
-                <li>✓ Overlays / titles / logo (live)</li>
+                <li>✓ Video + image overlays / titles / logo</li>
                 <li>✓ Captions karaoke (DOM approx)</li>
                 <li>~ Soft opacity dissolves only</li>
-                <li>✗ Exact xfade / ASS burn / split-screen</li>
+                <li>~ Split-screen guide (exact on Render)</li>
               </ul>
               <em>Use to check pacing. Click Render for the real export.</em>
             </span>
@@ -1245,9 +1246,9 @@
               <ul>
                 <li>✓ Exact keep-ranges / word cuts</li>
                 <li>✓ Exact color grades</li>
-                <li>✓ Exact Ken Burns / punch zoom</li>
+                <li>✓ Exact Ken Burns / punch / Effects lane</li>
                 <li>✓ Full music mix + duck</li>
-                <li>✓ Burned overlays / titles / logo</li>
+                <li>✓ Burned video + image overlays / titles / logo</li>
                 <li>✓ ASS caption burn (project style)</li>
                 <li>✓ Real xfade transitions</li>
                 <li>✓ Split-screen / reframe</li>
@@ -1337,6 +1338,7 @@
             <button id="tlPasteBtn" class="tl-chip-btn" title="Paste copied clip at playhead (Cmd/Ctrl+V)">📋 Paste</button>
             <button id="tlDupBtn" class="tl-chip-btn" title="Duplicate selected clip (Cmd/Ctrl+D)">👯 Duplicate</button>
             <button id="tlAddTitleBtn" class="tl-chip-btn">+ Title</button>
+            <button id="tlAddEffectBtn" class="tl-chip-btn" title="Add a timed effect on the Effects lane (split-screen, punch, Ken Burns, color)">+ Effect</button>
             <button id="tlProjectBtn" class="tl-chip-btn">🏷 Logo</button>
             <button id="tlCoEditorBtn" class="tl-chip-btn" title="Chat-based co-editor — describe edits in plain language">💬 Co-editor</button>
             <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/dup">⌨ Space · S · Del · ←→ · ⌘Z · Snap · ⌘C/V/D</span>
@@ -1357,6 +1359,10 @@
               <div class="tl-track" data-track="overlay">
                 <div class="tl-track-label">🖼 Overlay</div>
                 <div class="tl-track-lane" data-lane="overlay"></div>
+              </div>
+              <div class="tl-track" data-track="effects">
+                <div class="tl-track-label">✨ Effects</div>
+                <div class="tl-track-lane" data-lane="effects"></div>
               </div>
               <div class="tl-track" data-track="text">
                 <div class="tl-track-label">🔤 Titles</div>

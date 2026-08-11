@@ -7606,11 +7606,121 @@ def _normalize_timeline(timeline: dict) -> dict:
     tracks = tl.get("tracks")
     if not isinstance(tracks, dict):
         tracks = {}
-    for key in ("main", "overlay", "text", "music"):
+    for key in ("main", "overlay", "effects", "text", "music"):
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
+    # Effect-lane clips: type + start + out(duration). Coerce common shapes.
+    _fx_types = {"split_screen", "punch_zoom", "ken_burns", "color"}
+    cleaned_fx = []
+    for fx in tracks["effects"]:
+        if not isinstance(fx, dict):
+            continue
+        ftype = str(fx.get("type") or "")
+        if ftype not in _fx_types:
+            continue
+        try:
+            start = max(0.0, float(fx.get("start", 0)))
+        except (TypeError, ValueError):
+            start = 0.0
+        try:
+            # `out` is duration on the effects lane (same convention as titles).
+            dur = float(fx.get("out", fx.get("duration", 2)))
+        except (TypeError, ValueError):
+            dur = 2.0
+        dur = max(0.2, min(120.0, dur))
+        row = dict(fx)
+        row["type"] = ftype
+        row["start"] = start
+        row["out"] = dur
+        if "id" not in row or not row["id"]:
+            row["id"] = uuid.uuid4().hex[:8]
+        cleaned_fx.append(row)
+    tracks["effects"] = cleaned_fx
     tl["tracks"] = tracks
     return tl
+
+
+def _tl_effect_span(fx: dict) -> tuple[float, float]:
+    """Return (start, end) in output time for an effects-lane clip."""
+    try:
+        start = max(0.0, float(fx.get("start", 0)))
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        dur = max(0.2, float(fx.get("out", fx.get("duration", 2))))
+    except (TypeError, ValueError):
+        dur = 2.0
+    return start, start + dur
+
+
+def _tl_effects_overlapping(effects: list, t0: float, t1: float) -> list:
+    """Effects whose [start, end) overlaps output interval [t0, t1)."""
+    out = []
+    for fx in effects or []:
+        if not isinstance(fx, dict):
+            continue
+        a, b = _tl_effect_span(fx)
+        if b > t0 + 0.001 and a < t1 - 0.001:
+            out.append(fx)
+    return out
+
+
+def _tl_effect_cut_points(effects: list, t0: float, t1: float) -> list[float]:
+    """Sorted unique boundaries inside (t0, t1) where an effect starts or ends."""
+    pts = {round(t0, 4), round(t1, 4)}
+    for fx in effects or []:
+        if not isinstance(fx, dict):
+            continue
+        a, b = _tl_effect_span(fx)
+        if t0 < a < t1:
+            pts.add(round(a, 4))
+        if t0 < b < t1:
+            pts.add(round(b, 4))
+    return sorted(pts)
+
+
+def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
+    """Fold overlapping effects-lane clips into ken/punch/color/split props.
+
+    Later clips of the same type win. Returns (ken, punch, color, split).
+    """
+    ken = None
+    punch = None
+    color = None
+    split = None
+    for fx in lane_fxs or []:
+        ftype = fx.get("type")
+        if ftype == "ken_burns":
+            ken = {
+                "enabled": True,
+                "intensity": fx.get("intensity") or "med",
+                "direction": fx.get("direction") or "in",
+            }
+        elif ftype == "punch_zoom":
+            punch = {
+                "enabled": True,
+                "intensity": fx.get("intensity") or "med",
+                "hit": float(fx.get("hit") or 0),
+                "decay": float(fx.get("decay") or 0.45),
+            }
+            if isinstance(fx.get("anchor"), dict):
+                punch["anchor"] = fx["anchor"]
+        elif ftype == "color":
+            color = {
+                "preset": fx.get("preset") or "none",
+                "brightness": fx.get("brightness", 0),
+                "contrast": fx.get("contrast", 1),
+                "saturation": fx.get("saturation", 1),
+            }
+        elif ftype == "split_screen":
+            split = {
+                "enabled": True,
+                "source_job_id": fx.get("source_job_id"),
+                "asset_id": fx.get("asset_id"),
+                "in": float(fx.get("in") or 0),
+                "layout": fx.get("layout") or "auto",
+            }
+    return ken, punch, color, split
 
 
 def render_timeline_job(job_id: str, timeline: dict) -> None:
@@ -7644,16 +7754,20 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         if not main_clips:
             raise RuntimeError("Add at least one clip to the main track before rendering.")
 
+        lane_effects = tracks.get("effects") or []
+
         # ---- Pass 1: normalize + stitch the main video track ----
         # Each main clip may expand into several segments: text-based editing
         # cuts split it into keep-ranges, and split-screen / Ken Burns change how
-        # each piece is rendered. Transitions live on clip *boundaries* only;
-        # cut-internal boundaries are hard cuts.
+        # each piece is rendered. Effects-lane clips further subdivide by time.
+        # Transitions live on clip *boundaries* only; cut-internal boundaries
+        # are hard cuts.
         _stage("building main track", 10)
         segments = []        # [(path, dur)]
         transitions = []     # len == len(segments) - 1
         seg_meta = []        # per-segment caption source info, aligned to segments
         seg_counter = 0
+        out_cursor = 0.0     # output time so far (before xfade), matches Effects lane
         for i, c in enumerate(main_clips):
             src = _timeline_clip_source(c)
             if not src:
@@ -7683,12 +7797,11 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             if not keeps:
                 continue  # entire clip was cut away via text editing
 
-            ken = c.get("ken_burns")
-            punch = c.get("punch_zoom")
-            # AI Edit / co-editor historically wrote `color_grade`; inspector uses `color`.
-            color = c.get("color") or c.get("color_grade")
-            split = c.get("split") or {}
-            split_src = _timeline_clip_source(split) if split.get("enabled") else None
+            # Clip-level FX (legacy / inspector) — Effects lane overrides when set.
+            clip_ken = c.get("ken_burns")
+            clip_punch = c.get("punch_zoom")
+            clip_color = c.get("color") or c.get("color_grade")
+            clip_split = c.get("split") or {}
 
             clip_tr = c.get("transition") or {}
             clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
@@ -7697,28 +7810,53 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             burn_caps = c.get("burn_captions", True) and bool(c.get("source_job_id"))
 
             for k, (ks, ke) in enumerate(keeps):
-                seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
                 kdur = ke - ks
-                if split_src:
-                    s_in = max(0.0, float(split.get("in", 0))) + (ks - t_in)
-                    dur = _tl_split_segment(src, ks, split_src, s_in, kdur,
-                                            split.get("layout", "auto"),
-                                            W, H, fps, seg_path, color=color)
-                else:
-                    dur = _tl_normalize_segment(src, ks, ke, W, H, fps, fit, bg,
-                                                seg_path, ken=ken, color=color, punch=punch)
-                segments.append((seg_path, dur))
-                seg_meta.append({
-                    "source_job_id": c.get("source_job_id"),
-                    "src_in": ks, "src_out": ke, "burn_captions": burn_caps,
-                    "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
-                })
-                work.append(seg_path)
-                # Boundary transition only at the START of a new clip's first
-                # kept piece (not the very first segment overall).
-                if segments and len(segments) > 1:
-                    transitions.append(clip_tr if k == 0 else 0)
-                seg_counter += 1
+                keep_ot0 = out_cursor
+                keep_ot1 = out_cursor + kdur
+                cuts = _tl_effect_cut_points(lane_effects, keep_ot0, keep_ot1)
+                for bi in range(len(cuts) - 1):
+                    ot0, ot1 = cuts[bi], cuts[bi + 1]
+                    sub_dur = ot1 - ot0
+                    if sub_dur < 0.04:
+                        continue
+                    src_off = ot0 - keep_ot0
+                    sub_ks = ks + src_off
+                    sub_ke = sub_ks + sub_dur
+
+                    lane_fxs = _tl_effects_overlapping(lane_effects, ot0, ot1)
+                    fx_ken, fx_punch, fx_color, fx_split = _tl_props_from_lane_effects(lane_fxs)
+
+                    ken = fx_ken if fx_ken else clip_ken
+                    punch = fx_punch if fx_punch else clip_punch
+                    color = fx_color if fx_color else clip_color
+                    split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
+                    split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
+
+                    seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
+                    if split_src:
+                        # Second-source in-point advances with source time on A.
+                        base_in = max(0.0, float((split or {}).get("in", 0)))
+                        s_in = base_in + (sub_ks - t_in)
+                        dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
+                                                (split or {}).get("layout", "auto"),
+                                                W, H, fps, seg_path, color=color)
+                    else:
+                        dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
+                                                    seg_path, ken=ken, color=color, punch=punch)
+                    segments.append((seg_path, dur))
+                    seg_meta.append({
+                        "source_job_id": c.get("source_job_id"),
+                        "src_in": sub_ks, "src_out": sub_ke, "burn_captions": burn_caps,
+                        "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
+                    })
+                    work.append(seg_path)
+                    # Boundary transition only at the START of a new clip's first
+                    # kept piece (not the very first segment overall).
+                    if segments and len(segments) > 1:
+                        transitions.append(clip_tr if (k == 0 and bi == 0) else 0)
+                    seg_counter += 1
+
+                out_cursor += kdur
 
             jobs[job_id]["progress"] = 10 + int(25 * (i + 1) / len(main_clips))
             _db_save_job(job_id)

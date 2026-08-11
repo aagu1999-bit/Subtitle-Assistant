@@ -570,6 +570,7 @@
 .tl-clip.selected { outline: 2px solid #fff; z-index: 5; }
 .tl-clip-main    { background: linear-gradient(135deg,#3a6df0,#2b53c0); }
 .tl-clip-overlay { background: linear-gradient(135deg,#19a974,#0f7a54); }
+.tl-clip-effects { background: linear-gradient(135deg,#d97706,#b45309); }
 .tl-layout-presets {
   display: flex;
   flex-wrap: wrap;
