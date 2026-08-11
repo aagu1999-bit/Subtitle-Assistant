@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-21-overlay-kb-coeditor";
+  const TL_BUILD = "studio-editor-build-22-merge-fix";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -3448,34 +3448,87 @@
     }
     const a = tl.tracks.main[idx];
     const b = tl.tracks.main[idx + 1];
-    if (a.source_job_id !== b.source_job_id) {
-      alert("Can only merge adjacent shots from the same source.");
+    if (!a.source_job_id || a.source_job_id !== b.source_job_id) {
+      alert("Can only merge adjacent shots from the same source video.");
       return;
     }
-    // Contiguous or overlapping in source time.
-    if (Math.abs((a.out || 0) - (b.in || 0)) > 0.15 && (b.in || 0) < (a.out || 0) - 0.05) {
-      // Allow slight overlap; if b starts earlier than a ends it's ok.
-    }
-    if ((b.in || 0) + 0.05 < (a.out || 0) - 0.2 && (b.in || 0) < (a.in || 0)) {
-      alert("Shots are not sequential in source time.");
+
+    const aIn = Number(a.in) || 0;
+    const aOut = Number(a.out) || aIn;
+    const bIn = Number(b.in) || 0;
+    const bOut = Number(b.out) || bIn;
+    if (bOut <= bIn + 0.05) {
+      alert("Next shot has no usable duration.");
       return;
     }
+
+    // Order by source time to measure gap / coverage.
+    const earlyIn = Math.min(aIn, bIn);
+    const earlyOut = aIn <= bIn ? aOut : bOut;
+    const lateIn = Math.max(aIn, bIn);
+    const lateOut = Math.max(aOut, bOut);
+    const gap = lateIn - earlyOut;
+    const beforeDur = clipDuration(a) + clipDuration(b);
+
+    // Next shot already fully inside this clip's source range → deleting B is
+    // the only thing to do; say so instead of pretending we "merged".
+    if (bIn >= aIn - 0.05 && bOut <= aOut + 0.05) {
+      pushHistory();
+      ["overlay", "text", "music"].forEach((k) => {
+        (tl.tracks[k] || []).forEach((c) => {
+          if (c.anchor === b.id) c.anchor = a.id;
+        });
+      });
+      tl.tracks.main.splice(idx + 1, 1);
+      selectClip("main", a.id);
+      renderTimeline();
+      scheduleSave();
+      setRenderStatus("Removed next shot — it was already inside this clip’s source range (not a real merge)");
+      return;
+    }
+
+    // Only rejoin pieces of one continuous stretch (Split / Detect shots / AI pieces).
+    if (gap > 0.35) {
+      alert(
+        `Can't merge — these shots have a ${gap.toFixed(1)}s gap in the source.\n` +
+        `Merge only rejoins pieces that were split apart (same continuous stretch).\n\n` +
+        `A: ${fmtTime(aIn)}–${fmtTime(aOut)} · B: ${fmtTime(bIn)}–${fmtTime(bOut)}`
+      );
+      return;
+    }
+
     pushHistory();
-    const mergedCuts = [...(a.cuts || []), ...(b.cuts || [])];
-    a.out = Math.max(a.out || 0, b.out || 0);
-    a.cuts = mergedCuts;
-    a.transition = b.transition || a.transition;
-    // Prefer keeping effects from a; clear mid-boundary effects from b by not copying.
-    tl.tracks.main.splice(idx + 1, 1);
-    // Re-anchor anything that pointed at b.
+    // Union source range so B's footage is actually kept (old code only grew
+    // `out`, so an earlier-in-source "next" shot could be deleted silently).
+    a.in = earlyIn;
+    a.out = lateOut;
+    a.cuts = mergeCuts([...(a.cuts || []), ...(b.cuts || [])]);
+    a.word_overrides = Object.assign({}, b.word_overrides || {}, a.word_overrides || {});
+    // Boundary between A|B disappears; keep an outgoing transition if either had one.
+    a.transition = b.transition || a.transition || null;
+    if (!a.punch_zoom && b.punch_zoom) a.punch_zoom = b.punch_zoom;
+    if (!a.ken_burns && b.ken_burns) a.ken_burns = b.ken_burns;
+    if (!(a.color || a.color_grade) && (b.color || b.color_grade)) {
+      a.color = b.color || b.color_grade;
+      a.color_grade = a.color;
+    }
+    a._max = Math.max(Number(a._max) || 0, Number(b._max) || 0, a.out);
+
     ["overlay", "text", "music"].forEach((k) => {
       (tl.tracks[k] || []).forEach((c) => {
         if (c.anchor === b.id) c.anchor = a.id;
       });
     });
+    tl.tracks.main.splice(idx + 1, 1);
+
     selectClip("main", a.id);
     renderTimeline();
     scheduleSave();
+    const afterDur = clipDuration(a);
+    setRenderStatus(
+      `Merged shots → ${fmtTime(a.in)}–${fmtTime(a.out)} · ${fmtTime(afterDur)} visible` +
+      (Math.abs(afterDur - beforeDur) > 0.05 ? ` (was ${fmtTime(beforeDur)} across 2)` : "")
+    );
   }
 
   async function detectShotsOnSelected() {
