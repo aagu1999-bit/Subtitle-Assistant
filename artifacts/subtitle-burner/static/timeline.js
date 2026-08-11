@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-17-caption-look";
+  const TL_BUILD = "studio-editor-build-18-transcript-edit";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -190,7 +190,34 @@
   }
 
   function clipDuration(c) {
+    if (!c) return 0.1;
+    // Main clips have no absolute `start` — honor text-edit keep-ranges so
+    // lane widths / anchors match Preview cut + Render.
+    if (c.start == null && c.source_job_id) {
+      return mainClipVisibleDuration(c);
+    }
     return Math.max(0.1, (c.out || 0) - (c.in || 0));
+  }
+
+  function mainClipVisibleDuration(c) {
+    const ranges = keepRangesForClip(c, { allowEmpty: true });
+    if (!ranges.length) return 0.05;
+    const sum = ranges.reduce((acc, [a, b]) => acc + Math.max(0, b - a), 0);
+    return Math.max(0.05, sum);
+  }
+
+  /** Map a source-time into the clip's output-local time (after cuts). */
+  function sourceTimeToLocalOutput(clip, srcT) {
+    const ranges = keepRangesForClip(clip, { allowEmpty: true });
+    let played = 0;
+    const t = Number(srcT) || 0;
+    for (let i = 0; i < ranges.length; i++) {
+      const [a, b] = ranges[i];
+      if (t < a) return played;
+      if (t <= b) return played + (t - a);
+      played += Math.max(0, b - a);
+    }
+    return played;
   }
 
   // Main clips are sequential; compute each clip's start by cumulative duration.
@@ -289,7 +316,9 @@
         main: tl.tracks.main.map((c) => ({
           id: c.id, source_job_id: c.source_job_id, asset_id: c.asset_id,
           in: c.in, out: c.out, transition: c.transition || null,
-          cuts: c.cuts || [], ken_burns: c.ken_burns || null, punch_zoom: c.punch_zoom || null, split: c.split || null,
+          cuts: c.cuts || [],
+          word_overrides: c.word_overrides || null,
+          ken_burns: c.ken_burns || null, punch_zoom: c.punch_zoom || null, split: c.split || null,
           color: c.color || null, color_grade: c.color_grade || null,
           reframe: c.reframe || null, shot_index: c.shot_index != null ? c.shot_index : null,
           burn_captions: c.burn_captions,
@@ -420,12 +449,107 @@
       p.classList.toggle("hidden", p.dataset.lpanel !== name));
   }
 
-  // ---- Transcript-first editing (inline strike-to-cut) ----
+  // ---- Transcript-first editing (Phase 4: strike + rename + fillers) ----
+  const _TL_FILLER_SINGLE = new Set([
+    "um", "uh", "uhh", "uhm", "umm", "er", "erm",
+    "ah", "ahh", "hm", "hmm", "mm", "mhm",
+    "like", "basically", "literally", "actually",
+    "kinda", "sorta", "anyway", "anyways",
+    "okay", "ok", "right", "well",
+  ]);
+  const _TL_FILLER_PAIRS = [
+    ["you", "know"], ["i", "mean"], ["sort", "of"], ["kind", "of"],
+  ];
+
+  function _tlStripWord(s) {
+    return String(s || "").toLowerCase().replace(/[^a-z']/g, "");
+  }
+
+  function wordOverrideKey(w) {
+    return Number(w.start || 0).toFixed(3);
+  }
+
+  function displayWordText(clip, w) {
+    const ov = clip && clip.word_overrides;
+    const key = wordOverrideKey(w);
+    if (ov && ov[key] != null && String(ov[key]).length) return String(ov[key]);
+    return String(w.word || "");
+  }
+
+  function setWordOverride(clip, w, text) {
+    const key = wordOverrideKey(w);
+    const cleaned = String(text || "").trim();
+    if (!cleaned || cleaned === String(w.word || "").trim()) {
+      if (clip.word_overrides) {
+        delete clip.word_overrides[key];
+        if (!Object.keys(clip.word_overrides).length) clip.word_overrides = null;
+      }
+      return;
+    }
+    clip.word_overrides = Object.assign({}, clip.word_overrides || {});
+    clip.word_overrides[key] = cleaned;
+  }
+
+  function cutStats(clip) {
+    const words = transcriptWords || [];
+    let cutWords = 0;
+    let cutSec = 0;
+    const ranges = keepRangesForClip(clip, { allowEmpty: true });
+    const full = Math.max(0, (clip.out || 0) - (clip.in || 0));
+    const kept = ranges.reduce((a, [s, e]) => a + Math.max(0, e - s), 0);
+    cutSec = Math.max(0, full - kept);
+    words.forEach((w) => { if (isWordCut(clip, w)) cutWords++; });
+    return {
+      total: words.length,
+      cutWords,
+      cutSec,
+      keptSec: kept,
+      overrides: clip.word_overrides ? Object.keys(clip.word_overrides).length : 0,
+    };
+  }
+
+  function updateTranscriptToolbar(clip) {
+    const bar = $("tlTranscriptToolbar");
+    const meta = $("tlTranscriptMeta");
+    if (!bar) return;
+    if (!clip || !transcriptWords || !transcriptWords.length) {
+      bar.classList.add("hidden");
+      return;
+    }
+    bar.classList.remove("hidden");
+    const s = cutStats(clip);
+    if (meta) {
+      meta.textContent =
+        `${s.total} words` +
+        (s.cutWords ? ` · ${s.cutWords} cut (${s.cutSec.toFixed(1)}s)` : "") +
+        (s.overrides ? ` · ${s.overrides} renames` : "");
+    }
+  }
+
+  function seekTranscriptWord(clip, w) {
+    if (!clip || !w) return;
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+    const src = "/raw-upload/" + clip.source_job_id;
+    if (v.getAttribute("src") !== src) {
+      v.src = src;
+      previewingOutput = false;
+      const wrap = v.closest(".tl-preview");
+      if (wrap) wrap.classList.add("has-video");
+    }
+    const t = Math.max(clip.in || 0, Math.min(clip.out || 1e9, Number(w.start) || 0));
+    try { v.currentTime = t; } catch (e) { /* ignore */ }
+    highlightTranscriptAt(t);
+    updatePlayhead();
+    updateStageCompositor();
+  }
+
   async function renderTranscript(clip) {
     const doc = $("tlTranscriptDoc");
     const hint = $("tlTranscriptHint");
     if (!doc) return;
     transcriptWords = null;
+    updateTranscriptToolbar(null);
     if (!clip || !clip.source_job_id) {
       doc.innerHTML = "";
       if (hint) hint.textContent = "Select a Main clip to edit its words.";
@@ -443,8 +567,12 @@
       return;
     }
     transcriptWords = words;
-    if (hint) hint.textContent = "Click a word to strike it (cut from video). Click again to restore.";
+    if (hint) {
+      hint.textContent =
+        "Click a word to seek · Shift+click to cut/restore · Double-click to rename captions.";
+    }
     renderTranscriptWords(clip);
+    updateTranscriptToolbar(clip);
   }
 
   function isWordCut(clip, w) {
@@ -474,22 +602,92 @@
     return speaker || "";
   }
 
+  function _detectTlFillerIndices(words, clip) {
+    const flagged = new Set();
+    if (!words || !words.length) return flagged;
+    for (let i = 0; i < words.length; i++) {
+      const tok = _tlStripWord(displayWordText(clip, words[i]));
+      if (!tok) continue;
+      if (_TL_FILLER_SINGLE.has(tok)) { flagged.add(i); continue; }
+      if (i + 1 < words.length) {
+        const next = _tlStripWord(displayWordText(clip, words[i + 1]));
+        for (const [a, b] of _TL_FILLER_PAIRS) {
+          if (tok === a && next === b) { flagged.add(i); flagged.add(i + 1); }
+        }
+      }
+    }
+    return flagged;
+  }
+
   function renderTranscriptWords(clip) {
     const doc = $("tlTranscriptDoc");
     if (!doc || !transcriptWords) return;
     doc.innerHTML = "";
     const sc = (tl && tl.speaker_colors) || {};
-    transcriptWords.forEach((w) => {
+    const fillers = _detectTlFillerIndices(transcriptWords, clip);
+    transcriptWords.forEach((w, i) => {
       const sp = document.createElement("span");
-      sp.className = "tl-tword" + (isWordCut(clip, w) ? " cut" : "");
-      sp.textContent = w.word + " ";
+      const cut = isWordCut(clip, w);
+      const renamed = !!(clip.word_overrides && clip.word_overrides[wordOverrideKey(w)]);
+      sp.className = "tl-tword"
+        + (cut ? " cut" : "")
+        + (fillers.has(i) && !cut ? " filler" : "")
+        + (renamed ? " renamed" : "");
+      sp.textContent = displayWordText(clip, w) + " ";
       sp.dataset.start = w.start;
+      sp.dataset.idx = String(i);
       const col = _spkColor(sc, w.speaker);
-      if (col) sp.style.color = col;
-      if (w.speaker) sp.title = _spkLabel(w.speaker);
-      sp.onclick = () => toggleWordCut(clip, w);
+      if (col && !cut) sp.style.color = col;
+      const bits = [];
+      if (w.speaker) bits.push(_spkLabel(w.speaker));
+      if (renamed) bits.push("renamed");
+      if (fillers.has(i)) bits.push("filler");
+      bits.push("click seek · ⇧ cut · dbl-click rename");
+      sp.title = bits.join(" · ");
+      sp.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (e.shiftKey) toggleWordCut(clip, w);
+        else seekTranscriptWord(clip, w);
+      });
+      sp.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        beginWordRename(clip, w, sp);
+      });
       doc.appendChild(sp);
     });
+    updateTranscriptToolbar(clip);
+  }
+
+  function beginWordRename(clip, w, spanEl) {
+    if (!clip || !w || !spanEl) return;
+    if (spanEl.querySelector("input")) return;
+    pushHistory();
+    const current = displayWordText(clip, w);
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tl-tword-edit";
+    input.value = current;
+    spanEl.textContent = "";
+    spanEl.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) setWordOverride(clip, w, input.value);
+      renderTranscriptWords(clip);
+      scheduleSave();
+      updateLiveCaptions(playheadOutputTime() || 0);
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      e.stopPropagation();
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("click", (e) => e.stopPropagation());
   }
 
   function highlightTranscriptAt(t) {
@@ -501,29 +699,81 @@
     spans.forEach((sp, i) => sp.classList.toggle("playing", i === best));
   }
 
+  function mergeCuts(cuts) {
+    const sorted = cuts.slice().sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    sorted.forEach((r) => {
+      const last = merged[merged.length - 1];
+      if (last && r[0] <= last[1] + 0.05) last[1] = Math.max(last[1], r[1]);
+      else merged.push([r[0], r[1]]);
+    });
+    return merged;
+  }
+
   function toggleWordCut(clip, w) {
     pushHistory();
     const cuts = (clip.cuts || []).slice();
     if (isWordCut(clip, w)) {
-      // Remove any cut covering this word.
       clip.cuts = cuts.filter(([cs, ce]) =>
         !(Number(w.start) >= cs - 0.01 && Number(w.end) <= ce + 0.01));
     } else {
       cuts.push([Number(w.start), Number(w.end)]);
-      // Merge overlapping/adjacent cuts.
-      cuts.sort((a, b) => a[0] - b[0]);
-      const merged = [];
-      cuts.forEach((r) => {
-        const last = merged[merged.length - 1];
-        if (last && r[0] <= last[1] + 0.05) last[1] = Math.max(last[1], r[1]);
-        else merged.push(r.slice());
-      });
-      clip.cuts = merged;
+      clip.cuts = mergeCuts(cuts);
     }
     renderTranscriptWords(clip);
     applyAnchors();   // cuts change Main duration → reflow anchored items
     renderTracks();
     scheduleSave();
+  }
+
+  function restoreAllCuts(clip) {
+    if (!clip || !(clip.cuts || []).length) return;
+    pushHistory();
+    clip.cuts = [];
+    renderTranscriptWords(clip);
+    applyAnchors();
+    renderTracks();
+    scheduleSave();
+  }
+
+  function cutFillerWords(clip) {
+    if (!clip || !transcriptWords || !transcriptWords.length) return;
+    const idxs = _detectTlFillerIndices(transcriptWords, clip);
+    if (!idxs.size) {
+      alert("No filler words detected in this clip.");
+      return;
+    }
+    pushHistory();
+    const cuts = (clip.cuts || []).slice();
+    idxs.forEach((i) => {
+      const w = transcriptWords[i];
+      if (!w || isWordCut(clip, w)) return;
+      cuts.push([Number(w.start), Number(w.end)]);
+    });
+    clip.cuts = mergeCuts(cuts);
+    renderTranscriptWords(clip);
+    applyAnchors();
+    renderTracks();
+    scheduleSave();
+  }
+
+  function wireTranscriptToolbar() {
+    const restoreBtn = $("tlTranscriptRestoreBtn");
+    const fillerBtn = $("tlTranscriptFillersBtn");
+    if (restoreBtn) {
+      restoreBtn.onclick = () => {
+        if (!selected || selected.track !== "main") return;
+        const clip = findClip("main", selected.id);
+        if (clip) restoreAllCuts(clip);
+      };
+    }
+    if (fillerBtn) {
+      fillerBtn.onclick = () => {
+        if (!selected || selected.track !== "main") return;
+        const clip = findClip("main", selected.id);
+        if (clip) cutFillerWords(clip);
+      };
+    }
   }
 
   // Make sure a project exists before adding anything (guards the race where
@@ -833,7 +1083,7 @@
       const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
       if (idx < 0) return null;
       const c = tl.tracks.main[idx];
-      return mainStart(idx) + Math.max(0, Math.min(clipDuration(c), t - (c.in || 0)));
+      return mainStart(idx) + sourceTimeToLocalOutput(c, t);
     }
     return null;
   }
@@ -933,7 +1183,8 @@
   }
 
   // ---- Preview cut (Main keep-ranges + grade/music approx, no full Render) ----
-  function keepRangesForClip(clip) {
+  function keepRangesForClip(clip, opts) {
+    opts = opts || {};
     const cin = clip.in || 0;
     const cout = Math.max(cin + 0.05, clip.out || cin + 0.05);
     const cuts = (clip.cuts || [])
@@ -947,7 +1198,8 @@
       cursor = Math.max(cursor, b);
     });
     if (cout > cursor + 0.02) ranges.push([cursor, cout]);
-    return ranges.length ? ranges : [[cin, cout]];
+    if (ranges.length) return ranges;
+    return opts.allowEmpty ? [] : [[cin, cout]];
   }
 
   function cssFilterForColor(color) {
@@ -1497,31 +1749,44 @@
     }
     const style = tl.style || {};
     const groupSize = Math.max(1, Math.min(5, Number(style.group_size) || 3));
-    let wi = -1;
+    const ranges = keepRangesForClip(clip);
+    // Prefer visible (non-cut) words with clip-local renames applied.
+    const visible = [];
     for (let i = 0; i < transcriptWords.length; i++) {
       const w = transcriptWords[i];
+      if (isWordCut(clip, w)) continue;
+      const mid = (Number(w.start || 0) + Number(w.end || 0)) / 2;
+      if (!ranges.some(([a, b]) => mid >= a && mid <= b)) continue;
+      visible.push({
+        word: displayWordText(clip, w),
+        start: w.start,
+        end: w.end,
+        speaker: w.speaker,
+        _srcIdx: i,
+      });
+    }
+    if (!visible.length) {
+      liveCaptionEl.style.display = "none";
+      return;
+    }
+    let wi = -1;
+    for (let i = 0; i < visible.length; i++) {
+      const w = visible[i];
       const a = Number(w.start || 0);
       const b = Number(w.end || a);
       if (srcT >= a && srcT <= b + 0.08) { wi = i; break; }
     }
     if (wi < 0) {
-      for (let i = transcriptWords.length - 1; i >= 0; i--) {
-        if (Number(transcriptWords[i].start || 0) <= srcT) { wi = i; break; }
+      for (let i = visible.length - 1; i >= 0; i--) {
+        if (Number(visible[i].start || 0) <= srcT) { wi = i; break; }
       }
     }
     if (wi < 0) {
       liveCaptionEl.style.display = "none";
       return;
     }
-    // Hide when the active word is outside this clip's keep-ranges.
-    const ranges = keepRangesForClip(clip);
-    const wordMid = (Number(transcriptWords[wi].start || 0) + Number(transcriptWords[wi].end || 0)) / 2;
-    if (!ranges.some(([a, b]) => wordMid >= a && wordMid <= b)) {
-      liveCaptionEl.style.display = "none";
-      return;
-    }
     const g0 = Math.floor(wi / groupSize) * groupSize;
-    const group = transcriptWords.slice(g0, g0 + groupSize);
+    const group = visible.slice(g0, g0 + groupSize);
     const primary = style.primary_color || style.primary || "#FFFFFF";
     const highlight = style.highlight_color || style.highlight || "#FFE566";
     const font = style.font_name || style.font || "Anton";
@@ -1537,7 +1802,6 @@
     liveCaptionEl.innerHTML = group.map((w, j) => {
       const idx = g0 + j;
       let col = idx === wi ? highlight : primary;
-      // Optional speaker tint for non-active words when branding is applied.
       if (idx !== wi && w.speaker) {
         const scCol = _spkColor(sc, w.speaker);
         if (scCol) col = scCol;
@@ -2756,6 +3020,7 @@
         document.addEventListener("pointermove", onBoxMove);
         document.addEventListener("pointerup", onBoxUp);
         wireScrub();
+        wireTranscriptToolbar();
         setLeftTab("media");
         setSaveState(TL_BUILD);
         updateHistoryButtons();

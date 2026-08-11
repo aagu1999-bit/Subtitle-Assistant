@@ -7329,6 +7329,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                 seg_meta.append({
                     "source_job_id": c.get("source_job_id"),
                     "src_in": ks, "src_out": ke, "burn_captions": burn_caps,
+                    "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
                 })
                 work.append(seg_path)
                 # Boundary transition only at the START of a new clip's first
@@ -7365,6 +7366,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             if caption_emoji is None:
                 caption_emoji = sjob.get("emoji_rules") or {}
             seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+            overrides = meta.get("word_overrides") or {}
             for w in words:
                 try:
                     ws = float(w.get("start", 0))
@@ -7375,8 +7377,13 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     continue
                 local_s = max(0.0, ws - meta["src_in"])
                 local_e = max(local_s, min(meta["src_out"], we) - meta["src_in"])
+                text = w.get("word", "")
+                # Clip-local caption renames (Phase 4) keyed by source start time.
+                key = f"{ws:.3f}"
+                if key in overrides and str(overrides[key]).strip():
+                    text = str(overrides[key]).strip()
                 caption_words.append({
-                    "word": w.get("word", ""),
+                    "word": text,
                     "start": seg_start + local_s,
                     "end": seg_start + local_e,
                 })

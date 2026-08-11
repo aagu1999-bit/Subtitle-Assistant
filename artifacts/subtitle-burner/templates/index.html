@@ -1229,7 +1229,14 @@
           </div>
 
           <div class="tl-leftpanel" data-lpanel="transcript">
-            <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit its words. Click a word to strike it out — struck words are cut from the video.</p>
+            <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit its words. Click to seek · Shift+click to cut · Double-click to rename.</p>
+            <div id="tlTranscriptToolbar" class="tl-transcript-toolbar hidden">
+              <span id="tlTranscriptMeta" class="muted tl-transcript-meta"></span>
+              <div class="tl-transcript-actions">
+                <button type="button" id="tlTranscriptFillersBtn" class="btn btn-secondary btn-sm" title="Strike common filler words (um, uh, like, you know…)">Cut fillers</button>
+                <button type="button" id="tlTranscriptRestoreBtn" class="btn btn-secondary btn-sm" title="Restore every struck word in this clip">Restore all</button>
+              </div>
+            </div>
             <div id="tlTranscriptDoc" class="tl-transcript-doc"></div>
           </div>
 
