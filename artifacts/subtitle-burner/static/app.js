@@ -2446,61 +2446,133 @@ async function refreshReframeStatus() {
 }
 
 async function startReframeAnalyze(triggerBtn) {
-  if (!currentJobId) { alert("Open a transcribed video first."); return; }
+  if (!currentJobId) {
+    alert("Select a transcribed video in the jobs list (left), then click Analyze.");
+    return;
+  }
   if (triggerBtn) triggerBtn.disabled = true;
   if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = true;
   const ingestBtn = $("ingestAnalyzeBtn");
-  if (ingestBtn) ingestBtn.disabled = true;
+  if (ingestBtn) {
+    ingestBtn.disabled = true;
+    ingestBtn.textContent = "Analysing…";
+  }
+  if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analysing…";
   if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
-  if (reframeStatus) reframeStatus.textContent = "Starting…";
-  const empty = $("ingestSpeakerEmpty");
+  if (reframeStatus) {
+    reframeStatus.style.color = "";
+    reframeStatus.textContent = "Starting…";
+  }
+  // Ensure the empty/status node exists even after cards were rendered.
+  let empty = $("ingestSpeakerEmpty");
+  const cardsWrap = $("ingestSpeakerCards");
+  if (!empty && cardsWrap) {
+    cardsWrap.innerHTML =
+      `<p id="ingestSpeakerEmpty" class="muted" style="font-size:.78rem;line-height:1.5;margin:0 0 8px;padding:10px;background:rgba(30,41,59,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06)"></p>`;
+    empty = $("ingestSpeakerEmpty");
+  }
   if (empty) empty.textContent = "Analysing speakers… (GPU if available; CPU uses multi-core on Linux)";
+
+  const unlockAnalyzeBtns = () => {
+    if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
+    if (ingestBtn) ingestBtn.disabled = false;
+  };
+
+  if (_reframePollTimer) {
+    clearInterval(_reframePollTimer);
+    _reframePollTimer = null;
+  }
+
   try {
     const res = await fetch("/analyze-reframe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ job_id: currentJobId }),
     });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {
+      throw new Error(
+        res.status === 404
+          ? "Analyze endpoint missing — restart the app after pulling."
+          : `Server returned ${res.status} (not JSON). Restart the Studio server.`
+      );
+    }
+    if (!res.ok || (data && data.error)) {
+      throw new Error((data && data.error) || `Analyze failed (${res.status})`);
+    }
     const deviceHint = data.diarization_device ? ` · ${data.diarization_device}` : "";
     if (reframeStatus) reframeStatus.textContent = `Analysing speakers + faces${deviceHint}…`;
     if (empty) empty.textContent = `Analysing speakers + faces${deviceHint}…`;
-    if (_reframePollTimer) clearInterval(_reframePollTimer);
+
+    let pollFails = 0;
     _reframePollTimer = setInterval(async () => {
-      const r = await fetch(`/reframe-status/${currentJobId}`).then((x) => x.json());
-      if (r.ready) {
-        clearInterval(_reframePollTimer);
-        _reframePollTimer = null;
-        refreshReframeStatus();
-        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
-        if (ingestBtn) ingestBtn.disabled = false;
-        if (reframeEnabled) {
-          reframeEnabled.disabled = false;
-          reframeEnabled.checked = true;
+      try {
+        const statusRes = await fetch(`/reframe-status/${currentJobId}`);
+        let r = null;
+        try {
+          r = await statusRes.json();
+        } catch (_) {
+          pollFails += 1;
+          if (pollFails >= 5) {
+            clearInterval(_reframePollTimer);
+            _reframePollTimer = null;
+            unlockAnalyzeBtns();
+            if (ingestBtn) ingestBtn.textContent = "Analyze";
+            if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+            if (empty) empty.textContent = "Lost contact with server while analysing — try Analyze again.";
+          }
+          return;
         }
-      } else if (r.error) {
-        clearInterval(_reframePollTimer);
-        _reframePollTimer = null;
-        if (reframeStatus) {
-          reframeStatus.textContent = `❌ ${r.error}`;
-          reframeStatus.style.color = "#ff8a8a";
+        pollFails = 0;
+        if (r.ready) {
+          clearInterval(_reframePollTimer);
+          _reframePollTimer = null;
+          await refreshReframeStatus();
+          unlockAnalyzeBtns();
+          if (reframeEnabled) {
+            reframeEnabled.disabled = false;
+            reframeEnabled.checked = true;
+          }
+        } else if (r.error) {
+          clearInterval(_reframePollTimer);
+          _reframePollTimer = null;
+          if (reframeStatus) {
+            reframeStatus.textContent = `❌ ${r.error}`;
+            reframeStatus.style.color = "#ff8a8a";
+          }
+          if (empty) empty.textContent = "Analyze failed: " + r.error;
+          unlockAnalyzeBtns();
+          if (ingestBtn) ingestBtn.textContent = "Analyze";
+          if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+        } else if (r.status) {
+          const pct = r.progress != null ? ` (${r.progress}%)` : "";
+          const msg = `${r.status}${pct}`;
+          if (reframeStatus) reframeStatus.textContent = msg;
+          if (empty) empty.textContent = msg;
         }
-        if (empty) empty.textContent = "Analyze failed: " + r.error;
-        if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
-        if (ingestBtn) ingestBtn.disabled = false;
-      } else if (r.status) {
-        const pct = r.progress != null ? ` (${r.progress}%)` : "";
-        const msg = `${r.status}${pct}`;
-        if (reframeStatus) reframeStatus.textContent = msg;
-        if (empty) empty.textContent = msg;
+      } catch (pollErr) {
+        pollFails += 1;
+        if (pollFails >= 5) {
+          clearInterval(_reframePollTimer);
+          _reframePollTimer = null;
+          unlockAnalyzeBtns();
+          if (ingestBtn) ingestBtn.textContent = "Analyze";
+          if (empty) empty.textContent = "Analyze poll failed: " + (pollErr.message || pollErr);
+        }
       }
     }, 1500);
   } catch (e) {
-    if (reframeStatus) reframeStatus.textContent = "Error: " + e.message;
-    if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
-    if (ingestBtn) ingestBtn.disabled = false;
+    if (reframeStatus) {
+      reframeStatus.textContent = "Error: " + e.message;
+      reframeStatus.style.color = "#ff8a8a";
+    }
+    unlockAnalyzeBtns();
+    if (ingestBtn) ingestBtn.textContent = "Analyze";
+    if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
     if (empty) empty.textContent = "Analyze failed: " + e.message;
+    alert("Analyze failed:\n\n" + e.message);
   }
 }
 
@@ -2511,6 +2583,15 @@ const ingestAnalyzeBtn = $("ingestAnalyzeBtn");
 if (ingestAnalyzeBtn) {
   ingestAnalyzeBtn.onclick = () => startReframeAnalyze(ingestAnalyzeBtn);
 }
+// Backup: event delegation in case the Ingest button node is recreated.
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest && e.target.closest("#ingestAnalyzeBtn");
+  if (!btn) return;
+  // Prefer the direct handler; this catches cases where onclick was wiped.
+  if (btn.onclick) return;
+  e.preventDefault();
+  startReframeAnalyze(btn);
+});
 
 // Live-tint Ingest speaker pills + Transcript phrase colors when pickers change.
 // (Dynamic pickers wire their own input handlers in syncSpeakerColorPickers.)

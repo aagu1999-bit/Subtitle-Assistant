@@ -4148,6 +4148,11 @@ def analyze_reframe_job(
             pass
 
     try:
+        jobs[job_id]["reframe_error"] = None
+        jobs[job_id]["reframe_ready"] = False
+        prev_err = jobs[job_id].get("error") or ""
+        if "Reframe analysis failed" in prev_err or "reframe" in prev_err.lower():
+            jobs[job_id]["error"] = None
         _progress(10, "analysing speakers")
         result = analyze_reframe(
             video_path,
@@ -4168,12 +4173,19 @@ def analyze_reframe_job(
         jobs[job_id]["status"] = "awaiting_edit"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["reframe_ready"] = True
-        jobs[job_id]["error"] = None
+        jobs[job_id]["reframe_error"] = None
+        # Only clear job.error if it was a prior reframe failure.
+        prev_err = jobs[job_id].get("error") or ""
+        if "Reframe analysis failed" in prev_err or "reframe" in prev_err.lower():
+            jobs[job_id]["error"] = None
         _db_save_job(job_id)
     except Exception as e:
         jobs[job_id]["status"] = "awaiting_edit"
-        jobs[job_id]["error"] = f"Reframe analysis failed: {e}"
+        jobs[job_id]["reframe_ready"] = False
+        jobs[job_id]["reframe_error"] = f"Reframe analysis failed: {e}"
+        # Keep transcription/job.error intact — Analyze failures are separate.
         _db_save_job(job_id)
+        ai_logger.exception(f"[{job_id}] Reframe analysis failed: {e}")
 
 
 def retranscribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
@@ -5858,7 +5870,7 @@ def transcribe_only():
 @app.route("/analyze-reframe", methods=["POST"])
 def analyze_reframe_endpoint():
     """Kick off diarization + face tracking for *job_id*. Returns 200 with
-    {status: 'started'} immediately; poll /status/<job_id> for completion.
+    {status: 'started'} immediately; poll /reframe-status/<job_id> for completion.
     On completion the result lives in uploads/<job>_reframe.json and the
     job's `reframe_ready` flag flips True.
 
@@ -5871,7 +5883,7 @@ def analyze_reframe_endpoint():
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
     if not job_id or job_id not in jobs:
-        return jsonify({"error": "Unknown job"}), 404
+        return jsonify({"error": "Unknown job — select a transcribed video first"}), 404
     video_path = find_video_path(job_id)
     if not video_path:
         return jsonify({"error": "Source video missing for this job"}), 404
@@ -5892,6 +5904,22 @@ def analyze_reframe_endpoint():
     num_speakers = _opt_int("num_speakers")
     min_speakers = _opt_int("min_speakers")
     max_speakers = _opt_int("max_speakers")
+
+    # Clear stale Analyze errors so polling doesn't immediately short-circuit
+    # on a previous failure while the new worker is still starting.
+    job = jobs[job_id]
+    job["reframe_error"] = None
+    job["reframe_ready"] = False
+    # Don't clobber a real transcription error with reframe leftovers.
+    prev_err = job.get("error") or ""
+    if "Reframe analysis failed" in prev_err or "reframe" in prev_err.lower():
+        job["error"] = None
+    job["status"] = "analysing speakers"
+    job["progress"] = 5
+    try:
+        _db_save_job(job_id)
+    except Exception:
+        pass
 
     t = threading.Thread(
         target=analyze_reframe_job,
@@ -5999,31 +6027,57 @@ def reframe_status(job_id: str):
         return jsonify({"error": "Unknown job"}), 404
     job = jobs[job_id]
     cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
-    if cache_path.exists():
+    if cache_path.exists() and job.get("reframe_ready", True):
+        # Prefer cache when ready. During a re-analyze, reframe_ready is False
+        # so we keep reporting progress instead of the stale cache.
         try:
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            stats = dict(data.get("stats") or {})
-            diar = data.get("diarization") or []
-            breakdown = _speaker_breakdown(diar)
-            if breakdown:
-                stats["speaker_breakdown"] = breakdown
-                # Keep speakers list in sync with diar (post-swap friendly).
-                stats["speakers"] = [s["id"] for s in breakdown]
-                stats["speaker_count"] = len(breakdown)
-            return jsonify({"ready": True, "stats": stats})
+            # If a re-analyze is in flight, don't claim ready from old cache.
+            status = (job.get("status") or "").lower()
+            analysing = (
+                "analys" in status or "speaker" in status or "face" in status
+            ) and not job.get("reframe_ready")
+            if not analysing:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                stats = dict(data.get("stats") or {})
+                diar = data.get("diarization") or []
+                breakdown = _speaker_breakdown(diar)
+                if breakdown:
+                    stats["speaker_breakdown"] = breakdown
+                    stats["speakers"] = [s["id"] for s in breakdown]
+                    stats["speaker_count"] = len(breakdown)
+                return jsonify({"ready": True, "stats": stats})
         except (json.JSONDecodeError, OSError) as e:
             return jsonify({"ready": False, "error": str(e)}), 200
-    # No cache yet — surface the most recent job-level error so the user
-    # isn't left staring at "Analysing…" after a silent worker crash.
-    err = job.get("error") or ""
-    if "Reframe" in err or "reframe" in err:
-        return jsonify({"ready": False, "error": err}), 200
+
     status = job.get("status") or ""
-    analysing = "analys" in status.lower() or "speaker" in status.lower() or "face" in status.lower()
+    analysing = (
+        "analys" in status.lower()
+        or "speaker" in status.lower()
+        or "face" in status.lower()
+    ) and not job.get("reframe_ready")
+
+    # While a run is in flight, never surface a stale reframe_error.
+    if analysing:
+        return jsonify({
+            "ready": False,
+            "status": status,
+            "progress": job.get("progress"),
+            "diarization_device": _diarization_device_resolved,
+        }), 200
+
+    err = job.get("reframe_error") or ""
+    if not err:
+        # Back-compat for older jobs that stuffed Analyze failures into error.
+        legacy = job.get("error") or ""
+        if "Reframe analysis failed" in legacy or "reframe analysis" in legacy.lower():
+            err = legacy
+    if err:
+        return jsonify({"ready": False, "error": err}), 200
+
     return jsonify({
         "ready": False,
-        "status": status if analysing else None,
-        "progress": job.get("progress") if analysing else None,
+        "status": None,
+        "progress": None,
         "diarization_device": _diarization_device_resolved,
     }), 200
 
