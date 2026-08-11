@@ -1214,9 +1214,46 @@
             </select>
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
-          <button id="tlPlaySeqBtn" class="btn btn-secondary" title="Play Main-track clips in order without a full FFmpeg render">▶ Preview cut</button>
+          <button id="tlPlaySeqBtn" class="btn btn-secondary tl-tipbtn" type="button"
+            aria-describedby="tlPreviewTip"
+            title="Preview cut — approximate live playthrough (not a final export)">
+            ▶ Preview cut
+            <span id="tlPreviewTip" class="tl-tippanel" role="tooltip">
+              <strong>Preview cut</strong> — fast live approx (no FFmpeg)
+              <ul>
+                <li>✓ Word cuts / keep-ranges</li>
+                <li>✓ Color grades (CSS)</li>
+                <li>✓ Ken Burns / punch zoom (CSS)</li>
+                <li>✓ Music bed (crude duck)</li>
+                <li>✓ Overlays / titles / logo (live)</li>
+                <li>✓ Captions karaoke (DOM approx)</li>
+                <li>~ Soft opacity dissolves only</li>
+                <li>✗ Exact xfade / ASS burn / split-screen</li>
+              </ul>
+              <em>Use to check pacing. Click Render for the real export.</em>
+            </span>
+          </button>
           <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Caption fonts and colors for this project">Caption look</button>
-          <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
+          <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
+            aria-describedby="tlRenderTip"
+            style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff"
+            title="Render — full FFmpeg export with exact burns">
+            ▶ Render
+            <span id="tlRenderTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
+              <strong>Render</strong> — full FFmpeg export (exact)
+              <ul>
+                <li>✓ Exact keep-ranges / word cuts</li>
+                <li>✓ Exact color grades</li>
+                <li>✓ Exact Ken Burns / punch zoom</li>
+                <li>✓ Full music mix + duck</li>
+                <li>✓ Burned overlays / titles / logo</li>
+                <li>✓ ASS caption burn (project style)</li>
+                <li>✓ Real xfade transitions</li>
+                <li>✓ Split-screen / reframe</li>
+              </ul>
+              <em>Required after Co-editor / Caption look / B-roll changes.</em>
+            </span>
+          </button>
         </div>
       </div>
 
