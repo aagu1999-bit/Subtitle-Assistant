@@ -877,6 +877,21 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
+  // Large iPhone MOVs often truncate mid-upload on slow links — warn up front.
+  const bigMov = videos.find((f) => {
+    const name = (f.name || "").toLowerCase();
+    return (name.endsWith(".mov") || name.endsWith(".m4v")) && f.size > 80 * 1024 * 1024;
+  });
+  if (bigMov) {
+    const mb = Math.round(bigMov.size / (1024 * 1024));
+    const ok = confirm(
+      `"${bigMov.name}" is ~${mb} MB (common for iPhone HEVC).\n\n` +
+      "Keep this tab open until upload shows 100%. If Windows can't play it, that's normal — Drive re-encodes for streaming.\n\n" +
+      "OK = upload now.\nCancel = export Most Compatible / H.264 MP4 on the phone first (smaller + more reliable)."
+    );
+    if (!ok) return;
+  }
+
   // Leave the empty hero immediately so the user sees Ingest progress.
   _ingestBusy += 1;
   const emptyEl = document.getElementById("emptyState");
@@ -1529,7 +1544,19 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
       currentFile = null; // consumed — don't re-upload on accidental Transcribe click
       _progressPhase = "transcribe";
       barFill.style.width = "42%";
-      statusText.textContent = "Starting transcription…";
+      const mi = job.media_info || {};
+      const bits = [
+        mi.is_hevc ? "HEVC" : (mi.video_codec || null),
+        mi.audio_codec ? `audio:${mi.audio_codec}` : (mi.has_audio === false ? "audio:none" : null),
+        mi.size ? `${Math.round(mi.size / 1024)} KB on server` : null,
+        mi.duration ? `${Number(mi.duration).toFixed(1)}s` : null,
+      ].filter(Boolean);
+      statusText.textContent = bits.length
+        ? `Server received file (${bits.join(" · ")}) — extracting audio & transcribing…`
+        : "Starting transcription…";
+      if (mi.has_audio === false) {
+        statusText.textContent += " Warning: no audio stream detected — if this fails, Re-drop the original.";
+      }
       pollTranscription(job.job_id);
     }
     refreshJobsList();
@@ -1986,8 +2013,11 @@ function showEditor(words, saved = {}) {
     if (resultBtn) resultBtn.classList.remove("hidden");
   }
 
-  // Load the original uploaded video into the source player
-  sourcePlayer.src = "/raw-upload/" + currentJobId;
+  // Load the original uploaded video into the source player.
+  // For HEVC iPhone MOVs Chrome-on-Windows is often black until the H.264
+  // edit proxy lands — keep refreshing briefly until /raw-upload serves it.
+  sourcePlayer.src = "/raw-upload/" + currentJobId + "?t=" + Date.now();
+  _watchEditProxy(currentJobId);
 
   // Populate the editable subtitle list
   currentWords = words;

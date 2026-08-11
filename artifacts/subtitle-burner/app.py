@@ -5496,6 +5496,7 @@ def transcribe_only():
         "emoji_rules": None,
         "created_at": time.time(),
         "filename": f.filename,
+        "media_info": probe,
     }
     _db_save_job(job_id)
     pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
@@ -5503,7 +5504,18 @@ def transcribe_only():
     t.daemon = True
     t.start()
 
-    return jsonify({"job_id": job_id})
+    return jsonify({
+        "job_id": job_id,
+        "media_info": {
+            "size": probe.get("size"),
+            "duration": probe.get("duration"),
+            "has_audio": probe.get("has_audio"),
+            "has_video": probe.get("has_video"),
+            "video_codec": probe.get("video_codec"),
+            "audio_codec": probe.get("audio_codec"),
+            "is_hevc": probe.get("is_hevc"),
+        },
+    })
 
 
 @app.route("/analyze-reframe", methods=["POST"])
