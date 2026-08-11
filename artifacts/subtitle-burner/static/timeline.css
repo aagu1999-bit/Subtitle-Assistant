@@ -47,6 +47,15 @@
 }
 .tl-text { min-width: 160px; }
 .tl-savestate { font-size: .78rem; min-width: 70px; }
+.tl-workflow-hint {
+  font-size: .72rem;
+  opacity: 0.8;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+@media (max-width: 1100px) {
+  .tl-workflow-hint { display: none; }
+}
 
 /* Rich hover tips (Preview cut vs Render) */
 .tl-tipbtn {

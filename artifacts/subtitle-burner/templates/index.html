@@ -1165,8 +1165,8 @@
     <div class="row" style="gap:8px;flex-wrap:wrap">
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;min-width:180px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
       <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
-      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track">🎬 Send to timeline</button>
-      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Compile</button>
+      <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track — edit there, then Preview cut / Render (or Stitch Main)">🎬 Send to timeline</button>
+      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff" title="Stitch queue into one job, then optionally open Timeline">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
@@ -1214,6 +1214,9 @@
             </select>
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
+          <span class="muted tl-workflow-hint" title="Typical Captions-style path">Media → edit Main → Preview cut → Render</span>
+          <button id="tlStitchMainBtn" class="btn btn-secondary" type="button"
+            title="Bake the whole Main track into one combined source (word cuts applied). Then Preview cut / Render.">🎞 Stitch Main</button>
           <button id="tlPlaySeqBtn" class="btn btn-secondary tl-tipbtn" type="button"
             aria-describedby="tlPreviewTip">
             ▶ Preview cut

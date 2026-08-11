@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-24-playhead-merge-media";
+  const TL_BUILD = "studio-editor-build-25-stitch-main-workflow";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -3616,10 +3616,48 @@
     });
   }
 
+  function sourceNameForJob(jobId) {
+    const s = sources.find((x) => x.job_id === jobId);
+    return (s && s.filename) || String(jobId || "").slice(0, 8);
+  }
+
+  /** Expand a Main clip into compile-clips segments (honors word-cut keep-ranges). */
+  function mainClipToCompileSegments(c) {
+    if (!c || !c.source_job_id) return [];
+    const ranges = keepRangesForClip(c, { allowEmpty: true });
+    if (!ranges.length) return [];
+    const fname = sourceNameForJob(c.source_job_id);
+    return ranges.map(([a, b]) => ({
+      source_job_id: c.source_job_id,
+      start_time: a,
+      end_time: b,
+      source_filename: fname,
+    }));
+  }
+
+  async function stitchCompileClips(clips, label) {
+    const res = await fetch("/compile-clips", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: label || "stitched", clips }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "Stitch failed");
+    return data;
+  }
+
+  async function resolveStitchedDuration(jobId, fallback) {
+    try {
+      const info = await api("/source-info/" + jobId);
+      if (info && info.duration) return Number(info.duration);
+    } catch (e) {}
+    return fallback || 0;
+  }
+
   async function mergeDifferentSources(idx, a, b) {
     const btn = $("tlMergeBtn");
-    const aName = (sources.find((s) => s.job_id === a.source_job_id) || {}).filename || "clip A";
-    const bName = (sources.find((s) => s.job_id === b.source_job_id) || {}).filename || "clip B";
+    const aName = sourceNameForJob(a.source_job_id);
+    const bName = sourceNameForJob(b.source_job_id);
     if (!confirm(
       `These are different source videos.\n\n` +
       `Merge will stitch them into a new combined clip:\n` +
@@ -3630,38 +3668,14 @@
     setRenderStatus("Stitching different sources into one clip…");
     try {
       const label = `merged ${String(aName).replace(/\.[^.]+$/, "").slice(0, 24)}+${String(bName).replace(/\.[^.]+$/, "").slice(0, 24)}`;
-      const res = await fetch("/compile-clips", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          label,
-          clips: [
-            {
-              source_job_id: a.source_job_id,
-              start_time: Number(a.in) || 0,
-              end_time: Number(a.out) || 0,
-              source_filename: aName,
-            },
-            {
-              source_job_id: b.source_job_id,
-              start_time: Number(b.in) || 0,
-              end_time: Number(b.out) || 0,
-              source_filename: bName,
-            },
-          ],
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || "Stitch failed");
+      const segs = [
+        ...mainClipToCompileSegments(a),
+        ...mainClipToCompileSegments(b),
+      ];
+      if (segs.length < 2) throw new Error("Nothing to stitch (clips may be fully cut away).");
+      const data = await stitchCompileClips(segs, label);
       const newId = data.job_id;
-      let dur = 0;
-      try {
-        const info = await api("/source-info/" + newId);
-        dur = Number(info.duration) || 0;
-      } catch (e) {}
-      if (!dur) {
-        dur = clipDuration(a) + clipDuration(b);
-      }
+      const dur = await resolveStitchedDuration(newId, clipDuration(a) + clipDuration(b));
       srcDur[newId] = dur;
       pushHistory();
       const merged = {
@@ -3692,6 +3706,81 @@
       setRenderStatus("Merge failed");
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = "⛓ Merge"; }
+    }
+  }
+
+  /**
+   * Bake the whole Main track into one stitched source (Captions-style compile
+   * inside Timeline). Word cuts become omitted segments. Overlays/titles keep
+   * absolute times and re-anchor to the new single Main clip.
+   */
+  async function stitchMainTrack() {
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one Main clip first.");
+      return;
+    }
+    const segs = [];
+    tl.tracks.main.forEach((c) => {
+      mainClipToCompileSegments(c).forEach((s) => segs.push(s));
+    });
+    if (!segs.length) {
+      alert("Nothing to stitch — Main clips are empty or fully cut away.");
+      return;
+    }
+    const nClips = tl.tracks.main.length;
+    if (!confirm(
+      `Stitch Main into one combined clip?\n\n` +
+      `• ${nClips} Main shot${nClips === 1 ? "" : "s"} → ${segs.length} segment${segs.length === 1 ? "" : "s"}\n` +
+      `• Word cuts are baked out (skipped)\n` +
+      `• Overlays / titles keep their timing on the new clip\n\n` +
+      `Then Preview cut / Render as usual.`
+    )) return;
+
+    const btn = $("tlStitchMainBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "🎞 Stitching…"; }
+    setRenderStatus("Stitching Main track…");
+    try {
+      const label = (tl.label && String(tl.label).trim())
+        ? `${String(tl.label).trim()} — stitched`
+        : "timeline stitch";
+      const data = await stitchCompileClips(segs, label);
+      const newId = data.job_id;
+      const beforeDur = totalDuration();
+      const dur = await resolveStitchedDuration(newId, beforeDur);
+      srcDur[newId] = dur;
+      pushHistory();
+      const oldIds = tl.tracks.main.map((c) => c.id);
+      const merged = {
+        id: uid(),
+        source_job_id: newId,
+        in: 0,
+        out: dur,
+        _max: dur,
+        transition: null,
+        burn_captions: true,
+        cuts: [],
+      };
+      // Prefer grade from first main clip if any.
+      const firstFx = tl.tracks.main.find((c) => c.color || c.color_grade);
+      if (firstFx) {
+        merged.color = firstFx.color || firstFx.color_grade;
+        merged.color_grade = merged.color;
+      }
+      oldIds.forEach((oid) => reanchorFromClip(oid, merged.id));
+      tl.tracks.main = [merged];
+      if (typeof window.addJobToList === "function") window.addJobToList(newId);
+      await loadSources();
+      selectClip("main", merged.id);
+      renderTimeline();
+      scheduleSave();
+      setRenderStatus(
+        `Main stitched → ${fmtTime(dur)} · ${data.filename || "stitched"} · Preview cut or Render next`
+      );
+    } catch (e) {
+      alert("Stitch Main failed: " + (e.message || e));
+      setRenderStatus("Stitch failed");
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "🎞 Stitch Main"; }
     }
   }
 
@@ -4098,6 +4187,11 @@
     if (mergeBtn && !mergeBtn._wired) {
       mergeBtn._wired = true;
       mergeBtn.onclick = () => mergeSelectedWithNext();
+    }
+    const stitchBtn = $("tlStitchMainBtn");
+    if (stitchBtn && !stitchBtn._wired) {
+      stitchBtn._wired = true;
+      stitchBtn.onclick = () => stitchMainTrack();
     }
     const delBtn = $("tlDeleteBtn");
     if (delBtn && !delBtn._wired) {

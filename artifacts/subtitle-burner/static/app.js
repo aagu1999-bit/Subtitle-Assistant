@@ -4328,6 +4328,16 @@ if (compileGoBtn) {
       await refreshJobsList();
       refreshPastCompiles();
       await switchToJob(j.job_id);
+      // Close the Captions-style loop: offer Timeline as the edit surface.
+      if (typeof window.openTimelineEditor === "function") {
+        const goTl = confirm(
+          `Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"}.\n\n` +
+          `Open in Timeline to edit captions, B-roll, and Render?`
+        );
+        if (goTl) {
+          window.openTimelineEditor(j.job_id, { replace: true, newProject: true });
+        }
+      }
     } catch (e) {
       compileStatus.textContent = "Error: " + e.message;
     } finally {
