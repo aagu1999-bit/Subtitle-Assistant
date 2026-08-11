@@ -7053,22 +7053,37 @@ def _tl_declick_af(dur: float, d: float = 0.02) -> str:
 
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                       dur: float, layout: str, W: int, H: int, fps: int,
-                      out_path: Path, color: dict | None = None) -> float:
+                      out_path: Path, color: dict | None = None,
+                      placement: str | None = None) -> float:
     """Render a split-screen segment: two sources shown at once.
 
     layout 'side' = left/right halves; 'stack' = top/bottom halves; 'auto'
-    picks stack for portrait/square canvases and side for landscape. Audio is
-    taken from source A. Each half is center-cropped to fill its panel. An
-    optional *color* grade is applied to the combined frame.
+    picks stack for portrait/square canvases and side for landscape.
+
+    placement controls where the *second* video (srcB) sits:
+      stack: 'second_top' | 'second_bottom' (default bottom)
+      side:  'second_left' | 'second_right' (default right)
+    Legacy: placement 'swap' flips A/B panels.
+
+    Audio is taken from source A. Each half is center-cropped to fill its panel.
+    An optional *color* grade is applied to the combined frame.
     """
     if layout == "auto":
         layout = "stack" if H >= W else "side"
+    place = (placement or "").strip().lower()
+    if place in ("swap", "flipped", "second_first"):
+        # Legacy swap flag → concrete placement
+        place = "second_top" if layout != "side" else "second_left"
     if layout == "side":
         pw, ph = W // 2, H
         stack = "hstack"
+        # Default: Main left, second right
+        second_first = place in ("second_left", "left", "main_right")
     else:
         pw, ph = W, H // 2
         stack = "vstack"
+        # Default: Main top, second bottom
+        second_first = place in ("second_top", "top", "main_bottom")
     pw -= pw % 2
     ph -= ph % 2
 
@@ -7079,8 +7094,12 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     hasA = _has_audio_stream(srcA)
     cf = _tl_color_filter(color)
     post = ("," + cf) if cf else ""
+    if second_first:
+        order = "[p1][p0]"
+    else:
+        order = "[p0][p1]"
     fc = (f"{panel(0)};{panel(1)};"
-          f"[p0][p1]{stack}=inputs=2{post},format=yuv420p[v]")
+          f"{order}{stack}=inputs=2{post},format=yuv420p[v]")
     cmd = [FFMPEG, "-y",
            "-ss", f"{inA:.3f}", "-i", str(srcA),
            "-ss", f"{inB:.3f}", "-i", str(srcB)]
@@ -7719,6 +7738,7 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "asset_id": fx.get("asset_id"),
                 "in": float(fx.get("in") or 0),
                 "layout": fx.get("layout") or "auto",
+                "placement": fx.get("placement") or "second_bottom",
             }
     return ken, punch, color, split
 
@@ -7839,7 +7859,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                         s_in = base_in + (sub_ks - t_in)
                         dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
                                                 (split or {}).get("layout", "auto"),
-                                                W, H, fps, seg_path, color=color)
+                                                W, H, fps, seg_path, color=color,
+                                                placement=(split or {}).get("placement"))
                     else:
                         dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
                                                     seg_path, ken=ken, color=color, punch=punch)

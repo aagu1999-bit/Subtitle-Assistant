@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-27-effects-lane-chrome";
+  const TL_BUILD = "studio-editor-build-28-caption-look-split-place";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -79,13 +79,19 @@
       if (tl && tl.style) tl.style = normalizeTlStyle(tl.style);
       return false;
     }
+    return pullCaptionLookOntoTimeline(preferredJobId, { quiet: true });
+  }
+
+  /** Caption look is canonical — transfer fonts/colors/speakers onto this project. */
+  function pullCaptionLookOntoTimeline(preferredJobId, opts) {
+    opts = opts || {};
+    if (!tl) return false;
     let style = null;
     if (typeof window.captionLookStyle === "function") {
       style = window.captionLookStyle();
     } else if (typeof window.getStyle === "function") {
       style = window.getStyle();
     }
-    // Fall back to persisted job.style when the Branding panel has no fields yet.
     if (styleIsEmpty(style)) {
       const jid = preferredJobId
         || (tl.tracks && tl.tracks.main[0] && tl.tracks.main[0].source_job_id)
@@ -93,15 +99,24 @@
       const meta = jid && window.jobsById && window.jobsById[jid];
       if (meta && !styleIsEmpty(meta.style)) style = meta.style;
     }
-    if (styleIsEmpty(style)) return false;
+    if (styleIsEmpty(style)) {
+      if (!opts.quiet) setSaveState("Caption look empty — open Caption look first");
+      return false;
+    }
     tl.style = normalizeTlStyle(style);
     const sc = (style && style.speaker_colors) || {};
     if (sc && Object.keys(sc).length) {
       tl.speaker_colors = Object.assign({}, tl.speaker_colors || {}, sc);
     }
     const banner = style && style.headline_banner;
-    if (banner && !tl.headline_banner) {
+    if (banner) {
       tl.headline_banner = typeof banner === "string" ? { text: banner } : banner;
+    }
+    if (!opts.quiet) {
+      setSaveState("Pulled Caption look → Timeline");
+      scheduleSave();
+      renderProps();
+      updateStageCompositor();
     }
     return true;
   }
@@ -1062,6 +1077,7 @@
       hit: opts.hit != null ? Number(opts.hit) : 0,
       decay: opts.decay != null ? Number(opts.decay) : 0.45,
       anchor: opts.anchor || null,
+      placement: opts.placement || (ftype === "split_screen" ? "second_bottom" : null),
     };
     if (opts.quote) ec.quote = opts.quote;
     if (opts.reason) ec.reason = opts.reason;
@@ -2269,6 +2285,7 @@
     if (!layer || !splitCfg) return;
     let layout = splitCfg.layout || "auto";
     if (layout === "auto") layout = (tl.canvas === "16x9") ? "side" : "stack";
+    const place = (splitCfg.placement || "").toLowerCase();
     const line = document.createElement("div");
     line.style.position = "absolute";
     line.style.background = "rgba(255,255,255,.6)";
@@ -2276,6 +2293,21 @@
     if (layout === "side") { line.style.left = "50%"; line.style.top = "0"; line.style.bottom = "0"; line.style.width = "2px"; }
     else { line.style.top = "50%"; line.style.left = "0"; line.style.right = "0"; line.style.height = "2px"; }
     layer.appendChild(line);
+    const tag = document.createElement("div");
+    tag.style.cssText = "position:absolute;padding:2px 6px;font-size:10px;font-weight:700;background:rgba(0,0,0,.55);color:#fff;border-radius:4px;pointer-events:none;";
+    let secondLabel = "2nd";
+    if (layout === "side") {
+      const secondLeft = place === "second_left" || place === "left" || place === "main_right";
+      tag.textContent = secondLeft ? "2nd ←" : "→ 2nd";
+      tag.style.top = "8px";
+      tag.style.left = secondLeft ? "8px" : "54%";
+    } else {
+      const secondTop = place === "second_top" || place === "top" || place === "main_bottom";
+      tag.textContent = secondTop ? "2nd ↑" : "2nd ↓";
+      tag.style.left = "8px";
+      tag.style.top = secondTop ? "8px" : "54%";
+    }
+    layer.appendChild(tag);
   }
 
   let boxDrag = null;
@@ -2369,7 +2401,17 @@
         const splitOpts = [["", "— pick second video —"]].concat(
           sources.map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
         html += propSelect("source_job_id", "Second video", c.source_job_id || "", splitOpts);
-        html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1)}</div>`;
+        html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1)}</div>`;
+        const lay = c.layout || "stack";
+        const place = c.placement || (lay === "side" ? "second_right" : "second_bottom");
+        if (lay === "side") {
+          html += propSelect("placement", "Second video goes…", place,
+            [["second_left", "Left"], ["second_right", "Right (default)"]]);
+        } else {
+          html += propSelect("placement", "Second video goes…", place,
+            [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
+        }
+        html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. This is two sources side-by-side — different from Ingest <strong>Analyze</strong> (same video, speaker crops).</p>`;
       } else if (c.type === "color") {
         html += `<div class="tl-swatches" id="tlFxSwatches">` +
           COLOR_PRESETS.map(([v, t2]) =>
@@ -2489,7 +2531,16 @@
       html += propCheck("split.enabled", "Enable on this clip", sp.enabled);
       if (sp.enabled) {
         html += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
-        html += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "auto", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
+        html += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
+        const lay = sp.layout || "stack";
+        const place = sp.placement || (lay === "side" ? "second_right" : "second_bottom");
+        if (lay === "side") {
+          html += propSelect("split.placement", "Second video goes…", place,
+            [["second_left", "Left"], ["second_right", "Right (default)"]]);
+        } else {
+          html += propSelect("split.placement", "Second video goes…", place,
+            [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
+        }
       }
 
       // --- Color grade (per clip) ---
@@ -2550,23 +2601,30 @@
     const sc = tl.speaker_colors || {};
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
-    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Branding</label>`;
-    html += `<p class="muted" style="font-size:.74rem">Seeded from <strong>Caption look</strong> when empty. Push updates via <strong>Apply → Timeline</strong>, or edit here.</p>`;
     const st = normalizeTlStyle(tl.style || {});
-    html += `<div class="tl-prop-grid">
-      ${propSelect("__cap_font", "Caption font", st.font_name || st.font || "Anton", FONT_OPTS)}
-      ${propNum("__cap_size", "Caption size", st.font_size != null ? st.font_size : (st.size != null ? st.size : 64), 24, 120, 1)}
+    const primary = st.primary_color || st.primary || "#FFFFFF";
+    const highlight = st.highlight_color || st.highlight || "#FFD60A";
+    const fontName = st.font_name || st.font || "Anton";
+    const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Captions (from Caption look)</label>`;
+    html += `<p class="muted" style="font-size:.74rem;line-height:1.4"><strong>Caption look</strong> is the source of truth for karaoke style (white base + yellow active word, fonts, etc.). Timeline does not keep a second style editor — transfer it over.</p>`;
+    html += `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:10px;background:#12151e;border:1px solid #2a2f3a;border-radius:8px">
+      <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.05rem;letter-spacing:.02em">
+        <span style="color:${esc(primary)}">here with.</span>
+        <span style="color:${esc(highlight)}"> Vanessa,</span>
+      </span>
+      <span class="muted" style="font-size:.7rem">${esc(fontName)} · ${fontSize}px</span>
     </div>`;
-    html += `<div class="tl-prop-grid">
-      ${propColor("__cap_primary", "Primary", st.primary_color || st.primary || "#FFFFFF")}
-      ${propColor("__cap_highlight", "Highlight", st.highlight_color || st.highlight || "#FFD60A")}
+    html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary" data-act="open-caption-look" style="flex:1;font-size:.78rem">🎨 Open Caption look</button>
+      <button class="btn btn-primary" data-act="pull-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">⬇ Pull into Timeline</button>
     </div>`;
-    html += propColor("__cap_accent", "Accent", st.accent_color || st.accent || "#00FF88");
     if (tl.ai_edit) {
       html += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
     }
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
+    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints (Ingest → Analyze). Inactive words use these; the active karaoke word stays Highlight yellow.</p>`;
     html += `<div class="tl-prop-grid">`;
     spkKeys.forEach((key) => {
       const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
@@ -2575,6 +2633,22 @@
     html += `</div>`;
     html += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
     wrap.innerHTML = html;
+
+    const openCap = wrap.querySelector('[data-act="open-caption-look"]');
+    if (openCap) openCap.onclick = () => {
+      if (typeof window.setActiveTab === "function") window.setActiveTab("branding");
+      else {
+        const btn = document.querySelector('.main-tab[data-tab="branding"]');
+        if (btn) btn.click();
+      }
+    };
+    const pullCap = wrap.querySelector('[data-act="pull-caption-look"]');
+    if (pullCap) pullCap.onclick = () => {
+      pushHistory();
+      if (!pullCaptionLookOntoTimeline(null, { quiet: false })) {
+        alert("Open Caption look first and set fonts/colors (Hormozi = white + yellow karaoke), then Pull again.");
+      }
+    };
 
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;
@@ -2596,26 +2670,6 @@
           const t = inp.value.trim();
           tl.headline_banner = t ? { text: t } : null;
           if (tl.style) tl.style.headline_banner = t;
-        } else if (key === "__cap_font" || key === "__cap_size" || key === "__cap_primary" || key === "__cap_highlight" || key === "__cap_accent") {
-          tl.style = tl.style || {};
-          if (key === "__cap_font") {
-            tl.style.font_name = inp.value;
-            tl.style.font = inp.value;
-          } else if (key === "__cap_size") {
-            const n = parseFloat(inp.value) || 64;
-            tl.style.font_size = n;
-            tl.style.size = n;
-          } else if (key === "__cap_primary") {
-            tl.style.primary_color = inp.value;
-            tl.style.primary = inp.value;
-          } else if (key === "__cap_highlight") {
-            tl.style.highlight_color = inp.value;
-            tl.style.highlight = inp.value;
-          } else if (key === "__cap_accent") {
-            tl.style.accent_color = inp.value;
-            tl.style.accent = inp.value;
-          }
-          updateStageCompositor();
         } else {
           if (!tl.logo) return;
           const field = key.replace("__logo_", "");
@@ -3159,6 +3213,8 @@
     btn.disabled = true;
     setRenderStatus("Queued…");
     try {
+      // Caption look wins: refresh Timeline style from it before baking ASS.
+      pullCaptionLookOntoTimeline(null, { quiet: true });
       await saveNow();
       await api("/timeline/render", {
         method: "POST",
