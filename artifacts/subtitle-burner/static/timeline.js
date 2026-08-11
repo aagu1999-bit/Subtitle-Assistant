@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-26-video-overlays-effects-lane";
+  const TL_BUILD = "studio-editor-build-27-effects-lane-chrome";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -1073,17 +1073,56 @@
     return ec;
   }
 
+  // Inject Effects lane + toolbar button if the HTML template is stale
+  // (common when JS cache-busts ahead of a Flask restart / old index.html).
+  function ensureEffectsChrome() {
+    const tracks = $("tlTracks");
+    if (tracks && !document.querySelector('.tl-track[data-track="effects"]')) {
+      const row = document.createElement("div");
+      row.className = "tl-track";
+      row.dataset.track = "effects";
+      row.innerHTML =
+        '<div class="tl-track-label">✨ Effects</div>' +
+        '<div class="tl-track-lane" data-lane="effects"></div>';
+      const overlay = tracks.querySelector('.tl-track[data-track="overlay"]');
+      const text = tracks.querySelector('.tl-track[data-track="text"]');
+      if (overlay && overlay.nextSibling) tracks.insertBefore(row, overlay.nextSibling);
+      else if (text) tracks.insertBefore(row, text);
+      else tracks.appendChild(row);
+      console.log("[timeline] injected missing Effects track into DOM");
+    }
+    if (!$("tlAddEffectBtn")) {
+      const titleBtn = $("tlAddTitleBtn");
+      if (titleBtn && titleBtn.parentNode) {
+        const btn = document.createElement("button");
+        btn.id = "tlAddEffectBtn";
+        btn.className = "tl-chip-btn";
+        btn.title = "Add a timed effect on the Effects lane (split-screen, punch, Ken Burns, color)";
+        btn.textContent = "+ Effect";
+        titleBtn.parentNode.insertBefore(btn, titleBtn.nextSibling);
+        console.log("[timeline] injected missing + Effect button into DOM");
+      }
+    }
+    const fxBtn = $("tlAddEffectBtn");
+    if (fxBtn && !fxBtn.dataset.wired) {
+      fxBtn.dataset.wired = "1";
+      fxBtn.onclick = () => addEffectClip("punch_zoom");
+    }
+  }
+
   // ---- Timeline rendering ----
   // renderTimeline = redraw lanes AND rebuild the props panel (use on
   // selection / add / delete). renderTracks = redraw only the lanes (use during
   // slider/number edits so the props panel keeps focus).
   function renderTimeline() {
+    ensureEffectsChrome();
     applyAnchors();   // keep anchored overlays/titles/music attached to Main
     renderTracks();
     renderProps();
   }
 
   function renderTracks() {
+    ensureEffectsChrome();
     const total = totalDuration();
     const width = Math.max(300, total * PPS);
 
@@ -3397,6 +3436,7 @@
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
         on("tlAddTitleBtn", "onclick", () => addTitle());
+        ensureEffectsChrome();
         on("tlAddEffectBtn", "onclick", () => addEffectClip("punch_zoom"));
         on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
         on("tlSplitBtn", "onclick", () => splitAtPlayhead());
