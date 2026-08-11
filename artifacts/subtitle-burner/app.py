@@ -4866,6 +4866,14 @@ def fetch_auto_overlays():
         if stem != asset_id:
             asset_id = stem
 
+        display_name = f"{label}{asset_path.suffix.lower()}"
+        _write_asset_meta(
+            asset_id,
+            filename=display_name,
+            keyword=label,
+            source=source,
+        )
+
         pos = _overlay_layout_for_index(len(overlays), placement)
         overlays.append({
             "asset_id": asset_id,
@@ -6739,12 +6747,52 @@ def _asset_kind(ext: str) -> str | None:
     return None
 
 
+def _asset_meta_path(asset_id: str) -> Path:
+    return ASSET_DIR / f"{asset_id}.meta.json"
+
+
+def _write_asset_meta(asset_id: str, **fields) -> None:
+    """Persist display metadata (original filename, keyword, source) beside an asset."""
+    if not asset_id:
+        return
+    path = _asset_meta_path(asset_id)
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+    for k, v in fields.items():
+        if v is not None and v != "":
+            data[k] = v
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_asset_meta(asset_id: str) -> dict:
+    path = _asset_meta_path(asset_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _find_asset_path(asset_id: str) -> Path | None:
     """Resolve an uploaded asset id to its file on disk (extension agnostic)."""
     if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
         return None
     for p in ASSET_DIR.glob(f"{asset_id}.*"):
-        if p.is_file():
+        if not p.is_file():
+            continue
+        # Skip sidecar metadata / non-media companions.
+        if p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
+            continue
+        if _asset_kind(p.suffix):
             return p
     return None
 
@@ -7831,6 +7879,7 @@ def upload_asset():
     asset_id = uuid.uuid4().hex
     dest = ASSET_DIR / f"{asset_id}.{ext}"
     f.save(str(dest))
+    _write_asset_meta(asset_id, filename=f.filename, source="upload")
     return jsonify({
         "asset_id": asset_id,
         "kind": kind,
@@ -7846,13 +7895,22 @@ def list_assets():
     for p in ASSET_DIR.glob("*"):
         if not p.is_file():
             continue
+        if p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
+            continue
         kind = _asset_kind(p.suffix)
         if not kind:
             continue
+        meta = _read_asset_meta(p.stem)
+        filename = meta.get("filename") or meta.get("keyword") or None
+        if not filename and meta.get("keyword"):
+            filename = f"{meta['keyword']}.{p.suffix.lstrip('.')}"
         out.append({
             "asset_id": p.stem,
             "kind": kind,
             "ext": p.suffix.lstrip("."),
+            "filename": filename,
+            "keyword": meta.get("keyword"),
+            "source": meta.get("source"),
             "duration": _media_duration(p) if kind in ("video", "audio") else 0.0,
             "mtime": p.stat().st_mtime,
         })

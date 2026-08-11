@@ -66,8 +66,15 @@
   border-radius: 10px;
   overflow: hidden;
   max-height: 82vh;
+  min-height: 0;
 }
-.tl-lefttabs { display: flex; border-bottom: 1px solid #2a2f3a; }
+.tl-lefttabs {
+  display: flex;
+  border-bottom: 1px solid #2a2f3a;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+}
 .tl-lefttab {
   flex: 1;
   background: transparent;
@@ -77,10 +84,28 @@
   font-size: .82rem;
   cursor: pointer;
   border-bottom: 2px solid transparent;
+  pointer-events: auto;
 }
+.tl-lefttab:hover { color: #fff; background: rgba(255,255,255,.04); }
 .tl-lefttab.active { color: #fff; border-bottom-color: #6c5cff; background: #1a1e2a; }
-.tl-leftpanel { padding: 12px; overflow-y: auto; }
+.tl-leftpanel {
+  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  -webkit-overflow-scrolling: touch;
+}
 .tl-leftpanel.hidden { display: none; }
+.tl-asset-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #0c0e14;
+  border: 1px solid #2a2f3a;
+  flex-shrink: 0;
+}
 
 /* Transcript document (text-based editing) */
 .tl-transcript-toolbar {
@@ -408,14 +433,32 @@
   height: 100%;
 }
 .tl-tracks { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-.tl-track { display: flex; align-items: stretch; gap: 0; height: 52px; }
+.tl-track { display: flex; align-items: stretch; gap: 0; min-height: 56px; height: 56px; }
 .tl-track-label {
-  width: 70px;
+  width: 78px;
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  font-size: .76rem;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  font-size: .72rem;
   color: #aeb4c0;
+  overflow: hidden;
+  gap: 2px;
+  padding-right: 4px;
+  box-sizing: border-box;
+}
+.tl-track-controls {
+  display: flex !important;
+  gap: 2px !important;
+  margin-top: 0 !important;
+  flex-shrink: 0;
+}
+.tl-track-controls .tl-chip-btn {
+  padding: 1px 4px !important;
+  font-size: .62rem;
+  line-height: 1.15;
+  min-width: 0;
 }
 .tl-track-lane {
   position: relative;
@@ -423,8 +466,12 @@
   background: #1a1e2a;
   border: 1px dashed #2a2f3a;
   border-radius: 6px;
-  min-height: 52px;
+  min-height: 56px;
   overflow: hidden;
+  z-index: 1;
+}
+.tl-clip-asset-thumb {
+  opacity: .7;
 }
 .tl-track-lane.drag-over { border-color: #6c5cff; background: #1e2230; }
 

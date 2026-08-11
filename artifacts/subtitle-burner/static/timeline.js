@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-19-overlays";
+  const TL_BUILD = "studio-editor-build-20-media-fix";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -409,15 +409,19 @@
     if (!wrap) return;
     wrap.innerHTML = "";
     if (!assets.length) {
-      wrap.innerHTML = '<p class="muted tl-hint">No assets yet.</p>';
+      wrap.innerHTML = '<p class="muted tl-hint">No assets yet. Upload a file or Suggest B-roll overlays.</p>';
       return;
     }
     assets.forEach((a) => {
       const div = document.createElement("div");
       div.className = "tl-source-item";
       const icon = a.kind === "audio" ? "🎵" : a.kind === "image" ? "🖼" : "🎞";
+      const label = a.filename || `${a.ext || a.kind} ${String(a.asset_id || "").slice(0, 6)}`;
+      const thumb = (a.kind === "image" || a.kind === "video")
+        ? `<img class="tl-asset-thumb" src="/asset/${a.asset_id}" alt="" loading="lazy">`
+        : "";
       div.innerHTML =
-        `<span class="tl-source-name">${icon} ${esc(a.ext)} ${a.duration ? fmtTime(a.duration) : ""}</span>`;
+        `${thumb}<span class="tl-source-name" title="${esc(label)}">${icon} ${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
       if (a.kind === "audio") {
         const m = document.createElement("button");
         m.className = "tl-chip-btn";
@@ -431,6 +435,11 @@
         o.onclick = () => addOverlayClip({ asset_id: a.asset_id }, a);
         div.appendChild(o);
       }
+      // Clicking the row itself selects/highlights — also jump to Media tab.
+      div.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return;
+        setLeftTab("media", { pin: true });
+      });
       wrap.appendChild(div);
     });
   }
@@ -441,12 +450,22 @@
   }
 
   // ---- Left column tabs (Transcript / Media) ----
-  function setLeftTab(name) {
+  let leftTabPinned = null; // "media" | "transcript" | null — user choice wins over auto-switch
+
+  function setLeftTab(name, opts) {
+    opts = opts || {};
     leftTab = name;
+    if (opts.pin) leftTabPinned = name;
     document.querySelectorAll(".tl-lefttab").forEach((b) =>
       b.classList.toggle("active", b.dataset.ltab === name));
     document.querySelectorAll(".tl-leftpanel").forEach((p) =>
       p.classList.toggle("hidden", p.dataset.lpanel !== name));
+  }
+
+  function wireLeftTabs() {
+    document.querySelectorAll(".tl-lefttab").forEach((b) => {
+      b.onclick = () => setLeftTab(b.dataset.ltab, { pin: true });
+    });
   }
 
   // ---- Transcript-first editing (Phase 4: strike + rename + fillers) ----
@@ -838,6 +857,8 @@
       fade_out: ref.fade_out != null ? Number(ref.fade_out) : 0.2,
       border_px: ref.border_px != null ? Number(ref.border_px) : 0,
       layout: ref.layout || null,
+      keyword: ref.keyword || null,
+      source: ref.source || null,
     };
     // Legacy auto-fetch used percent coords / scale — normalize if needed.
     if (oc.x > 1.5) oc.x = Math.min(1, oc.x / 100);
@@ -952,8 +973,8 @@
           controls = document.createElement("div");
           controls.className = "tl-track-controls";
           controls.style.display = "flex";
-          controls.style.gap = "4px";
-          controls.style.marginTop = "4px";
+          controls.style.gap = "2px";
+          controls.style.marginTop = "0";
           label.appendChild(controls);
         }
         controls.innerHTML = `
@@ -1058,6 +1079,13 @@
       bgSlice(el, "tl-clip-wave", "/asset-waveform/" + c.asset_id + ".png", srcMax, cIn, cDur);
     } else if (track === "overlay" && c.source_job_id) {
       bgSlice(el, "tl-clip-film", "/filmstrip/" + c.source_job_id + ".jpg", srcMax, cIn, cDur);
+    } else if (track === "overlay" && c.asset_id) {
+      const node = document.createElement("div");
+      node.className = "tl-clip-film tl-clip-asset-thumb";
+      node.style.backgroundImage = `url("/asset/${c.asset_id}?t=1")`;
+      node.style.backgroundSize = "cover";
+      node.style.backgroundPosition = "center";
+      el.appendChild(node);
     }
   }
 
@@ -1074,7 +1102,21 @@
       return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")}${badges}`;
     }
     if (track === "text") return (c.text || "Title").split("\n")[0];
-    if (track === "music") return `🎵 music ${fmtTime(clipDuration(c))}`;
+    if (track === "music") {
+      const a = assets.find((x) => x.asset_id === c.asset_id);
+      const name = a ? (a.filename || a.ext || "music") : "music";
+      return `🎵 ${String(name).replace(/\.[^.]+$/, "")} ${fmtTime(clipDuration(c))}`;
+    }
+    if (c.keyword) return `🖼 ${c.keyword}`;
+    if (c.asset_id) {
+      const a = assets.find((x) => x.asset_id === c.asset_id);
+      if (a && a.filename) return `🖼 ${String(a.filename).replace(/\.[^.]+$/, "")}`;
+      return `🖼 asset ${String(c.asset_id).slice(0, 6)}`;
+    }
+    if (c.source_job_id) {
+      const s = sources.find((x) => x.job_id === c.source_job_id);
+      if (s && s.filename) return `🖼 ${String(s.filename).replace(/\.[^.]+$/, "")}`;
+    }
     return `🖼 overlay ${fmtTime(clipDuration(c))}`;
   }
 
@@ -1099,8 +1141,17 @@
       wrap.classList.add("has-video");
       if (seekTo != null) { try { v.currentTime = seekTo; } catch (e) {} }
     }
-    // Selecting a Main clip surfaces its transcript for text-based editing.
-    if (track === "main" && c) { setLeftTab("transcript"); renderTranscript(c); }
+    // Selecting a Main clip surfaces its transcript — unless the user pinned Media.
+    if (track === "main" && c && leftTabPinned !== "media") {
+      setLeftTab("transcript");
+      renderTranscript(c);
+    } else if (track === "main" && c && leftTab === "transcript") {
+      renderTranscript(c);
+    }
+    // Selecting overlay/music/text keeps Media open so you can see the library.
+    if ((track === "overlay" || track === "music") && leftTabPinned !== "transcript") {
+      setLeftTab("media");
+    }
     applyStage();
     renderTimeline();   // renderProps() (inside) redraws the preview boxes
   }
@@ -1346,7 +1397,7 @@
         const c = tl.tracks.main[i];
         if (!c.source_job_id) continue;
         selected = { track: "main", id: c.id };
-        setLeftTab("transcript");
+        if (leftTabPinned !== "media") setLeftTab("transcript");
         renderTranscript(c);
         applyLiveGrade(c);
         const src = "/raw-upload/" + c.source_job_id;
@@ -3086,8 +3137,17 @@
         document.addEventListener("pointerup", onBoxUp);
         wireScrub();
         wireTranscriptToolbar();
+        wireLeftTabs();
         on("tlAutoOverlaysBtn", "onclick", () => suggestKeywordOverlays());
-        setLeftTab("media");
+        on("tlAssetBtn", "onclick", () => $("tlAssetFile")?.click());
+        on("tlAssetFile", "onchange", async (e) => {
+          const f = e.target.files && e.target.files[0];
+          if (!f) return;
+          await uploadAsset(f);
+          e.target.value = "";
+          setLeftTab("media", { pin: true });
+        });
+        setLeftTab("media", { pin: true });
         setSaveState(TL_BUILD);
         updateHistoryButtons();
       } catch (e) {
@@ -3157,11 +3217,14 @@
       for (const ov of list) {
         await addOverlayClip(ov);
       }
+      await loadAssets();
+      setLeftTab("media", { pin: true });
+      renderTimeline();
       const st = data.stats || {};
       const bits = [];
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.badge) bits.push(`${st.badge} badge`);
-      setSaveState(`Added ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}` + (bits.length ? ` (${bits.join(", ")})` : ""));
+      setSaveState(`Added ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}` + (bits.length ? ` (${bits.join(", ")})` : "") + " — see Media");
       if (window.StudioLogger) StudioLogger.clip("auto_overlays", `${list.length}:${mode}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);
