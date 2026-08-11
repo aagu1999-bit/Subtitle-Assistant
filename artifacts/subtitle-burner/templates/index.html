@@ -234,10 +234,10 @@
               Next: fix words, set caption look, find shorts, or open the timeline.
             </p>
             <div style="display:flex;flex-wrap:wrap;gap:8px">
-              <button type="button" id="readyEditWordsBtn" class="btn btn-primary btn-sm">✂️ Edit words</button>
-              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">🎨 Caption look</button>
-              <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">🔥 Find Shorts</button>
-              <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">🎬 Open Timeline</button>
+              <button type="button" id="readyEditWordsBtn" class="btn btn-primary btn-sm">Edit words</button>
+              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
+              <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
+              <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">Open in Timeline</button>
             </div>
           </section>
         </div>
@@ -811,7 +811,7 @@
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
               <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
               <button type="button" id="transcriptBackIngestBtn" class="btn btn-secondary btn-sm">← Ingest</button>
-              <button type="button" id="transcriptCaptionLookBtn" class="btn btn-secondary btn-sm">🎨 Caption look</button>
+              <button type="button" id="transcriptCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
             </div>
           </div>
           <div class="video-preview-wrapper" style="position:relative;width:100%;">
@@ -930,10 +930,11 @@
         Edits sync back to the ✨ Highlights card automatically.
       </p>
       <div class="row" style="margin-bottom:0;gap:8px;flex-wrap:wrap">
-        <button id="previewEditReplay" class="btn btn-secondary">▶ Replay</button>
-        <button id="previewEditAdd" class="btn btn-secondary">+ Add to compilation</button>
-        <button id="previewEditToTimeline" class="btn btn-secondary" title="Open the multi-track editor with this range on the Main track">🎬 To timeline</button>
-        <button id="previewEditMakeClip" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Make a clip</button>
+        <button id="previewEditReplay" class="btn btn-secondary">Preview</button>
+        <button id="previewEditToTimeline" class="btn btn-primary" title="Put this range on the Timeline">Open in Timeline</button>
+        <button id="previewEditAiEdit" class="btn btn-secondary" title="Advanced: style + intensity → seeded Timeline project">AI Edit…</button>
+        <button id="previewEditMakeClip" class="btn btn-secondary">Export clip</button>
+        <button id="previewEditAdd" class="btn btn-secondary">Add to compilation</button>
         <button id="previewEditSave" class="btn btn-secondary" style="margin-left:auto">💾 Save &amp; back</button>
       </div>
       <div id="previewEditStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
@@ -1047,8 +1048,8 @@
 
     <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
       <button id="renderBtn" class="btn btn-primary btn-lg" style="flex:1;min-width:240px">Render with Edits</button>
-      <button id="aiEditJobBtn" class="btn btn-secondary" title="Captions-style AI Edit — style + intensity → seeded timeline project" style="background:linear-gradient(135deg,#2a2450,#1a1e2a);border-color:#6c5cff88;color:#e8e4ff">✨ AI Edit</button>
-      <button id="editToTimelineBtn" class="btn btn-secondary" title="Open the multi-track Editor with this video on the Main track">🎬 Edit in timeline</button>
+      <button id="aiEditJobBtn" class="btn btn-secondary" title="Advanced: style + intensity → seeded Timeline project" style="background:linear-gradient(135deg,#2a2450,#1a1e2a);border-color:#6c5cff88;color:#e8e4ff">AI Edit…</button>
+      <button id="editToTimelineBtn" class="btn btn-secondary" title="Open in Timeline with this video on the Main track">Open in Timeline</button>
       <button id="retranscribeBtn" class="btn btn-secondary" title="Re-run Whisper on this video. Use when the timestamps drift (e.g. the source was already a tightened or stitched video).">↻ Re-transcribe</button>
       <button id="exportSrtBtn" class="btn btn-secondary" title="Download the current transcript as an SRT subtitle file (works with YouTube, Premiere, CapCut).">⬇ .srt</button>
       <button id="exportVttBtn" class="btn btn-secondary" title="Download the current transcript as a WebVTT subtitle file (works with HTML5 video, web players).">⬇ .vtt</button>
@@ -1076,9 +1077,10 @@
       </div>
       {% endif %}
       <p class="muted panel-desc">
-        Pick a format and target length — Gemini finds hook-first moments. Each card is an individual clip:
-        <strong>Open as project</strong> runs AI Edit (style + intensity) into the timeline,
-        <strong>Export alone</strong> trims a standalone job, or batch-export the gallery.
+        Pick a format and target length — Gemini finds hook-first moments. On each card:
+        <strong>Preview</strong> → <strong>Open in Timeline</strong> (primary) →
+        <strong>AI Edit…</strong> (advanced) → <strong>Export clip</strong> →
+        <strong>Add to compilation</strong>.
       </p>
 
       <div class="row">
@@ -1213,7 +1215,7 @@
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
           <button id="tlPlaySeqBtn" class="btn btn-secondary" title="Play Main-track clips in order without a full FFmpeg render">▶ Preview cut</button>
-          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Open caption fonts and colors for this project">🎨 Caption look</button>
+          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Caption fonts and colors for this project">Caption look</button>
           <button id="tlRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
         </div>
       </div>

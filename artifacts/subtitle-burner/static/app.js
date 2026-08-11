@@ -2086,7 +2086,7 @@ function showEditor(words, saved = {}) {
   if (Array.isArray(saved.clip_suggestions) && saved.clip_suggestions.length && typeof renderHighlights === "function") {
     renderHighlights(saved.clip_suggestions, saved.clip_format || "auto");
     if (hlStatus) {
-      hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — open any as a project.`;
+      hlStatus.textContent = `${saved.clip_suggestions.length} short${saved.clip_suggestions.length === 1 ? "" : "s"} ready — Open in Timeline or Export clip.`;
     }
   }
 
@@ -2244,10 +2244,14 @@ async function pollRender(jobId) {
   setTimeout(() => pollRender(jobId), 2000);
 }
 
-// "Edit transcript again" — scroll back up to editor
+// "Edit transcript again" — open Edit words panel
 reEditBtn.onclick = () => {
   result.classList.add("hidden");
-  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (typeof openEditWords === "function") openEditWords();
+  else {
+    setActiveTab("transcript");
+    editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 };
 
 // "Re-transcribe" — discard current words and re-run Whisper on the video.
@@ -2929,8 +2933,8 @@ function renderJobsList() {
     if (meta.video_available) {
       const toTl = document.createElement("button");
       toTl.className = "job-rename job-to-timeline";
-      toTl.textContent = "🎬 Timeline";
-      toTl.title = "Edit in timeline (open the multi-track editor with this clip)";
+      toTl.textContent = "Open in Timeline";
+      toTl.title = "Open in Timeline with this clip";
       toTl.onclick = (e) => {
         e.stopPropagation();
         // timeline.js loads after app.js, so guard at click time, not render.
@@ -2943,8 +2947,8 @@ function renderJobsList() {
     if (meta.has_words || meta.status === "awaiting_edit" || meta.status === "done") {
       const editWords = document.createElement("button");
       editWords.className = "job-rename job-edit-words";
-      editWords.textContent = "✂️ Words";
-      editWords.title = "Edit transcript words (fillers, fixes, tighten)";
+      editWords.textContent = "Edit words";
+      editWords.title = "Edit words — fillers, fixes, tighten silences";
       editWords.onclick = (e) => {
         e.stopPropagation();
         switchToJob(jobId, { force: true, tab: "transcript" });
@@ -3347,16 +3351,15 @@ function renderHighlights(clips, format) {
 
     card.appendChild(timeRow);
 
-    // ---- Action buttons ----
+    // ---- Action buttons (Phase 2 verb set, fixed order) ----
+    // Preview → Open in Timeline → AI Edit… → Export clip → Add to compilation
     const actions = document.createElement("div");
     actions.className = "hl-actions";
 
     const previewBtn = document.createElement("button");
-    previewBtn.textContent = "▶ Preview";
+    previewBtn.textContent = "Preview";
+    previewBtn.title = "Play and nudge this range";
     previewBtn.onclick = () => {
-      // Open the preview-edit panel on the Edit tab. onUpdate is called on
-      // every input change in the panel (live sync back to this card) plus
-      // on Save / Make-a-clip / Add-to-compilation actions.
       openPreviewEditor({
         title: editedTitle,
         hookQuote: editedQuote,
@@ -3373,21 +3376,83 @@ function renderHighlights(clips, format) {
     };
     actions.appendChild(previewBtn);
 
-    const addSegBtn = document.createElement("button");
-    addSegBtn.textContent = "🔗 Add to assembly";
-    addSegBtn.title = "Add this clip as a segment in the assembly bar";
-    addSegBtn.onclick = () => {
-      if (editedEnd <= editedStart) { alert("End time must be greater than start time."); return; }
-      _addClipToAssembly({ title: editedTitle, start: editedStart, end: editedEnd, quote: editedQuote });
-      addSegBtn.textContent = "✓ Added";
-      addSegBtn.disabled = true;
-      setTimeout(() => { addSegBtn.disabled = false; addSegBtn.textContent = "🔗 Add to assembly"; }, 1500);
-      if (window.StudioLogger) StudioLogger.clip("segment_added", `"${editedTitle}" ${editedStart.toFixed(1)}-${editedEnd.toFixed(1)}s`);
+    const openTlBtn = document.createElement("button");
+    openTlBtn.className = "primary hl-open-timeline";
+    openTlBtn.textContent = "Open in Timeline";
+    openTlBtn.title = "Put this range on the Timeline (Main track)";
+    openTlBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      if (typeof window.openTimelineEditor === "function") {
+        window.openTimelineEditor(currentJobId, {
+          in: editedStart,
+          out: editedEnd,
+          newProject: true,
+          replace: true,
+        });
+      } else {
+        alert("Timeline is not available yet — try again in a second.");
+      }
     };
-    actions.appendChild(addSegBtn);
+    actions.appendChild(openTlBtn);
+
+    const aiEditBtn = document.createElement("button");
+    aiEditBtn.className = "hl-ai-edit";
+    aiEditBtn.textContent = "AI Edit…";
+    aiEditBtn.title = "Advanced: style + intensity → seeded Timeline project";
+    aiEditBtn.onclick = () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      openAiEditPlan({
+        source_job_id: currentJobId,
+        start_time: editedStart,
+        end_time: editedEnd,
+        label: editedTitle || "highlight",
+      });
+    };
+    actions.appendChild(aiEditBtn);
+
+    const exportBtn = document.createElement("button");
+    exportBtn.textContent = "Export clip";
+    exportBtn.title = "Trim this range into a standalone video job";
+    exportBtn.onclick = async () => {
+      if (editedEnd <= editedStart) {
+        alert("End time must be greater than start time.");
+        return;
+      }
+      exportBtn.disabled = true;
+      exportBtn.textContent = "Exporting…";
+      try {
+        const res = await fetch("/clip-from-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_job_id: currentJobId,
+            start_time: editedStart,
+            end_time: editedEnd,
+            label: editedTitle || "highlight",
+          }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error);
+        addJobToList(j.job_id);
+        await refreshJobsList();
+        await switchToJob(j.job_id, { force: true, tab: "ingest" });
+      } catch (e) {
+        alert("Could not export clip: " + e.message);
+        exportBtn.disabled = false;
+        exportBtn.textContent = "Export clip";
+      }
+    };
+    actions.appendChild(exportBtn);
 
     const addBtn = document.createElement("button");
-    addBtn.textContent = "+ Add to compilation";
+    addBtn.textContent = "Add to compilation";
+    addBtn.title = "Queue this clip for the Compilation tab";
     addBtn.onclick = () => {
       if (editedEnd <= editedStart) {
         alert("End time must be greater than start time.");
@@ -3405,79 +3470,10 @@ function renderHighlights(clips, format) {
       addBtn.disabled = true;
       setTimeout(() => {
         addBtn.disabled = false;
-        addBtn.textContent = "+ Add to compilation";
+        addBtn.textContent = "Add to compilation";
       }, 1500);
     };
     actions.appendChild(addBtn);
-
-    const makeBtn = document.createElement("button");
-    makeBtn.className = "primary";
-    makeBtn.textContent = "Export alone";
-    makeBtn.title = "Chop this highlight into a standalone clip job";
-    makeBtn.onclick = async () => {
-      if (editedEnd <= editedStart) {
-        alert("End time must be greater than start time.");
-        return;
-      }
-      makeBtn.disabled = true;
-      makeBtn.textContent = "Trimming…";
-      try {
-        const res = await fetch("/clip-from-job", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            source_job_id: currentJobId,
-            start_time: editedStart,
-            end_time: editedEnd,
-            label: editedTitle || "highlight",
-          }),
-        });
-        const j = await res.json();
-        if (j.error) throw new Error(j.error);
-        addJobToList(j.job_id);
-        await refreshJobsList();
-        await switchToJob(j.job_id);
-      } catch (e) {
-        alert("Could not create clip: " + e.message);
-        makeBtn.disabled = false;
-        makeBtn.textContent = "Export alone";
-      }
-    };
-    actions.appendChild(makeBtn);
-
-    const openProjectBtn = document.createElement("button");
-    openProjectBtn.className = "hl-open-project";
-    openProjectBtn.textContent = "Open as project";
-    openProjectBtn.title = "AI Edit → style + intensity → seeded timeline project";
-    openProjectBtn.onclick = () => {
-      if (editedEnd <= editedStart) {
-        alert("End time must be greater than start time.");
-        return;
-      }
-      openAiEditPlan({
-        source_job_id: currentJobId,
-        start_time: editedStart,
-        end_time: editedEnd,
-        label: editedTitle || "highlight",
-      });
-    };
-    actions.appendChild(openProjectBtn);
-
-    const tlBtn = document.createElement("button");
-    tlBtn.textContent = "🎬 Timeline only";
-    tlBtn.title = "Open the timeline editor with this highlight (no AI Edit plan)";
-    tlBtn.onclick = () => {
-      if (editedEnd <= editedStart) {
-        alert("End time must be greater than start time.");
-        return;
-      }
-      if (typeof window.openTimelineEditor === "function") {
-        window.openTimelineEditor(currentJobId, { in: editedStart, out: editedEnd, newProject: true, replace: true });
-      } else {
-        alert("Timeline Editor is not available.");
-      }
-    };
-    actions.appendChild(tlBtn);
 
     card.appendChild(actions);
     hlResults.appendChild(card);
@@ -3891,7 +3887,7 @@ function renderCompileQueue() {
     const hint = document.createElement("p");
     hint.className = "muted";
     hint.style.cssText = "text-align:center;padding:24px 12px;font-size:.9rem";
-    hint.innerHTML = "Nothing queued yet. Open the <strong>✨ Highlights</strong> tab on any video and click <strong>+ Add to compilation</strong> on the suggestions you want to stitch together.";
+    hint.innerHTML = "Nothing queued yet. On <strong>AI Shorts</strong>, click <strong>Add to compilation</strong> on the clips you want to stitch together.";
     compileListEl.appendChild(hint);
     return;
   }
@@ -4812,10 +4808,34 @@ if (_peToTimeline) {
     }
     _peSyncToCard();
     if (typeof window.openTimelineEditor !== "function") {
-      alert("Editor is still loading — try again in a second.");
+      alert("Timeline is still loading — try again in a second.");
       return;
     }
-    window.openTimelineEditor(currentJobId, { in: t.s, out: t.e });
+    window.openTimelineEditor(currentJobId, {
+      in: t.s,
+      out: t.e,
+      newProject: true,
+      replace: true,
+    });
+  };
+}
+
+const _peAiEdit = $("previewEditAiEdit");
+if (_peAiEdit) {
+  _peAiEdit.onclick = () => {
+    if (!_activePreview || !currentJobId) return;
+    const t = _peGetTimes();
+    if (!t.valid) {
+      _peSetStatus("Invalid times. End must be greater than start.", false);
+      return;
+    }
+    _peSyncToCard();
+    openAiEditPlan({
+      source_job_id: currentJobId,
+      start_time: t.s,
+      end_time: t.e,
+      label: (_activePreview && _activePreview.title) || "highlight",
+    });
   };
 }
 
@@ -4862,7 +4882,7 @@ if (_peMakeClip) {
     }
     _peSyncToCard();
     _peMakeClip.disabled = true;
-    _peSetStatus("Trimming clip…");
+    _peSetStatus("Exporting clip…");
     try {
       const res = await fetch("/clip-from-job", {
         method: "POST",
@@ -4879,9 +4899,9 @@ if (_peMakeClip) {
       addJobToList(j.job_id);
       await refreshJobsList();
       closePreviewEditor();
-      await switchToJob(j.job_id);
+      await switchToJob(j.job_id, { force: true, tab: "ingest" });
     } catch (err) {
-      _peSetStatus("Could not create clip: " + err.message, false);
+      _peSetStatus("Could not export clip: " + err.message, false);
     } finally {
       _peMakeClip.disabled = false;
     }

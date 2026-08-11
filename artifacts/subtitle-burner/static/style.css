@@ -701,11 +701,15 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   color: #fff;
   border-color: #6c5cff;
 }
-.hl-card button.hl-open-project {
+.hl-card button.hl-open-timeline {
   background: linear-gradient(135deg, #9785ff, #6c5cff);
   color: #fff;
   border-color: transparent;
   font-weight: 600;
+}
+.hl-card button.hl-ai-edit {
+  border-color: #6c5cff88;
+  color: #c8c0ff;
 }
 .hl-card button:hover { filter: brightness(1.1); }
 .hl-card button:disabled { opacity: 0.5; cursor: not-allowed; }
