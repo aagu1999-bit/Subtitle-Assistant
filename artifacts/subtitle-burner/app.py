@@ -4025,10 +4025,28 @@ _EFFECT_LIMITS = {
 
 
 def _build_effect_suggestion_prompt(transcript: str, total: float,
-                                    max_effects: int) -> str:
+                                    max_effects: int,
+                                    purpose: str | None = None) -> str:
     """Ask Gemini where camera moves would earn their keep."""
-    return f"""You are an expert short-form video editor deciding where camera moves belong in a talking-head edit. The transcript below has [mm:ss] timestamps. The video is {total:.1f} seconds long.
-
+    purpose = (purpose or "").strip()
+    purpose_block = ""
+    if purpose:
+        purpose_block = f"""
+Editor's stated purpose for this edit (honor this above generic social defaults):
+\"{purpose[:500]}\"
+Bias effect choices toward that goal. If the purpose asks for calm / documentary /
+cinematic pacing, prefer ken_burns and fewer punch_zooms. If it asks for viral /
+hooks / energy, prefer punch_zoom on strongest lines.
+"""
+    long_note = ""
+    if total >= 240:
+        long_note = f"""
+This is a LONGER cut (~{total / 60:.0f} min). Spread accents across the timeline —
+do not cluster everything in the first minute. Still prefer fewer, stronger moments
+(max {max_effects}).
+"""
+    return f"""You are an expert video editor deciding where camera moves belong in a talking-head edit. The transcript below has [mm:ss] timestamps. The video is {total:.1f} seconds long.
+{purpose_block}{long_note}
 Choose at most {max_effects} moments. Fewer is better — a move that isn't motivated is worse than no move at all. Never cover the whole video; these are accents.
 
 Effects you may place:
@@ -9210,8 +9228,20 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
     }
 
 
-def _intensity_effect_budget(intensity: str) -> int:
-    return {"low": 2, "med": 4, "high": 8}.get((intensity or "med").lower(), 4)
+def _intensity_effect_budget(intensity: str, duration_sec: float | None = None) -> int:
+    base = {"low": 2, "med": 4, "high": 8}.get((intensity or "med").lower(), 4)
+    # Full-video / long-form edits need a few more accents without going wild.
+    try:
+        dur = float(duration_sec or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur >= 600:
+        return min(16, base + 6)
+    if dur >= 240:
+        return min(12, base + 4)
+    if dur >= 120:
+        return min(10, base + 2)
+    return base
 
 
 def _uid_short() -> str:
@@ -9559,8 +9589,11 @@ def ai_edit_seed():
 
     Body: {
       source_job_id, start_time?, end_time?, style_pack, intensity,
-      label?, apply_cuts?, create_clip?, max_effects?
+      label?, purpose?, apply_cuts?, create_clip?, max_effects?
     }
+
+    Omit end_time (or pass full transcript end) + create_clip=false to edit the
+    entire uploaded video — not only a Shorts chop.
     """
     data = request.get_json(force=True) or {}
     source_job_id = data.get("source_job_id") or data.get("job_id")
@@ -9577,11 +9610,20 @@ def ai_edit_seed():
     if intensity not in ("low", "med", "high"):
         intensity = "med"
     label = (data.get("label") or src.get("filename") or "AI Edit")[:120]
+    purpose = str(data.get("purpose") or data.get("edit_purpose") or "").strip()[:500]
 
     try:
         t_in = float(data.get("start_time", data.get("in", 0)) or 0)
         default_out = float(words[-1].get("end", 0) or 0)
-        t_out = float(data.get("end_time", data.get("out", default_out)) or default_out)
+        # Explicit full-video flag, or missing end → use full transcript.
+        if data.get("full_video") or (
+            data.get("end_time") is None and data.get("out") is None
+            and data.get("create_clip") is not True
+        ):
+            t_out = default_out
+            t_in = 0.0
+        else:
+            t_out = float(data.get("end_time", data.get("out", default_out)) or default_out)
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid start/end"}), 400
     t_in = max(0.0, t_in)
@@ -9591,6 +9633,7 @@ def ai_edit_seed():
     apply_cuts = bool(data.get("apply_cuts", True))
     create_clip = bool(data.get("create_clip", False))
     insert_media = bool(data.get("insert_media", True))
+    window_dur = t_out - t_in
 
     # Optional: materialize a chopped child job (Captions "individual clip").
     work_job_id = source_job_id
@@ -9616,14 +9659,22 @@ def ai_edit_seed():
     effects = []
     gemini_warning = None
     try:
-        max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity))
+        max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity, window_dur))
     except (TypeError, ValueError):
-        max_fx = _intensity_effect_budget(intensity)
+        max_fx = _intensity_effect_budget(intensity, window_dur)
     try:
         total = float(words[-1].get("end", 0) or work_out)
+        # Windowed words for the LLM when editing a range of the parent job.
+        win_words = [
+            w for w in words
+            if float(w.get("end", 0) or 0) > work_in and float(w.get("start", 0) or 0) < work_out
+        ] or words
         result = _gemini_generate_clip_suggestions(
             _build_effect_suggestion_prompt(
-                _format_transcript_for_llm(words), total, max_fx
+                _format_transcript_for_llm(win_words),
+                max(1.0, work_out - work_in if create_clip else total),
+                max_fx,
+                purpose=purpose or None,
             )
         )
         effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
@@ -9641,6 +9692,9 @@ def ai_edit_seed():
         work_job_id, work_in, work_out, pack, intensity, cuts, effects,
         label=label, words=words, insert_media=insert_media,
     )
+    if purpose:
+        timeline["ai_edit"] = dict(timeline.get("ai_edit") or {})
+        timeline["ai_edit"]["purpose"] = purpose
     # Persist style onto the working job for caption burns (canonical Caption look).
     if pack.get("style"):
         jobs[work_job_id]["style"] = _normalize_caption_style(pack["style"])
@@ -9653,6 +9707,8 @@ def ai_edit_seed():
         "job_id": work_job_id,
         "style_pack": pack_id,
         "intensity": intensity,
+        "purpose": purpose or None,
+        "full_video": bool(data.get("full_video")) or (t_in <= 0.05 and abs(t_out - float(words[-1].get("end", 0) or 0)) < 0.5),
         "label": label,
         "in": work_in,
         "out": work_out,

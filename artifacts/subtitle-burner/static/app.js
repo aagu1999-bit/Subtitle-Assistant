@@ -3773,6 +3773,33 @@ let _aiEditCtx = null;
 let _aiEditPackId = "pulse";
 let _aiEditRecCuts = []; // full recommended cuts from preview
 
+function _syncAiEditScopeUi() {
+  const fullEl = $("aiEditScopeFull");
+  const clipEl = $("aiEditScopeClip");
+  const createClipEl = $("aiEditCreateClip");
+  const scopeLabel = $("aiEditScopeLabel");
+  const isFull = !!(fullEl && fullEl.checked) || !!( _aiEditCtx && _aiEditCtx.full_video );
+  if (fullEl && clipEl && _aiEditCtx) {
+    // If opened from a highlight window, allow clip scope; otherwise force full.
+    const hasWindow = _aiEditCtx.end_time != null && _aiEditCtx.start_time != null
+      && Number(_aiEditCtx.end_time) > Number(_aiEditCtx.start_time);
+    clipEl.disabled = !hasWindow && !_aiEditCtx.allow_clip_scope;
+    if (_aiEditCtx.full_video || !hasWindow) {
+      fullEl.checked = true;
+      if (clipEl) clipEl.checked = false;
+    }
+  }
+  const useFull = !!(fullEl && fullEl.checked);
+  if (createClipEl) {
+    if (useFull) createClipEl.checked = false;
+  }
+  if (scopeLabel) {
+    scopeLabel.textContent = useFull
+      ? "Full video → cuts, zooms, captions → Timeline (no Shorts chop required)"
+      : "Highlight window → cuts, zooms, captions → Timeline";
+  }
+}
+
 async function openAiEditPlan(ctx) {
   _aiEditCtx = ctx || null;
   _aiEditRecCuts = [];
@@ -3780,14 +3807,32 @@ async function openAiEditPlan(ctx) {
   if (!modal || !_aiEditCtx) return;
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
+
+  const purposeEl = $("aiEditPurpose");
+  if (purposeEl) purposeEl.value = _aiEditCtx.purpose || purposeEl.value || "";
+
   const createClipEl = $("aiEditCreateClip");
   if (createClipEl) {
-    // Highlight chops prefer a child clip job; whole-job AI Edit does not.
-    const preferClip = _aiEditCtx.create_clip !== false
+    // Full-video edits stay on the source job. Short highlight chops can create a child job.
+    const preferClip = !_aiEditCtx.full_video
+      && _aiEditCtx.create_clip !== false
       && (_aiEditCtx.start_time != null && _aiEditCtx.end_time != null
           && Number(_aiEditCtx.end_time) - Number(_aiEditCtx.start_time) < 180);
     createClipEl.checked = preferClip;
   }
+  const fullEl = $("aiEditScopeFull");
+  const clipEl = $("aiEditScopeClip");
+  if (fullEl && clipEl) {
+    if (_aiEditCtx.full_video || _aiEditCtx.end_time == null) {
+      fullEl.checked = true;
+      clipEl.checked = false;
+    } else {
+      clipEl.checked = true;
+      fullEl.checked = false;
+    }
+  }
+  _syncAiEditScopeUi();
+
   const status = $("aiEditCutsPreview");
   if (status) status.textContent = "Loading style packs…";
   const outline = $("aiEditOutline");
@@ -3897,25 +3942,34 @@ function selectedAiEditCuts() {
   return selected;
 }
 
+function _aiEditIsFullScope() {
+  const fullEl = $("aiEditScopeFull");
+  if (fullEl) return !!fullEl.checked;
+  return !!(_aiEditCtx && _aiEditCtx.full_video);
+}
+
 async function previewAiEditCuts() {
   if (!_aiEditCtx) return;
   const el = $("aiEditCutsPreview");
   if (!el) return;
   el.textContent = "Estimating recommended cuts…";
   try {
+    const full = _aiEditIsFullScope();
+    const body = {
+      job_id: _aiEditCtx.source_job_id,
+      start_time: full ? 0 : _aiEditCtx.start_time,
+      end_time: full ? undefined : _aiEditCtx.end_time,
+    };
     const res = await fetch("/recommended-cuts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        job_id: _aiEditCtx.source_job_id,
-        start_time: _aiEditCtx.start_time,
-        end_time: _aiEditCtx.end_time,
-      }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     const st = data.stats || {};
-    el.textContent = `Recommended AI Trim: ${st.cut_count || 0} cut(s) · ~${st.seconds_removed || 0}s removed`
+    el.textContent = (full ? "Full video · " : "Window · ")
+      + `Recommended AI Trim: ${st.cut_count || 0} cut(s) · ~${st.seconds_removed || 0}s removed`
       + (data.filler_count ? ` · ${data.filler_count} filler word(s)` : "")
       + ((data.silence_gaps || []).length ? ` · ${(data.silence_gaps || []).length} silence gap(s)` : "");
     renderAiEditOutline(data);
@@ -3934,17 +3988,21 @@ async function runAiEditGenerate() {
   try {
     const intensity = ($("aiEditIntensity") && $("aiEditIntensity").value) || "med";
     const applyCuts = !($("aiEditApplyCuts") && !$("aiEditApplyCuts").checked);
-    const createClip = !($("aiEditCreateClip") && !$("aiEditCreateClip").checked);
+    const full = _aiEditIsFullScope();
+    const createClip = !full && !($("aiEditCreateClip") && !$("aiEditCreateClip").checked);
     const insertMedia = !($("aiEditInsertMedia") && !$("aiEditInsertMedia").checked);
+    const purpose = ($("aiEditPurpose") && $("aiEditPurpose").value || "").trim();
     const cuts = applyCuts ? selectedAiEditCuts() : [];
     const res = await fetch("/ai-edit-seed", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source_job_id: _aiEditCtx.source_job_id,
-        start_time: _aiEditCtx.start_time,
-        end_time: _aiEditCtx.end_time,
-        label: _aiEditCtx.label || "AI Edit",
+        start_time: full ? 0 : _aiEditCtx.start_time,
+        end_time: full ? undefined : _aiEditCtx.end_time,
+        full_video: full,
+        label: _aiEditCtx.label || (full ? "Full-video AI Edit" : "AI Edit"),
+        purpose: purpose || undefined,
         style_pack: _aiEditPackId,
         intensity,
         apply_cuts: applyCuts,
@@ -4003,18 +4061,43 @@ async function runAiEditGenerate() {
       });
     });
   }
-  // Also expose for short-clip path: AI Edit whole current job from Transcript.
+  // AI Edit whole current job (full video) — ready panel / AI Shorts.
   window.openAiEditPlanForJob = function (jobId, opts) {
     opts = opts || {};
+    const full = opts.full_video !== false && opts.end_time == null;
     openAiEditPlan({
       source_job_id: jobId || currentJobId,
-      start_time: opts.start_time != null ? opts.start_time : 0,
-      end_time: opts.end_time,
-      label: opts.label || "AI Edit",
+      start_time: full ? 0 : (opts.start_time != null ? opts.start_time : 0),
+      end_time: full ? null : opts.end_time,
+      full_video: full,
+      label: opts.label || (full ? "Full-video AI Edit" : "AI Edit"),
+      purpose: opts.purpose || "",
       create_clip: opts.create_clip === true ? true : false,
+      allow_clip_scope: !!opts.allow_clip_scope,
     });
   };
+
+  const scopeFull = $("aiEditScopeFull");
+  const scopeClip = $("aiEditScopeClip");
+  const onScopeChange = () => {
+    _syncAiEditScopeUi();
+    previewAiEditCuts();
+  };
+  if (scopeFull) scopeFull.addEventListener("change", onScopeChange);
+  if (scopeClip) scopeClip.addEventListener("change", onScopeChange);
 })();
+
+function openAiEditFullFromReady() {
+  if (!requireReadyTranscript("AI Edit full video")) return;
+  if (typeof window.openAiEditPlanForJob !== "function") {
+    alert("AI Edit is still loading — try again in a second.");
+    return;
+  }
+  window.openAiEditPlanForJob(currentJobId, {
+    full_video: true,
+    label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "Full-video AI Edit",
+  });
+}
 
 function updateAiEditNudge(_isLongForm) {
   // AI Edit nudge stays on AI Shorts only — never on Edit Words / ready panel.
@@ -4828,6 +4911,8 @@ window.openLongFormFromReady = openLongFormFromReady;
   ["readyFindShortsBtn", openFindShorts],
   ["readyOpenTimelineBtn", openTimelineFromReady],
   ["readyOpenLongFormBtn", openLongFormFromReady],
+  ["readyAiEditFullBtn", openAiEditFullFromReady],
+  ["hlAiEditFullBtn", openAiEditFullFromReady],
   ["transcriptBackIngestBtn", () => setActiveTab("ingest")],
   ["transcriptCaptionLookBtn", openCaptionLook],
   ["brandingBackIngestBtn", () => setActiveTab("ingest")],

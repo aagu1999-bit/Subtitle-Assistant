@@ -227,6 +227,7 @@
             <div style="display:flex;flex-wrap:wrap;gap:8px">
               <button type="button" id="readyOpenLongFormBtn" class="btn btn-primary btn-sm hidden" title="Open a 16:9 Timeline for the full upload — windowed B-roll, Main cutaways">Edit as Long-form (16:9)</button>
               <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Edit in Timeline</button>
+              <button type="button" id="readyAiEditFullBtn" class="btn btn-primary btn-sm" title="Run AI Edit on the entire transcript — cuts, zooms, captions — without chopping into Shorts first">✨ AI Edit full video</button>
               <button type="button" id="readyInstantExportBtn" class="btn btn-primary btn-sm" title="Burn captions with the current Caption look into an MP4">⚡ Instant Export</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
               <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
@@ -238,7 +239,7 @@
             <div class="section-title">✨ Suggested next steps</div>
             <div style="font-size:0.8rem;color:#c8cdd8;line-height:1.65;background:rgba(30,41,59,0.4);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
               <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, Look (captions + audio), speakers, Effects. Long uploads (≥4 min): <strong>Edit as Long-form (16:9)</strong>.</div>
-              <div style="margin-bottom:10px"><strong>2. Caption &amp; audio</strong> — Timeline → Look (Hormozi white + yellow karaoke, optional enhancement).</div>
+              <div style="margin-bottom:10px"><strong>2. AI Edit full video</strong> — run cuts/zooms/captions on the <em>entire</em> upload (optional purpose). Shorts chops are separate.</div>
               <div style="margin-bottom:10px"><strong>3. Find Shorts</strong> — optional Gemini clip suggestions on the AI Shorts tab (never auto-runs on upload).</div>
               <div class="muted" style="font-size:.74rem;margin-top:8px;line-height:1.45">
                 Speaker Analyze lives on a selected Main clip in Timeline (Transcript / Project).
@@ -1123,6 +1124,7 @@
 
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff"{% if not gemini_enabled %} disabled title="Set GEMINI_API_KEY to enable"{% endif %}>Find highlights</button>
+        <button id="hlAiEditFullBtn" class="btn btn-secondary" type="button" title="Edit the entire uploaded video (not a Shorts chop) — optional purpose + style pack"{% if not gemini_enabled %} disabled{% endif %}>✨ AI Edit full video</button>
         <button id="batchExportBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;margin-left:auto">🚀 Batch Export All Shorts (ZIP / MP4)</button>
         <button id="hlMoreBtn" class="btn" style="display:none">↻ More options</button>
       </div>
@@ -1435,15 +1437,35 @@
   </div>
   <!-- /Tab: Editor -->
 
-  <!-- AI Edit plan modal (Captions-style style + intensity → timeline seed) -->
+  <!-- AI Edit plan modal (full video OR Shorts window → timeline seed) -->
   <div id="aiEditModal" class="ai-edit-modal hidden" aria-hidden="true">
     <div class="ai-edit-modal-card">
       <div class="ai-edit-modal-head">
         <strong>AI Edit</strong>
-        <span class="muted" style="font-size:.78rem">Pick a style + intensity, review recommended cuts, then open as a timeline project</span>
+        <span id="aiEditScopeLabel" class="muted" style="font-size:.78rem">Full video or clip window → cuts, zooms, captions → Timeline</span>
         <button type="button" id="aiEditClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
       </div>
       <div class="ai-edit-modal-body">
+        <div class="row" style="align-items:flex-start">
+          <label style="min-width:100px;padding-top:6px">Scope</label>
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:.86rem">
+            <label style="display:flex;align-items:center;gap:8px">
+              <input type="radio" name="aiEditScope" id="aiEditScopeFull" value="full" checked>
+              Entire uploaded video (no Shorts chop required)
+            </label>
+            <label style="display:flex;align-items:center;gap:8px">
+              <input type="radio" name="aiEditScope" id="aiEditScopeClip" value="clip">
+              This highlight / time window only
+            </label>
+          </div>
+        </div>
+        <div class="row" style="align-items:flex-start">
+          <label style="min-width:100px;padding-top:6px" for="aiEditPurpose">Purpose <span class="muted">(optional)</span></label>
+          <div style="flex:1;min-width:200px">
+            <textarea id="aiEditPurpose" rows="2" maxlength="500" placeholder="e.g. Keep it cinematic for YouTube · Tighten for a podcast reel · Emphasize product demo moments" style="width:100%;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical;font:inherit"></textarea>
+            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Steers zooms/pacing when Gemini is available. Leave blank to use the style pack defaults.</p>
+          </div>
+        </div>
         <div class="row" style="align-items:flex-start">
           <label style="min-width:100px;padding-top:6px">Style</label>
           <div id="aiEditPacks" class="ai-edit-packs"></div>
@@ -1466,8 +1488,8 @@
         <div class="row">
           <label style="min-width:100px">Clip job</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
-            <input type="checkbox" id="aiEditCreateClip" checked>
-            Chop into a standalone clip job first
+            <input type="checkbox" id="aiEditCreateClip">
+            Chop into a standalone clip job first <span class="muted">(off for full-video edits)</span>
           </label>
         </div>
         <div class="row">
