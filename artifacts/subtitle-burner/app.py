@@ -110,6 +110,7 @@ CAPCUT_TEMPLATES = {
     # Keys mirror the UI <select id="capcutTemplate"> values.
     "podcast_interview": {
         "label": "Podcast / Interview 9:16",
+        "ai_edit_pack": "clarity",
         "canvas": "9x16",
         "font": "Montserrat Thin Black",
         "size": 64,
@@ -132,6 +133,7 @@ CAPCUT_TEMPLATES = {
     },
     "capcut_reels": {
         "label": "CapCut High-Energy Reel",
+        "ai_edit_pack": "pulse",
         "canvas": "9x16",
         "font": "Integral CF",
         "size": 68,
@@ -153,6 +155,7 @@ CAPCUT_TEMPLATES = {
     },
     "product_spotlight": {
         "label": "Product Spotlight",
+        "ai_edit_pack": "velocity",
         "canvas": "9x16",
         "font": "Anton",
         "size": 72,
@@ -174,6 +177,7 @@ CAPCUT_TEMPLATES = {
     },
     "cinematic_vlog": {
         "label": "Cinematic Festival Vlog",
+        "ai_edit_pack": "film",
         "canvas": "16x9",
         "font": "DM Sans",
         "size": 56,

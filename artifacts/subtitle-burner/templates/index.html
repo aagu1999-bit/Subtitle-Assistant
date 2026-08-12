@@ -278,24 +278,18 @@
       <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
     </div>
     <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">
-      <strong>Canonical caption + audio style</strong> — edited inside Timeline → <strong>Look</strong>.
-      White base + yellow karaoke (Hormozi / Classic). Changes sync into the open project automatically.
+      <strong>Caption + brand look only</strong> — fonts, colors, karaoke, logo.
+      Storytelling cuts, zooms, and engagement pacing live on <strong>AI Shorts → AI Edit…</strong> (not here).
     </p>
 
-    <!-- CapCut Master Viral Templates -->
-    <div class="row" style="margin-bottom:16px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px">
-      <label style="min-width:130px;font-weight:700;color:#9785ff;font-size:.88rem">🎬 CapCut Template</label>
-      <select id="capcutTemplate" style="flex:1;padding:6px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font-weight:600;font-size:.86rem">
-        <option value="podcast_interview" selected>🎙️ Podcast / Interview 9:16 (Host/Guest Colors + Reframe)</option>
-        <option value="capcut_reels">⚡ CapCut High-Energy Reel (Fast Pacing + Bouncy MrBeast + Auto B-Roll)</option>
-        <option value="product_spotlight">🛍️ Product Spotlight (Auto-Zoom + Price Tag Banner + Callouts)</option>
-        <option value="cinematic_vlog">🎪 Cinematic Festival Vlog (Widescreen + Slow Pan/Zoom + Karaoke Flow)</option>
-      </select>
-      <button id="saveBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:8px;font-size:.78rem" title="Save your current style, colors, and banner as a reusable custom preset">💾 Save My Brand Preset</button>
-      <button id="loadBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Restore your saved custom brand preset">↩ Load</button>
-      <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Push caption style, speaker colors, canvas, effects, and B-roll defaults into the open Timeline project">🎬 Apply → Timeline</button>
-      <p id="capcutTemplateHint" class="muted" style="width:100%;margin:8px 0 0;font-size:.74rem;line-height:1.4">
-        Templates set captions <em>and</em> edit defaults (canvas, reframe, punch zoom, Ken Burns, B-roll). Use <strong>Apply → Timeline</strong> to push them onto a project.
+    <!-- Brand / caption tools (edit packs moved to AI Shorts) -->
+    <div class="row" style="margin-bottom:16px;padding:12px;background:#181c28;border:1px solid #3b4252;border-radius:10px;flex-wrap:wrap;gap:8px">
+      <span style="font-weight:700;color:#c8c0ff;font-size:.88rem;min-width:130px">🎨 Brand &amp; captions</span>
+      <button id="saveBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Save your current style, colors, and banner as a reusable custom preset">💾 Save My Brand Preset</button>
+      <button id="loadBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Restore your saved custom brand preset">↩ Load</button>
+      <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Push caption style, speaker colors, and logo into the open Timeline project">🎬 Apply look → Timeline</button>
+      <p class="muted" style="width:100%;margin:4px 0 0;font-size:.74rem;line-height:1.4">
+        Want CapCut-style <em>edits</em> (cuts / punch / B-roll density)? Use <strong>AI Shorts</strong> → pick an edit pack → <strong>Find highlights</strong> → <strong>AI Edit…</strong> on a card.
       </p>
     </div>
 
@@ -1068,11 +1062,27 @@
       </div>
       {% endif %}
       <p class="muted panel-desc">
-        Pick a format and target length — Gemini finds hook-first moments. On each card:
-        <strong>Preview</strong> → <strong>Open in Timeline</strong> (primary) →
-        <strong>AI Edit…</strong> (advanced) → <strong>Export clip</strong> →
+        Pick a <strong>CapCut-style edit pack</strong> (pacing / zooms / captions recipe), then format + length.
+        Gemini finds hook-first moments — that is the storytelling step. On each card:
+        <strong>Preview</strong> → <strong>Open in Timeline</strong> →
+        <strong>AI Edit…</strong> (applies cuts + the pack) →
+        <strong>Export clip</strong> →
         <strong>Add to compilation</strong>.
       </p>
+
+      <div class="row" style="margin-bottom:14px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px;flex-wrap:wrap;gap:8px;align-items:center">
+        <label style="min-width:130px;font-weight:700;color:#9785ff;font-size:.88rem" for="capcutTemplate">🎬 Edit pack</label>
+        <select id="capcutTemplate" style="flex:1;min-width:220px;padding:6px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font-weight:600;font-size:.86rem">
+          <option value="podcast_interview" selected>🎙️ Podcast / Interview — Clarity (talking-head)</option>
+          <option value="capcut_reels">⚡ High-Energy Reel — Pulse (fast cuts + punch)</option>
+          <option value="product_spotlight">🛍️ Product Spotlight — Velocity (dense zooms)</option>
+          <option value="cinematic_vlog">🎪 Cinematic Vlog — Film (16:9, sparse cuts)</option>
+        </select>
+        <p id="capcutTemplateHint" class="muted" style="width:100%;margin:0;font-size:.74rem;line-height:1.4">
+          Packs set the <em>AI Edit</em> recipe (cuts/zooms/captions). They do <strong>not</strong> auto-rewrite the story —
+          run <strong>Find highlights</strong>, then <strong>AI Edit…</strong> on a short.
+        </p>
+      </div>
 
       <div class="row">
         <label style="min-width:120px">Format</label>

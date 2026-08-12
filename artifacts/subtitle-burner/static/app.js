@@ -3795,6 +3795,12 @@ async function openAiEditPlan(ctx) {
     outline.innerHTML = "";
     outline.classList.remove("has-cuts");
   }
+  // Prefer CapCut → AI Edit pack mapping when set on AI Shorts.
+  const fromCapcut = window._preferredAiEditPack
+    || (window._pendingCapcutTemplate && window._pendingCapcutTemplate.ai_edit_pack)
+    || null;
+  if (fromCapcut) _aiEditPackId = fromCapcut;
+
   try {
     const res = await fetch("/ai-edit/style-packs");
     const data = await res.json();
@@ -3818,6 +3824,7 @@ async function openAiEditPlan(ctx) {
       if (!packs.find((p) => p.id === _aiEditPackId) && packs[0]) {
         _aiEditPackId = packs[0].id;
       }
+      host.querySelectorAll(".ai-edit-pack").forEach((el) => el.classList.toggle("active", el.dataset.pack === _aiEditPackId));
     }
     await previewAiEditCuts();
   } catch (e) {
@@ -5975,6 +5982,20 @@ function applyCapcutTemplateToUi(tKey, opts) {
   window._activeCapcutKey = tKey;
   window._pendingCapcutTemplate = t;
 
+  // Map CapCut-style edit pack → AI Edit recipe (storytelling lives there).
+  const packMap = {
+    podcast_interview: "clarity",
+    capcut_reels: "pulse",
+    product_spotlight: "velocity",
+    cinematic_vlog: "film",
+  };
+  const aiPack = t.ai_edit_pack || packMap[tKey] || "pulse";
+  t.ai_edit_pack = aiPack;
+  if (typeof _aiEditPackId !== "undefined") {
+    try { _aiEditPackId = aiPack; } catch (e) { /* optional */ }
+  }
+  window._preferredAiEditPack = aiPack;
+
   if ($("font")) _setSelectOptionValue($("font"), t.font);
   if ($("group") && t.group != null) {
     $("group").value = t.group;
@@ -6040,16 +6061,10 @@ function applyCapcutTemplateToUi(tKey, opts) {
 
   const hint = $("capcutTemplateHint");
   if (hint) {
-    const bits = [];
-    if (t.canvas) bits.push("canvas " + String(t.canvas).replace("x", ":"));
-    if (t.reframe && t.reframe.enabled) bits.push("reframe on");
-    if (t.punch_zoom && t.punch_zoom.enabled) bits.push("punch zoom");
-    if (t.ken_burns && t.ken_burns.enabled) bits.push("Ken Burns");
-    if (t.color_grade) bits.push("grade " + t.color_grade);
-    if (t.auto_overlays) bits.push("auto B-roll");
-    hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> ready: "
-      + (bits.join(" · ") || "captions only")
-      + ". Use <strong>Apply → Timeline</strong> to push canvas/effects/B-roll defaults onto a project.";
+    hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> → AI Edit pack <strong>"
+      + aiPack + "</strong>. "
+      + "Find highlights, then <strong>AI Edit…</strong> on a card for cuts/zooms. "
+      + "Caption Look stays for fonts/colors/brand only.";
   }
 
   if (typeof scheduleDraftSave === "function") scheduleDraftSave();
@@ -6138,43 +6153,24 @@ window._brandLogoAssetId = window._brandLogoAssetId || null;
 })();
 
 async function applyBrandingToTimeline() {
-  const tKey = (typeof capcutTemplateEl !== "undefined" && capcutTemplateEl && capcutTemplateEl.value)
-    || window._activeCapcutKey
-    || "podcast_interview";
-  const pack = (typeof applyCapcutTemplateToUi === "function"
-    ? applyCapcutTemplateToUi(tKey, { skipPresetClick: false })
-    : null) || window._pendingCapcutTemplate || CAPCUT_TEMPLATES[tKey] || {};
+  // Caption Look → Timeline: look/brand only (not storytelling cuts).
   const style = typeof flushCaptionLookToJob === "function"
     ? await flushCaptionLookToJob()
     : (typeof captionLookStyle === "function" ? captionLookStyle() : getStyle());
   if (typeof window.ensureTimelineInit === "function") {
     await window.ensureTimelineInit();
   }
-  // Ensure a project exists so branding has somewhere to land.
   if (typeof window.openTimelineEditor === "function" && currentJobId) {
     const needOpen = !(window.timelineHasMainClips && window.timelineHasMainClips());
     if (needOpen) {
-      await window.openTimelineEditor(currentJobId, {
-        canvas: pack.canvas || undefined,
-        longForm: pack.canvas === "16x9",
-        label: pack.label || undefined,
-      });
+      await window.openTimelineEditor(currentJobId);
     }
   }
   if (typeof window.applyTimelineBranding !== "function") {
     alert("Timeline Editor is not available.");
     return;
   }
-  const opts = {
-    canvas: pack.canvas || null,
-    punch_zoom: pack.punch_zoom || null,
-    ken_burns: pack.ken_burns || null,
-    color_grade: pack.color_grade || null,
-    broll_mode: pack.broll_mode || null,
-    broll_placement: pack.broll_placement || null,
-    broll_scope: pack.broll_scope || null,
-    speaker_color_map: pack.speaker_color_map || null,
-  };
+  const opts = {};
   if (window._brandLogoAssetId) {
     opts.logo = {
       asset_id: window._brandLogoAssetId,
@@ -6183,15 +6179,8 @@ async function applyBrandingToTimeline() {
   }
   window.applyTimelineBranding(style, opts);
   setActiveTab("editor");
-  if (pack.auto_overlays) {
-    const statusEl = $("tlBrollStatus");
-    if (statusEl) {
-      statusEl.textContent = "Template wants auto B-roll — open Media and tap Suggest B-roll.";
-      statusEl.style.color = "#f0c674";
-    }
-  }
   if (window.StudioLogger) {
-    StudioLogger.clip("capcut_to_timeline", String(tKey) + (opts.logo ? " + logo" : ""));
+    StudioLogger.clip("branding_to_timeline", "look only" + (opts.logo ? " + logo" : ""));
   }
 }
 
