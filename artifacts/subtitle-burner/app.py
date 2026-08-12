@@ -5134,13 +5134,23 @@ def broll_status():
     Add ?probe=1 to live-test Pexels (does not return the secret).
     """
     st = _broll_provider_status()
+    raw = os.environ.get("PEXELS_API_KEY")
     out = {
         "providers": st,
         "photo_ready": _broll_any_photo_provider(),
+        "build": "broll-status-v2",
+        # Diagnostics only — never includes the key value.
+        "pexels_env": {
+            "present": raw is not None,
+            "nonempty_after_strip": bool((raw or "").strip()),
+            "length": len((raw or "").strip()),
+            "had_surrounding_whitespace": bool(raw is not None and raw != raw.strip()),
+        },
         "hint": (
             "Set PEXELS_API_KEY and/or UNSPLASH_ACCESS_KEY and/or "
             "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll. "
-            "After changing Replit Secrets, restart the repl. "
+            "After changing Replit Secrets, Stop the workflow and Run again "
+            "(or Redeploy). Cursor Environment Secrets do not sync to Replit. "
             "Call /broll/status?probe=1 to validate Pexels."
         ),
     }
