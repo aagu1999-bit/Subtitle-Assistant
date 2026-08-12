@@ -263,9 +263,11 @@
   <div id="captionLookRoot" class="caption-look-root">
 
   <!-- Style panel -->
-  <section class="panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <h2 style="margin:0">🎨 Caption look</h2>
+  <details class="panel" id="captionLookCaptionsSection" open>
+    <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <h2 style="margin:0;font-size:1rem">🎨 Caption look</h2>
+    </summary>
+    <div style="display:flex;justify-content:flex-end;margin:-4px 0 8px">
       <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
     </div>
     <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">
@@ -413,11 +415,16 @@
       </div>
     </div>
 
-  </section>
+  </details>
 
   <!-- Audio Enhancement panel -->
-  <section class="panel">
-    <h2>Audio Enhancement</h2>
+  <details class="panel" id="captionLookAudioSection" open>
+    <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
+      <h2 style="margin:0;font-size:1rem">🔊 Audio Enhancement</h2>
+    </summary>
+    <p class="muted panel-desc" style="margin-top:8px">
+      Applied on <strong>Timeline → Render</strong> (and Instant Export / Export clip). Preview cut does not bake these filters.
+    </p>
 
     {% if auphonic_enabled or elevenlabs_enabled or dolby_enabled %}
     <!-- Engine tab switcher -->
@@ -702,7 +709,7 @@
       <strong>Negative</strong> = delay the audio (audio plays early).
     </p>
 
-  </section>
+  </details>
 
   <!-- Background Music panel (collapsible) -->
   <details class="panel" id="bgMusicPanel" style="border-color:#5e81ac">
@@ -1168,7 +1175,7 @@
         <div class="tl-toolbar-left">
           <select id="tlProjectSelect" class="tl-select" title="Open an existing timeline project"></select>
           <button id="tlNewBtn" class="btn btn-secondary">+ New project</button>
-          <button id="tlDeleteProjectBtn" class="btn btn-secondary" type="button" title="Delete the open timeline project">🗑 Delete</button>
+          <button id="tlDeleteProjectBtn" class="btn btn-secondary" type="button" title="Delete the open timeline project" style="border-color:#bf616a88;color:#ffb4b4">🗑 Delete project</button>
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
@@ -1227,6 +1234,7 @@
                 <li>✓ ASS caption burn (project style)</li>
                 <li>✓ Real xfade transitions</li>
                 <li>✓ Split-screen / reframe</li>
+                <li>✓ Audio Enhancement (Look → Audio)</li>
               </ul>
               <em>Required after Co-editor / Caption look / B-roll changes.</em>
             </span>
@@ -1300,7 +1308,14 @@
           </div>
 
           <div class="tl-leftpanel hidden" data-lpanel="look" id="tlLookPanel">
-            <p class="muted tl-hint" style="margin-bottom:10px">Caption fonts/colors and audio enhancement for this project. Edits sync into Timeline automatically.</p>
+            <div class="tl-look-nav">
+              <button type="button" class="tl-chip-btn" data-look-jump="captions">🎨 Captions</button>
+              <button type="button" class="tl-chip-btn" data-look-jump="audio">🔊 Audio</button>
+            </div>
+            <p class="muted tl-hint" style="margin-bottom:10px">
+              Captions + <strong>Audio Enhancement</strong> live here. Changes sync into the project.
+              Audio filters apply when you press <strong>▶ Render</strong> (not on Preview cut).
+            </p>
             <div id="tlLookMount" class="tl-look-mount"></div>
           </div>
         </aside>

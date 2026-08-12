@@ -6991,15 +6991,173 @@ def _media_duration(path: Path) -> float:
         return 0.0
 
 
-def _timeline_clip_source(clip: dict) -> Path | None:
-    """Resolve a timeline clip's media: either a source job's video or an asset."""
+def _timeline_clip_source(clip: dict, prefer_proxy: bool = True) -> Path | None:
+    """Resolve a timeline clip's media: either a source job's video or an asset.
+
+    For transcribed jobs, prefer the H.264 edit proxy when present — iPhone MOV
+    originals often carry mebx metadata streams that break filtergraphs using
+    `[N:v]` during overlay composite.
+    """
     sid = clip.get("source_job_id")
     if sid and sid in jobs:
+        if prefer_proxy:
+            proxy = _edit_proxy_path(sid)
+            try:
+                if proxy.exists() and proxy.stat().st_size > 64:
+                    return proxy
+            except OSError:
+                pass
         return find_video_path(sid)
     aid = clip.get("asset_id")
     if aid:
         return _find_asset_path(aid)
     return None
+
+
+def _tl_ensure_overlay_video(path: Path, job_id: str | None = None) -> Path | None:
+    """Return a path FFmpeg can read as a real video stream for overlays.
+
+    If *path* has no video (or is a brittle phone MOV / HEVC), fall back to the
+    job's edit proxy or a short one-off H.264 remux in CACHE_DIR.
+
+    iPhone QuickTime files often carry ``mebx`` timed-metadata streams that make
+    filtergraph inputs like ``[N:v]`` fail even when a video stream exists.
+    """
+    if not path or not path.exists():
+        return None
+    # Already a cleaned overlay/proxy mp4 — trust it.
+    name = path.name.lower()
+    if "_editproxy" in name or name.startswith("ovsrc_"):
+        probe_fast = _probe_media_streams(path)
+        return path if probe_fast.get("has_video") else None
+
+    probe = _probe_media_streams(path)
+    fmt = (probe.get("format_name") or "").lower()
+    is_qt = path.suffix.lower() in (".mov", ".qt") or "mov" in fmt or "quicktime" in fmt
+    needs_safe = (
+        not probe.get("has_video")
+        or probe.get("is_hevc")
+        or is_qt
+    )
+    if probe.get("has_video") and not needs_safe:
+        return path
+    if job_id:
+        proxy = _edit_proxy_path(job_id)
+        try:
+            if proxy.exists() and proxy.stat().st_size > 64:
+                return proxy
+        except OSError:
+            pass
+    # One-off remux/transcode for overlay use (small PiP — speed over quality).
+    try:
+        digest = hashlib.md5(f"{path.resolve()}:{path.stat().st_mtime}".encode()).hexdigest()[:16]
+    except OSError:
+        return path if probe.get("has_video") else None
+    out = CACHE_DIR / f"ovsrc_{digest}.mp4"
+    if out.exists() and out.stat().st_size > 64:
+        return out
+    proc = subprocess.run(
+        [
+            FFMPEG, "-y",
+            "-dn", "-sn",
+            "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "96k",
+            "-movflags", "+faststart",
+            str(out),
+        ],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size < 64:
+        _safe_unlink(out)
+        return path if probe.get("has_video") else None
+    return out
+
+
+def _tl_audio_wants_enhance(audio: dict | None) -> bool:
+    """True when Look → Audio Enhancement should run on Timeline Render."""
+    if not isinstance(audio, dict) or not audio:
+        return False
+    provider = str(audio.get("provider") or "ffmpeg").lower()
+    try:
+        offset = abs(float(audio.get("offset_seconds") or 0))
+    except (TypeError, ValueError):
+        offset = 0.0
+    if offset >= 0.01:
+        return True
+    if provider in ("auphonic", "elevenlabs", "dolby"):
+        return True
+    return bool(build_audio_filter_chain(audio))
+
+
+def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: str) -> None:
+    """Apply Caption-look audio enhancement onto a finished timeline video."""
+    provider = str((audio or {}).get("provider") or "ffmpeg").lower()
+    enhanced = UPLOAD_DIR / f"{job_id}_tlaudio.aac"
+    try:
+        if provider == "auphonic":
+            if not os.environ.get("AUPHONIC_API_KEY"):
+                raise RuntimeError("Auphonic is not configured (AUPHONIC_API_KEY not set).")
+            enhance_with_auphonic(video, enhanced, audio)
+        elif provider == "elevenlabs":
+            if not os.environ.get("ELEVENLABS_API_KEY"):
+                raise RuntimeError("ElevenLabs is not configured (ELEVENLABS_API_KEY not set).")
+            enhance_with_elevenlabs(video, enhanced, audio)
+        elif provider == "dolby":
+            if not os.environ.get("DOLBY_API_KEY"):
+                raise RuntimeError("Dolby is not configured (DOLBY_API_KEY not set).")
+            enhance_with_dolby(video, enhanced, audio)
+        else:
+            af = build_audio_filter_chain(audio)
+            if af:
+                apply_audio_enhancements(video, enhanced, af)
+            else:
+                # Offset-only: extract clean AAC then shift below.
+                proc = subprocess.run(
+                    [FFMPEG, "-y", "-i", str(video), "-vn", "-c:a", "aac", "-b:a", "192k",
+                     str(enhanced)],
+                    capture_output=True, text=True,
+                )
+                if proc.returncode != 0 or not enhanced.exists():
+                    raise RuntimeError(f"Audio extract failed: {(proc.stderr or '')[-400:]}")
+
+        if provider in ("auphonic", "elevenlabs"):
+            _apply_isolation_postprocess(enhanced, video, audio)
+
+        try:
+            offset_sec = float(audio.get("offset_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            offset_sec = 0.0
+        if abs(offset_sec) >= 0.01 and enhanced.exists():
+            adjusted = enhanced.with_suffix(".offset.aac")
+            if offset_sec > 0:
+                cmd = [FFMPEG, "-y", "-i", str(enhanced), "-ss", f"{offset_sec:.3f}",
+                       "-c:a", "aac", "-b:a", "192k", str(adjusted)]
+            else:
+                delay_ms = int(round(abs(offset_sec) * 1000))
+                cmd = [FFMPEG, "-y", "-i", str(enhanced),
+                       "-af", f"adelay={delay_ms}|{delay_ms}",
+                       "-c:a", "aac", "-b:a", "192k", str(adjusted)]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode == 0 and adjusted.exists() and adjusted.stat().st_size > 0:
+                _safe_unlink(enhanced)
+                adjusted.rename(enhanced)
+            else:
+                _safe_unlink(adjusted)
+
+        if not enhanced.exists() or enhanced.stat().st_size < 64:
+            raise RuntimeError("Audio enhancement produced no usable audio.")
+        _tl_run(
+            [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
+             "-map", "0:v:0", "-map", "1:a:0",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+             "-shortest", "-movflags", "+faststart", str(out_path)],
+            "Mux enhanced audio",
+        )
+    finally:
+        _safe_unlink(enhanced)
+        _safe_unlink(enhanced.with_suffix(".offset.aac"))
 
 
 def _tl_run(cmd: list, what: str) -> None:
@@ -7243,7 +7401,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     ph -= ph % 2
 
     def panel(idx):
-        return (f"[{idx}:v]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+        return (f"[{idx}:v:0]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
                 f"crop={pw}:{ph},setsar=1,fps={fps}[p{idx}]")
 
     hasA = _has_audio_stream(srcA)
@@ -7291,8 +7449,8 @@ def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> No
         inputs += ["-stream_loop", "-1", "-i", str(path)]
     else:
         inputs += ["-i", str(path)]
-    prep = f"[1:v]scale={lw}:-2,setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
-    fc = f"{prep};[0:v][lg]overlay=x={x}:y={y}:shortest=1[v]"
+    prep = f"[1:v:0]scale={lw}:-2,setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
+    fc = f"{prep};[0:v:0][lg]overlay=x={x}:y={y}:shortest=1[v]"
     _tl_run(
         [FFMPEG, "-y", *inputs, "-filter_complex", fc,
          "-map", "[v]", "-map", "0:a?", *_VIDEO_ENC_ARGS,
@@ -7476,10 +7634,17 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
     """
     resolved = []
     for ov in overlay_clips:
-        path = _timeline_clip_source(ov)
+        path = _timeline_clip_source(ov, prefer_proxy=True)
         if not path:
             continue
         kind = "image" if path.suffix.lower().lstrip(".") in ASSET_EXT_IMAGE else "video"
+        if kind == "video":
+            sid = ov.get("source_job_id")
+            safe = _tl_ensure_overlay_video(path, sid if isinstance(sid, str) else None)
+            if not safe:
+                print(f"[overlay] skip {path.name}: no video stream", flush=True)
+                continue
+            path = safe
         resolved.append((ov, path, kind))
     if not resolved:
         _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
@@ -7488,7 +7653,7 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
 
     inputs = ["-i", str(base)]
     filt = []
-    cur = "[0:v]"
+    cur = "[0:v:0]"
     in_idx = 1
     fps = max(15, min(60, int(fps or 30)))
     for n, (ov, path, kind) in enumerate(resolved, start=1):
@@ -7530,10 +7695,15 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         scale = _tl_overlay_scale_filter(ow, oh, fit)
         if kind == "image":
             inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]{scale}"
+            # Explicit :0 — phone containers often mix mebx data streams.
+            prep = f"[{in_idx}:v:0]{scale}"
         else:
-            inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
-            prep = f"[{in_idx}:v]{scale},setpts=PTS-STARTPTS"
+            # Open full file, trim in-graph (avoids -ss-before--i dropping :v on MOV/mebx).
+            inputs += ["-i", str(path)]
+            prep = (
+                f"[{in_idx}:v:0]trim=start={o_in:.3f}:duration={length:.3f},"
+                f"setpts=PTS-STARTPTS,{scale}"
+            )
         # Ken Burns on the PiP box (photo / short B-roll moments).
         kb = _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
         if kb:
@@ -7775,6 +7945,8 @@ def _normalize_timeline(timeline: dict) -> dict:
         tl["style"] = _normalize_caption_style(style)
     else:
         tl["style"] = {}
+    audio = tl.get("audio")
+    tl["audio"] = audio if isinstance(audio, dict) else None
     ts = tl.get("track_states")
     tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
@@ -8170,6 +8342,23 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError("Render produced an empty or missing output file.")
+
+        # ---- Pass 5: Audio Enhancement (Look → Audio) — exact FFmpeg / AI ----
+        audio = tl.get("audio") if isinstance(tl.get("audio"), dict) else None
+        if not audio:
+            audio = jobs[job_id].get("audio") if isinstance(jobs[job_id].get("audio"), dict) else None
+        if _tl_audio_wants_enhance(audio):
+            _stage("enhancing audio", 93)
+            pre_audio = UPLOAD_DIR / f"{job_id}_tlpreaudio.mp4"
+            if pre_audio.exists():
+                _safe_unlink(pre_audio)
+            output_path.replace(pre_audio)
+            work.append(pre_audio)
+            jobs[job_id]["audio"] = audio
+            _tl_apply_project_audio(pre_audio, audio, output_path, job_id)
+
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise RuntimeError("Render produced an empty or missing output file.")
         output_path.touch()
 
         jobs[job_id]["status"] = "done"
@@ -8474,6 +8663,14 @@ def timeline_render():
     style = _normalize_caption_style(style) if _style_has_caption_fields(style) else _normalize_caption_style({})
     timeline["style"] = style
     jobs[job_id]["style"] = style
+    audio = data.get("audio")
+    if audio is None:
+        audio = timeline.get("audio")
+    if audio is None:
+        audio = jobs[job_id].get("audio")
+    if isinstance(audio, dict):
+        timeline["audio"] = audio
+        jobs[job_id]["audio"] = audio
     jobs[job_id]["timeline"] = timeline
     jobs[job_id]["status"] = "queued"
     jobs[job_id]["progress"] = 0

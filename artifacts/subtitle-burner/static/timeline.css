@@ -375,11 +375,24 @@
   overflow: auto;
   padding-right: 4px;
 }
+.tl-look-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
 .tl-look-mount .panel {
   margin-bottom: 12px;
 }
 .tl-look-mount .panel h2 {
   font-size: .95rem;
+}
+.tl-look-mount details.panel > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.tl-look-mount details.panel > summary::-webkit-details-marker {
+  display: none;
 }
 .caption-look-root.tl-embedded .panel {
   background: #12151e;
@@ -745,6 +758,36 @@
   justify-content: space-between;
 }
 .tl-props-empty { font-size: .85rem; padding: 20px 4px; }
+.tl-prop-details {
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  background: #12151e;
+  margin: 0 0 10px;
+  overflow: hidden;
+}
+.tl-prop-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 10px;
+  font-size: .82rem;
+  font-weight: 650;
+  color: #e8eaee;
+  user-select: none;
+}
+.tl-prop-summary::-webkit-details-marker { display: none; }
+.tl-prop-summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  color: #8b91a0;
+  transition: transform .15s ease;
+}
+.tl-prop-details[open] > .tl-prop-summary::before {
+  transform: rotate(90deg);
+}
+.tl-prop-body {
+  padding: 0 10px 10px;
+}
 .tl-prop-row {
   display: flex;
   flex-direction: column;

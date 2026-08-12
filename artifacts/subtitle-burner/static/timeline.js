@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-30-look-media-dnd";
+  const TL_BUILD = "studio-editor-build-31-overlay-audio-props";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -134,6 +134,7 @@
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
       style: tl.style || null,
+      audio: tl.audio || null,
       ai_edit: tl.ai_edit || null,
       speaker_colors: tl.speaker_colors || null,
       headline_banner: tl.headline_banner || null,
@@ -168,6 +169,7 @@
     tl.bg = d.bg || "#000000";
     tl.logo = d.logo || null;
     if (d.style !== undefined) tl.style = d.style;
+    if (d.audio !== undefined) tl.audio = d.audio;
     if (d.ai_edit !== undefined) tl.ai_edit = d.ai_edit;
     if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
     if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
@@ -679,9 +681,23 @@
     if (name === "look") mountCaptionLookIntoTimeline();
   }
 
+  function jumpLookSection(which) {
+    setLeftTab("look", { pin: true });
+    mountCaptionLookIntoTimeline();
+    const id = which === "audio" ? "captionLookAudioSection" : "captionLookCaptionsSection";
+    const el = document.getElementById(id);
+    if (el) {
+      if (typeof el.open === "boolean") el.open = true;
+      try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+    }
+  }
+
   function wireLeftTabs() {
     document.querySelectorAll(".tl-lefttab").forEach((b) => {
       b.onclick = () => setLeftTab(b.dataset.ltab, { pin: true });
+    });
+    document.querySelectorAll("[data-look-jump]").forEach((b) => {
+      b.onclick = () => jumpLookSection(b.dataset.lookJump);
     });
   }
 
@@ -698,6 +714,15 @@
       _captionLookMounted = true;
       wireCaptionLookAutoSync();
     }
+    // Keep Captions + Audio Enhancement expanded and reachable in Timeline Look.
+    const audioSec = document.getElementById("captionLookAudioSection");
+    if (audioSec) {
+      if (typeof audioSec.open === "boolean") audioSec.open = true;
+      audioSec.classList.remove("hidden");
+      audioSec.style.display = "";
+    }
+    const capsSec = document.getElementById("captionLookCaptionsSection");
+    if (capsSec && typeof capsSec.open === "boolean") capsSec.open = true;
   }
 
   let _lookSyncWired = false;
@@ -2797,53 +2822,52 @@
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += propCheck("duck", "Duck under voice (auto-lower during speech)", c.duck);
     } else if (t === "overlay") {
-      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity != null ? c.opacity : 1, 0, 1, 0.05)}</div>`;
-      html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
-      html += `<label class="tl-prop-sectlabel">Layout presets</label>`;
-      html += `<div class="tl-layout-presets">`;
+      let ovBody = "";
+      ovBody += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity != null ? c.opacity : 1, 0, 1, 0.05)}</div>`;
+      ovBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      ovBody += `<label class="tl-prop-sectlabel">Layout presets</label>`;
+      ovBody += `<div class="tl-layout-presets">`;
       Object.keys(OVERLAY_LAYOUTS).forEach((id) => {
         const L = OVERLAY_LAYOUTS[id];
         const active = c.layout === id ? " active" : "";
-        html += `<button type="button" class="tl-chip-btn${active}" data-act="ovlayout" data-layout="${id}">${L.label}</button>`;
+        ovBody += `<button type="button" class="tl-chip-btn${active}" data-act="ovlayout" data-layout="${id}">${L.label}</button>`;
       });
-      html += `</div>`;
-      html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x != null ? c.x : 0.5, 0, 1, 0.01)}${propRange("y", "Position Y", c.y != null ? c.y : 0.1, 0, 1, 0.01)}</div>`;
-      html += `<div class="tl-prop-grid">${propRange("w", "Width", c.w != null ? c.w : 0.34, 0.05, 1.0, 0.01)}${propRange("h", "Height", c.h != null ? c.h : 0.22, 0.05, 1.0, 0.01)}</div>`;
+      ovBody += `</div>`;
+      ovBody += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x != null ? c.x : 0.5, 0, 1, 0.01)}${propRange("y", "Position Y", c.y != null ? c.y : 0.1, 0, 1, 0.01)}</div>`;
+      ovBody += `<div class="tl-prop-grid">${propRange("w", "Width", c.w != null ? c.w : 0.34, 0.05, 1.0, 0.01)}${propRange("h", "Height", c.h != null ? c.h : 0.22, 0.05, 1.0, 0.01)}</div>`;
       const fitOpts = [["cover", "Cover / Crop"], ["contain", "Contain / Fit"], ["fill", "Stretch"]];
-      html += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
-      html += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
-      html += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
-      // Ken Burns on B-roll / photo overlays (moment inserts — not whole Main).
+      ovBody += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
+      ovBody += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
+      ovBody += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
+      html += propSection("🖼 Overlay layout", ovBody, true);
       const ovKb = c.ken_burns || {};
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (B-roll motion)</label>`;
-      html += propCheck("ken_burns.enabled", "Slow zoom on this overlay moment", ovKb.enabled);
+      let kbBody = propCheck("ken_burns.enabled", "Slow zoom on this overlay moment", ovKb.enabled);
       if (ovKb.enabled) {
-        html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", ovKb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", ovKb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
-        html += `<p class="muted" style="font-size:.72rem">Best on photo B-roll and short inserts — keeps still frames alive for the beat.</p>`;
+        kbBody += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", ovKb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", ovKb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+        kbBody += `<p class="muted" style="font-size:.72rem">Best on photo B-roll and short inserts — keeps still frames alive for the beat.</p>`;
       }
+      html += propSection("🔍 Ken Burns (B-roll motion)", kbBody, !!ovKb.enabled);
     } else { // main
-      html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
-      html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
-      html += propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
+      let trimBody = "";
+      trimBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      trimBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
+      trimBody += propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
       const trType = (c.transition && c.transition.type) || "";
-      html += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
-      html += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this.</p>`;
+      trimBody += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
+      trimBody += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this.</p>`;
+      html += propSection("✂ Trim & captions", trimBody, true);
 
-      // --- Text-based editing ---
       const cutCount = (c.cuts || []).length;
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">✂️ Text-based editing</label>`;
-      html += `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
-      html += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
+      let textBody = `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
+      textBody += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
+      html += propSection("✂️ Text-based editing", textBody, false);
 
-      // --- AI effect placement ---
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">✨ AI camera moves</label>`;
-      html += `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
-      html += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes timed moves. Apply places them on the <strong>Effects</strong> lane (resize / move freely).</p>`;
-      html += `<div id="tlFxList" style="margin-top:8px"></div>`;
+      let aiCam = `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
+      aiCam += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes timed moves. Apply places them on the <strong>Effects</strong> lane (resize / move freely).</p>`;
+      aiCam += `<div id="tlFxList" style="margin-top:8px"></div>`;
+      html += propSection("✨ AI camera moves", aiCam, false);
 
-      // --- Per-shot AI restyle (Captions shot restyle) ---
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 AI Edit this shot</label>`;
-      html += `<div class="tl-prop-grid">
+      let restyle = `<div class="tl-prop-grid">
         <label class="tl-prop">Style<select data-restyle-pack>
           <option value="pulse">Pulse</option>
           <option value="clarity">Clarity</option>
@@ -2857,65 +2881,61 @@
           <option value="high">High</option>
         </select></label>
       </div>`;
-      html += `<button class="btn btn-secondary btn-block" data-act="restyle" style="margin-top:6px">Restyle shot</button>`;
-      html += `<p class="muted" style="font-size:.72rem">Re-runs the AI Edit recipe on this shot only (Captions per-shot restyle).</p>`;
+      restyle += `<button class="btn btn-secondary btn-block" data-act="restyle" style="margin-top:6px">Restyle shot</button>`;
+      restyle += `<p class="muted" style="font-size:.72rem">Re-runs the AI Edit recipe on this shot only (Captions per-shot restyle).</p>`;
+      html += propSection("🎨 AI Edit this shot", restyle, false);
 
-      // --- Active Speaker Reframe (per clip) ---
       const ref = c.reframe || {};
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">📱 9:16 Active Speaker Reframe</label>`;
-      html += propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
+      let refBody = propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
       if (ref.enabled) {
         const pOpts = [["active", "Active Speaker"], ["left", "Left Person"], ["right", "Right Person"], ["full", "Wide Shot"]];
-        html += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
+        refBody += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
       }
+      html += propSection("📱 9:16 Active Speaker Reframe", refBody, !!ref.enabled);
 
-      html += `<hr class="tl-sep"><p class="muted" style="font-size:.72rem">Prefer the <strong>Effects</strong> lane for timed punch / Ken Burns / split / color. Clip-level toggles below still work for whole-shot looks.</p>`;
+      html += `<p class="muted" style="font-size:.72rem;margin:8px 0">Prefer the <strong>Effects</strong> lane for timed punch / Ken Burns / split / color. Clip-level toggles below still work for whole-shot looks.</p>`;
 
-      // --- Ken Burns (per clip) ---
       const kb = c.ken_burns || {};
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (whole clip)</label>`;
-      html += propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
+      let kbBody = propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
       if (kb.enabled) {
-        html += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+        kbBody += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       }
+      html += propSection("🔍 Ken Burns (whole clip)", kbBody, !!kb.enabled);
 
-      // --- Punch Zoom (per clip) ---
       const pz = c.punch_zoom || {};
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⚡ Punch Zoom (whole clip)</label>`;
-      html += propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
+      let pzBody = propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
       if (pz.enabled) {
-        html += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
+        pzBody += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
       }
+      html += propSection("⚡ Punch Zoom (whole clip)", pzBody, !!pz.enabled);
 
-      // --- Split-screen (per clip) ---
       const sp = c.split || {};
       const splitOpts = [["", "— pick second video —"]].concat(
         sources.filter((s) => s.job_id !== c.source_job_id).map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⬓ Split-screen (whole clip)</label>`;
-      html += propCheck("split.enabled", "Enable on this clip", sp.enabled);
+      let spBody = propCheck("split.enabled", "Enable on this clip", sp.enabled);
       if (sp.enabled) {
-        html += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
-        html += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
+        spBody += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
+        spBody += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
         const lay = sp.layout || "stack";
         const place = sp.placement || (lay === "side" ? "second_right" : "second_bottom");
         if (lay === "side") {
-          html += propSelect("split.placement", "Second video goes…", place,
+          spBody += propSelect("split.placement", "Second video goes…", place,
             [["second_left", "Left"], ["second_right", "Right (default)"]]);
         } else {
-          html += propSelect("split.placement", "Second video goes…", place,
+          spBody += propSelect("split.placement", "Second video goes…", place,
             [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
         }
       }
+      html += propSection("⬓ Split-screen (whole clip)", spBody, !!sp.enabled);
 
-      // --- Color grade (per clip) ---
       const col = c.color || {};
-      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Color (whole clip)</label>`;
-      html += `<div class="tl-swatches" id="tlSwatches">` +
+      let colBody = `<div class="tl-swatches" id="tlSwatches">` +
         COLOR_PRESETS.map(([v, t2]) =>
           `<div class="tl-swatch tl-swatch-${v} ${ (col.preset || "none") === v ? "active" : ""}" data-preset="${v}" title="${t2}">${t2}</div>`
         ).join("") + `</div>`;
-      html += `<div class="tl-prop-grid" style="margin-top:8px">${propRange("color.brightness", "Brightness", col.brightness != null ? col.brightness : 0, -0.3, 0.3, 0.02)}${propRange("color.contrast", "Contrast", col.contrast != null ? col.contrast : 1, 0.5, 1.5, 0.02)}</div>`;
-      html += propRange("color.saturation", "Saturation", col.saturation != null ? col.saturation : 1, 0, 2, 0.05);
+      colBody += `<div class="tl-prop-grid" style="margin-top:8px">${propRange("color.brightness", "Brightness", col.brightness != null ? col.brightness : 0, -0.3, 0.3, 0.02)}${propRange("color.contrast", "Contrast", col.contrast != null ? col.contrast : 1, 0.5, 1.5, 0.02)}</div>`;
+      colBody += propRange("color.saturation", "Saturation", col.saturation != null ? col.saturation : 1, 0, 2, 0.05);
+      html += propSection("🎨 Color (whole clip)", colBody, false);
     }
 
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
@@ -2956,15 +2976,18 @@
     if (!(tl.tracks.main || []).length) {
       html += `<p class="muted" style="font-size:.74rem;padding:8px 10px;background:#181c28;border:1px solid #2a2f3a;border-radius:8px;line-height:1.45">This project has <strong>0 Main clips</strong>. Drag a video from <strong>Media</strong> onto the Main lane to start.</p>`;
     }
-    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🏷 Persistent logo / watermark</label>`;
+
+    let logoBody = "";
     if (!imgVid.length) {
-      html += `<p class="muted" style="font-size:.74rem">Upload a logo image first (Media → Assets).</p>`;
+      logoBody += `<p class="muted" style="font-size:.74rem">Upload a logo image first (Media → Assets).</p>`;
     }
-    html += propSelect("__logo_asset", "Logo image", lg.asset_id || "", opts);
+    logoBody += propSelect("__logo_asset", "Logo image", lg.asset_id || "", opts);
     if (lg.asset_id) {
-      html += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
-      html += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
+      logoBody += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
+      logoBody += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
     }
+    html += propSection("🏷 Persistent logo / watermark", logoBody, !!lg.asset_id);
+
     const sc = tl.speaker_colors || {};
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
@@ -2973,47 +2996,58 @@
     const highlight = st.highlight_color || st.highlight || "#FFD60A";
     const fontName = st.font_name || st.font || "Anton";
     const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
-    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Captions &amp; audio</label>`;
-    html += `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:10px;background:#12151e;border:1px solid #2a2f3a;border-radius:8px">
+    let lookBody = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:10px;background:#12151e;border:1px solid #2a2f3a;border-radius:8px">
       <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.05rem;letter-spacing:.02em">
         <span style="color:${esc(primary)}">here with.</span>
         <span style="color:${esc(highlight)}"> Vanessa,</span>
       </span>
       <span class="muted" style="font-size:.7rem">${esc(fontName)} · ${fontSize}px</span>
     </div>`;
-    html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
-      <button class="btn btn-primary" data-act="open-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🎨 Open Look (captions + audio)</button>
+    lookBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="btn btn-primary" data-act="open-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🎨 Open Look</button>
+      <button class="btn btn-secondary" data-act="open-look-audio" style="flex:1;font-size:.78rem">🔊 Audio Enhancement</button>
     </div>`;
+    lookBody += `<p class="muted" style="font-size:.72rem;line-height:1.4">Audio filters apply on <strong>▶ Render</strong> (not Preview cut).</p>`;
     if (tl.ai_edit) {
-      html += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
+      lookBody += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
     }
+    html += propSection("🎨 Captions &amp; audio", lookBody, true);
+
     const mainClip = (tl.tracks.main || [])[0] || null;
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
-    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">👥 Speakers (Analyze)</label>`;
+    let spkBody = "";
     if (!mainClip) {
-      html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Add a Main clip first, then Analyze on the Transcript panel (or select that clip).</p>`;
+      spkBody += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Add a Main clip first, then Analyze on the Transcript panel (or select that clip).</p>`;
     } else {
-      html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Analyze the selected / first Main clip for multi-speaker colors and 9:16 reframe.</p>`;
-      html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      spkBody += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Analyze the selected / first Main clip for multi-speaker colors and 9:16 reframe.</p>`;
+      spkBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
         <button class="btn btn-secondary" data-act="analyze-speakers" style="flex:1;font-size:.78rem">Analyze speakers</button>
       </div>`;
     }
-    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints</p>`;
-    html += `<div class="tl-prop-grid">`;
+    spkBody += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints</p>`;
+    spkBody += `<div class="tl-prop-grid">`;
     spkKeys.forEach((key) => {
       const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
-      html += `<label>${label} <input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
+      spkBody += `<label>${label} <input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
     });
-    html += `</div>`;
-    html += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
+    spkBody += `</div>`;
+    spkBody += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
+    html += propSection("👥 Speakers (Analyze)", spkBody, false);
+
+    html += `<button class="tl-del-btn" data-act="delete-project" type="button" style="margin-top:12px">🗑 Delete project</button>`;
     wrap.innerHTML = html;
 
     const openCap = wrap.querySelector('[data-act="open-caption-look"]');
     if (openCap) openCap.onclick = () => {
       setLeftTab("look", { pin: true });
       mountCaptionLookIntoTimeline();
+      jumpLookSection("captions");
     };
+    const openAud = wrap.querySelector('[data-act="open-look-audio"]');
+    if (openAud) openAud.onclick = () => jumpLookSection("audio");
+    const delProj = wrap.querySelector('[data-act="delete-project"]');
+    if (delProj) delProj.onclick = () => deleteCurrentProject();
     const analyzeProj = wrap.querySelector('[data-act="analyze-speakers"]');
     if (analyzeProj) {
       analyzeProj.onclick = () => {
@@ -3103,6 +3137,12 @@
   function propSelect(key, label, val, opts) {
     const o = opts.map(([v, t]) => `<option value="${v}" ${v === val ? "selected" : ""}>${t}</option>`).join("");
     return `<div class="tl-prop-row"><label>${label}</label><select data-key="${key}">${o}</select></div>`;
+  }
+  /** Collapsible right-rail section (restored details/summary). */
+  function propSection(title, bodyHtml, open) {
+    return `<details class="tl-prop-details"${open ? " open" : ""}>` +
+      `<summary class="tl-prop-summary">${title}</summary>` +
+      `<div class="tl-prop-body">${bodyHtml}</div></details>`;
   }
 
   function wireProps(wrap, track, c) {
@@ -3532,6 +3572,7 @@
       bg: d.bg || "#000000",
       logo: d.logo || null,
       style: d.style ? normalizeTlStyle(d.style) : null,
+      audio: d.audio || null,
       ai_edit: d.ai_edit || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
