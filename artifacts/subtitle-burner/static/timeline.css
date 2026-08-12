@@ -201,10 +201,53 @@
 .tl-transcript-meta { font-size: .74rem; line-height: 1.35; }
 .tl-transcript-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .tl-transcript-doc {
-  line-height: 2.0;
-  font-size: .95rem;
+  line-height: 1.45;
+  font-size: .9rem;
   color: #e8eaee;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
+.tl-phrase-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 28px;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.tl-phrase-row:hover { background: #1c2030; }
+.tl-phrase-row.active {
+  background: rgba(108, 92, 255, 0.14);
+}
+.tl-phrase-row.has-speaker {
+  box-shadow: inset 3px 0 0 var(--tl-spk, #FFD700);
+}
+.tl-phrase-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .72rem;
+  color: #8892a8;
+  padding-top: 3px;
+  user-select: none;
+}
+.tl-phrase-row.active .tl-phrase-time { color: #ffd60a; }
+.tl-phrase-text {
+  line-height: 1.7;
+  min-width: 0;
+}
+.tl-phrase-del {
+  border: none;
+  background: transparent;
+  color: #8892a8;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.tl-phrase-del:hover { color: #ff8a9b; background: #3a1e24; }
 .tl-tword {
   cursor: pointer;
   padding: 1px 2px;

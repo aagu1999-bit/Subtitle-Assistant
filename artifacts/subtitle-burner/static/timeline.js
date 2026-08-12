@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-28-caption-look-split-place";
+  const TL_BUILD = "studio-editor-build-29-timeline-phrases-analyze";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -708,10 +708,42 @@
     transcriptWords = words;
     if (hint) {
       hint.textContent =
-        "Click a word to seek · Shift+click to cut/restore · Double-click to rename captions.";
+        "Click a phrase to seek · edit text · × cuts the phrase · Shift+click a word to cut one · Double-click a word to rename.";
     }
     renderTranscriptWords(clip);
     updateTranscriptToolbar(clip);
+    refreshTlAnalyzeStatus(clip.source_job_id);
+  }
+
+  function _fmtTlTime(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    const m = Math.floor(s / 60);
+    const r = s - m * 60;
+    return m + ":" + r.toFixed(1).padStart(4, "0");
+  }
+
+  function refreshTlAnalyzeStatus(jobId) {
+    const el = $("tlAnalyzeStatus");
+    const btn = $("tlAnalyzeBtn");
+    if (!el || !jobId) return;
+    fetch("/reframe-status/" + jobId)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ready && data.stats) {
+          const faceN = data.stats.face_samples || 0;
+          const faceNote = data.stats.faces_skipped
+            ? " · faces skipped"
+            : (faceN ? `, ${faceN} faces` : "");
+          el.textContent = `✓ ${data.stats.speaker_count} speakers${faceNote}`;
+          if (btn) btn.textContent = "Re-analyze";
+        } else if (data.error) {
+          el.textContent = data.error;
+        } else {
+          el.textContent = "Speakers optional — Analyze when you want colors / 9:16 reframe.";
+          if (btn) btn.textContent = "Analyze speakers";
+        }
+      })
+      .catch(() => { /* silent */ });
   }
 
   function isWordCut(clip, w) {
@@ -764,38 +796,112 @@
     doc.innerHTML = "";
     const sc = (tl && tl.speaker_colors) || {};
     const fillers = _detectTlFillerIndices(transcriptWords, clip);
-    transcriptWords.forEach((w, i) => {
-      const sp = document.createElement("span");
-      const cut = isWordCut(clip, w);
-      const renamed = !!(clip.word_overrides && clip.word_overrides[wordOverrideKey(w)]);
-      sp.className = "tl-tword"
-        + (cut ? " cut" : "")
-        + (fillers.has(i) && !cut ? " filler" : "")
-        + (renamed ? " renamed" : "");
-      sp.textContent = displayWordText(clip, w) + " ";
-      sp.dataset.start = w.start;
-      sp.dataset.idx = String(i);
-      const col = _spkColor(sc, w.speaker);
-      if (col && !cut) sp.style.color = col;
-      const bits = [];
-      if (w.speaker) bits.push(_spkLabel(w.speaker));
-      if (renamed) bits.push("renamed");
-      if (fillers.has(i)) bits.push("filler");
-      bits.push("click seek · ⇧ cut · dbl-click rename");
-      sp.title = bits.join(" · ");
-      sp.addEventListener("click", (e) => {
-        e.preventDefault();
-        if (e.shiftKey) toggleWordCut(clip, w);
-        else seekTranscriptWord(clip, w);
+    const style = normalizeTlStyle((tl && tl.style) || {});
+    const groupSize = Math.max(1, Math.min(5, Number(style.group_size) || 3));
+
+    for (let i = 0; i < transcriptWords.length; i += groupSize) {
+      const group = transcriptWords.slice(i, i + groupSize);
+      if (!group.length) continue;
+
+      const row = document.createElement("div");
+      row.className = "tl-phrase-row";
+      row.dataset.start = String(group[0].start);
+      row.dataset.end = String(group[group.length - 1].end);
+      row.dataset.from = String(i);
+
+      const spCounts = {};
+      group.forEach((w) => {
+        if (w.speaker) spCounts[w.speaker] = (spCounts[w.speaker] || 0) + 1;
       });
-      sp.addEventListener("dblclick", (e) => {
+      const dominantSp = Object.keys(spCounts).sort((a, b) => spCounts[b] - spCounts[a])[0] || "";
+      if (dominantSp) {
+        row.classList.add("has-speaker");
+        const rail = _spkColor(sc, dominantSp) || "#FFD700";
+        row.style.setProperty("--tl-spk", rail);
+      }
+
+      const timeEl = document.createElement("span");
+      timeEl.className = "tl-phrase-time";
+      timeEl.textContent = _fmtTlTime(group[0].start);
+      timeEl.title = "Seek to " + _fmtTlTime(group[0].start)
+        + (dominantSp ? " · " + _spkLabel(dominantSp) : "");
+
+      const textEl = document.createElement("div");
+      textEl.className = "tl-phrase-text";
+
+      group.forEach((w, j) => {
+        const abs = i + j;
+        const sp = document.createElement("span");
+        const cut = isWordCut(clip, w);
+        const renamed = !!(clip.word_overrides && clip.word_overrides[wordOverrideKey(w)]);
+        sp.className = "tl-tword"
+          + (cut ? " cut" : "")
+          + (fillers.has(abs) && !cut ? " filler" : "")
+          + (renamed ? " renamed" : "");
+        sp.textContent = displayWordText(clip, w) + " ";
+        sp.dataset.start = w.start;
+        sp.dataset.idx = String(abs);
+        const col = _spkColor(sc, w.speaker);
+        if (col && !cut) sp.style.color = col;
+        const bits = [];
+        if (w.speaker) bits.push(_spkLabel(w.speaker));
+        if (renamed) bits.push("renamed");
+        if (fillers.has(abs)) bits.push("filler");
+        bits.push("⇧ cut · dbl-click rename");
+        sp.title = bits.join(" · ");
+        sp.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.shiftKey) toggleWordCut(clip, w);
+          else seekTranscriptWord(clip, w);
+        });
+        sp.addEventListener("dblclick", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          beginWordRename(clip, w, sp);
+        });
+        textEl.appendChild(sp);
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "tl-phrase-del";
+      delBtn.textContent = "×";
+      delBtn.title = "Cut this whole phrase from the clip";
+      delBtn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        beginWordRename(clip, w, sp);
+        cutPhraseWords(clip, group);
       });
-      doc.appendChild(sp);
-    });
+
+      row.addEventListener("click", (e) => {
+        if (textEl.contains(e.target) || delBtn.contains(e.target)) return;
+        seekTranscriptWord(clip, group[0]);
+        doc.querySelectorAll(".tl-phrase-row").forEach((r) => r.classList.remove("active"));
+        row.classList.add("active");
+      });
+
+      row.appendChild(timeEl);
+      row.appendChild(textEl);
+      row.appendChild(delBtn);
+      doc.appendChild(row);
+    }
     updateTranscriptToolbar(clip);
+  }
+
+  function cutPhraseWords(clip, group) {
+    if (!clip || !group || !group.length) return;
+    pushHistory();
+    const cuts = (clip.cuts || []).slice();
+    group.forEach((w) => {
+      if (!w || isWordCut(clip, w)) return;
+      cuts.push([Number(w.start), Number(w.end)]);
+    });
+    clip.cuts = mergeCuts(cuts);
+    renderTranscriptWords(clip);
+    applyAnchors();
+    renderTracks();
+    scheduleSave();
   }
 
   function beginWordRename(clip, w, spanEl) {
@@ -836,6 +942,12 @@
     let best = -1;
     spans.forEach((sp, i) => { if (parseFloat(sp.dataset.start) <= t) best = i; });
     spans.forEach((sp, i) => sp.classList.toggle("playing", i === best));
+    const rows = doc.querySelectorAll(".tl-phrase-row");
+    rows.forEach((row) => {
+      const a = parseFloat(row.dataset.start);
+      const b = parseFloat(row.dataset.end);
+      row.classList.toggle("active", Number.isFinite(a) && Number.isFinite(b) && t >= a && t < b + 0.05);
+    });
   }
 
   function mergeCuts(cuts) {
@@ -899,6 +1011,7 @@
   function wireTranscriptToolbar() {
     const restoreBtn = $("tlTranscriptRestoreBtn");
     const fillerBtn = $("tlTranscriptFillersBtn");
+    const analyzeBtn = $("tlAnalyzeBtn");
     if (restoreBtn) {
       restoreBtn.onclick = () => {
         if (!selected || selected.track !== "main") return;
@@ -913,6 +1026,53 @@
         if (clip) cutFillerWords(clip);
       };
     }
+    if (analyzeBtn) {
+      analyzeBtn.onclick = () => {
+        const clip = (selected && selected.track === "main")
+          ? findClip("main", selected.id)
+          : ((tl && tl.tracks && tl.tracks.main && tl.tracks.main[0]) || null);
+        if (!clip || !clip.source_job_id) {
+          alert("Select a Main clip with a transcribed source, then Analyze speakers.");
+          return;
+        }
+        const statusEl = $("tlAnalyzeStatus");
+        if (typeof window.startReframeAnalyze === "function") {
+          window.startReframeAnalyze(analyzeBtn, {
+            jobId: clip.source_job_id,
+            onStatus: (msg) => { if (statusEl) statusEl.textContent = msg || ""; },
+          });
+        } else {
+          alert("Analyze is still loading — try again in a second.");
+        }
+      };
+    }
+    window.onTimelineAnalyzeReady = (jobId) => {
+      // After diarization, stamp colors onto project + refresh phrase rails.
+      fetch("/stamp-speakers/" + jobId, { method: "POST" }).catch(() => {});
+      fetch("/reframe-status/" + jobId)
+        .then((r) => r.json())
+        .then((data) => {
+          if (!tl || !data.ready || !data.stats) return;
+          const breakdown = (data.stats.speaker_breakdown) || [];
+          tl.speaker_colors = tl.speaker_colors || {};
+          breakdown.forEach((spk, i) => {
+            if (!spk || !spk.id) return;
+            if (!tl.speaker_colors[spk.id]) {
+              tl.speaker_colors[spk.id] = _spkColor({}, spk.id) ||
+                ["#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770"][i % 5];
+            }
+          });
+          scheduleSave();
+          renderProps();
+          const clip = (selected && selected.track === "main")
+            ? findClip("main", selected.id)
+            : null;
+          if (clip && clip.source_job_id === jobId) renderTranscript(clip);
+          else if (clip) renderTranscriptWords(clip);
+          refreshTlAnalyzeStatus(jobId);
+        })
+        .catch(() => {});
+    };
   }
 
   // Make sure a project exists before adding anything (guards the race where
@@ -2411,7 +2571,7 @@
           html += propSelect("placement", "Second video goes…", place,
             [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
         }
-        html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. This is two sources side-by-side — different from Ingest <strong>Analyze</strong> (same video, speaker crops).</p>`;
+        html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. This is two sources side-by-side — different from Timeline <strong>Analyze speakers</strong> (same video, speaker crops / 9:16 reframe).</p>`;
       } else if (c.type === "color") {
         html += `<div class="tl-swatches" id="tlFxSwatches">` +
           COLOR_PRESETS.map(([v, t2]) =>
@@ -2624,7 +2784,12 @@
     }
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
-    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints (Ingest → Analyze). Inactive words use these; the active karaoke word stays Highlight yellow.</p>`;
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">👥 Speakers (Analyze)</label>`;
+    html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Run Analyze for multi-speaker colors and 9:16 reframe. Lives here in Timeline — not on upload.</p>`;
+    html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary" data-act="analyze-speakers" style="flex:1;font-size:.78rem">Analyze speakers</button>
+    </div>`;
+    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints — inactive words; active karaoke stays Caption look Highlight yellow.</p>`;
     html += `<div class="tl-prop-grid">`;
     spkKeys.forEach((key) => {
       const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
@@ -2649,6 +2814,27 @@
         alert("Open Caption look first and set fonts/colors (Hormozi = white + yellow karaoke), then Pull again.");
       }
     };
+    const analyzeProj = wrap.querySelector('[data-act="analyze-speakers"]');
+    if (analyzeProj) {
+      analyzeProj.onclick = () => {
+        const clip = (selected && selected.track === "main")
+          ? findClip("main", selected.id)
+          : ((tl && tl.tracks && tl.tracks.main && tl.tracks.main[0]) || null);
+        if (!clip || !clip.source_job_id) {
+          alert("Add a Main clip first, then Analyze speakers.");
+          return;
+        }
+        const statusEl = $("tlAnalyzeStatus");
+        if (typeof window.startReframeAnalyze === "function") {
+          window.startReframeAnalyze(analyzeProj, {
+            jobId: clip.source_job_id,
+            onStatus: (msg) => { if (statusEl) statusEl.textContent = msg || ""; },
+          });
+        } else {
+          alert("Analyze is still loading — try again in a second.");
+        }
+      };
+    }
 
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;

@@ -954,7 +954,9 @@ function handleFiles(files) {
 window.handleFiles = handleFiles;
 
 function getPreCleanFlag() {
-  return $("preCleanForTranscribe") && $("preCleanForTranscribe").checked;
+  // Pre-clean checkbox removed from Ingest — never denoise on upload/retranscribe
+  // from this UI. Backend still accepts pre_clean if a client sends it.
+  return false;
 }
 
 // Stable palette for SPEAKER_00…N (Host/Guest first, then extras).
@@ -2117,11 +2119,18 @@ function showEditor(words, saved = {}) {
   if (longBadge) longBadge.style.display = isLongForm ? "" : "none";
 
   const landOn = (saved && saved._landOn) || "ingest";
-  setActiveTab(landOn === "transcript" ? "transcript" : "ingest");
-  if (typeof updateAiEditNudge === "function") updateAiEditNudge(isLongForm);
-  if (landOn === "transcript") {
-    editor.scrollIntoView({ behavior: "smooth", block: "start" });
-  } else if (typeof updateReadyActions === "function") {
+  // Legacy "transcript" / Edit Words landings redirect to Timeline.
+  if (landOn === "transcript" || landOn === "editor") {
+    if (typeof window.openTimelineEditor === "function" && currentJobId) {
+      window.openTimelineEditor(currentJobId);
+    } else {
+      setActiveTab("editor");
+    }
+  } else {
+    setActiveTab("ingest");
+  }
+  if (typeof updateAiEditNudge === "function") updateAiEditNudge(false);
+  if (landOn !== "transcript" && landOn !== "editor" && typeof updateReadyActions === "function") {
     updateReadyActions();
     const ready = $("readyActions");
     if (ready) ready.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -2135,9 +2144,8 @@ function showEditor(words, saved = {}) {
     }
   }
 
-  // Only if the Ingest checkbox is explicitly checked — never force Gemini
-  // Shorts on first transcription just because the clip is long-form.
-  maybeAutoGenerateShorts(currentJobId, { force: false, switchTab: false });
+  // Auto-Generate Shorts after upload removed from Ingest — use AI Shorts tab /
+  // ready "Find Shorts" only.
 }
 
 function _jobDurationFromWords(words) {
@@ -2450,17 +2458,27 @@ async function refreshReframeStatus() {
   } catch { /* offline — silent */ }
 }
 
-async function startReframeAnalyze(triggerBtn) {
-  if (!currentJobId) {
-    alert("Select a transcribed video in the jobs list (left), then click Analyze.");
+async function startReframeAnalyze(triggerBtn, opts) {
+  opts = opts || {};
+  const jobId = opts.jobId || currentJobId;
+  const onStatus = typeof opts.onStatus === "function" ? opts.onStatus : null;
+  if (!jobId) {
+    alert("Select a Main clip in Timeline (or a transcribed video), then click Analyze speakers.");
     return;
   }
+  // Prefer the Timeline-selected source when Analyze is launched from Timeline.
+  if (opts.jobId) currentJobId = opts.jobId;
   if (triggerBtn) triggerBtn.disabled = true;
   if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = true;
   const ingestBtn = $("ingestAnalyzeBtn");
+  const tlBtn = $("tlAnalyzeBtn");
   if (ingestBtn) {
     ingestBtn.disabled = true;
     ingestBtn.textContent = "Analysing…";
+  }
+  if (tlBtn && tlBtn !== triggerBtn) {
+    tlBtn.disabled = true;
+    tlBtn.textContent = "Analysing…";
   }
   if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analysing…";
   if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
@@ -2468,6 +2486,7 @@ async function startReframeAnalyze(triggerBtn) {
     reframeStatus.style.color = "";
     reframeStatus.textContent = "Starting…";
   }
+  if (onStatus) onStatus("Starting…");
   // Ensure the empty/status node exists even after cards were rendered.
   let empty = $("ingestSpeakerEmpty");
   const cardsWrap = $("ingestSpeakerCards");
@@ -2481,6 +2500,10 @@ async function startReframeAnalyze(triggerBtn) {
   const unlockAnalyzeBtns = () => {
     if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = false;
     if (ingestBtn) ingestBtn.disabled = false;
+    if (tlBtn) {
+      tlBtn.disabled = false;
+      if (!tlBtn.textContent || /analys/i.test(tlBtn.textContent)) tlBtn.textContent = "Analyze speakers";
+    }
   };
 
   if (_reframePollTimer) {
@@ -2492,7 +2515,7 @@ async function startReframeAnalyze(triggerBtn) {
     const res = await fetch("/analyze-reframe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: currentJobId }),
+      body: JSON.stringify({ job_id: jobId }),
     });
     let data = null;
     try {
@@ -2520,9 +2543,12 @@ async function startReframeAnalyze(triggerBtn) {
     if (data.faces_note) {
       if (reframeStatus) reframeStatus.textContent = data.faces_note;
       if (empty) empty.textContent = data.faces_note;
+      if (onStatus) onStatus(data.faces_note);
     }
-    if (reframeStatus) reframeStatus.textContent = `Analysing speakers + faces${deviceHint}…`;
-    if (empty) empty.textContent = `Analysing speakers + faces${deviceHint}…`;
+    const startMsg = `Analysing speakers + faces${deviceHint}…`;
+    if (reframeStatus) reframeStatus.textContent = startMsg;
+    if (empty) empty.textContent = startMsg;
+    if (onStatus) onStatus(startMsg);
     if (data.faces_note && empty) {
       empty.textContent = `Analysing speakers${deviceHint}… (${data.faces_note})`;
     }
@@ -2530,7 +2556,7 @@ async function startReframeAnalyze(triggerBtn) {
     let pollFails = 0;
     _reframePollTimer = setInterval(async () => {
       try {
-        const statusRes = await fetch(`/reframe-status/${currentJobId}`);
+        const statusRes = await fetch(`/reframe-status/${jobId}`);
         let r = null;
         try {
           r = await statusRes.json();
@@ -2543,6 +2569,7 @@ async function startReframeAnalyze(triggerBtn) {
             if (ingestBtn) ingestBtn.textContent = "Analyze";
             if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
             if (empty) empty.textContent = "Lost contact with server while analysing — try Analyze again.";
+            if (onStatus) onStatus("Lost contact — try Analyze again.");
           }
           return;
         }
@@ -2552,9 +2579,17 @@ async function startReframeAnalyze(triggerBtn) {
           _reframePollTimer = null;
           await refreshReframeStatus();
           unlockAnalyzeBtns();
+          if (tlBtn) tlBtn.textContent = "Re-analyze";
           if (reframeEnabled) {
             reframeEnabled.disabled = false;
             reframeEnabled.checked = true;
+          }
+          if (onStatus) {
+            const n = (r.stats && r.stats.speaker_count) || "?";
+            onStatus(`✓ ${n} speakers — colors apply in transcript`);
+          }
+          if (typeof window.onTimelineAnalyzeReady === "function") {
+            try { window.onTimelineAnalyzeReady(jobId, r); } catch (_) { /* optional */ }
           }
         } else if (r.error) {
           clearInterval(_reframePollTimer);
@@ -2564,6 +2599,7 @@ async function startReframeAnalyze(triggerBtn) {
             reframeStatus.style.color = "#ff8a8a";
           }
           if (empty) empty.textContent = "Analyze failed: " + r.error;
+          if (onStatus) onStatus("❌ " + r.error);
           unlockAnalyzeBtns();
           if (ingestBtn) ingestBtn.textContent = "Analyze";
           if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
@@ -2572,6 +2608,7 @@ async function startReframeAnalyze(triggerBtn) {
           const msg = `${r.status}${pct}`;
           if (reframeStatus) reframeStatus.textContent = msg;
           if (empty) empty.textContent = msg;
+          if (onStatus) onStatus(msg);
         }
       } catch (pollErr) {
         pollFails += 1;
@@ -2581,6 +2618,7 @@ async function startReframeAnalyze(triggerBtn) {
           unlockAnalyzeBtns();
           if (ingestBtn) ingestBtn.textContent = "Analyze";
           if (empty) empty.textContent = "Analyze poll failed: " + (pollErr.message || pollErr);
+          if (onStatus) onStatus("Analyze poll failed: " + (pollErr.message || pollErr));
         }
       }
     }, 1500);
@@ -2593,9 +2631,12 @@ async function startReframeAnalyze(triggerBtn) {
     if (ingestBtn) ingestBtn.textContent = "Analyze";
     if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
     if (empty) empty.textContent = "Analyze failed: " + e.message;
+    if (onStatus) onStatus("Error: " + e.message);
     alert("Analyze failed:\n\n" + e.message);
   }
 }
+
+window.startReframeAnalyze = startReframeAnalyze;
 
 if (reframeAnalyzeBtn) {
   reframeAnalyzeBtn.onclick = () => startReframeAnalyze(reframeAnalyzeBtn);
@@ -3111,11 +3152,12 @@ function renderJobsList() {
     if (meta.has_words || meta.status === "awaiting_edit" || meta.status === "done") {
       const editWords = document.createElement("button");
       editWords.className = "job-rename job-edit-words";
-      editWords.textContent = "Edit words";
-      editWords.title = "Edit words — fillers, fixes, tighten silences";
+      editWords.textContent = "Edit in Timeline";
+      editWords.title = "Open Timeline transcript — phrases, fillers, speakers";
       editWords.onclick = (e) => {
         e.stopPropagation();
-        switchToJob(jobId, { force: true, tab: "transcript" });
+        if (typeof window.openTimelineEditor === "function") window.openTimelineEditor(jobId);
+        else switchToJob(jobId, { force: true, tab: "editor" });
       };
       div.appendChild(editWords);
     }
@@ -3960,14 +4002,10 @@ async function runAiEditGenerate() {
   };
 })();
 
-function updateAiEditNudge(isLongForm) {
+function updateAiEditNudge(_isLongForm) {
+  // AI Edit nudge stays on AI Shorts only — never on Edit Words / ready panel.
   const nudge = $("aiEditNudge");
-  if (!nudge) return;
-  if (isLongForm) {
-    nudge.classList.add("hidden");
-    return;
-  }
-  nudge.classList.remove("hidden");
+  if (nudge) nudge.classList.add("hidden");
 }
 const aiEditNudgeBtn = $("aiEditNudgeBtn");
 if (aiEditNudgeBtn) {
@@ -4702,14 +4740,13 @@ function updateReadyActions() {
   const hint = $("readyActionsHint");
   if (hint && ready) {
     const name = (jobsById[currentJobId] && jobsById[currentJobId].filename) || "This video";
-    hint.textContent = `${name} is transcribed. Fix words, set caption look, find shorts, or open the timeline.`;
+    hint.textContent = `${name} is transcribed. Edit phrases in Timeline, set caption look, or find shorts.`;
   }
 }
 
 function openEditWords() {
-  if (!requireReadyTranscript("Edit words")) return;
-  setActiveTab("transcript");
-  if (editor) editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Edit Words page retired as the primary surface — phrase editing lives in Timeline.
+  openTimelineFromReady();
 }
 
 function openCaptionLook() {
@@ -4735,7 +4772,6 @@ window.openEditWords = openEditWords;
 window.openCaptionLook = openCaptionLook;
 
 [
-  ["readyEditWordsBtn", openEditWords],
   ["readyCaptionLookBtn", openCaptionLook],
   ["readyFindShortsBtn", openFindShorts],
   ["readyOpenTimelineBtn", openTimelineFromReady],
