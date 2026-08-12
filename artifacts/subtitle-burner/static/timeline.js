@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-37-mobile";
+  const TL_BUILD = "studio-editor-build-38-broll-status";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -319,8 +319,103 @@
     const res = await fetch(url, opts);
     let data = null;
     try { data = await res.json(); } catch (e) { /* non-json */ }
-    if (!res.ok) throw new Error((data && data.error) || res.statusText);
+    if (!res.ok) {
+      const msg = (data && (data.error || data.message)) || res.statusText || ("HTTP " + res.status);
+      if (res.status === 404) {
+        throw new Error(msg + " (404 — route missing on this host; pull latest code and Stop+Run / Redeploy)");
+      }
+      throw new Error(msg);
+    }
     return data;
+  }
+
+  /** Live-refresh B-roll mode dropdown from /broll/status (avoids stale HTML). */
+  async function refreshBrollStatus(opts) {
+    opts = opts || {};
+    const statusEl = $("tlBrollStatus");
+    const hintEl = $("tlBrollHint");
+    const modeEl = $("tlBrollMode");
+    try {
+      const q = opts.probe ? "?probe=1" : "";
+      const data = await api("/broll/status" + q);
+      const st = data.providers || {};
+      const photoReady = !!data.photo_ready;
+      const bits = [];
+      if (st.pexels) bits.push("Pexels ✓");
+      else bits.push("Pexels ✗");
+      if (st.unsplash) bits.push("Unsplash ✓");
+      if (st.google_cse) bits.push("CSE ✓");
+      else bits.push("CSE ✗");
+      bits.push("badges ✓");
+      if (statusEl) {
+        statusEl.textContent = bits.join(" · ") + (data.build ? " · " + data.build : "");
+        statusEl.style.color = photoReady ? "#7ddea0" : "#f0c674";
+      }
+      if (modeEl) {
+        const photoOpt = modeEl.querySelector('option[value="photo"]');
+        const gifOpt = modeEl.querySelector('option[value="gif"]');
+        const autoOpt = modeEl.querySelector('option[value="auto"]');
+        const badgeOpt = modeEl.querySelector('option[value="badge"]');
+        if (photoOpt) photoOpt.disabled = !photoReady;
+        if (gifOpt) gifOpt.disabled = !st.google_cse;
+        // If photos just became available and UI was stuck on badges, flip to Auto.
+        if (photoReady && modeEl.value === "badge" && autoOpt) {
+          modeEl.value = "auto";
+        }
+        if (!photoReady && modeEl.value === "photo" && badgeOpt) {
+          modeEl.value = "badge";
+        }
+        if (!st.google_cse && modeEl.value === "gif" && badgeOpt) {
+          modeEl.value = photoReady ? "auto" : "badge";
+        }
+      }
+      if (hintEl) {
+        if (photoReady) {
+          hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
+            + "Each Suggest returns up to ~4–5 clips (max 12)."
+            + (st.google_cse ? " GIF mode uses Google CSE." : "");
+        } else {
+          const aliases = (data.pexels_env && data.pexels_env.alias_names) || [];
+          const aliasNote = aliases.length
+            ? " Found env names: " + aliases.join(", ") + "."
+            : " No PEXELS_* env visible in this process.";
+          hintEl.innerHTML = "No photo API key in <em>this</em> Studio process — badges still work. "
+            + "On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>, then <strong>Stop + Run</strong> "
+            + "(Cursor secrets do not sync)." + aliasNote;
+        }
+      }
+      if (opts.probe && data.pexels_probe) {
+        const p = data.pexels_probe;
+        if (statusEl) {
+          statusEl.textContent = (p.ok ? "Pexels OK" : "Pexels fail") + ": " + (p.message || "")
+            + (p.http_status != null ? " (HTTP " + p.http_status + ")" : "");
+          statusEl.style.color = p.ok ? "#7ddea0" : "#e07070";
+        }
+        return p;
+      }
+      return data;
+    } catch (e) {
+      if (statusEl) {
+        statusEl.textContent = "Could not read /broll/status: " + e.message;
+        statusEl.style.color = "#e07070";
+      }
+      return null;
+    }
+  }
+
+  async function testPexelsKey() {
+    const btn = $("tlBrollTestBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
+    try {
+      const p = await refreshBrollStatus({ probe: true });
+      if (p && !p.ok) {
+        alert((p.message || "Pexels check failed") + "\n\nReplit: set PEXELS_API_KEY in Tools → Secrets, then Stop + Run. Cursor secrets do not sync to Replit.");
+      } else if (p && p.ok) {
+        alert("Pexels accepted the key. Switch mode to Auto (or Photos) and click Suggest B-roll again.");
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Test Pexels"; }
+    }
   }
 
   function scheduleSave() {
@@ -4621,6 +4716,7 @@
         wireTranscriptToolbar();
         wireLeftTabs();
         on("tlAutoOverlaysBtn", "onclick", () => suggestKeywordOverlays());
+        on("tlBrollTestBtn", "onclick", () => testPexelsKey());
         on("tlAssetBtn", "onclick", () => $("tlAssetFile")?.click());
         on("tlAssetFile", "onchange", async (e) => {
           const f = e.target.files && e.target.files[0];
@@ -4660,6 +4756,7 @@
       await loadSources();
       await loadAssets();
       await loadProjects();
+      refreshBrollStatus().catch(() => {});
       console.log("[timeline] " + TL_BUILD + " ready; tl=", !!tl);
     })();
 
@@ -4763,6 +4860,15 @@
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
       setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip` +
         (bits.length ? ` · ${bits.join(", ")}` : ""));
+      if (!data.photo_ready && mode !== "badge" && st.badge && !st.photo) {
+        const hint = data.hint || "No photo API key in this Studio process. On Replit set PEXELS_API_KEY then Stop+Run.";
+        const statusEl = $("tlBrollStatus");
+        if (statusEl) {
+          statusEl.textContent = "Photos unavailable — showing badges. " + hint;
+          statusEl.style.color = "#f0c674";
+        }
+        refreshBrollStatus().catch(() => {});
+      }
       if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}:${scope}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);

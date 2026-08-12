@@ -4692,16 +4692,36 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 
 def _broll_provider_status() -> dict:
     return {
-        "google_cse": bool(os.environ.get("GOOGLE_CSE_API_KEY") and os.environ.get("GOOGLE_CSE_CX")),
-        "pexels": bool((os.environ.get("PEXELS_API_KEY") or "").strip()),
+        "google_cse": bool(
+            (os.environ.get("GOOGLE_CSE_API_KEY") or "").strip()
+            and (os.environ.get("GOOGLE_CSE_CX") or "").strip()
+        ),
+        "pexels": bool(_pexels_api_key()),
         "unsplash": bool((os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()),
         "badge": True,
     }
 
 
 def _pexels_api_key() -> str:
-    """Return trimmed Pexels key (Replit/UI pastes often include trailing spaces)."""
-    return (os.environ.get("PEXELS_API_KEY") or "").strip()
+    """Return trimmed Pexels key (Replit/UI pastes often include trailing spaces).
+
+    Accepts common alias names so a mistyped Replit secret still works.
+    """
+    for name in ("PEXELS_API_KEY", "PEXELS_KEY", "PEXELS_API"):
+        val = (os.environ.get(name) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _pexels_env_aliases_present() -> list:
+    """Secret *names* present in the process that look like Pexels (no values)."""
+    out = []
+    for k in os.environ:
+        ku = k.upper()
+        if "PEXEL" in ku:
+            out.append(k)
+    return sorted(out)
 
 
 def _probe_pexels_key() -> dict:
@@ -5123,7 +5143,14 @@ def fetch_auto_overlays():
         "placement": placement,
         "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
+        "photo_ready": _broll_any_photo_provider(),
         "stats": {"photo": used_photo, "badge": used_badge, "gif": used_gif},
+        "hint": (
+            None if _broll_any_photo_provider() or mode == "badge"
+            else "No photo API key in this Studio process. "
+                 "On Replit: Tools → Secrets → PEXELS_API_KEY, then Stop + Run. "
+                 "Cursor secrets do not sync to Replit."
+        ),
     })
 
 
@@ -5135,23 +5162,24 @@ def broll_status():
     """
     st = _broll_provider_status()
     raw = os.environ.get("PEXELS_API_KEY")
+    aliases = _pexels_env_aliases_present()
     out = {
         "providers": st,
         "photo_ready": _broll_any_photo_provider(),
-        "build": "broll-status-v2",
+        "build": "broll-status-v3",
         # Diagnostics only — never includes the key value.
         "pexels_env": {
-            "present": raw is not None,
-            "nonempty_after_strip": bool((raw or "").strip()),
-            "length": len((raw or "").strip()),
+            "present": bool(_pexels_api_key()) or (raw is not None),
+            "nonempty_after_strip": bool(_pexels_api_key()),
+            "length": len(_pexels_api_key()),
             "had_surrounding_whitespace": bool(raw is not None and raw != raw.strip()),
+            "alias_names": aliases,
+            "expected_name": "PEXELS_API_KEY",
         },
         "hint": (
-            "Set PEXELS_API_KEY and/or UNSPLASH_ACCESS_KEY and/or "
-            "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll. "
-            "After changing Replit Secrets, Stop the workflow and Run again "
-            "(or Redeploy). Cursor Environment Secrets do not sync to Replit. "
-            "Call /broll/status?probe=1 to validate Pexels."
+            "Set PEXELS_API_KEY on the same host that runs Studio "
+            "(Replit Tools→Secrets, then Stop+Run — Cursor secrets do not sync). "
+            "Call /broll/status?probe=1 to validate."
         ),
     }
     if str(request.args.get("probe") or "").strip() in ("1", "true", "yes"):
@@ -8694,7 +8722,8 @@ def delete_asset(asset_id: str):
     if wave.exists():
         _safe_unlink(wave)
     if removed == 0:
-        return jsonify({"error": "Asset not found"}), 404
+        # Idempotent cleanup (Skip / Replace) — not a hard client error.
+        return jsonify({"ok": True, "asset_id": asset_id, "removed": 0, "missing": True})
     return jsonify({"ok": True, "asset_id": asset_id, "removed": removed})
 
 

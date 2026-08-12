@@ -1317,13 +1317,17 @@
                   </select>
                 </label>
                 <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll</button>
+                <div class="tl-broll-status-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <button id="tlBrollTestBtn" class="tl-chip-btn" type="button" title="Live-check PEXELS_API_KEY on this host (never shows the full key)">Test Pexels</button>
+                  <span id="tlBrollStatus" class="muted" style="font-size:.72rem" aria-live="polite">Checking B-roll providers…</span>
+                </div>
                 <div id="tlBrollPending" class="tl-broll-pending hidden" aria-live="polite"></div>
                 <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
                   {% if broll_photo_ready %}
                     Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. Each Suggest returns up to ~4–5 clips (max 12); run again / change Scope for more on long videos.
                     {% if broll_google_cse %} GIF mode uses Google CSE.{% endif %}
                   {% else %}
-                    No photo API keys yet — badges still work. Set <code>PEXELS_API_KEY</code> and/or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> (GIF mode needs CSE).
+                    No photo API keys in <em>this</em> Studio process — badges still work. On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>, then <strong>Stop + Run</strong> (Cursor secrets do not sync). GIF mode needs CSE.
                   {% endif %}
                 </p>
               </div>
