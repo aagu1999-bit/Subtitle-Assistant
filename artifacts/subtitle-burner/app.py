@@ -5128,11 +5128,8 @@ def fetch_auto_overlays():
             "fade_out": 0.25,
             "border_px": 2 if source in ("photo", "gif") else 0,
             "layout": pos["layout"],
-            # Ken Burns on animated GIFs looks wrong — keep motion in the GIF.
-            "ken_burns": (
-                {"enabled": True, "direction": "in", "intensity": "med"}
-                if source == "photo" and not is_gif_asset else None
-            ),
+            # Ken Burns is opt-in in the Timeline inspector / Effects lane.
+            "ken_burns": None,
         })
 
     return jsonify({

@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-38-broll-status";
+  const TL_BUILD = "studio-editor-build-39-no-auto-kenburns";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -747,17 +747,25 @@
         const o = document.createElement("button");
         o.className = "tl-chip-btn";
         o.textContent = a.kind === "video" ? "🎬" : "🖼";
-        o.title = "Add as overlay";
+        o.title = "Add as overlay (PiP — floats over A-roll, does not take Main time)";
         o.onclick = (e) => { e.stopPropagation(); addOverlayClip({ asset_id: a.asset_id }, a); };
         actions.appendChild(o);
-        if (a.kind === "image") {
-          const fx = document.createElement("button");
-          fx.className = "tl-chip-btn";
-          fx.textContent = "✨";
-          fx.title = "Add Ken Burns on Effects lane";
-          fx.onclick = (e) => { e.stopPropagation(); addEffectClip("ken_burns", { intensity: "med" }); };
-          actions.appendChild(fx);
-        }
+        // Cutaway on Main (takes timeline time). Ken Burns is opt-in via clip props / + Effect.
+        const asMain = document.createElement("button");
+        asMain.className = "tl-chip-btn";
+        asMain.textContent = "✂";
+        asMain.title = "Add as Main cutaway (takes time on Main — stills ~2.4s)";
+        asMain.onclick = (e) => {
+          e.stopPropagation();
+          addMainCutawayClip({
+            asset_id: a.asset_id,
+            start: playheadOutputTime() || 0,
+            out: a.kind === "image" ? 2.4 : Math.min(a.duration || 4, 5),
+            keyword: a.keyword || a.filename || null,
+            source: a.source || (a.kind === "gif" ? "gif" : null),
+          }, a);
+        };
+        actions.appendChild(asMain);
       }
       const del = document.createElement("button");
       del.className = "tl-chip-btn tl-chip-danger";
@@ -922,8 +930,10 @@
       }
       if (lane === "overlay") return addOverlayClip({ asset_id: asset.asset_id }, asset);
       if (lane === "effects") {
-        if (asset.kind === "image" || asset.kind === "gif") return addEffectClip("ken_burns", { intensity: "med" });
-        return addOverlayClip({ asset_id: asset.asset_id }, asset);
+        // Effects lane is timed FX on Main (punch / Ken Burns / split) — not a place
+        // to drop media. Put images/GIFs on Overlay or Main instead.
+        alert("Drop images/GIFs on Overlay (PiP) or Main (cutaway). Use + Effect for Ken Burns / punch zoom.");
+        return;
       }
     }
   }
@@ -1517,11 +1527,8 @@
       cutaway: true,
       keyword: ref.keyword || null,
       source: ref.source || null,
-      ken_burns: ref.ken_burns
-        ? Object.assign({}, ref.ken_burns)
-        : (ref.source === "photo" || (asset && asset.kind === "image")
-          ? { enabled: true, direction: "in", intensity: "med" }
-          : null),
+      // Ken Burns is opt-in (inspector / + Effect) — never auto-enable on place.
+      ken_burns: ref.ken_burns ? Object.assign({}, ref.ken_burns) : null,
       transition: null,
     };
     if (ref.source === "gif" || (asset && asset.kind === "gif")) {
@@ -1619,11 +1626,8 @@
       layout: ref.layout || null,
       keyword: ref.keyword || null,
       source: ref.source || null,
-      ken_burns: ref.ken_burns
-        ? Object.assign({}, ref.ken_burns)
-        : (ref.source === "photo" || (asset && asset.kind === "image")
-          ? { enabled: true, direction: "in", intensity: "med" }
-          : null),
+      // Ken Burns is opt-in via clip props — do not auto-apply on place.
+      ken_burns: ref.ken_burns ? Object.assign({}, ref.ken_burns) : null,
     };
     // GIFs keep their own animation — no Ken Burns.
     if (ref.source === "gif" || (asset && asset.kind === "gif") ||
