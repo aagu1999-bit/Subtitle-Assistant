@@ -1288,6 +1288,7 @@
                   <select id="tlBrollMode" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
                     <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured, else badges)</option>
                     <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (Pexels / Unsplash / Google CSE)</option>
+                    <option value="gif" {% if not broll_google_cse %}disabled{% endif %}>GIFs (Google CSE · giphy/tenor/imgur)</option>
                     <option value="badge" {% if not broll_photo_ready %}selected{% endif %}>Keyword badges only</option>
                   </select>
                 </label>
@@ -1308,9 +1309,10 @@
                 <div id="tlBrollPending" class="tl-broll-pending hidden" aria-live="polite"></div>
                 <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
                   {% if broll_photo_ready %}
-                    Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong> cutaway (long-form). Scope windows the transcript for long uploads.
+                    Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. Each Suggest returns up to ~4–5 clips (max 12); run again / change Scope for more on long videos.
+                    {% if broll_google_cse %} GIF mode uses Google CSE.{% endif %}
                   {% else %}
-                    No photo API keys yet — badges still work. Suggest → Overlay / As Main. Set <code>PEXELS_API_KEY</code>, <code>UNSPLASH_ACCESS_KEY</code>, or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> in Cursor Environment Secrets (and optionally GitHub Actions).
+                    No photo API keys yet — badges still work. Set <code>PEXELS_API_KEY</code> and/or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> (GIF mode needs CSE).
                   {% endif %}
                 </p>
               </div>

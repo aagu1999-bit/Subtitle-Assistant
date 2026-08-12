@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-35-long-upload";
+  const TL_BUILD = "studio-editor-build-36-gif-broll";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -805,21 +805,21 @@
         return addMusicClip(asset);
       }
       if (lane === "main") {
-        // Video/image assets can land as Main cutaways (long-form B-roll).
-        if (asset.kind === "image" || asset.kind === "video") {
+        // Video/image/GIF assets can land as Main cutaways (long-form B-roll).
+        if (asset.kind === "image" || asset.kind === "gif" || asset.kind === "video") {
           return addMainCutawayClip({
             asset_id: asset.asset_id,
             start: playheadOutputTime() || 0,
             out: asset.kind === "image" ? 2.4 : Math.min(asset.duration || 4, 5),
             keyword: asset.keyword || asset.filename || null,
-            source: asset.source || null,
+            source: asset.source || (asset.kind === "gif" ? "gif" : null),
           }, asset);
         }
         return addOverlayClip({ asset_id: asset.asset_id }, asset);
       }
       if (lane === "overlay") return addOverlayClip({ asset_id: asset.asset_id }, asset);
       if (lane === "effects") {
-        if (asset.kind === "image") return addEffectClip("ken_burns", { intensity: "med" });
+        if (asset.kind === "image" || asset.kind === "gif") return addEffectClip("ken_burns", { intensity: "med" });
         return addOverlayClip({ asset_id: asset.asset_id }, asset);
       }
     }
@@ -1421,6 +1421,9 @@
           : null),
       transition: null,
     };
+    if (ref.source === "gif" || (asset && asset.kind === "gif")) {
+      cut.ken_burns = null;
+    }
     if (!cut.asset_id) {
       alert("Cutaway needs an asset.");
       return null;
@@ -1519,6 +1522,11 @@
           ? { enabled: true, direction: "in", intensity: "med" }
           : null),
     };
+    // GIFs keep their own animation — no Ken Burns.
+    if (ref.source === "gif" || (asset && asset.kind === "gif") ||
+        (ref.asset_id && /\.gif$/i.test(String((asset && asset.filename) || "")))) {
+      oc.ken_burns = null;
+    }
     // Legacy auto-fetch used percent coords / scale — normalize if needed.
     if (oc.x > 1.5) oc.x = Math.min(1, oc.x / 100);
     if (oc.y > 1.5) oc.y = Math.min(1, oc.y / 100);
@@ -4659,7 +4667,7 @@
     const placement = placeEl ? placeEl.value : "pip";
     const scope = scopeEl ? scopeEl.value : "full";
     const isLong = tl && tl.canvas === "16x9";
-    if (btn) { btn.disabled = true; btn.textContent = mode === "badge" ? "Making badges…" : "Fetching B-roll…"; }
+    if (btn) { btn.disabled = true; btn.textContent = mode === "badge" ? "Making badges…" : (mode === "gif" ? "Fetching GIFs…" : "Fetching B-roll…"); }
     try {
       let jobId = null;
       let winStart = null;
@@ -4702,9 +4710,11 @@
       }
 
       // Long-form: quieter density (fewer suggestions per pass).
+      // Cap 12 per Suggest click — run Suggest again (or change Scope) for more.
       let budget = isLong ? 4 : 5;
       if (scope === "playhead") budget = Math.min(budget, 3);
       if (scope === "selected") budget = isLong ? 4 : 5;
+      if (mode === "gif") budget = Math.min(budget, 4);
 
       const body = { budget, mode, placement };
       if (jobId) body.job_id = jobId;
@@ -4717,7 +4727,9 @@
       });
       const list = data.overlays || [];
       if (!list.length) {
-        alert(mode === "photo"
+        alert(mode === "gif"
+          ? "No GIFs found. Needs Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) with Image search on, and sites like giphy.com / tenor.com / imgur.com."
+          : mode === "photo"
           ? "No photo B-roll found. Check API keys / try Auto or Badges."
           : "No keyword overlay moments found in this window.");
         return;
@@ -4732,6 +4744,7 @@
       const st = data.stats || {};
       const bits = [];
       if (st.photo) bits.push(`${st.photo} photo`);
+      if (st.gif) bits.push(`${st.gif} gif`);
       if (st.badge) bits.push(`${st.badge} badge`);
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
       setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip` +
@@ -4765,7 +4778,7 @@
     pendingBroll.forEach((p) => {
       const start = Number(p.start || 0);
       const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
-      const srcLabel = p.source === "photo" ? "Photo" : (p.source === "badge" ? "Badge" : (p.source || "Asset"));
+      const srcLabel = p.source === "gif" ? "GIF" : (p.source === "photo" ? "Photo" : (p.source === "badge" ? "Badge" : (p.source || "Asset")));
       html += `<div class="tl-broll-card" data-pending-id="${p.id}">
         <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
         <div class="tl-broll-meta">

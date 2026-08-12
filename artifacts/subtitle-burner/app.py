@@ -4744,19 +4744,23 @@ def _download_url_to_asset(url: str, dest_stem: Path, timeout: int = 25) -> Path
         return None
 
 
-def _search_broll_google_cse(query: str) -> str | None:
+def _search_broll_google_cse(query: str, file_type: str | None = None) -> str | None:
     key = os.environ.get("GOOGLE_CSE_API_KEY", "")
     cx = os.environ.get("GOOGLE_CSE_CX", "")
     if not key or not cx:
         return None
     try:
         import requests as _req
+        params = {
+            "key": key, "cx": cx, "q": query,
+            "searchType": "image", "num": 1, "safe": "active",
+        }
+        ft = (file_type or "").lower().strip().lstrip(".")
+        if ft in ("gif", "png", "jpg", "jpeg", "webp", "bmp"):
+            params["fileType"] = "gif" if ft == "gif" else ft
         r = _req.get(
             "https://www.googleapis.com/customsearch/v1",
-            params={
-                "key": key, "cx": cx, "q": query,
-                "searchType": "image", "num": 1, "safe": "active",
-            },
+            params=params,
             timeout=20,
         )
         if r.status_code >= 400:
@@ -4818,16 +4822,28 @@ def _search_broll_unsplash(query: str) -> str | None:
         return None
 
 
-def _fetch_broll_image_for_keyword(query: str, dest_stem: Path) -> Path | None:
-    """Search providers in order and download the first hit next to dest_stem."""
+def _fetch_broll_image_for_keyword(query: str, dest_stem: Path,
+                                   prefer_gif: bool = False) -> Path | None:
+    """Search providers in order and download the first hit next to dest_stem.
+
+    prefer_gif=True uses Google CSE fileType=gif (Pexels/Unsplash stay photos).
+    """
     q = (query or "").strip()
     if not q:
         return None
-    url = (
-        _search_broll_google_cse(q)
-        or _search_broll_pexels(q)
-        or _search_broll_unsplash(q)
-    )
+    if prefer_gif:
+        url = _search_broll_google_cse(q, file_type="gif")
+        if not url:
+            # Broaden: same query without fileType, keep only if URL looks like a gif.
+            url = _search_broll_google_cse(q)
+            if url and ".gif" not in url.lower().split("?")[0]:
+                url = None
+    else:
+        url = (
+            _search_broll_google_cse(q)
+            or _search_broll_pexels(q)
+            or _search_broll_unsplash(q)
+        )
     if not url:
         return None
     return _download_url_to_asset(url, dest_stem)
@@ -4888,11 +4904,11 @@ def fetch_auto_overlays():
     if (not words) and job_id and job_id in jobs:
         words = jobs[job_id].get("words") or []
     try:
-        budget = max(1, min(8, int(data.get("budget") or 5)))
+        budget = max(1, min(12, int(data.get("budget") or 5)))
     except (TypeError, ValueError):
         budget = 5
     mode = str(data.get("mode") or "auto").lower().strip()
-    if mode not in ("auto", "photo", "badge"):
+    if mode not in ("auto", "photo", "badge", "gif"):
         mode = "auto"
     placement = str(data.get("placement") or "pip").lower().strip()
 
@@ -4938,6 +4954,7 @@ def fetch_auto_overlays():
     providers = _broll_provider_status()
     used_photo = 0
     used_badge = 0
+    used_gif = 0
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
     for co in callouts:
@@ -4948,12 +4965,33 @@ def fetch_auto_overlays():
         asset_path = None
         source = "badge"
 
+        want_gif = mode == "gif" and bool(providers.get("google_cse"))
         want_photo = mode in ("photo", "auto") and _broll_any_photo_provider()
-        if want_photo:
+        if want_gif:
+            asset_path = _fetch_broll_image_for_keyword(
+                label, ASSET_DIR / asset_id, prefer_gif=True,
+            )
+            if asset_path:
+                source = "gif"
+                used_gif += 1
+                final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
+                if asset_path.resolve() != final.resolve():
+                    try:
+                        if final.exists():
+                            _safe_unlink(final)
+                        asset_path.replace(final)
+                        asset_path = final
+                    except OSError:
+                        pass
+        elif want_photo:
             asset_path = _fetch_broll_image_for_keyword(label, ASSET_DIR / asset_id)
             if asset_path:
-                source = "photo"
-                used_photo += 1
+                is_gif = _is_gif_path(asset_path)
+                source = "gif" if is_gif else "photo"
+                if is_gif:
+                    used_gif += 1
+                else:
+                    used_photo += 1
                 final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
                 if asset_path.resolve() != final.resolve():
                     try:
@@ -4965,7 +5003,7 @@ def fetch_auto_overlays():
                         pass
 
         if asset_path is None:
-            if mode == "photo":
+            if mode in ("photo", "gif"):
                 continue
             dest = ASSET_DIR / f"{asset_id}.png"
             if not _make_keyword_badge_png(label, dest):
@@ -4988,6 +5026,7 @@ def fetch_auto_overlays():
         )
 
         pos = _overlay_layout_for_index(len(overlays), placement)
+        is_gif_asset = source == "gif" or _is_gif_path(asset_path)
         overlays.append({
             "asset_id": asset_id,
             "keyword": label,
@@ -5003,11 +5042,12 @@ def fetch_auto_overlays():
             "fit": pos["fit"],
             "fade_in": 0.15,
             "fade_out": 0.25,
-            "border_px": 2 if source == "photo" else 0,
+            "border_px": 2 if source in ("photo", "gif") else 0,
             "layout": pos["layout"],
+            # Ken Burns on animated GIFs looks wrong — keep motion in the GIF.
             "ken_burns": (
                 {"enabled": True, "direction": "in", "intensity": "med"}
-                if source == "photo" else None
+                if source == "photo" and not is_gif_asset else None
             ),
         })
 
@@ -5019,7 +5059,7 @@ def fetch_auto_overlays():
         "placement": placement,
         "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
-        "stats": {"photo": used_photo, "badge": used_badge},
+        "stats": {"photo": used_photo, "badge": used_badge, "gif": used_gif},
     })
 
 
@@ -5862,6 +5902,7 @@ def index():
         dolby_enabled=dolby_enabled,
         gemini_enabled=gemini_enabled,
         broll_photo_ready=broll_photo_ready,
+        broll_google_cse=bool(broll_providers.get("google_cse")),
         broll_providers=broll_providers,
         asset_version=asset_version,
     )
@@ -6907,7 +6948,9 @@ ASSET_DIR = BASE_DIR / "assets"
 ASSET_DIR.mkdir(exist_ok=True)
 
 ASSET_EXT_VIDEO = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
-ASSET_EXT_IMAGE = {"jpg", "jpeg", "png", "webp", "gif", "bmp"}
+ASSET_EXT_STILL = {"jpg", "jpeg", "png", "webp", "bmp"}
+ASSET_EXT_GIF = {"gif"}
+ASSET_EXT_IMAGE = ASSET_EXT_STILL | ASSET_EXT_GIF
 ASSET_EXT_AUDIO = {"mp3", "wav", "m4a", "aac", "ogg", "flac"}
 
 # Canvas presets the UI offers. Keys are sent by the client.
@@ -6938,11 +6981,17 @@ def _asset_kind(ext: str) -> str | None:
     ext = ext.lower().lstrip(".")
     if ext in ASSET_EXT_VIDEO:
         return "video"
-    if ext in ASSET_EXT_IMAGE:
+    if ext in ASSET_EXT_GIF:
+        return "gif"
+    if ext in ASSET_EXT_STILL:
         return "image"
     if ext in ASSET_EXT_AUDIO:
         return "audio"
     return None
+
+
+def _is_gif_path(path: Path | None) -> bool:
+    return bool(path) and path.suffix.lower().lstrip(".") in ASSET_EXT_GIF
 
 
 def _asset_meta_path(asset_id: str) -> Path:
@@ -7347,13 +7396,14 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     """
     dur = max(0.05, t_out - t_in)
     ext = src.suffix.lower().lstrip(".")
-    is_image = ext in ASSET_EXT_IMAGE
+    is_gif = ext in ASSET_EXT_GIF
+    is_image = ext in ASSET_EXT_STILL
 
     # Calculate unique segment cache key
     mtime = src.stat().st_mtime if src.exists() else 0
     cache_raw = (
         f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_"
-        f"img={int(is_image)}_"
+        f"img={int(is_image)}_gif={int(is_gif)}_"
         f"{json.dumps(ken, sort_keys=True) if ken else ''}_"
         f"{json.dumps(color, sort_keys=True) if color else ''}_"
         f"{json.dumps(punch, sort_keys=True) if punch else ''}"
@@ -7373,7 +7423,8 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},setsar=1")
     vf += f",fps={fps}"
-    kb = _tl_kenburns_filter(ken, W, H, fps, dur)
+    # Skip Ken Burns on GIFs — motion lives in the animation itself.
+    kb = None if is_gif else _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
         vf += "," + kb
     pz = _tl_punch_zoom_filter(punch, W, H, fps)
@@ -7384,7 +7435,20 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         vf += "," + cf
     vf += ",format=yuv420p"
 
-    if is_image:
+    if is_gif:
+        cmd = [
+            FFMPEG, "-y",
+            "-ignore_loop", "0", "-stream_loop", "-1",
+            "-i", str(src),
+            "-f", "lavfi", "-t", f"{dur:.3f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-t", f"{dur:.3f}", "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+            str(out_path),
+        ]
+        _tl_run(cmd, "GIF cutaway")
+    elif is_image:
         # Main cutaway from a still: loop the frame, silent audio bed.
         cmd = [
             FFMPEG, "-y",
@@ -7711,7 +7775,13 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         path = _timeline_clip_source(ov, prefer_proxy=True)
         if not path:
             continue
-        kind = "image" if path.suffix.lower().lstrip(".") in ASSET_EXT_IMAGE else "video"
+        ext = path.suffix.lower().lstrip(".")
+        if ext in ASSET_EXT_GIF:
+            kind = "gif"
+        elif ext in ASSET_EXT_STILL:
+            kind = "image"
+        else:
+            kind = "video"
         if kind == "video":
             sid = ov.get("source_job_id")
             safe = _tl_ensure_overlay_video(path, sid if isinstance(sid, str) else None)
@@ -7767,7 +7837,18 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
             border = 0
 
         scale = _tl_overlay_scale_filter(ow, oh, fit)
-        if kind == "image":
+        if kind == "gif":
+            # Animated GIF: decode frames (ignore_loop 0 = honor file loop;
+            # stream_loop -1 keeps it playing for the overlay window).
+            inputs += [
+                "-ignore_loop", "0", "-stream_loop", "-1",
+                "-i", str(path),
+            ]
+            prep = (
+                f"[{in_idx}:v:0]trim=duration={length:.3f},"
+                f"setpts=PTS-STARTPTS,fps={fps},{scale}"
+            )
+        elif kind == "image":
             inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
             # Explicit :0 — phone containers often mix mebx data streams.
             prep = f"[{in_idx}:v:0]{scale}"
@@ -7778,8 +7859,8 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
                 f"[{in_idx}:v:0]trim=start={o_in:.3f}:duration={length:.3f},"
                 f"setpts=PTS-STARTPTS,{scale}"
             )
-        # Ken Burns on the PiP box (photo / short B-roll moments).
-        kb = _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
+        # Ken Burns on the PiP box (photo / short B-roll moments) — skip for GIFs.
+        kb = None if kind == "gif" else _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
         if kb:
             prep += "," + kb
         if border > 0:
@@ -8472,7 +8553,7 @@ def upload_asset():
         "asset_id": asset_id,
         "kind": kind,
         "filename": f.filename,
-        "duration": _media_duration(dest) if kind in ("video", "audio") else 0.0,
+        "duration": _media_duration(dest) if kind in ("video", "audio", "gif") else 0.0,
     })
 
 
@@ -8499,7 +8580,7 @@ def list_assets():
             "filename": filename,
             "keyword": meta.get("keyword"),
             "source": meta.get("source"),
-            "duration": _media_duration(p) if kind in ("video", "audio") else 0.0,
+            "duration": _media_duration(p) if kind in ("video", "audio", "gif") else 0.0,
             "mtime": p.stat().st_mtime,
         })
     out.sort(key=lambda a: a["mtime"], reverse=True)
