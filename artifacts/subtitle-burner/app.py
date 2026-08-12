@@ -4693,10 +4693,73 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 def _broll_provider_status() -> dict:
     return {
         "google_cse": bool(os.environ.get("GOOGLE_CSE_API_KEY") and os.environ.get("GOOGLE_CSE_CX")),
-        "pexels": bool(os.environ.get("PEXELS_API_KEY")),
-        "unsplash": bool(os.environ.get("UNSPLASH_ACCESS_KEY")),
+        "pexels": bool((os.environ.get("PEXELS_API_KEY") or "").strip()),
+        "unsplash": bool((os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()),
         "badge": True,
     }
+
+
+def _pexels_api_key() -> str:
+    """Return trimmed Pexels key (Replit/UI pastes often include trailing spaces)."""
+    return (os.environ.get("PEXELS_API_KEY") or "").strip()
+
+
+def _probe_pexels_key() -> dict:
+    """Live check against Pexels — never returns the key value."""
+    key = _pexels_api_key()
+    if not key:
+        return {
+            "configured": False,
+            "ok": False,
+            "http_status": None,
+            "message": "PEXELS_API_KEY is missing in this process. "
+                       "Set the secret name exactly PEXELS_API_KEY, then restart Studio.",
+        }
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://api.pexels.com/v1/search",
+            params={"query": "nature", "per_page": 1},
+            headers={"Authorization": key},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            photos = (r.json() or {}).get("photos") or []
+            return {
+                "configured": True,
+                "ok": True,
+                "http_status": 200,
+                "key_len": len(key),
+                "key_prefix": key[:4] + "…",
+                "hits": len(photos),
+                "message": "Pexels accepted the key.",
+            }
+        if r.status_code in (401, 403):
+            return {
+                "configured": True,
+                "ok": False,
+                "http_status": r.status_code,
+                "key_len": len(key),
+                "key_prefix": key[:4] + "…",
+                "message": "Pexels rejected the key (unauthorized). "
+                           "Regenerate at https://www.pexels.com/api/ and update the secret.",
+            }
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": r.status_code,
+            "key_len": len(key),
+            "key_prefix": key[:4] + "…",
+            "message": f"Pexels returned HTTP {r.status_code}. Try again in a minute.",
+        }
+    except Exception as e:
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": None,
+            "key_len": len(key),
+            "message": f"Could not reach Pexels: {e}",
+        }
 
 
 def _broll_any_photo_provider() -> bool:
@@ -4775,7 +4838,7 @@ def _search_broll_google_cse(query: str, file_type: str | None = None) -> str | 
 
 
 def _search_broll_pexels(query: str) -> str | None:
-    key = os.environ.get("PEXELS_API_KEY", "")
+    key = _pexels_api_key()
     if not key:
         return None
     try:
@@ -4787,6 +4850,7 @@ def _search_broll_pexels(query: str) -> str | None:
             timeout=20,
         )
         if r.status_code >= 400:
+            ai_logger.warning(f"Pexels B-roll search HTTP {r.status_code}")
             return None
         photos = (r.json() or {}).get("photos") or []
         if not photos:
@@ -5065,16 +5129,30 @@ def fetch_auto_overlays():
 
 @app.route("/broll/status", methods=["GET"])
 def broll_status():
-    """Which B-roll image providers are configured."""
+    """Which B-roll image providers are configured.
+
+    Add ?probe=1 to live-test Pexels (does not return the secret).
+    """
     st = _broll_provider_status()
-    return jsonify({
+    out = {
         "providers": st,
         "photo_ready": _broll_any_photo_provider(),
         "hint": (
             "Set PEXELS_API_KEY and/or UNSPLASH_ACCESS_KEY and/or "
-            "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll."
+            "GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX for photo B-roll. "
+            "After changing Replit Secrets, restart the repl. "
+            "Call /broll/status?probe=1 to validate Pexels."
         ),
-    })
+    }
+    if str(request.args.get("probe") or "").strip() in ("1", "true", "yes"):
+        out["pexels_probe"] = _probe_pexels_key()
+    return jsonify(out)
+
+
+@app.route("/broll/test-pexels", methods=["GET"])
+def broll_test_pexels():
+    """Live Pexels key check — never echoes the full key."""
+    return jsonify(_probe_pexels_key())
 
 
 @app.route("/jobs")
