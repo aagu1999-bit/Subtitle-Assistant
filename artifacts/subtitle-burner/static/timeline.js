@@ -1366,7 +1366,7 @@
       x: ref.x != null ? Number(ref.x) : 0.58,
       y: ref.y != null ? Number(ref.y) : 0.06,
       w: ref.w != null ? Number(ref.w) : 0.34,
-      h: ref.h != null ? Number(ref.h) : null,
+      h: ref.h != null ? Number(ref.h) : 0.22,
       opacity: ref.opacity != null ? Number(ref.opacity) : 1.0,
       fit: ref.fit || "cover",
       fade_in: ref.fade_in != null ? Number(ref.fade_in) : 0.15,
