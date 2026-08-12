@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-33-broll-approve";
+  const TL_BUILD = "studio-editor-build-34-seek-sync";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -253,6 +253,21 @@
       played += Math.max(0, b - a);
     }
     return played;
+  }
+
+  /** Inverse of sourceTimeToLocalOutput — map output-local seconds back into source time. */
+  function localOutputToSourceTime(clip, localOt) {
+    const ranges = keepRangesForClip(clip, { allowEmpty: true });
+    let played = 0;
+    let remain = Math.max(0, Number(localOt) || 0);
+    for (let i = 0; i < ranges.length; i++) {
+      const [a, b] = ranges[i];
+      const d = Math.max(0, b - a);
+      if (remain <= d + 0.0001) return a + Math.min(d, remain);
+      remain -= d;
+      played += d;
+    }
+    return Number(clip.out) || Number(clip.in) || 0;
   }
 
   // Main clips are sequential; compute each clip's start by cumulative duration.
@@ -906,18 +921,38 @@
     if (!clip || !w) return;
     const v = $("tlPreviewVideo");
     if (!v) return;
-    const src = "/raw-upload/" + clip.source_job_id;
-    if (v.getAttribute("src") !== src) {
+    // Keep this Main clip selected so the playhead maps source → output correctly.
+    if (clip.id && tl && tl.tracks && tl.tracks.main) {
+      const exists = tl.tracks.main.some((c) => c.id === clip.id);
+      if (exists) {
+        selected = { track: "main", id: clip.id };
+        logoSelected = false;
+      }
+    }
+    const src = clip.source_job_id ? ("/raw-upload/" + clip.source_job_id) : null;
+    if (src && v.getAttribute("src") !== src) {
       v.src = src;
       previewingOutput = false;
       const wrap = v.closest(".tl-preview");
       if (wrap) wrap.classList.add("has-video");
+    } else {
+      previewingOutput = false;
     }
     const t = Math.max(clip.in || 0, Math.min(clip.out || 1e9, Number(w.start) || 0));
-    try { v.currentTime = t; } catch (e) { /* ignore */ }
-    highlightTranscriptAt(t);
-    updatePlayhead();
-    updateStageCompositor();
+    const apply = () => {
+      try { v.currentTime = t; } catch (e) { /* ignore */ }
+      highlightTranscriptAt(t);
+      updatePlayhead();
+      updateStageCompositor();
+      renderTracks();
+      renderProps();
+    };
+    if (src && v.readyState < 1) {
+      v.addEventListener("loadedmetadata", apply, { once: true });
+      v.load();
+    } else {
+      apply();
+    }
   }
 
   async function renderTranscript(clip) {
@@ -1112,7 +1147,9 @@
       });
 
       row.addEventListener("click", (e) => {
-        if (textEl.contains(e.target) || delBtn.contains(e.target)) return;
+        if (delBtn.contains(e.target)) return;
+        // Word spans handle their own seek; phrase/time click seeks to phrase start.
+        if (e.target && e.target.closest && e.target.closest(".tl-tword")) return;
         seekTranscriptWord(clip, group[0]);
         doc.querySelectorAll(".tl-phrase-row").forEach((r) => r.classList.remove("active"));
         row.classList.add("active");
@@ -1774,7 +1811,8 @@
   }
 
   // ---- Selection + properties ----
-  function selectClip(track, id) {
+  function selectClip(track, id, opts) {
+    opts = opts || {};
     selected = { track, id };
     logoSelected = false;
     const c = findClip(track, id);
@@ -1793,7 +1831,9 @@
       const wrap = v.closest(".tl-preview");
       if (v.getAttribute("src") !== src) { v.src = src; previewingOutput = false; }
       wrap.classList.add("has-video");
-      if (seekTo != null) { try { v.currentTime = seekTo; } catch (e) {} }
+      if (seekTo != null && !opts.preserveSeek) {
+        try { v.currentTime = seekTo; } catch (e) {}
+      }
     }
     // Selecting a Main clip surfaces its transcript — unless the user pinned Media.
     if (track === "main" && c && leftTabPinned !== "media") {
@@ -1824,14 +1864,35 @@
   // preview is that source clip, so map source-time into the clip's slot.
   function playheadOutputTime() {
     const v = $("tlPreviewVideo");
-    if (!v) return null;
+    if (!v || !tl) return null;
     const t = v.currentTime || 0;
     if (previewingOutput) return t;
     if (selected && selected.track === "main") {
       const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
-      if (idx < 0) return null;
-      const c = tl.tracks.main[idx];
-      return mainStart(idx) + sourceTimeToLocalOutput(c, t);
+      if (idx >= 0) {
+        const c = tl.tracks.main[idx];
+        return mainStart(idx) + sourceTimeToLocalOutput(c, t);
+      }
+    }
+    // Map preview source time → output even when an Overlay/Effect is selected
+    // (common while scrubbing). Prefer the Main clip whose [in,out] contains t
+    // so split same-source clips (IMG_0022 ×2) land on the right playhead slot.
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      if (!c.source_job_id) continue;
+      if (v.getAttribute("src") !== "/raw-upload/" + c.source_job_id) continue;
+      const cin = c.in || 0;
+      const cout = c.out != null ? c.out : 1e9;
+      if (t >= cin - 0.05 && t <= cout + 0.05) {
+        return mainStart(i) + sourceTimeToLocalOutput(c, t);
+      }
+    }
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      if (!c.source_job_id) continue;
+      if (v.getAttribute("src") === "/raw-upload/" + c.source_job_id) {
+        return mainStart(i) + sourceTimeToLocalOutput(c, t);
+      }
     }
     return null;
   }
@@ -1845,6 +1906,150 @@
     ph.style.left = (TRACK_LABEL_W + ot * PPS) + "px";
     const lab = $("tlPlayheadTime");
     if (lab) lab.textContent = fmtTime(ot);
+  }
+
+  /** Convert a pointer X inside #tlTimeline into output timeline seconds. */
+  function outputTimeFromClientX(clientX) {
+    const root = $("tlTimeline");
+    if (!root) return 0;
+    const rect = root.getBoundingClientRect();
+    const pad = 8; // .tl-timeline padding
+    const x = clientX - rect.left + (root.scrollLeft || 0) - pad;
+    return Math.max(0, (x - TRACK_LABEL_W) / PPS);
+  }
+
+  /**
+   * Seek the preview + playhead to an output-timeline time.
+   * Loads the covering Main clip when not viewing a full render.
+   */
+  function seekToOutputTime(ot, opts) {
+    opts = opts || {};
+    if (!tl) return;
+    ot = Math.max(0, Number(ot) || 0);
+    const v = $("tlPreviewVideo");
+    if (!v) return;
+
+    let idx = -1;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const s = mainStart(i);
+      const e = s + clipDuration(tl.tracks.main[i]);
+      if (ot >= s - 0.0001 && ot < e + 0.0001) { idx = i; break; }
+    }
+    if (idx < 0 && tl.tracks.main.length) {
+      idx = tl.tracks.main.length - 1;
+      const end = mainStart(idx) + clipDuration(tl.tracks.main[idx]);
+      ot = Math.max(mainStart(idx), end - 0.05);
+    }
+
+    if (previewingOutput && !opts.forceSource) {
+      try { v.currentTime = ot; } catch (e) { /* ignore */ }
+      updatePlayhead();
+      updateStageCompositor();
+      if (idx >= 0 && leftTab === "transcript") {
+        const c = tl.tracks.main[idx];
+        const local = ot - mainStart(idx);
+        highlightTranscriptAt(localOutputToSourceTime(c, local));
+      }
+      return;
+    }
+
+    if (idx < 0) {
+      updatePlayhead();
+      return;
+    }
+
+    const c = tl.tracks.main[idx];
+    const local = ot - mainStart(idx);
+    const srcT = localOutputToSourceTime(c, local);
+    if (!opts.keepSelection) {
+      selected = { track: "main", id: c.id };
+      logoSelected = false;
+    }
+
+    const finish = () => {
+      try { v.currentTime = srcT; } catch (e) { /* ignore */ }
+      if (leftTab === "transcript") {
+        const trClip = (opts.keepSelection && selected && selected.track === "main")
+          ? findClip("main", selected.id)
+          : c;
+        if (trClip && trClip.source_job_id === c.source_job_id) {
+          if (!transcriptWords) renderTranscript(trClip);
+          else highlightTranscriptAt(srcT);
+        }
+      }
+      updatePlayhead();
+      updateStageCompositor();
+      renderTracks();
+      if (!opts.quietProps && !opts.keepSelection) renderProps();
+    };
+
+    if (c.source_job_id) {
+      const src = "/raw-upload/" + c.source_job_id;
+      if (v.getAttribute("src") !== src) {
+        v.src = src;
+        previewingOutput = false;
+        const wrap = v.closest(".tl-preview");
+        if (wrap) wrap.classList.add("has-video");
+        v.addEventListener("loadedmetadata", finish, { once: true });
+        try { v.load(); } catch (e) { finish(); }
+        return;
+      }
+    }
+    previewingOutput = false;
+    finish();
+  }
+
+  function wireTimelineSeek() {
+    const root = $("tlTimeline");
+    const ruler = $("tlRuler");
+    if (!root || root._seekWired) return;
+    root._seekWired = true;
+
+    const onSeekPointer = (e) => {
+      if (e.button != null && e.button !== 0) return;
+      // Don't steal clip drag / resize handles.
+      if (e.target.closest && (
+        e.target.closest(".tl-clip-handle") ||
+        e.target.closest(".tl-track-controls") ||
+        e.target.closest("button")
+      )) return;
+      // Clicking a real clip still selects+drags via onTimelineMouseDown —
+      // but also seek to that X so the cursor jumps under the click.
+      const ot = outputTimeFromClientX(e.clientX);
+      // Empty lane / ruler / pending ghost: seek only (no drag).
+      const onClip = e.target.closest && e.target.closest(".tl-clip") && !e.target.closest(".tl-clip-pending");
+      if (!onClip || e.target.closest(".tl-ruler") || e.target === root || e.target.classList.contains("tl-track-lane")) {
+        seekToOutputTime(ot, { quietProps: !!onClip });
+      } else if (onClip) {
+        // Selecting a clip already jumps preview to clip.in — override to click time.
+        seekToOutputTime(ot, { quietProps: true });
+      }
+    };
+
+    if (ruler) {
+      ruler.style.cursor = "ew-resize";
+      ruler.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        seekToOutputTime(outputTimeFromClientX(e.clientX));
+        const move = (ev) => seekToOutputTime(outputTimeFromClientX(ev.clientX), { quietProps: true });
+        const up = () => {
+          document.removeEventListener("pointermove", move);
+          document.removeEventListener("pointerup", up);
+          renderProps();
+        };
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", up);
+      });
+    }
+
+    // Empty areas of lanes / timeline chrome (not starting a clip drag).
+    root.addEventListener("pointerdown", (e) => {
+      if (e.target.closest && e.target.closest(".tl-clip") && !e.target.closest(".tl-clip-pending")) return;
+      if (e.target.closest && e.target.closest(".tl-ruler")) return;
+      if (e.target.closest && e.target.closest(".tl-track-controls")) return;
+      onSeekPointer(e);
+    });
   }
 
   // ---- Split the selected Main clip at the playhead ----
@@ -3628,10 +3833,12 @@
 
   function onTimelineMouseDown(e) {
     const clipEl = e.target.closest(".tl-clip");
-    if (!clipEl) return;
+    if (!clipEl || clipEl.classList.contains("tl-clip-pending")) return;
     const track = clipEl.dataset.track;
     const id = clipEl.dataset.id;
-    selectClip(track, id);
+    selectClip(track, id, { preserveSeek: true });
+    // Jump playhead to the clicked time on the clip (not always clip.in).
+    seekToOutputTime(outputTimeFromClientX(e.clientX), { quietProps: true, keepSelection: true });
     const handle = e.target.closest(".tl-clip-handle");
     const c = findClip(track, id);
     if (!c) return;
@@ -4170,19 +4377,8 @@
         on("tlZoomOut", "onclick", () => setZoom(-4));
         document.addEventListener("keydown", onEditorKeyDown);
 
-        // Click / scrub anywhere on ruler to seek playhead
-        const ruler = $("tlRuler");
-        if (ruler) {
-          ruler.addEventListener("pointerdown", (e) => {
-            const rect = ruler.getBoundingClientRect();
-            const clickX = e.clientX - rect.left;
-            const t = Math.max(0, clickX / PPS);
-            const v = $("tlPreviewVideo");
-            if (v) v.currentTime = t;
-            updatePlayhead();
-            updateStageCompositor();
-          });
-        }
+        // Click / scrub ruler + empty lanes to seek playhead (output time).
+        wireTimelineSeek();
 
         on("tlProjectBtn", "onclick", () => {
           // Logo / project panel — clear selection so renderProps shows project settings.
