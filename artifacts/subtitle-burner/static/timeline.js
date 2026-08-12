@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-32-resize-look-props";
+  const TL_BUILD = "studio-editor-build-33-broll-approve";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -28,6 +28,7 @@
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
   let selected = null;     // { track, id }
   let logoSelected = false; // project logo selected for on-stage resize
+  let pendingBroll = [];   // suggested overlays awaiting Accept / Skip / Replace
   let sources = [];        // [{job_id, filename, ...}]
   let assets = [];         // [{asset_id, kind, duration, ext}]
   const srcDur = {};       // job_id -> duration cache
@@ -1655,6 +1656,43 @@
           lane.appendChild(mark);
         }
       });
+
+      // Ghost pending B-roll on the Overlay lane (not in the project until Accept).
+      if (track === "overlay" && pendingBroll.length) {
+        pendingBroll.forEach((p) => {
+          const start = p.start || 0;
+          const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
+          const el = document.createElement("div");
+          el.className = "tl-clip tl-clip-overlay tl-clip-pending";
+          el.style.left = (LANE_OFFSET + start * PPS) + "px";
+          el.style.width = Math.max(20, dur * PPS) + "px";
+          el.title = `Pending B-roll: ${p.keyword || "overlay"} — Accept in Media`;
+          el.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setLeftTab("media", { pin: true });
+            renderPendingBroll();
+            const card = document.querySelector(`.tl-broll-card[data-pending-id="${p.id}"]`);
+            if (card) {
+              try { card.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+              card.classList.add("flash");
+              setTimeout(() => card.classList.remove("flash"), 800);
+            }
+          });
+          const label = document.createElement("div");
+          label.className = "tl-clip-label";
+          label.textContent = p.keyword || "B-roll";
+          el.appendChild(label);
+          if (p.asset_id) {
+            const thumb = document.createElement("div");
+            thumb.className = "tl-clip-film";
+            thumb.style.backgroundImage = `url("/asset/${p.asset_id}")`;
+            thumb.style.backgroundSize = "cover";
+            thumb.style.opacity = "0.45";
+            el.appendChild(thumb);
+          }
+          lane.appendChild(el);
+        });
+      }
     });
     updatePlayhead();
   }
@@ -2491,6 +2529,40 @@
           media.style.transform = `scale(${kbScale.toFixed(4)})`;
         }
       }
+    });
+
+    // Ghost pending B-roll suggestions on the stage (dimmed, not interactive resize).
+    pendingBroll.forEach((item) => {
+      const start = item.start || 0;
+      const dur = Math.max(0.4, (item.out != null ? Number(item.out) : 1.8) - (item.in || 0));
+      if (ot < start || ot > start + dur) return;
+      const wrap = document.createElement("div");
+      wrap.className = "tl-pending-ghost";
+      wrap.style.position = "absolute";
+      wrap.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
+      wrap.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
+      wrap.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
+      wrap.style.height = ((item.h != null ? item.h : 0.22) * 100) + "%";
+      wrap.style.opacity = "0.72";
+      wrap.style.overflow = "hidden";
+      wrap.style.pointerEvents = "auto";
+      wrap.style.cursor = "pointer";
+      wrap.title = "Pending B-roll — click to review in Media";
+      const media = document.createElement("img");
+      media.src = item.asset_id ? ("/asset/" + item.asset_id) : "";
+      media.style.position = "absolute";
+      media.style.inset = "0";
+      media.style.width = "100%";
+      media.style.height = "100%";
+      media.style.objectFit = item.fit || "cover";
+      media.style.pointerEvents = "none";
+      wrap.appendChild(media);
+      wrap.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setLeftTab("media", { pin: true });
+        renderPendingBroll();
+      });
+      layer.appendChild(wrap);
     });
 
     if (tl.logo && tl.logo.asset_id) {
@@ -4208,22 +4280,200 @@
           : "No keyword overlay moments found in this transcript.");
         return;
       }
-      for (const ov of list) {
-        await addOverlayClip(ov);
-      }
+      // Review queue — do NOT auto-place on Overlay until Accept.
+      pendingBroll = list.map((ov) => Object.assign({}, ov, { id: uid(), _status: "pending" }));
       await loadAssets();
       setLeftTab("media", { pin: true });
-      renderTimeline();
+      renderPendingBroll();
+      renderTracks();
+      updateStageCompositor();
       const st = data.stats || {};
       const bits = [];
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.badge) bits.push(`${st.badge} badge`);
-      setSaveState(`Added ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}` + (bits.length ? ` (${bits.join(", ")})` : "") + " — see Media");
-      if (window.StudioLogger) StudioLogger.clip("auto_overlays", `${list.length}:${mode}`);
+      setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} ready — Accept / Skip in Media` +
+        (bits.length ? ` (${bits.join(", ")})` : ""));
+      if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest B-roll overlays"; }
+    }
+  }
+
+  function renderPendingBroll() {
+    const host = $("tlBrollPending");
+    if (!host) return;
+    if (!pendingBroll.length) {
+      host.classList.add("hidden");
+      host.innerHTML = "";
+      return;
+    }
+    host.classList.remove("hidden");
+    let html = `<div class="tl-broll-pending-head">
+      <strong>Review B-roll (${pendingBroll.length})</strong>
+      <div class="tl-broll-pending-actions">
+        <button type="button" class="tl-chip-btn" data-broll-act="accept-all">Accept all</button>
+        <button type="button" class="tl-chip-btn tl-chip-danger" data-broll-act="skip-all">Skip all</button>
+      </div>
+    </div>`;
+    pendingBroll.forEach((p) => {
+      const start = Number(p.start || 0);
+      const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
+      const srcLabel = p.source === "photo" ? "Photo" : (p.source === "badge" ? "Badge" : (p.source || "Asset"));
+      html += `<div class="tl-broll-card" data-pending-id="${p.id}">
+        <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
+        <div class="tl-broll-meta">
+          <div class="kw">${esc(p.keyword || "B-roll")}</div>
+          <div class="when">${fmtTime(start)} · ${dur.toFixed(1)}s on Overlay</div>
+          <div class="src">${esc(srcLabel)}</div>
+          <div class="tl-broll-btns">
+            <button type="button" class="btn btn-primary" data-broll-act="accept" data-id="${p.id}">Accept</button>
+            <button type="button" class="btn btn-secondary" data-broll-act="skip" data-id="${p.id}">Skip</button>
+            <button type="button" class="btn btn-secondary" data-broll-act="replace" data-id="${p.id}">Replace</button>
+            <button type="button" class="tl-chip-btn" data-broll-act="seek" data-id="${p.id}" title="Seek preview to this moment">↗ Seek</button>
+          </div>
+        </div>
+      </div>`;
+    });
+    host.innerHTML = html;
+    host.querySelectorAll("[data-broll-act]").forEach((btn) => {
+      btn.onclick = () => {
+        const act = btn.dataset.brollAct;
+        const id = btn.dataset.id;
+        if (act === "accept-all") return acceptAllPendingBroll();
+        if (act === "skip-all") return skipAllPendingBroll();
+        if (act === "accept") return acceptPendingBroll(id);
+        if (act === "skip") return skipPendingBroll(id);
+        if (act === "replace") return replacePendingBroll(id, btn);
+        if (act === "seek") return seekPendingBroll(id);
+      };
+    });
+  }
+
+  function _pendingById(id) {
+    return pendingBroll.find((p) => p.id === id) || null;
+  }
+
+  function seekPendingBroll(id) {
+    const p = _pendingById(id);
+    if (!p) return;
+    const v = $("tlPreviewVideo");
+    const t = Number(p.start || 0);
+    if (v) {
+      try { v.currentTime = t; } catch (_) {}
+      updatePlayhead();
+      updateStageCompositor();
+    }
+  }
+
+  async function acceptPendingBroll(id) {
+    const p = _pendingById(id);
+    if (!p) return;
+    pendingBroll = pendingBroll.filter((x) => x.id !== id);
+    renderPendingBroll();
+    const { id: _drop, _status, ...ref } = p;
+    await addOverlayClip(ref);
+    renderTracks();
+    updateStageCompositor();
+    setSaveState(`Accepted “${p.keyword || "B-roll"}” → Overlay`);
+  }
+
+  function skipPendingBroll(id) {
+    const p = _pendingById(id);
+    if (!p) return;
+    pendingBroll = pendingBroll.filter((x) => x.id !== id);
+    // Best-effort cleanup of unused suggestion asset (ignore failures).
+    if (p.asset_id) {
+      api("/delete-asset/" + p.asset_id, { method: "POST" }).catch(() => {});
+    }
+    renderPendingBroll();
+    renderTracks();
+    updateStageCompositor();
+    loadAssets().catch(() => {});
+    setSaveState(`Skipped “${p.keyword || "B-roll"}”`);
+  }
+
+  async function acceptAllPendingBroll() {
+    const list = pendingBroll.slice();
+    pendingBroll = [];
+    renderPendingBroll();
+    for (const p of list) {
+      const { id: _drop, _status, ...ref } = p;
+      await addOverlayClip(ref);
+    }
+    renderTracks();
+    updateStageCompositor();
+    setSaveState(`Accepted ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}`);
+  }
+
+  function skipAllPendingBroll() {
+    const list = pendingBroll.slice();
+    pendingBroll = [];
+    list.forEach((p) => {
+      if (p.asset_id) api("/delete-asset/" + p.asset_id, { method: "POST" }).catch(() => {});
+    });
+    renderPendingBroll();
+    renderTracks();
+    updateStageCompositor();
+    loadAssets().catch(() => {});
+    setSaveState(`Skipped ${list.length} suggestion${list.length === 1 ? "" : "s"}`);
+  }
+
+  async function replacePendingBroll(id, btn) {
+    const p = _pendingById(id);
+    if (!p) return;
+    const card = document.querySelector(`.tl-broll-card[data-pending-id="${id}"]`);
+    if (card) card.classList.add("is-replacing");
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    const modeEl = $("tlBrollMode");
+    const placeEl = $("tlBrollPlacement");
+    const mode = modeEl ? modeEl.value : "auto";
+    const placement = placeEl ? placeEl.value : "pip";
+    let jobId = null;
+    if (tl && tl.tracks.main[0]) jobId = tl.tracks.main[0].source_job_id;
+    if (!jobId && typeof window.currentJobId !== "undefined") jobId = window.currentJobId;
+    try {
+      const body = {
+        budget: 1,
+        mode,
+        placement,
+        keywords: [{
+          text: p.keyword || "B-roll",
+          start: p.start || 0,
+          duration: Math.max(1.2, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0)),
+        }],
+      };
+      if (jobId) body.job_id = jobId;
+      const data = await api("/fetch-auto-overlays", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const next = (data.overlays || [])[0];
+      if (!next || !next.asset_id) {
+        alert("No replacement found for “" + (p.keyword || "B-roll") + "”. Try another mode.");
+        return;
+      }
+      const oldAsset = p.asset_id;
+      Object.assign(p, next, {
+        id: p.id,
+        start: p.start,
+        keyword: p.keyword || next.keyword,
+        _status: "pending",
+      });
+      if (oldAsset && oldAsset !== p.asset_id) {
+        api("/delete-asset/" + oldAsset, { method: "POST" }).catch(() => {});
+      }
+      await loadAssets();
+      renderPendingBroll();
+      renderTracks();
+      updateStageCompositor();
+      setSaveState(`Replaced “${p.keyword}” candidate`);
+    } catch (e) {
+      alert("Replace failed: " + e.message);
+    } finally {
+      if (card) card.classList.remove("is-replacing");
     }
   }
 

@@ -4896,6 +4896,30 @@ def fetch_auto_overlays():
     placement = str(data.get("placement") or "pip").lower().strip()
 
     callouts = _keyword_callouts_for_window(words, 0.0, 1e9, budget)
+    # Optional: replace/refetch specific keywords (approval UI "Replace").
+    raw_kw = data.get("keywords")
+    if isinstance(raw_kw, list) and raw_kw:
+        forced = []
+        for item in raw_kw[:budget]:
+            if isinstance(item, str) and item.strip():
+                forced.append({"text": item.strip(), "start": 0.0, "duration": 1.8})
+            elif isinstance(item, dict) and str(item.get("text") or "").strip():
+                try:
+                    start = float(item.get("start") or 0)
+                except (TypeError, ValueError):
+                    start = 0.0
+                try:
+                    dur = float(item.get("duration") or 1.8)
+                except (TypeError, ValueError):
+                    dur = 1.8
+                forced.append({
+                    "text": str(item.get("text")).strip(),
+                    "start": max(0.0, start),
+                    "duration": max(1.0, dur),
+                })
+        if forced:
+            callouts = forced
+
     overlays = []
     providers = _broll_provider_status()
     used_photo = 0

@@ -984,3 +984,114 @@
   background: #3a1e24;
   color: #fff;
 }
+
+/* ---- Pending B-roll approval ---- */
+.tl-broll-pending {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 340px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.tl-broll-pending.hidden { display: none; }
+.tl-broll-pending-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tl-broll-pending-head strong {
+  font-size: .8rem;
+  color: #e8eaee;
+}
+.tl-broll-pending-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tl-broll-card {
+  border: 1px solid #3a4260;
+  border-radius: 10px;
+  background: #12151e;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+.tl-broll-card.is-replacing { opacity: 0.55; pointer-events: none; }
+.tl-broll-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #0e1118;
+  border: 1px solid #2a2f3a;
+}
+.tl-broll-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tl-broll-meta .kw {
+  font-size: .8rem;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-broll-meta .when {
+  font-size: .7rem;
+  color: #8b91a0;
+}
+.tl-broll-meta .src {
+  font-size: .68rem;
+  color: #a8b0ff;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.tl-broll-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.tl-broll-btns .btn {
+  font-size: .72rem;
+  padding: 4px 8px;
+}
+.tl-clip-pending {
+  border: 1.5px dashed #9785ff !important;
+  background: rgba(108, 92, 255, 0.22) !important;
+  opacity: 0.85;
+}
+.tl-clip-pending .tl-clip-label::before {
+  content: "⏳ ";
+}
+.tl-pending-ghost {
+  outline: 2px dashed rgba(151, 133, 255, 0.95);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.35);
+}
+.tl-pending-ghost::after {
+  content: "Pending — Accept in Media";
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(0,0,0,.65);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 2;
+}
+.tl-broll-card.flash {
+  box-shadow: 0 0 0 2px #9785ff;
+}
