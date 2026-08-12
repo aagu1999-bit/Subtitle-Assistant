@@ -1169,16 +1169,28 @@ def _get_diarization_pipeline():
                 )
         except Exception as err:
             err_str = str(err)
+            token_hint = (
+                f"HF_TOKEN is set in this process ({len(token)} chars)."
+                if token else
+                "HF_TOKEN is NOT set in the running Studio process."
+            )
             if (
                 "gated" in err_str.lower()
                 or "401" in err_str
                 or "403" in err_str
                 or "private" in err_str.lower()
+                or "unauthorized" in err_str.lower()
             ):
                 raise RuntimeError(
-                    "Hugging Face Access Error: Please verify you have accepted the free model "
-                    "agreements at https://hf.co/pyannote/speaker-diarization-3.1 and "
-                    "https://hf.co/pyannote/segmentation-3.0."
+                    "Hugging Face rejected the token for pyannote models. "
+                    f"{token_hint} "
+                    "Do all of these with the SAME HF account: "
+                    "(1) Accept https://hf.co/pyannote/speaker-diarization-3.1 "
+                    "(2) Accept https://hf.co/pyannote/segmentation-3.0 "
+                    "(you need BOTH — diarization alone is not enough) "
+                    "(3) Create a Read token at https://huggingface.co/settings/tokens "
+                    "(4) Put it in .env.local as HF_TOKEN=hf_... and RESTART the Studio server. "
+                    f"Raw error: {err_str[:240]}"
                 ) from err
             raise
         if pipeline is None:
@@ -1208,29 +1220,30 @@ def _get_diarization_pipeline():
         return _diarization_pipeline
 
 
-def _warm_diarization_pipeline() -> None:
-    """Background warm so the first Analyze doesn't pay full model-download cost."""
-    try:
-        if not (
-            os.environ.get(HUGGINGFACE_TOKEN_ENV)
-            or os.environ.get("HUGGINGFACE_TOKEN")
-            or os.environ.get("HF_TOKEN")
-        ):
-            return
-        _get_diarization_pipeline()
-    except Exception as e:
-        print(f"[diarize] warm skipped: {e}", flush=True)
-
-
-threading.Thread(target=_warm_diarization_pipeline, daemon=True).start()
-
-
 def _hf_token_present() -> bool:
     return bool(
         os.environ.get(HUGGINGFACE_TOKEN_ENV)
         or os.environ.get("HUGGINGFACE_TOKEN")
         or os.environ.get("HF_TOKEN")
     )
+
+
+def _warm_diarization_pipeline() -> None:
+    """Optional background warm. Disabled by default — model download/load
+    steals CPU/disk from uploads + Whisper. Set DIARIZATION_WARM=1 to enable.
+    """
+    try:
+        if os.environ.get("DIARIZATION_WARM", "").strip() not in ("1", "true", "True", "yes"):
+            return
+        if not _hf_token_present():
+            return
+        _get_diarization_pipeline()
+    except Exception as e:
+        print(f"[diarize] warm skipped: {e}", flush=True)
+
+
+# Only runs when DIARIZATION_WARM=1 (off by default so upload stays fast).
+threading.Thread(target=_warm_diarization_pipeline, daemon=True).start()
 
 
 def _probe_analyze_deps() -> dict:
