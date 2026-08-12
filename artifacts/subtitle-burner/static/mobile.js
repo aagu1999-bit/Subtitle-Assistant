@@ -19,6 +19,10 @@
 
   function setMobileNavActive(tab) {
     document.querySelectorAll("#mobileBottomNav .mobile-nav-btn").forEach((btn) => {
+      if (btn.dataset.action === "export") {
+        btn.classList.remove("active");
+        return;
+      }
       btn.classList.toggle("active", btn.dataset.tab === tab);
     });
   }
@@ -49,6 +53,11 @@
 
     document.querySelectorAll("#mobileBottomNav .mobile-nav-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
+        if (btn.dataset.action === "export") {
+          if (typeof window.runInstantExport === "function") window.runInstantExport();
+          else alert("Export is still loading — wait a second and try again.");
+          return;
+        }
         const tab = btn.dataset.tab;
         setMobileNavActive(tab);
         closeMobilePanel();

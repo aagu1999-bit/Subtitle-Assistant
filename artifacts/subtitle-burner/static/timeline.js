@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-39-no-auto-kenburns";
+  const TL_BUILD = "studio-editor-build-40-export-capcut";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4367,7 +4367,7 @@
       return;
     }
     const btn = $("tlRenderBtn");
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
     setRenderStatus("Queued…");
     try {
       // Caption look wins: refresh Timeline style from it before baking ASS.
@@ -4381,9 +4381,13 @@
       pollRender();
     } catch (e) {
       setRenderStatus("Error: " + e.message);
-      btn.disabled = false;
+      if (btn) btn.disabled = false;
     }
   }
+  window.renderTimelineVideo = renderTimelineVideo;
+  window.timelineHasMainClips = function () {
+    return !!(tl && tl.tracks && tl.tracks.main && tl.tracks.main.length);
+  };
 
   function pollRender() {
     clearInterval(pollTimer);
@@ -5087,7 +5091,8 @@
     }
   }
 
-  // Branding tab → Timeline: caption style, speaker colors, headline, logo.
+  // Branding tab → Timeline: caption style, speaker colors, headline, logo,
+  // plus CapCut pack extras (canvas, punch, ken burns, color grade, B-roll defaults).
   window.applyTimelineBranding = function (style, opts) {
     if (!tl) {
       alert("Open or create a Timeline project first.");
@@ -5097,7 +5102,7 @@
     style = normalizeTlStyle(style || {});
     opts = opts || {};
     tl.style = Object.assign({}, tl.style || {}, style);
-    const sc = style.speaker_colors || {};
+    const sc = style.speaker_colors || opts.speaker_color_map || {};
     const merged = Object.assign({}, tl.speaker_colors || {});
     Object.keys(sc).forEach((k) => { if (sc[k]) merged[k] = sc[k]; });
     if (sc.Host && !merged.SPEAKER_00) merged.SPEAKER_00 = sc.Host;
@@ -5115,8 +5120,51 @@
         opts.logo,
       );
     }
+    if (opts.canvas) {
+      const c = String(opts.canvas).replace(":", "x");
+      if (c === "9x16" || c === "16x9" || c === "1x1") {
+        tl.canvas = c;
+        if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+      }
+    }
+    // Punch zoom / Ken Burns / color grade on Main clips (opt-in from CapCut packs).
+    if (opts.punch_zoom && opts.punch_zoom.enabled && tl.tracks.main.length) {
+      tl.tracks.main.forEach((clip) => {
+        clip.punch_zoom = {
+          enabled: true,
+          intensity: opts.punch_zoom.intensity || "med",
+        };
+      });
+    }
+    if (opts.ken_burns && opts.ken_burns.enabled && tl.tracks.main.length) {
+      tl.tracks.main.forEach((clip) => {
+        if (clip.cutaway) return; // still cutaways stay static unless user enables
+        clip.ken_burns = {
+          enabled: true,
+          direction: opts.ken_burns.direction || "in",
+          intensity: opts.ken_burns.intensity || "low",
+        };
+      });
+    }
+    if (opts.color_grade) {
+      tl.tracks.main.forEach((clip) => {
+        clip.color_grade = opts.color_grade;
+      });
+    }
+    if (opts.broll_mode && $("tlBrollMode")) {
+      const modeEl = $("tlBrollMode");
+      const opt = modeEl.querySelector(`option[value="${opts.broll_mode}"]`);
+      if (opt && !opt.disabled) modeEl.value = opts.broll_mode;
+    }
+    if (opts.broll_placement && $("tlBrollPlacement")) {
+      $("tlBrollPlacement").value = opts.broll_placement;
+    }
+    if (opts.broll_scope && $("tlBrollScope")) {
+      $("tlBrollScope").value = opts.broll_scope;
+    }
     selected = null;
     renderTimeline();
+    applyStage();
     scheduleSave();
     setSaveState("Branding applied ✓");
     // Refresh media library so the new logo asset appears.

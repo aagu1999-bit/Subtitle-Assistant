@@ -227,6 +227,7 @@
             <div style="display:flex;flex-wrap:wrap;gap:8px">
               <button type="button" id="readyOpenLongFormBtn" class="btn btn-primary btn-sm hidden" title="Open a 16:9 Timeline for the full upload — windowed B-roll, Main cutaways">Edit as Long-form (16:9)</button>
               <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Edit in Timeline</button>
+              <button type="button" id="readyInstantExportBtn" class="btn btn-primary btn-sm" title="Burn captions with the current Caption look into an MP4">⚡ Instant Export</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
               <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
             </div>
@@ -292,7 +293,10 @@
       </select>
       <button id="saveBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:8px;font-size:.78rem" title="Save your current style, colors, and banner as a reusable custom preset">💾 Save My Brand Preset</button>
       <button id="loadBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Restore your saved custom brand preset">↩ Load</button>
-      <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Push caption style, speaker colors, and headline into the open Timeline project">🎬 Apply → Timeline</button>
+      <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="margin-left:4px;font-size:.78rem" title="Push caption style, speaker colors, canvas, effects, and B-roll defaults into the open Timeline project">🎬 Apply → Timeline</button>
+      <p id="capcutTemplateHint" class="muted" style="width:100%;margin:8px 0 0;font-size:.74rem;line-height:1.4">
+        Templates set captions <em>and</em> edit defaults (canvas, reframe, punch zoom, Ken Burns, B-roll). Use <strong>Apply → Timeline</strong> to push them onto a project.
+      </p>
     </div>
 
     <div class="row" style="margin-bottom:20px;">
@@ -1522,9 +1526,15 @@
   <button type="button" class="mobile-nav-btn" data-tab="compilation">
     <span class="ico">🎞</span><span class="lbl">Queue</span>
   </button>
+  <button type="button" class="mobile-nav-btn" id="mobileExportBtn" data-action="export" title="Instant Export MP4">
+    <span class="ico">⚡</span><span class="lbl">Export</span>
+  </button>
 </nav>
 <div id="mobilePanelScrim" class="mobile-panel-scrim" hidden></div>
 
+<script>
+  window.CAPCUT_TEMPLATES = {{ capcut_templates | default({}) | tojson }};
+</script>
 <script src="{{ url_for('static', filename='studio-logger.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='timeline.js') }}?v={{ asset_version }}"></script>
@@ -1541,20 +1551,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tabBtn) tabBtn.click();
     });
   });
-  // Header Instant Export — primary handler lives in app.js (flushes Caption look).
-  // Fallback only if the studio script failed to load.
+  // Header Instant Export is wired in app.js (runInstantExport). Fallback only if JS failed.
   document.getElementById("headerExportBtn")?.addEventListener("click", () => {
-    if (typeof flushCaptionLookToJob === "function") return; // app.js Smart Export owns this
-    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
-      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
-      if (typeof setActiveTab === "function") setActiveTab("ingest");
-      return;
-    }
-    const r = document.getElementById("renderBtn");
-    const g = document.getElementById("go");
-    if (r && !r.disabled && r.offsetParent !== null) r.click();
-    else if (g && !g.disabled) g.click();
-    else alert("Open Transcript Cut / Branding and click Render when your edits are ready.");
+    if (typeof window.runInstantExport === "function") return;
+    alert("Export is still loading — wait a second and try again, or hard-refresh.");
   });
 });
 </script>

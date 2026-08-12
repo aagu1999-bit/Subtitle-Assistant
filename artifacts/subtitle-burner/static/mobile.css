@@ -17,8 +17,8 @@
   border-top: 1px solid #2a2f3a;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 2px;
 }
 .mobile-nav-btn {
   appearance: none;

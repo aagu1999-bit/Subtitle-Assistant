@@ -2219,14 +2219,18 @@ async function maybeAutoGenerateShorts(jobId, opts) {
 // ---- Phase 2: Render ----
 // (legacy maybeAutoGenerateShorts replaced above; keep render wiring)
 renderBtn.onclick = async () => {
-  const editedWords = collectEditedWords();
-
-  if (!editedWords.length) {
+  if (typeof window.runInstantExport === "function") {
+    return window.runInstantExport({ forceJobRender: true });
+  }
+  const editedWords = collectEditedWords({ silent: true });
+  const words = editedWords.length ? editedWords : (currentWords || []);
+  if (!words.length) {
+    alert("No subtitle phrases to render — upload and wait for transcript ready.");
     return;
   }
 
   const emojiRules = getEmojiRules();
-  currentWords = editedWords;
+  currentWords = words;
   saveDraftNow();
 
   result.classList.add("hidden");
@@ -2241,7 +2245,7 @@ renderBtn.onclick = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         job_id: currentJobId,
-        words: editedWords,
+        words,
         style: getStyle(),
         audio: getAudio(),
         emoji_rules: emojiRules,
@@ -5697,53 +5701,137 @@ function _renderAssemblyBar() {
   }
 })();
 
-// ---- Smart Export Engine (Header Controller) ----
+// ---- Smart Export Engine (Header + mobile Export) ----
 (function() {
+  let _exportBusy = false;
+
+  function activeStudioTab() {
+    const activeTabBtn = document.querySelector("#mainTabs .main-tab.active")
+      || document.querySelector(".workflow-steps .main-tab.active")
+      || document.querySelector(".main-tab.active");
+    return activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "ingest";
+  }
+
+  function showExportProgress(msg) {
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    if (progress) progress.classList.remove("hidden");
+    if (result) result.classList.add("hidden");
+    if (barFill) barFill.style.width = "8%";
+    if (statusText) statusText.textContent = msg || "Exporting…";
+    try {
+      (progress || statusText)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    } catch (e) { /* ignore */ }
+  }
+
+  async function renderCurrentJobDirect() {
+    if (!currentJobId) throw new Error("No active video.");
+    const edited = (typeof collectEditedWords === "function")
+      ? collectEditedWords({ silent: true })
+      : [];
+    const words = (edited && edited.length) ? edited : (currentWords || []);
+    if (!words.length) {
+      throw new Error("No transcript words to burn. Wait until Ingest shows ready.");
+    }
+    currentWords = words;
+    if (typeof flushCaptionLookToJob === "function") {
+      try { await flushCaptionLookToJob(); } catch (e) { /* best-effort */ }
+    }
+    const style = typeof getStyle === "function" ? getStyle() : {};
+    const audio = typeof getAudio === "function" ? getAudio() : {};
+    const emojiRules = typeof getEmojiRules === "function" ? getEmojiRules() : [];
+    showExportProgress("Sending Instant Export…");
+    if (renderBtn) renderBtn.disabled = true;
+    const res = await fetch("/render", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        words,
+        style,
+        audio,
+        emoji_rules: emojiRules,
+      }),
+    });
+    const job = await res.json();
+    if (!res.ok || job.error) throw new Error(job.error || ("HTTP " + res.status));
+    pollRender(job.job_id);
+  }
+
+  window.runInstantExport = async function runInstantExport(opts) {
+    opts = opts || {};
+    if (_exportBusy) return;
+    _exportBusy = true;
+    const headerBtn = $("headerExportBtn");
+    const readyBtn = $("readyInstantExportBtn");
+    const mobileBtn = $("mobileExportBtn");
+    const prevHeader = headerBtn ? headerBtn.textContent : "";
+    try {
+      if (headerBtn) { headerBtn.disabled = true; headerBtn.textContent = "Exporting…"; }
+      if (readyBtn) readyBtn.disabled = true;
+      if (mobileBtn) mobileBtn.disabled = true;
+
+      if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+        alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+        if (typeof setActiveTab === "function") setActiveTab("ingest");
+        return;
+      }
+
+      if (window.StudioLogger) StudioLogger.action("instantExport", "click", activeStudioTab());
+
+      if (typeof flushCaptionLookToJob === "function" && currentJobId) {
+        try { await flushCaptionLookToJob(); } catch (e) { /* best-effort */ }
+      }
+
+      const tabName = activeStudioTab();
+
+      // Timeline project with Main clips → Timeline Render (full edit bake).
+      if (!opts.forceJobRender && tabName === "editor" && typeof window.renderTimelineVideo === "function") {
+        const hasMain = !!(window.timelineHasMainClips && window.timelineHasMainClips());
+        if (hasMain) {
+          showExportProgress("Rendering Timeline…");
+          await window.renderTimelineVideo();
+          return;
+        }
+      }
+
+      if (tabName === "highlights") {
+        const batchBtn = $("batchExportBtn");
+        if (batchBtn && !batchBtn.disabled) {
+          batchBtn.click();
+          return;
+        }
+      }
+
+      if ($("clipAssemblyBar") && !$("clipAssemblyBar").classList.contains("hidden")) {
+        const expAss = $("clipAssemblyExport");
+        if (expAss && !expAss.disabled) {
+          expAss.click();
+          return;
+        }
+      }
+
+      // Default: burn current job captions → MP4 (works even when Render UI is in a hidden tab).
+      await renderCurrentJobDirect();
+    } catch (e) {
+      alert("Instant Export failed: " + (e && e.message ? e.message : e));
+      if (renderBtn) renderBtn.disabled = false;
+      if (progress) progress.classList.add("hidden");
+    } finally {
+      _exportBusy = false;
+      if (headerBtn) { headerBtn.disabled = false; headerBtn.textContent = prevHeader || "⚡ Instant Export MP4"; }
+      if (readyBtn) readyBtn.disabled = false;
+      if (mobileBtn) mobileBtn.disabled = false;
+    }
+  };
+
   const headerBtn = $("headerExportBtn");
-  if (!headerBtn) return;
-
-  headerBtn.addEventListener("click", async () => {
-    // Determine active tab
-    const activeTabBtn = document.querySelector(".main-tab.active");
-    const tabName = activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "edit";
-
-    if (window.StudioLogger) StudioLogger.action("headerExportBtn", "click", `tab:${tabName}`);
-
-    if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
-      alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
-      if (typeof setActiveTab === "function") setActiveTab("ingest");
-      return;
-    }
-
-    // Flush Caption look so Instant Export / Timeline / batch always burn current fonts.
-    if (typeof flushCaptionLookToJob === "function" && currentJobId) {
-      try { await flushCaptionLookToJob(); } catch { /* best-effort */ }
-    }
-
-    if (tabName === "highlights") {
-      const batchBtn = $("batchExportBtn");
-      if (batchBtn) { batchBtn.click(); return; }
-    }
-    if (tabName === "editor") {
-      const tlBtn = $("tlRenderBtn");
-      if (tlBtn) { tlBtn.click(); return; }
-    }
-    if ($("clipAssemblyBar") && !$("clipAssemblyBar").classList.contains("hidden")) {
-      const expAss = $("clipAssemblyExport");
-      if (expAss) { expAss.click(); return; }
-    }
-
-    // Default to main Edit Studio render
-    const rBtn = $("renderBtn");
-    const gBtn = $("go");
-    if (rBtn && !rBtn.disabled && rBtn.offsetParent !== null) {
-      rBtn.click();
-    } else if (gBtn && !gBtn.disabled) {
-      gBtn.click();
-    } else {
-      alert("No active video or edit to render. Upload a video to begin!");
-    }
-  });
+  if (headerBtn) {
+    headerBtn.addEventListener("click", () => window.runInstantExport());
+  }
+  const readyExport = $("readyInstantExportBtn");
+  if (readyExport) {
+    readyExport.addEventListener("click", () => window.runInstantExport({ forceJobRender: true }));
+  }
 })();
 
 // ---- Batch Export All Shorts Handler ----
@@ -5826,49 +5914,155 @@ function _renderAssemblyBar() {
   });
 })();
 
-// ---- CapCut Viral Templates ----
-const CAPCUT_TEMPLATES = {
-  podcast_interview: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", group: 2, headline: "Mind-Blowing Secret", speakerColors: true },
-  capcut_reels: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1, headline: "", speakerColors: false, punch_zoom: { enabled: true, intensity: "med" } },
-  product_spotlight: { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", group: 3, headline: "Must Have Product!", speakerColors: false },
-  cinematic_vlog: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", group: 4, headline: "", speakerColors: false },
-};
+// ---- CapCut Viral Templates (rich packs from server CAPCUT_TEMPLATES) ----
+const CAPCUT_TEMPLATES = (typeof window !== "undefined" && window.CAPCUT_TEMPLATES && Object.keys(window.CAPCUT_TEMPLATES).length)
+  ? window.CAPCUT_TEMPLATES
+  : {
+      podcast_interview: {
+        canvas: "9x16", font: "Montserrat Thin Black", size: 64,
+        primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", group: 2,
+        headline: "Mind-Blowing Secret", viral_preset: "hormozi", speaker_colors: true,
+        speaker_color_map: { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
+        reframe: { enabled: true, top_panel: "active", bottom_panel: "full" },
+        punch_zoom: { enabled: false }, auto_overlays: false, broll_mode: "auto",
+        broll_placement: "pip", broll_scope: "full",
+      },
+      capcut_reels: {
+        canvas: "9x16", font: "Integral CF", size: 68,
+        primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1,
+        headline: "", viral_preset: "mrbeast", speaker_colors: false,
+        punch_zoom: { enabled: true, intensity: "med" }, auto_overlays: true,
+        broll_mode: "auto", broll_placement: "pip", broll_scope: "full",
+      },
+      product_spotlight: {
+        canvas: "9x16", font: "Anton", size: 72,
+        primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", group: 3,
+        headline: "📍 Featured Product", viral_preset: "neon", speaker_colors: false,
+        punch_zoom: { enabled: true, intensity: "high" }, color_grade: "warm",
+        auto_overlays: true, broll_mode: "auto", broll_placement: "center",
+        broll_scope: "selected",
+      },
+      cinematic_vlog: {
+        canvas: "16x9", font: "DM Sans", size: 56,
+        primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", group: 4,
+        headline: "", viral_preset: "karaoke", speaker_colors: false,
+        punch_zoom: { enabled: false },
+        ken_burns: { enabled: true, direction: "in", intensity: "low" },
+        color_grade: "cinematic", auto_overlays: false, broll_mode: "auto",
+        broll_placement: "center", broll_scope: "playhead",
+      },
+    };
+
+window._activeCapcutKey = window._activeCapcutKey || "podcast_interview";
+
+function _setSelectOptionValue(sel, value) {
+  if (!sel || value == null) return;
+  const font = String(value);
+  if ([...sel.options].some((o) => o.value === font)) {
+    sel.value = font;
+    return;
+  }
+  const soft = [...sel.options].find((o) =>
+    o.value.toLowerCase().includes(font.split(" ")[0].toLowerCase())
+  );
+  if (soft) sel.value = soft.value;
+}
+
+function applyCapcutTemplateToUi(tKey, opts) {
+  opts = opts || {};
+  const t = CAPCUT_TEMPLATES[tKey];
+  if (!t) return null;
+  window._activeCapcutKey = tKey;
+  window._pendingCapcutTemplate = t;
+
+  if ($("font")) _setSelectOptionValue($("font"), t.font);
+  if ($("group") && t.group != null) {
+    $("group").value = t.group;
+    if ($("groupVal")) $("groupVal").textContent = t.group;
+  }
+  if ($("size") && t.size != null) {
+    $("size").value = t.size;
+    if ($("sizeVal")) $("sizeVal").textContent = t.size;
+  }
+  if ($("headlineBanner") && t.headline != null) $("headlineBanner").value = t.headline;
+  if ($("speakerColorsEnabled")) $("speakerColorsEnabled").checked = !!t.speaker_colors;
+  if (t.speaker_color_map && typeof syncSpeakerColorPickers === "function") {
+    try {
+      syncSpeakerColorPickers(Object.keys(t.speaker_color_map));
+      Object.entries(t.speaker_color_map).forEach(([id, color]) => {
+        const inp = document.querySelector(`[data-speaker-color="${id}"]`);
+        if (inp && color) inp.value = color;
+      });
+    } catch (e) { /* optional */ }
+  }
+
+  if (t.punch_zoom) {
+    if ($("punchZoomEnabled")) $("punchZoomEnabled").checked = !!t.punch_zoom.enabled;
+    if ($("punchZoomIntensity") && t.punch_zoom.intensity) {
+      $("punchZoomIntensity").value = t.punch_zoom.intensity;
+    }
+  } else if ($("punchZoomEnabled")) {
+    $("punchZoomEnabled").checked = false;
+  }
+
+  if (t.reframe) {
+    if ($("reframeEnabled")) $("reframeEnabled").checked = !!t.reframe.enabled;
+    if ($("reframeTopSelect") && t.reframe.top_panel) $("reframeTopSelect").value = t.reframe.top_panel;
+    if ($("reframeBottomSelect") && t.reframe.bottom_panel) $("reframeBottomSelect").value = t.reframe.bottom_panel;
+  }
+
+  const preset = t.viral_preset || ({
+    podcast_interview: "hormozi",
+    capcut_reels: "mrbeast",
+    product_spotlight: "neon",
+    cinematic_vlog: "karaoke",
+  })[tKey];
+  const presetBtn = preset
+    ? document.querySelector(`#viralPresets .theme[data-preset="${preset}"]`)
+    : null;
+  if (presetBtn && !opts.skipPresetClick) {
+    presetBtn.click();
+  } else {
+    if ($("primary") && t.primary) $("primary").value = t.primary;
+    if ($("highlight") && t.highlight) $("highlight").value = t.highlight;
+    if ($("accent") && t.accent) $("accent").value = t.accent;
+  }
+
+  // Re-apply pack-specific colors/fonts after viral preset may overwrite them.
+  if ($("primary") && t.primary) $("primary").value = t.primary;
+  if ($("highlight") && t.highlight) $("highlight").value = t.highlight;
+  if ($("accent") && t.accent) $("accent").value = t.accent;
+  if ($("font")) _setSelectOptionValue($("font"), t.font);
+  if ($("group") && t.group != null) {
+    $("group").value = t.group;
+    if ($("groupVal")) $("groupVal").textContent = t.group;
+  }
+
+  const hint = $("capcutTemplateHint");
+  if (hint) {
+    const bits = [];
+    if (t.canvas) bits.push("canvas " + String(t.canvas).replace("x", ":"));
+    if (t.reframe && t.reframe.enabled) bits.push("reframe on");
+    if (t.punch_zoom && t.punch_zoom.enabled) bits.push("punch zoom");
+    if (t.ken_burns && t.ken_burns.enabled) bits.push("Ken Burns");
+    if (t.color_grade) bits.push("grade " + t.color_grade);
+    if (t.auto_overlays) bits.push("auto B-roll");
+    hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> ready: "
+      + (bits.join(" · ") || "captions only")
+      + ". Use <strong>Apply → Timeline</strong> to push canvas/effects/B-roll defaults onto a project.";
+  }
+
+  if (typeof scheduleDraftSave === "function") scheduleDraftSave();
+  if (typeof updateFontPreview === "function") updateFontPreview();
+  return t;
+}
+
+window.applyCapcutTemplateToUi = applyCapcutTemplateToUi;
 
 const capcutTemplateEl = document.getElementById("capcutTemplate");
 if (capcutTemplateEl) {
   capcutTemplateEl.addEventListener("change", () => {
-    const tKey = capcutTemplateEl.value;
-    const t = CAPCUT_TEMPLATES[tKey];
-    if (!t) return;
-    
-    if (document.getElementById("font")) document.getElementById("font").value = t.font;
-    if (document.getElementById("group")) { document.getElementById("group").value = t.group; if (document.getElementById("groupVal")) document.getElementById("groupVal").textContent = t.group; }
-    if (document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = t.headline;
-    if (document.getElementById("speakerColorsEnabled")) document.getElementById("speakerColorsEnabled").checked = t.speakerColors;
-    
-    if (t.punch_zoom) {
-      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = t.punch_zoom.enabled;
-      if (document.getElementById("punchZoomIntensity")) document.getElementById("punchZoomIntensity").value = t.punch_zoom.intensity;
-    } else {
-      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = false;
-    }
-    
-    const presetMap = {
-      podcast_interview: "hormozi",
-      capcut_reels: "mrbeast",
-      product_spotlight: "neon",
-      cinematic_vlog: "karaoke"
-    };
-    const presetBtn = document.querySelector(`#viralPresets .theme[data-preset="${presetMap[tKey]}"]`);
-    if (presetBtn) presetBtn.click();
-    else {
-      if (document.getElementById("size")) document.getElementById("size").value = t.size;
-      if (document.getElementById("primary")) document.getElementById("primary").value = t.primary;
-      if (document.getElementById("highlight")) document.getElementById("highlight").value = t.highlight;
-      if (document.getElementById("accent")) document.getElementById("accent").value = t.accent;
-      if (typeof scheduleDraftSave === "function") scheduleDraftSave();
-      if (typeof updateFontPreview === "function") updateFontPreview();
-    }
+    applyCapcutTemplateToUi(capcutTemplateEl.value);
   });
 }
 
@@ -5944,17 +6138,43 @@ window._brandLogoAssetId = window._brandLogoAssetId || null;
 })();
 
 async function applyBrandingToTimeline() {
+  const tKey = (typeof capcutTemplateEl !== "undefined" && capcutTemplateEl && capcutTemplateEl.value)
+    || window._activeCapcutKey
+    || "podcast_interview";
+  const pack = (typeof applyCapcutTemplateToUi === "function"
+    ? applyCapcutTemplateToUi(tKey, { skipPresetClick: false })
+    : null) || window._pendingCapcutTemplate || CAPCUT_TEMPLATES[tKey] || {};
   const style = typeof flushCaptionLookToJob === "function"
     ? await flushCaptionLookToJob()
     : (typeof captionLookStyle === "function" ? captionLookStyle() : getStyle());
   if (typeof window.ensureTimelineInit === "function") {
     await window.ensureTimelineInit();
   }
+  // Ensure a project exists so branding has somewhere to land.
+  if (typeof window.openTimelineEditor === "function" && currentJobId) {
+    const needOpen = !(window.timelineHasMainClips && window.timelineHasMainClips());
+    if (needOpen) {
+      await window.openTimelineEditor(currentJobId, {
+        canvas: pack.canvas || undefined,
+        longForm: pack.canvas === "16x9",
+        label: pack.label || undefined,
+      });
+    }
+  }
   if (typeof window.applyTimelineBranding !== "function") {
     alert("Timeline Editor is not available.");
     return;
   }
-  const opts = {};
+  const opts = {
+    canvas: pack.canvas || null,
+    punch_zoom: pack.punch_zoom || null,
+    ken_burns: pack.ken_burns || null,
+    color_grade: pack.color_grade || null,
+    broll_mode: pack.broll_mode || null,
+    broll_placement: pack.broll_placement || null,
+    broll_scope: pack.broll_scope || null,
+    speaker_color_map: pack.speaker_color_map || null,
+  };
   if (window._brandLogoAssetId) {
     opts.logo = {
       asset_id: window._brandLogoAssetId,
@@ -5963,7 +6183,16 @@ async function applyBrandingToTimeline() {
   }
   window.applyTimelineBranding(style, opts);
   setActiveTab("editor");
-  if (window.StudioLogger) StudioLogger.clip("branding_to_timeline", "style + speaker colors" + (opts.logo ? " + logo" : ""));
+  if (pack.auto_overlays) {
+    const statusEl = $("tlBrollStatus");
+    if (statusEl) {
+      statusEl.textContent = "Template wants auto B-roll — open Media and tap Suggest B-roll.";
+      statusEl.style.color = "#f0c674";
+    }
+  }
+  if (window.StudioLogger) {
+    StudioLogger.clip("capcut_to_timeline", String(tKey) + (opts.logo ? " + logo" : ""));
+  }
 }
 
 const applyBrandingToTimelineBtn = $("applyBrandingToTimelineBtn");
