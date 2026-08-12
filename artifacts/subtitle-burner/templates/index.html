@@ -220,6 +220,7 @@
               Next: edit phrases in Timeline, set caption look, or find shorts.
             </p>
             <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <button type="button" id="readyOpenLongFormBtn" class="btn btn-primary btn-sm hidden" title="Open a 16:9 Timeline for the full upload — windowed B-roll, Main cutaways">Edit as Long-form (16:9)</button>
               <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Edit in Timeline</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
               <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
@@ -230,7 +231,7 @@
           <section class="panel">
             <div class="section-title">✨ Suggested next steps</div>
             <div style="font-size:0.8rem;color:#c8cdd8;line-height:1.65;background:rgba(30,41,59,0.4);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-              <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, Look (captions + audio), speakers, Effects.</div>
+              <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, Look (captions + audio), speakers, Effects. Long uploads (≥4 min): <strong>Edit as Long-form (16:9)</strong>.</div>
               <div style="margin-bottom:10px"><strong>2. Caption &amp; audio</strong> — Timeline → Look (Hormozi white + yellow karaoke, optional enhancement).</div>
               <div style="margin-bottom:10px"><strong>3. Find Shorts</strong> — optional Gemini clip suggestions on the AI Shorts tab (never auto-runs on upload).</div>
               <div class="muted" style="font-size:.74rem;margin-top:8px;line-height:1.45">
@@ -1290,19 +1291,26 @@
                     <option value="badge" {% if not broll_photo_ready %}selected{% endif %}>Keyword badges only</option>
                   </select>
                 </label>
+                <label class="muted" style="font-size:.74rem">Scope
+                  <select id="tlBrollScope" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
+                    <option value="full">Full transcript</option>
+                    <option value="selected">Selected Main clip</option>
+                    <option value="playhead">Near playhead (±30–45s)</option>
+                  </select>
+                </label>
                 <label class="muted" style="font-size:.74rem">Placement
                   <select id="tlBrollPlacement" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
                     <option value="pip" selected>Corner PiP</option>
                     <option value="center">Center overlay</option>
                   </select>
                 </label>
-                <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll overlays</button>
+                <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll</button>
                 <div id="tlBrollPending" class="tl-broll-pending hidden" aria-live="polite"></div>
                 <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
                   {% if broll_photo_ready %}
-                    Photo providers ready. Suggest pulls stock images timed to visual words — <strong>Accept</strong> each before they land on Overlay.
+                    Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong> cutaway (long-form). Scope windows the transcript for long uploads.
                   {% else %}
-                    No photo API keys yet — badges still work. Suggest → review → Accept. Set <code>PEXELS_API_KEY</code>, <code>UNSPLASH_ACCESS_KEY</code>, or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> for real B-roll.
+                    No photo API keys yet — badges still work. Suggest → Overlay / As Main. Set <code>PEXELS_API_KEY</code>, <code>UNSPLASH_ACCESS_KEY</code>, or <code>GOOGLE_CSE_API_KEY</code>+<code>GOOGLE_CSE_CX</code> in Cursor Environment Secrets (and optionally GitHub Actions).
                   {% endif %}
                 </p>
               </div>

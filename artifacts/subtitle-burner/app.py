@@ -4878,7 +4878,8 @@ def fetch_auto_overlays():
     Body: {
       words?: [...], job_id?: str, budget?: int,
       mode?: "auto"|"photo"|"badge",
-      placement?: "pip"|"center"
+      placement?: "pip"|"center",
+      start?: float, end?: float   # optional source-time window (long-form)
     }
     """
     data = request.get_json(force=True) or {}
@@ -4895,7 +4896,20 @@ def fetch_auto_overlays():
         mode = "auto"
     placement = str(data.get("placement") or "pip").lower().strip()
 
-    callouts = _keyword_callouts_for_window(words, 0.0, 1e9, budget)
+    try:
+        win_start = float(data["start"]) if data.get("start") is not None else 0.0
+    except (TypeError, ValueError):
+        win_start = 0.0
+    try:
+        win_end = float(data["end"]) if data.get("end") is not None else 1e9
+    except (TypeError, ValueError):
+        win_end = 1e9
+    if win_end <= win_start:
+        win_start, win_end = 0.0, 1e9
+    win_start = max(0.0, win_start)
+    win_end = max(win_start + 0.5, win_end)
+
+    callouts = _keyword_callouts_for_window(words, win_start, win_end, budget)
     # Optional: replace/refetch specific keywords (approval UI "Replace").
     raw_kw = data.get("keywords")
     if isinstance(raw_kw, list) and raw_kw:
@@ -5003,6 +5017,7 @@ def fetch_auto_overlays():
         "count": len(overlays),
         "mode": mode,
         "placement": placement,
+        "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
         "stats": {"photo": used_photo, "badge": used_badge},
     })
@@ -7326,14 +7341,23 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
                           punch: dict | None = None) -> float:
     """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
 
+    Still-image assets (Main cutaways) are looped for the requested duration.
     Uses an MD5 hash cache to skip FFmpeg re-encoding for unchanged segments,
     speeding up timeline updates by up to 30x.
     """
     dur = max(0.05, t_out - t_in)
-    
+    ext = src.suffix.lower().lstrip(".")
+    is_image = ext in ASSET_EXT_IMAGE
+
     # Calculate unique segment cache key
     mtime = src.stat().st_mtime if src.exists() else 0
-    cache_raw = f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_{json.dumps(ken, sort_keys=True) if ken else ''}_{json.dumps(color, sort_keys=True) if color else ''}_{json.dumps(punch, sort_keys=True) if punch else ''}"
+    cache_raw = (
+        f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_"
+        f"img={int(is_image)}_"
+        f"{json.dumps(ken, sort_keys=True) if ken else ''}_"
+        f"{json.dumps(color, sort_keys=True) if color else ''}_"
+        f"{json.dumps(punch, sort_keys=True) if punch else ''}"
+    )
     cache_hash = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
     cached_segment = CACHE_DIR / f"norm_{cache_hash}.mp4"
 
@@ -7360,19 +7384,33 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         vf += "," + cf
     vf += ",format=yuv420p"
 
-    has_audio = _has_audio_stream(src)
-    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
-    if not has_audio:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
-    cmd += ["-t", f"{dur:.3f}", "-vf", vf,
-            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
-    if has_audio:
-        cmd += ["-af", _tl_declick_af(dur)]
-    if not has_audio:
-        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
-    cmd += [str(out_path)]
-    _tl_run(cmd, "Clip trim")
+    if is_image:
+        # Main cutaway from a still: loop the frame, silent audio bed.
+        cmd = [
+            FFMPEG, "-y",
+            "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", str(src),
+            "-f", "lavfi", "-t", f"{dur:.3f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+            "-t", f"{dur:.3f}", str(out_path),
+        ]
+        _tl_run(cmd, "Still cutaway")
+    else:
+        has_audio = _has_audio_stream(src)
+        cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+        if not has_audio:
+            cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        cmd += ["-t", f"{dur:.3f}", "-vf", vf,
+                *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
+        if has_audio:
+            cmd += ["-af", _tl_declick_af(dur)]
+        if not has_audio:
+            cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+        cmd += [str(out_path)]
+        _tl_run(cmd, "Clip trim")
 
     # Store in cache for future instant re-renders
     try:
@@ -8605,11 +8643,14 @@ def timeline_create():
     """Create a new (empty) timeline editor job.
 
     Optionally seed the main track with the calling job's full clip via
-    {seed_job_id}. Returns {job_id}.
+    {seed_job_id}. Optional canvas (e.g. 16x9 for long-form). Returns {job_id}.
     """
     data = request.get_json(force=True) or {}
     seed_job_id = data.get("seed_job_id")
     label = (data.get("label") or "Timeline edit").strip()[:80] or "Timeline edit"
+    canvas = data.get("canvas") or "9x16"
+    if canvas not in TIMELINE_CANVASES:
+        canvas = "9x16"
 
     job_id = uuid.uuid4().hex
     tracks = {"main": [], "overlay": [], "text": [], "music": []}
@@ -8623,7 +8664,7 @@ def timeline_create():
                 "in": 0.0,
                 "out": dur or 10.0,
             })
-    timeline = _normalize_timeline({"tracks": tracks})
+    timeline = _normalize_timeline({"tracks": tracks, "canvas": canvas})
 
     jobs[job_id] = {
         "status": "timeline_edit",

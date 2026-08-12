@@ -4741,9 +4741,20 @@ function updateReadyActions() {
   const ready = hasReadyTranscript();
   box.classList.toggle("hidden", !ready);
   const hint = $("readyActionsHint");
+  const longBtn = $("readyOpenLongFormBtn");
+  const words = (typeof currentWords !== "undefined" && currentWords) ||
+    (jobsById[currentJobId] && jobsById[currentJobId].words) || [];
+  const dur = typeof _jobDurationFromWords === "function" ? _jobDurationFromWords(words) : 0;
+  const isLong = dur >= 240;
+  if (longBtn) {
+    longBtn.classList.toggle("hidden", !ready || !isLong);
+    if (isLong) longBtn.classList.remove("btn-secondary");
+  }
   if (hint && ready) {
     const name = (jobsById[currentJobId] && jobsById[currentJobId].filename) || "This video";
-    hint.textContent = `${name} is transcribed. Edit phrases in Timeline, set caption look, or find shorts.`;
+    hint.textContent = isLong
+      ? `${name} looks long-form (${Math.round(dur / 60)} min). Prefer Edit as Long-form (16:9), or open Timeline / Find Shorts.`
+      : `${name} is transcribed. Edit phrases in Timeline, set caption look, or find shorts.`;
   }
 }
 
@@ -4782,13 +4793,30 @@ function openTimelineFromReady() {
   }
 }
 
+function openLongFormFromReady() {
+  if (!requireReadyTranscript("Long-form Timeline")) return;
+  if (typeof window.openTimelineEditor === "function" && currentJobId) {
+    window.openTimelineEditor(currentJobId, {
+      longForm: true,
+      canvas: "16x9",
+      newProject: true,
+      replace: true,
+      label: "Long-form edit",
+    });
+  } else {
+    setActiveTab("editor");
+  }
+}
+
 window.openEditWords = openEditWords;
 window.openCaptionLook = openCaptionLook;
+window.openLongFormFromReady = openLongFormFromReady;
 
 [
   ["readyCaptionLookBtn", openCaptionLook],
   ["readyFindShortsBtn", openFindShorts],
   ["readyOpenTimelineBtn", openTimelineFromReady],
+  ["readyOpenLongFormBtn", openLongFormFromReady],
   ["transcriptBackIngestBtn", () => setActiveTab("ingest")],
   ["transcriptCaptionLookBtn", openCaptionLook],
   ["brandingBackIngestBtn", () => setActiveTab("ingest")],

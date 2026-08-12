@@ -1014,6 +1014,9 @@
   gap: 4px;
   flex-wrap: wrap;
 }
+.tl-main-cutaway {
+  background: #0a0c12;
+}
 .tl-broll-card {
   border: 1px solid #3a4260;
   border-radius: 10px;

@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-34-seek-sync";
+  const TL_BUILD = "studio-editor-build-35-long-upload";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -805,7 +805,16 @@
         return addMusicClip(asset);
       }
       if (lane === "main") {
-        // Main track is transcribed jobs today — place media assets as overlay.
+        // Video/image assets can land as Main cutaways (long-form B-roll).
+        if (asset.kind === "image" || asset.kind === "video") {
+          return addMainCutawayClip({
+            asset_id: asset.asset_id,
+            start: playheadOutputTime() || 0,
+            out: asset.kind === "image" ? 2.4 : Math.min(asset.duration || 4, 5),
+            keyword: asset.keyword || asset.filename || null,
+            source: asset.source || null,
+          }, asset);
+        }
         return addOverlayClip({ asset_id: asset.asset_id }, asset);
       }
       if (lane === "overlay") return addOverlayClip({ asset_id: asset.asset_id }, asset);
@@ -1379,6 +1388,97 @@
     }
   }
 
+  /** Insert a still/video asset as a Main cutaway, splitting A-roll at *start* (output time). */
+  async function addMainCutawayClip(ref, asset) {
+    if (!(await ensureProject())) return null;
+    if (!tl.tracks.main.length) {
+      alert("Add an A-roll clip on Main first, then accept B-roll as a cutaway.");
+      return null;
+    }
+    pushHistory();
+    const dur = Math.max(
+      0.8,
+      ref.out != null
+        ? Number(ref.out) - Number(ref.in || 0)
+        : (asset && asset.kind === "image" ? 2.4 : Math.min((asset && asset.duration) || 4, 5)),
+    );
+    const tStart = Math.max(0, Number(ref.start != null ? ref.start : 0));
+    const cut = {
+      id: uid(),
+      source_job_id: null,
+      asset_id: ref.asset_id || (asset && asset.asset_id) || null,
+      in: 0,
+      out: dur,
+      _max: dur,
+      burn_captions: false,
+      cutaway: true,
+      keyword: ref.keyword || null,
+      source: ref.source || null,
+      ken_burns: ref.ken_burns
+        ? Object.assign({}, ref.ken_burns)
+        : (ref.source === "photo" || (asset && asset.kind === "image")
+          ? { enabled: true, direction: "in", intensity: "med" }
+          : null),
+      transition: null,
+    };
+    if (!cut.asset_id) {
+      alert("Cutaway needs an asset.");
+      return null;
+    }
+    insertCutawayIntoMain(tStart, cut);
+    selected = { track: "main", id: cut.id };
+    renderTimeline();
+    scheduleSave();
+    return cut;
+  }
+
+  function insertCutawayIntoMain(tStart, cutClip) {
+    const cutDur = clipDuration(cutClip);
+    let cursor = 0;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      const cDur = clipDuration(c);
+      if (tStart >= cursor + cDur - 0.02) {
+        cursor += cDur;
+        continue;
+      }
+      // Asset cutaways: insert before this clip if we're at its leading edge,
+      // otherwise replace a slice of A-roll (source_job) or splice between assets.
+      if (c.asset_id && !c.source_job_id) {
+        if (tStart <= cursor + 0.05) {
+          tl.tracks.main.splice(i, 0, cutClip);
+        } else {
+          tl.tracks.main.splice(i + 1, 0, cutClip);
+        }
+        return;
+      }
+      const local = Math.max(0, tStart - cursor);
+      const srcIn = Number(c.in) || 0;
+      const midStart = srcIn + local;
+      const midEnd = Math.min(Number(c.out) || midStart + cutDur, midStart + cutDur);
+      const slice = Math.max(0.8, midEnd - midStart);
+      cutClip.out = slice;
+      cutClip._max = slice;
+      const parts = [];
+      if (midStart > srcIn + 0.08) {
+        const before = Object.assign({}, c, { id: uid(), out: midStart, transition: null });
+        before.cuts = (c.cuts || []).filter((r) => r[0] < midStart);
+        parts.push(before);
+      }
+      parts.push(cutClip);
+      if (midEnd < (Number(c.out) || 0) - 0.08) {
+        const after = Object.assign({}, c, {
+          id: uid(), in: midEnd, transition: null,
+        });
+        after.cuts = (c.cuts || []).filter((r) => r[1] > midEnd);
+        parts.push(after);
+      }
+      tl.tracks.main.splice(i, 1, ...parts);
+      return;
+    }
+    tl.tracks.main.push(cutClip);
+  }
+
   async function addOverlayClip(ref, asset) {
     if (!(await ensureProject())) return null;
     pushHistory();
@@ -1797,6 +1897,7 @@
     const isVid = !!(c.source_job_id || (c.asset_id && (assets.find((x) => x.asset_id === c.asset_id) || {}).kind === "video"));
     const icon = isVid ? "🎬" : "🖼";
     let ovBadge = (c.ken_burns && c.ken_burns.enabled) ? " 🔍" : "";
+    if (track === "main" && c.cutaway) ovBadge = " ✂" + ovBadge;
     if (c.keyword) return `${icon} ${c.keyword}${ovBadge}`;
     if (c.asset_id) {
       const a = assets.find((x) => x.asset_id === c.asset_id);
@@ -1821,7 +1922,12 @@
     // can still position boxes against real framing.
     let src = null, seekTo = null;
     if (c && c.source_job_id) { src = "/raw-upload/" + c.source_job_id; seekTo = c.in || 0; }
-    else if (c && c.asset_id && track !== "music") src = "/asset/" + c.asset_id;
+    else if (c && c.asset_id && track !== "music") {
+      const asset = assets.find((x) => x.asset_id === c.asset_id);
+      if (asset && asset.kind === "video") src = "/asset/" + c.asset_id;
+      else if (track !== "main") src = "/asset/" + c.asset_id;
+      // Main still cutaways: keep A-roll under the compositor full-bleed image.
+    }
     if (!src) {
       const fm = tl.tracks.main.find((m) => m.source_job_id);
       if (fm) src = "/raw-upload/" + fm.source_job_id;
@@ -1871,6 +1977,8 @@
       const idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
       if (idx >= 0) {
         const c = tl.tracks.main[idx];
+        // Still / asset Main cutaways have no A-roll source clock.
+        if (c.asset_id && !c.source_job_id) return mainStart(idx);
         return mainStart(idx) + sourceTimeToLocalOutput(c, t);
       }
     }
@@ -1972,7 +2080,7 @@
         const trClip = (opts.keepSelection && selected && selected.track === "main")
           ? findClip("main", selected.id)
           : c;
-        if (trClip && trClip.source_job_id === c.source_job_id) {
+        if (trClip && trClip.source_job_id && trClip.source_job_id === c.source_job_id) {
           if (!transcriptWords) renderTranscript(trClip);
           else highlightTranscriptAt(srcT);
         }
@@ -1994,6 +2102,25 @@
         try { v.load(); } catch (e) { finish(); }
         return;
       }
+    } else if (c.asset_id) {
+      // Still cutaways: keep last A-roll frame under a full-bleed compositor image.
+      // Video assets: load into the preview element.
+      const asset = assets.find((x) => x.asset_id === c.asset_id);
+      if (asset && asset.kind === "video") {
+        const src = "/asset/" + c.asset_id;
+        if (v.getAttribute("src") !== src) {
+          v.src = src;
+          previewingOutput = false;
+          const wrap = v.closest(".tl-preview");
+          if (wrap) wrap.classList.add("has-video");
+          v.addEventListener("loadedmetadata", finish, { once: true });
+          try { v.load(); } catch (e) { finish(); }
+          return;
+        }
+      }
+      previewingOutput = false;
+      finish();
+      return;
     }
     previewingOutput = false;
     finish();
@@ -2282,8 +2409,61 @@
       for (let i = 0; i < tl.tracks.main.length; i++) {
         if (cancelled) break;
         const c = tl.tracks.main[i];
-        if (!c.source_job_id) continue;
         selected = { track: "main", id: c.id };
+        // Still / asset cutaways: hold on the compositor for their duration.
+        if (c.asset_id && !c.source_job_id) {
+          const hold = clipDuration(c);
+          const baseOut = mainStart(i);
+          const asset = assets.find((x) => x.asset_id === c.asset_id);
+          if (asset && asset.kind === "video") {
+            const src = "/asset/" + c.asset_id;
+            if (v.getAttribute("src") !== src) {
+              v.src = src;
+              await waitEvent(v, "loadedmetadata", 8000);
+            }
+            try { v.currentTime = c.in || 0; } catch (e) {}
+            v.play().catch(() => {});
+            await new Promise((resolve) => {
+              const t0 = performance.now();
+              const tick = () => {
+                const elapsed = (performance.now() - t0) / 1000;
+                const ot = baseOut + Math.min(hold, elapsed);
+                const ph = $("tlPlayhead");
+                if (ph) { ph.style.display = "block"; ph.style.left = (TRACK_LABEL_W + ot * PPS) + "px"; }
+                syncMusicAt(ot);
+                updateStageCompositor();
+                if (cancelled || elapsed >= hold - 0.03) {
+                  try { v.pause(); } catch (e) {}
+                  resolve();
+                  return;
+                }
+                requestAnimationFrame(tick);
+              };
+              requestAnimationFrame(tick);
+            });
+          } else {
+            await new Promise((resolve) => {
+              const t0 = performance.now();
+              const tick = () => {
+                const elapsed = (performance.now() - t0) / 1000;
+                const ot = baseOut + Math.min(hold, elapsed);
+                const ph = $("tlPlayhead");
+                if (ph) { ph.style.display = "block"; ph.style.left = (TRACK_LABEL_W + ot * PPS) + "px"; }
+                syncMusicAt(ot);
+                updateStageCompositor();
+                if (cancelled || elapsed >= hold - 0.03) {
+                  resolve();
+                  return;
+                }
+                requestAnimationFrame(tick);
+              };
+              updateStageCompositor();
+              requestAnimationFrame(tick);
+            });
+          }
+          continue;
+        }
+        if (!c.source_job_id) continue;
         if (leftTabPinned !== "media") setLeftTab("transcript");
         renderTranscript(c);
         applyLiveGrade(c, mainStart(i));
@@ -2613,6 +2793,19 @@
     applyPunchZoom(v, ot);
 
     const stHeight = layer.clientHeight || 640;
+
+    // Full-bleed Main cutaway (still / photo) sits under overlays.
+    if (activeMainClip && activeMainClip.asset_id && !activeMainClip.source_job_id) {
+      const asset = assets.find((x) => x.asset_id === activeMainClip.asset_id);
+      if (!asset || asset.kind !== "video") {
+        const cut = document.createElement("img");
+        cut.className = "tl-main-cutaway";
+        cut.src = "/asset/" + activeMainClip.asset_id;
+        cut.alt = activeMainClip.keyword || "Cutaway";
+        cut.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;z-index:1";
+        layer.appendChild(cut);
+      }
+    }
 
     tl.tracks.text.forEach(item => {
       const start = item.start || 0;
@@ -3958,14 +4151,24 @@
   }
 
   // ---- Project lifecycle ----
-  async function newProject() {
+  async function newProject(opts) {
+    opts = opts || {};
     try {
+      const body = {
+        label: opts.label || (opts.canvas === "16x9" ? "Long-form edit" : "Timeline edit"),
+      };
+      if (opts.canvas) body.canvas = opts.canvas;
       const data = await api("/timeline/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label: "Timeline edit" }),
+        body: JSON.stringify(body),
       });
       await openProject(data.job_id);
+      if (opts.canvas && tl) {
+        tl.canvas = opts.canvas;
+        if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+        applyStage();
+      }
       await loadProjects();
     } catch (e) {
       alert("Could not create project: " + e.message);
@@ -4451,19 +4654,62 @@
     const btn = $("tlAutoOverlaysBtn");
     const modeEl = $("tlBrollMode");
     const placeEl = $("tlBrollPlacement");
+    const scopeEl = $("tlBrollScope");
     const mode = modeEl ? modeEl.value : "auto";
     const placement = placeEl ? placeEl.value : "pip";
+    const scope = scopeEl ? scopeEl.value : "full";
+    const isLong = tl && tl.canvas === "16x9";
     if (btn) { btn.disabled = true; btn.textContent = mode === "badge" ? "Making badges…" : "Fetching B-roll…"; }
     try {
       let jobId = null;
+      let winStart = null;
+      let winEnd = null;
       if (selected && selected.track === "main") {
         const c = findClip("main", selected.id);
         jobId = c && c.source_job_id;
+        if (scope === "selected" && c && c.source_job_id) {
+          winStart = Number(c.in) || 0;
+          winEnd = Number(c.out) != null ? Number(c.out) : winStart + 60;
+        }
       }
       if (!jobId && tl.tracks.main[0]) jobId = tl.tracks.main[0].source_job_id;
       if (!jobId && typeof window.currentJobId !== "undefined") jobId = window.currentJobId;
-      const body = { budget: 5, mode, placement };
+
+      if (scope === "playhead") {
+        const ot = playheadOutputTime();
+        const center = ot != null ? ot : 0;
+        const pad = isLong ? 45 : 30;
+        winStart = Math.max(0, center - pad);
+        winEnd = center + pad;
+        // Map output → source when the active Main is an A-roll source clip.
+        const active = activeMainAt(center);
+        if (active && active.source_job_id) {
+          const idx = tl.tracks.main.findIndex((x) => x.id === active.id);
+          const local = center - mainStart(idx);
+          const srcT = localOutputToSourceTime(active, local);
+          winStart = Math.max(0, srcT - pad);
+          winEnd = srcT + pad;
+          jobId = active.source_job_id;
+        }
+      } else if (scope === "selected" && winStart == null) {
+        // Fall back: first Main A-roll window.
+        const c = (tl.tracks.main || []).find((x) => x.source_job_id);
+        if (c) {
+          winStart = Number(c.in) || 0;
+          winEnd = Number(c.out) != null ? Number(c.out) : winStart + 120;
+          jobId = c.source_job_id;
+        }
+      }
+
+      // Long-form: quieter density (fewer suggestions per pass).
+      let budget = isLong ? 4 : 5;
+      if (scope === "playhead") budget = Math.min(budget, 3);
+      if (scope === "selected") budget = isLong ? 4 : 5;
+
+      const body = { budget, mode, placement };
       if (jobId) body.job_id = jobId;
+      if (winStart != null) body.start = winStart;
+      if (winEnd != null) body.end = winEnd;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4473,7 +4719,7 @@
       if (!list.length) {
         alert(mode === "photo"
           ? "No photo B-roll found. Check API keys / try Auto or Badges."
-          : "No keyword overlay moments found in this transcript.");
+          : "No keyword overlay moments found in this window.");
         return;
       }
       // Review queue — do NOT auto-place on Overlay until Accept.
@@ -4487,13 +4733,14 @@
       const bits = [];
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.badge) bits.push(`${st.badge} badge`);
-      setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} ready — Accept / Skip in Media` +
-        (bits.length ? ` (${bits.join(", ")})` : ""));
-      if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}`);
+      const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
+      setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip` +
+        (bits.length ? ` · ${bits.join(", ")}` : ""));
+      if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}:${scope}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest B-roll overlays"; }
+      if (btn) { btn.disabled = false; btn.textContent = "✨ Suggest B-roll"; }
     }
   }
 
@@ -4506,10 +4753,12 @@
       return;
     }
     host.classList.remove("hidden");
+    const asMainDefault = tl && tl.canvas === "16x9";
     let html = `<div class="tl-broll-pending-head">
       <strong>Review B-roll (${pendingBroll.length})</strong>
       <div class="tl-broll-pending-actions">
-        <button type="button" class="tl-chip-btn" data-broll-act="accept-all">Accept all</button>
+        <button type="button" class="tl-chip-btn" data-broll-act="accept-all">${asMainDefault ? "Accept all → Overlay" : "Accept all"}</button>
+        <button type="button" class="tl-chip-btn" data-broll-act="accept-all-main">Accept all → Main</button>
         <button type="button" class="tl-chip-btn tl-chip-danger" data-broll-act="skip-all">Skip all</button>
       </div>
     </div>`;
@@ -4521,10 +4770,11 @@
         <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
         <div class="tl-broll-meta">
           <div class="kw">${esc(p.keyword || "B-roll")}</div>
-          <div class="when">${fmtTime(start)} · ${dur.toFixed(1)}s on Overlay</div>
+          <div class="when">${fmtTime(start)} · ${dur.toFixed(1)}s</div>
           <div class="src">${esc(srcLabel)}</div>
           <div class="tl-broll-btns">
-            <button type="button" class="btn btn-primary" data-broll-act="accept" data-id="${p.id}">Accept</button>
+            <button type="button" class="btn btn-primary" data-broll-act="accept" data-id="${p.id}">Overlay</button>
+            <button type="button" class="btn btn-secondary" data-broll-act="accept-main" data-id="${p.id}">As Main</button>
             <button type="button" class="btn btn-secondary" data-broll-act="skip" data-id="${p.id}">Skip</button>
             <button type="button" class="btn btn-secondary" data-broll-act="replace" data-id="${p.id}">Replace</button>
             <button type="button" class="tl-chip-btn" data-broll-act="seek" data-id="${p.id}" title="Seek preview to this moment">↗ Seek</button>
@@ -4538,8 +4788,10 @@
         const act = btn.dataset.brollAct;
         const id = btn.dataset.id;
         if (act === "accept-all") return acceptAllPendingBroll();
+        if (act === "accept-all-main") return acceptAllPendingBrollAsMain();
         if (act === "skip-all") return skipAllPendingBroll();
         if (act === "accept") return acceptPendingBroll(id);
+        if (act === "accept-main") return acceptPendingBrollAsMain(id);
         if (act === "skip") return skipPendingBroll(id);
         if (act === "replace") return replacePendingBroll(id, btn);
         if (act === "seek") return seekPendingBroll(id);
@@ -4554,13 +4806,8 @@
   function seekPendingBroll(id) {
     const p = _pendingById(id);
     if (!p) return;
-    const v = $("tlPreviewVideo");
     const t = Number(p.start || 0);
-    if (v) {
-      try { v.currentTime = t; } catch (_) {}
-      updatePlayhead();
-      updateStageCompositor();
-    }
+    seekToOutputTime(t, { keepSelection: true, quietProps: true });
   }
 
   async function acceptPendingBroll(id) {
@@ -4573,6 +4820,19 @@
     renderTracks();
     updateStageCompositor();
     setSaveState(`Accepted “${p.keyword || "B-roll"}” → Overlay`);
+  }
+
+  async function acceptPendingBrollAsMain(id) {
+    const p = _pendingById(id);
+    if (!p) return;
+    pendingBroll = pendingBroll.filter((x) => x.id !== id);
+    renderPendingBroll();
+    const { id: _drop, _status, ...ref } = p;
+    const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
+    await addMainCutawayClip(ref, asset);
+    renderTracks();
+    updateStageCompositor();
+    setSaveState(`Accepted “${p.keyword || "B-roll"}” → Main cutaway`);
   }
 
   function skipPendingBroll(id) {
@@ -4601,6 +4861,23 @@
     renderTracks();
     updateStageCompositor();
     setSaveState(`Accepted ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}`);
+  }
+
+  async function acceptAllPendingBrollAsMain() {
+    const list = pendingBroll.slice();
+    pendingBroll = [];
+    renderPendingBroll();
+    // Later cutaways shift Main — accept in reverse chronological order so
+    // earlier `start` times stay valid as we splice.
+    list.sort((a, b) => Number(b.start || 0) - Number(a.start || 0));
+    for (const p of list) {
+      const { id: _drop, _status, ...ref } = p;
+      const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
+      await addMainCutawayClip(ref, asset);
+    }
+    renderTracks();
+    updateStageCompositor();
+    setSaveState(`Accepted ${list.length} Main cutaway${list.length === 1 ? "" : "s"}`);
   }
 
   function skipAllPendingBroll() {
@@ -4739,8 +5016,28 @@
       }
       await ensureInit({ skipAutoOpen: seeding });
 
-      if (opts.newProject || (seeding && !tl) || opts.seedTimeline) {
-        await newProject();
+      const wantCanvas = opts.canvas || (opts.longForm ? "16x9" : null);
+      const forceNew = !!(opts.newProject || opts.longForm || opts.seedTimeline);
+
+      if (forceNew || (seeding && !tl)) {
+        await newProject({
+          canvas: wantCanvas || undefined,
+          label: opts.label || (opts.longForm ? "Long-form edit" : undefined),
+        });
+      }
+
+      if (wantCanvas && tl) {
+        pushHistory();
+        tl.canvas = wantCanvas;
+        if ($("tlCanvas")) $("tlCanvas").value = tl.canvas;
+        // Long-form defaults: quieter B-roll placement (center is less shouty on 16:9).
+        if (opts.longForm) {
+          const placeEl = $("tlBrollPlacement");
+          const scopeEl = $("tlBrollScope");
+          if (placeEl && placeEl.value === "pip") placeEl.value = "center";
+          if (scopeEl) scopeEl.value = "playhead";
+        }
+        applyStage();
       }
 
       // Captions-style AI Edit seed: apply full timeline JSON onto the project.
@@ -4781,10 +5078,10 @@
         return;
       }
 
-      // Single-job seed (Edit range / job row).
+      // Single-job seed (Edit range / job row / long-form ingest).
       if (seedJobId && !sources.find((s) => s.job_id === seedJobId)) await loadSources();
       if (seedJobId && tl) {
-        if (opts.replace) {
+        if (opts.replace || opts.longForm) {
           pushHistory();
           tl.tracks.main = [];
           selected = null;
@@ -4793,6 +5090,10 @@
         seedStyleFromCaptionLook(seedJobId);
         renderTimeline();
         scheduleSave();
+        if (opts.longForm) {
+          setLeftTab("media", { pin: true });
+          setSaveState("Long-form 16:9 — Suggest B-roll near playhead, Accept as Main cutaway");
+        }
       }
     } finally {
       window._tlDeferAutoOpen = false;
