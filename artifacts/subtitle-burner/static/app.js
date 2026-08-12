@@ -3007,6 +3007,8 @@ let jobsById = {};
 window.normalizeCaptionStyle = normalizeCaptionStyle;
 window.styleHasCaptionFields = styleHasCaptionFields;
 window.captionLookStyle = captionLookStyle;
+window.applyStyle = applyStyle;
+window.updateFontPreview = updateFontPreview;
 window.flushCaptionLookToJob = flushCaptionLookToJob;
 window.getStyle = getStyle;
 window.getAudio = getAudio;
@@ -4795,10 +4797,21 @@ window.openCaptionLook = openCaptionLook;
   if (el) el.onclick = fn;
 });
 
-// Timeline toolbar Caption look (element may appear after timeline.js mounts).
+// Timeline toolbar Captions / Audio / Look (elements may appear after timeline.js mounts).
 document.addEventListener("click", (e) => {
-  const btn = e.target && e.target.closest && e.target.closest("#tlCaptionLookBtn");
-  if (!btn) return;
+  const caps = e.target && e.target.closest && e.target.closest("#tlCaptionsBtn");
+  const aud = e.target && e.target.closest && e.target.closest("#tlAudioBtn");
+  const look = e.target && e.target.closest && e.target.closest("#tlCaptionLookBtn");
+  if (!caps && !aud && !look) return;
+  if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
+  if (aud && typeof window.jumpTimelineLook === "function") {
+    window.jumpTimelineLook("audio");
+    return;
+  }
+  if (typeof window.jumpTimelineLook === "function") {
+    window.jumpTimelineLook("captions");
+    return;
+  }
   openCaptionLook();
 });
 

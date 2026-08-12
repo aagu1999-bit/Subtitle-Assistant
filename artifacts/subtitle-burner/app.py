@@ -7449,7 +7449,19 @@ def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> No
         inputs += ["-stream_loop", "-1", "-i", str(path)]
     else:
         inputs += ["-i", str(path)]
-    prep = f"[1:v:0]scale={lw}:-2,setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
+    # Optional free height (on-stage stretch). Otherwise keep aspect via -2.
+    lh = None
+    if logo.get("h") is not None:
+        try:
+            hfrac = min(1.0, max(0.03, float(logo.get("h"))))
+            lh = max(2, int(H * hfrac) // 2 * 2)
+        except (TypeError, ValueError):
+            lh = None
+    if lh:
+        scale = f"scale={lw}:{lh}:force_original_aspect_ratio=disable"
+    else:
+        scale = f"scale={lw}:-2"
+    prep = f"[1:v:0]{scale},setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
     fc = f"{prep};[0:v:0][lg]overlay=x={x}:y={y}:shortest=1[v]"
     _tl_run(
         [FFMPEG, "-y", *inputs, "-filter_complex", fc,

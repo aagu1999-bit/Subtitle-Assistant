@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-31-overlay-audio-props";
+  const TL_BUILD = "studio-editor-build-32-resize-look-props";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -27,6 +27,7 @@
   // ---- State ----
   let tl = null;           // { job_id, label, canvas, fit, fps, tracks }
   let selected = null;     // { track, id }
+  let logoSelected = false; // project logo selected for on-stage resize
   let sources = [];        // [{job_id, filename, ...}]
   let assets = [];         // [{asset_id, kind, duration, ext}]
   const srcDur = {};       // job_id -> duration cache
@@ -684,10 +685,16 @@
   function jumpLookSection(which) {
     setLeftTab("look", { pin: true });
     mountCaptionLookIntoTimeline();
+    const caps = document.getElementById("captionLookCaptionsSection");
+    const audio = document.getElementById("captionLookAudioSection");
+    const bg = document.getElementById("bgMusicPanel");
+    // Focus one panel so options (fonts / audio checkboxes) are actually visible.
+    if (caps && typeof caps.open === "boolean") caps.open = (which !== "audio");
+    if (audio && typeof audio.open === "boolean") audio.open = (which === "audio");
+    if (bg && typeof bg.open === "boolean" && which === "audio") bg.open = false;
     const id = which === "audio" ? "captionLookAudioSection" : "captionLookCaptionsSection";
     const el = document.getElementById(id);
     if (el) {
-      if (typeof el.open === "boolean") el.open = true;
       try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
     }
   }
@@ -1731,6 +1738,7 @@
   // ---- Selection + properties ----
   function selectClip(track, id) {
     selected = { track, id };
+    logoSelected = false;
     const c = findClip(track, id);
     // Choose what the preview shows: the clip's own video, or — for titles /
     // image overlays with no video — the first Main clip as a backdrop so you
@@ -2440,12 +2448,17 @@
         wrap.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
         wrap.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
         wrap.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
-        if (item.h != null) wrap.style.height = (item.h * 100) + "%";
-        else wrap.style.aspectRatio = "16 / 9";
+        if (item.h != null) {
+          wrap.style.height = (item.h * 100) + "%";
+          wrap.style.aspectRatio = "auto";
+        } else {
+          wrap.style.aspectRatio = "16 / 9";
+        }
         wrap.style.opacity = baseOp * fadeMul;
         wrap.style.overflow = "hidden";
         wrap.style.pointerEvents = "auto";
         wrap.style.cursor = "move";
+        wrap.dataset.ovId = item.id;
         if (item.border_px) {
           wrap.style.boxShadow = `0 0 0 ${item.border_px}px #fff`;
         }
@@ -2457,6 +2470,7 @@
         media.style.pointerEvents = "none";
         wrap.appendChild(media);
         wrap.addEventListener("pointerdown", (e) => {
+          logoSelected = false;
           selectClip("overlay", item.id);
           startBoxDrag(e, "overlay", item, wrap);
         });
@@ -2482,20 +2496,32 @@
     if (tl.logo && tl.logo.asset_id) {
       const lg = tl.logo;
       const el = document.createElement("img");
+      el.dataset.logoEl = "1";
       el.style.position = "absolute";
       el.style.left = (lg.x != null ? lg.x : 0.04) * 100 + "%";
       el.style.top = (lg.y != null ? lg.y : 0.04) * 100 + "%";
       el.style.width = (lg.w != null ? lg.w : 0.18) * 100 + "%";
+      if (lg.h != null) {
+        el.style.height = (lg.h * 100) + "%";
+        el.style.objectFit = "fill";
+      } else {
+        el.style.height = "auto";
+        el.style.objectFit = "contain";
+      }
       el.style.opacity = lg.opacity != null ? lg.opacity : 0.9;
       el.style.pointerEvents = "auto";
       el.style.cursor = "move";
       el.src = "/asset/" + lg.asset_id;
 
       el.addEventListener("pointerdown", (e) => {
+        selected = null;
+        logoSelected = true;
+        renderProps();
         startBoxDrag(e, "logo", lg, el);
       });
 
       layer.appendChild(el);
+      if (logoSelected) addPreviewBox("logo", lg, "Logo");
     }
 
     // Render interactive bounding boxes & resize handles for selected elements
@@ -2652,18 +2678,37 @@
       box.textContent = labelText;
     } else {
       box.className = "tl-pbox";
-      box.style.left = (obj.x != null ? obj.x : 0.5) * 100 + "%";
-      box.style.top = (obj.y != null ? obj.y : 0.1) * 100 + "%";
-      box.style.width = (obj.w != null ? obj.w : 0.3) * 100 + "%";
-      if (obj.h != null) box.style.height = (obj.h * 100) + "%";
-      else box.style.aspectRatio = "16 / 9";
+      box.dataset.pboxKind = kind;
+      if (obj.id) box.dataset.pboxId = obj.id;
+      box.style.left = (obj.x != null ? obj.x : (kind === "logo" ? 0.04 : 0.5)) * 100 + "%";
+      box.style.top = (obj.y != null ? obj.y : (kind === "logo" ? 0.04 : 0.1)) * 100 + "%";
+      box.style.width = (obj.w != null ? obj.w : (kind === "logo" ? 0.18 : 0.3)) * 100 + "%";
+      if (obj.h != null) {
+        box.style.height = (obj.h * 100) + "%";
+        box.style.aspectRatio = "auto";
+      } else if (kind === "logo") {
+        box.style.height = "auto";
+        box.style.minHeight = "36px";
+      } else {
+        box.style.aspectRatio = "16 / 9";
+      }
       const lbl = document.createElement("div");
       lbl.className = "tl-pbox-label";
       lbl.textContent = labelText;
       box.appendChild(lbl);
-      const h = document.createElement("div");
-      h.className = "tl-pbox-handle";
-      box.appendChild(h);
+      // Corner + edge handles: free width / height (not locked aspect).
+      [
+        ["se", "nwse-resize"],
+        ["e", "ew-resize"],
+        ["s", "ns-resize"],
+      ].forEach(([dir, cur]) => {
+        const h = document.createElement("div");
+        h.className = "tl-pbox-handle tl-pbox-handle-" + dir;
+        h.dataset.handle = dir;
+        h.style.cursor = cur;
+        h.title = dir === "e" ? "Drag to change width" : (dir === "s" ? "Drag to change height" : "Drag to change width & height");
+        box.appendChild(h);
+      });
     }
     box.addEventListener("pointerdown", (e) => startBoxDrag(e, kind, obj, box));
     layer.appendChild(box);
@@ -2699,16 +2744,48 @@
     layer.appendChild(tag);
   }
 
+  function _liveBoxTarget(kind, obj) {
+    const layer = $("tlOverlayLayer");
+    if (!layer) return null;
+    if (kind === "logo") return layer.querySelector("[data-logo-el]");
+    if (kind === "overlay" && obj && obj.id) return layer.querySelector(`[data-ov-id="${obj.id}"]`);
+    return null;
+  }
+
+  function _applyBoxGeom(el, obj, kind) {
+    if (!el || !obj) return;
+    const dx = (obj.x != null ? obj.x : (kind === "logo" ? 0.04 : 0.5));
+    const dy = (obj.y != null ? obj.y : (kind === "logo" ? 0.04 : 0.1));
+    const dw = (obj.w != null ? obj.w : (kind === "logo" ? 0.18 : 0.3));
+    el.style.left = (dx * 100) + "%";
+    el.style.top = (dy * 100) + "%";
+    el.style.width = (dw * 100) + "%";
+    if (obj.h != null) {
+      el.style.height = (obj.h * 100) + "%";
+      el.style.aspectRatio = "auto";
+      if (kind === "logo") el.style.objectFit = "fill";
+    }
+  }
+
   let boxDrag = null;
   function startBoxDrag(e, kind, obj, box) {
     pushHistory();
     const rect = $("tlStage").getBoundingClientRect();
+    const handleEl = e.target.classList && e.target.classList.contains("tl-pbox-handle")
+      ? e.target
+      : (e.target.closest && e.target.closest(".tl-pbox-handle"));
+    const measuredH = (box && box.offsetHeight && rect.height)
+      ? (box.offsetHeight / rect.height)
+      : (kind === "logo" ? 0.1 : 0.22);
     boxDrag = {
       kind, obj, box, rect,
-      isHandle: e.target.classList.contains("tl-pbox-handle"),
+      isHandle: !!handleEl,
+      handle: (handleEl && handleEl.dataset.handle) || "se",
       sx: e.clientX, sy: e.clientY,
-      ox: obj.x != null ? obj.x : 0.5, oy: obj.y != null ? obj.y : 0.5,
-      ow: obj.w != null ? obj.w : 0.3,
+      ox: obj.x != null ? obj.x : (kind === "logo" ? 0.04 : 0.5),
+      oy: obj.y != null ? obj.y : (kind === "logo" ? 0.04 : 0.1),
+      ow: obj.w != null ? obj.w : (kind === "logo" ? 0.18 : 0.3),
+      oh: obj.h != null ? obj.h : measuredH,
     };
     try { box.setPointerCapture(e.pointerId); } catch (err) {}
     e.preventDefault();
@@ -2716,16 +2793,26 @@
   }
   function onBoxMove(e) {
     if (!boxDrag) return;
-    const { rect, obj, box, isHandle } = boxDrag;
+    const { rect, obj, box, isHandle, handle, kind } = boxDrag;
     if (isHandle) {
-      const w = boxDrag.ow + (e.clientX - boxDrag.sx) / rect.width;
-      obj.w = Math.min(1, Math.max(0.05, w));
-      box.style.width = obj.w * 100 + "%";
+      const dx = (e.clientX - boxDrag.sx) / Math.max(1, rect.width);
+      const dy = (e.clientY - boxDrag.sy) / Math.max(1, rect.height);
+      if (handle === "se" || handle === "e") {
+        obj.w = Math.min(1, Math.max(0.05, boxDrag.ow + dx));
+      }
+      if (handle === "se" || handle === "s") {
+        obj.h = Math.min(1, Math.max(0.05, boxDrag.oh + dy));
+      } else if (obj.h == null && handle === "e") {
+        // Keep existing height if any was measured so width-only doesn't snap aspect.
+        obj.h = boxDrag.oh;
+      }
+      _applyBoxGeom(box, obj, kind);
+      _applyBoxGeom(_liveBoxTarget(kind, obj), obj, kind);
     } else {
-      obj.x = Math.min(1, Math.max(0, boxDrag.ox + (e.clientX - boxDrag.sx) / rect.width));
-      obj.y = Math.min(1, Math.max(0, boxDrag.oy + (e.clientY - boxDrag.sy) / rect.height));
-      box.style.left = obj.x * 100 + "%";
-      box.style.top = obj.y * 100 + "%";
+      obj.x = Math.min(1, Math.max(0, boxDrag.ox + (e.clientX - boxDrag.sx) / Math.max(1, rect.width)));
+      obj.y = Math.min(1, Math.max(0, boxDrag.oy + (e.clientY - boxDrag.sy) / Math.max(1, rect.height)));
+      _applyBoxGeom(box, obj, kind);
+      _applyBoxGeom(_liveBoxTarget(kind, obj), obj, kind);
     }
   }
   function onBoxUp() {
@@ -2733,6 +2820,7 @@
     boxDrag = null;
     renderProps();   // refresh the X/Y/size sliders to the dragged values
     scheduleSave();
+    updateStageCompositor();
   }
 
   // ---- Preview <-> playhead sync (native <video controls> does the seeking) ----
@@ -2848,26 +2936,39 @@
       }
       html += propSection("🔍 Ken Burns (B-roll motion)", kbBody, !!ovKb.enabled);
     } else { // main
+      const st = normalizeTlStyle(tl.style || {});
+      const primary = st.primary_color || st.primary || "#FFFFFF";
+      const highlight = st.highlight_color || st.highlight || "#FFD60A";
+      const fontName = st.font_name || st.font || "Anton";
+      const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
+
       let trimBody = "";
       trimBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       trimBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
-      trimBody += propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
       const trType = (c.transition && c.transition.type) || "";
       trimBody += propSelect("__transition", "Transition into this clip", trType, TRANSITION_OPTS);
-      trimBody += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this.</p>`;
-      html += propSection("✂ Trim & captions", trimBody, true);
+      trimBody += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this. Edit words in the left <strong>Transcript</strong> panel.</p>`;
+      html += propSection("✂ Trim", trimBody, true);
 
-      const cutCount = (c.cuts || []).length;
-      let textBody = `<button class="btn btn-secondary btn-block" data-act="edittext">Edit transcript${cutCount ? ` (${cutCount} cut${cutCount > 1 ? "s" : ""})` : ""}</button>`;
-      textBody += `<p class="muted" style="font-size:.72rem">Strike out words to delete them from the video.</p>`;
-      html += propSection("✂️ Text-based editing", textBody, false);
+      let capBody = propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
+      capBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:6px 0 8px">Caption words come from this clip’s Whisper transcript. Look / branding below is what they render as.</p>`;
+      capBody += `<div class="tl-cap-preview">
+        <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.1rem;letter-spacing:.02em">
+          <span style="color:${esc(primary)}">here with.</span>
+          <span style="color:${esc(highlight)}"> Vanessa,</span>
+        </span>
+        <span class="muted" style="font-size:.7rem;display:block;margin-top:4px">${esc(fontName)} · ${fontSize}px</span>
+      </div>`;
+      capBody += `<div class="tl-prop-grid">${propSelect("__style_font", "Font", fontName, FONT_OPTS)}${propNum("__style_size", "Size", fontSize, 24, 140, 2)}</div>`;
+      capBody += `<div class="tl-prop-grid">${propColor("__style_primary", "Base color", primary)}${propColor("__style_highlight", "Karaoke highlight", highlight)}</div>`;
+      capBody += `<button class="btn btn-secondary btn-block" data-act="open-captions" style="margin-top:6px">🎨 Open Captions (full Look)</button>`;
+      html += propSection("💬 Captions style", capBody, true);
 
-      let aiCam = `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
-      aiCam += `<p class="muted" style="font-size:.72rem">Reads this clip's transcript and proposes timed moves. Apply places them on the <strong>Effects</strong> lane (resize / move freely).</p>`;
-      aiCam += `<div id="tlFxList" style="margin-top:8px"></div>`;
-      html += propSection("✨ AI camera moves", aiCam, false);
-
-      let restyle = `<div class="tl-prop-grid">
+      let aiBody = `<button class="btn btn-secondary btn-block" data-act="suggestfx">Suggest camera moves</button>`;
+      aiBody += `<p class="muted" style="font-size:.72rem">Reads this clip’s transcript and proposes timed moves on the Effects lane.</p>`;
+      aiBody += `<div id="tlFxList" style="margin-top:8px"></div>`;
+      aiBody += `<hr class="tl-sep">`;
+      aiBody += `<div class="tl-prop-grid">
         <label class="tl-prop">Style<select data-restyle-pack>
           <option value="pulse">Pulse</option>
           <option value="clarity">Clarity</option>
@@ -2881,61 +2982,69 @@
           <option value="high">High</option>
         </select></label>
       </div>`;
-      restyle += `<button class="btn btn-secondary btn-block" data-act="restyle" style="margin-top:6px">Restyle shot</button>`;
-      restyle += `<p class="muted" style="font-size:.72rem">Re-runs the AI Edit recipe on this shot only (Captions per-shot restyle).</p>`;
-      html += propSection("🎨 AI Edit this shot", restyle, false);
-
-      const ref = c.reframe || {};
-      let refBody = propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
-      if (ref.enabled) {
-        const pOpts = [["active", "Active Speaker"], ["left", "Left Person"], ["right", "Right Person"], ["full", "Wide Shot"]];
-        refBody += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
-      }
-      html += propSection("📱 9:16 Active Speaker Reframe", refBody, !!ref.enabled);
-
-      html += `<p class="muted" style="font-size:.72rem;margin:8px 0">Prefer the <strong>Effects</strong> lane for timed punch / Ken Burns / split / color. Clip-level toggles below still work for whole-shot looks.</p>`;
+      aiBody += `<button class="btn btn-secondary btn-block" data-act="restyle" style="margin-top:6px">Restyle this shot</button>`;
+      html += propSection("✨ AI", aiBody, false);
 
       const kb = c.ken_burns || {};
-      let kbBody = propCheck("ken_burns.enabled", "Enable on this clip", kb.enabled);
-      if (kb.enabled) {
-        kbBody += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in (push)"], ["out", "Zoom out (pull)"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
-      }
-      html += propSection("🔍 Ken Burns (whole clip)", kbBody, !!kb.enabled);
-
       const pz = c.punch_zoom || {};
-      let pzBody = propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
-      if (pz.enabled) {
-        pzBody += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
-      }
-      html += propSection("⚡ Punch Zoom (whole clip)", pzBody, !!pz.enabled);
-
       const sp = c.split || {};
+      const col = c.color || {};
+      const ref = c.reframe || {};
       const splitOpts = [["", "— pick second video —"]].concat(
         sources.filter((s) => s.job_id !== c.source_job_id).map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
-      let spBody = propCheck("split.enabled", "Enable on this clip", sp.enabled);
+
+      let fxBody = `<p class="muted" style="font-size:.72rem;margin:0 0 8px;line-height:1.4">Whole-clip looks. Prefer the <strong>Effects</strong> lane when you want timed stretches.</p>`;
+
+      fxBody += `<div class="tl-fx-block"><strong>🔍 Ken Burns</strong>`;
+      fxBody += propCheck("ken_burns.enabled", "Enable", kb.enabled);
+      if (kb.enabled) {
+        fxBody += `<div class="tl-prop-grid">${propSelect("ken_burns.direction", "Direction", kb.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("ken_burns.intensity", "Strength", kb.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
+      }
+      fxBody += `</div>`;
+
+      fxBody += `<div class="tl-fx-block"><strong>⚡ Punch zoom</strong>`;
+      fxBody += propCheck("punch_zoom.enabled", "Enable", pz.enabled);
+      if (pz.enabled) {
+        fxBody += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
+      }
+      fxBody += `</div>`;
+
+      fxBody += `<div class="tl-fx-block"><strong>⬓ Split-screen</strong>`;
+      fxBody += propCheck("split.enabled", "Enable", sp.enabled);
       if (sp.enabled) {
-        spBody += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
-        spBody += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
+        fxBody += propSelect("split.source_job_id", "Second video", sp.source_job_id || "", splitOpts);
+        fxBody += `<div class="tl-prop-grid">${propSelect("split.layout", "Layout", sp.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("split.in", "2nd start (s)", sp.in || 0, 0, 99999, 0.1)}</div>`;
         const lay = sp.layout || "stack";
         const place = sp.placement || (lay === "side" ? "second_right" : "second_bottom");
         if (lay === "side") {
-          spBody += propSelect("split.placement", "Second video goes…", place,
+          fxBody += propSelect("split.placement", "Second video goes…", place,
             [["second_left", "Left"], ["second_right", "Right (default)"]]);
         } else {
-          spBody += propSelect("split.placement", "Second video goes…", place,
+          fxBody += propSelect("split.placement", "Second video goes…", place,
             [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
         }
       }
-      html += propSection("⬓ Split-screen (whole clip)", spBody, !!sp.enabled);
+      fxBody += `</div>`;
 
-      const col = c.color || {};
-      let colBody = `<div class="tl-swatches" id="tlSwatches">` +
+      fxBody += `<div class="tl-fx-block"><strong>🎨 Color</strong>`;
+      fxBody += `<div class="tl-swatches" id="tlSwatches">` +
         COLOR_PRESETS.map(([v, t2]) =>
           `<div class="tl-swatch tl-swatch-${v} ${ (col.preset || "none") === v ? "active" : ""}" data-preset="${v}" title="${t2}">${t2}</div>`
         ).join("") + `</div>`;
-      colBody += `<div class="tl-prop-grid" style="margin-top:8px">${propRange("color.brightness", "Brightness", col.brightness != null ? col.brightness : 0, -0.3, 0.3, 0.02)}${propRange("color.contrast", "Contrast", col.contrast != null ? col.contrast : 1, 0.5, 1.5, 0.02)}</div>`;
-      colBody += propRange("color.saturation", "Saturation", col.saturation != null ? col.saturation : 1, 0, 2, 0.05);
-      html += propSection("🎨 Color (whole clip)", colBody, false);
+      fxBody += `<div class="tl-prop-grid" style="margin-top:8px">${propRange("color.brightness", "Brightness", col.brightness != null ? col.brightness : 0, -0.3, 0.3, 0.02)}${propRange("color.contrast", "Contrast", col.contrast != null ? col.contrast : 1, 0.5, 1.5, 0.02)}</div>`;
+      fxBody += propRange("color.saturation", "Saturation", col.saturation != null ? col.saturation : 1, 0, 2, 0.05);
+      fxBody += `</div>`;
+
+      fxBody += `<div class="tl-fx-block"><strong>📱 9:16 speaker reframe</strong>`;
+      fxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 8px">After <strong>Analyze speakers</strong>, crops a vertical stack (e.g. active speaker + wide) for Reels/TikTok. Needs Analyze first.</p>`;
+      fxBody += propCheck("reframe.enabled", "Enable on this clip", ref.enabled);
+      if (ref.enabled) {
+        const pOpts = [["active", "Active Speaker"], ["left", "Left Person"], ["right", "Right Person"], ["full", "Wide Shot"]];
+        fxBody += `<div class="tl-prop-grid">${propSelect("reframe.top_panel", "Top panel", ref.top_panel || "active", pOpts)}${propSelect("reframe.bottom_panel", "Bottom panel", ref.bottom_panel || "full", pOpts)}</div>`;
+      }
+      fxBody += `</div>`;
+
+      html += propSection("✨ Effects (whole clip)", fxBody, false);
     }
 
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
@@ -2972,10 +3081,16 @@
     const lg = tl.logo || {};
     const opts = [["", "— no logo —"]].concat(imgVid.map((a) => [a.asset_id, `${a.kind} · ${a.ext}`]));
     let html = `<h3>⚙ Project</h3>`;
-    html += `<p class="muted" style="font-size:.74rem;line-height:1.4">No clip selected — project settings. Select a Main clip for transcript Analyze, or open <strong>Look</strong> for captions + audio.</p>`;
+    html += `<p class="muted" style="font-size:.74rem;line-height:1.4">No clip selected. Drag media onto lanes, or open Captions / Audio below.</p>`;
     if (!(tl.tracks.main || []).length) {
       html += `<p class="muted" style="font-size:.74rem;padding:8px 10px;background:#181c28;border:1px solid #2a2f3a;border-radius:8px;line-height:1.45">This project has <strong>0 Main clips</strong>. Drag a video from <strong>Media</strong> onto the Main lane to start.</p>`;
     }
+
+    html += `<div class="tl-prop-stack">
+      <button class="btn btn-primary btn-block" data-act="open-captions" type="button" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🎨 Captions</button>
+      <button class="btn btn-secondary btn-block" data-act="open-audio" type="button">🔊 Audio Enhancement</button>
+      <p class="muted" style="font-size:.72rem;line-height:1.4;margin:0">Captions = fonts/colors/karaoke. Audio = noise/voice/loudness (applies on <strong>▶ Render</strong>).</p>
+    </div>`;
 
     let logoBody = "";
     if (!imgVid.length) {
@@ -2983,69 +3098,56 @@
     }
     logoBody += propSelect("__logo_asset", "Logo image", lg.asset_id || "", opts);
     if (lg.asset_id) {
+      logoBody += `<p class="muted" style="font-size:.72rem;line-height:1.4">Click the logo on the preview, then drag the white circles to stretch width/height. Sliders below are fine-tune.</p>`;
       logoBody += `<div class="tl-prop-grid">${propRange("__logo_x", "Position X", lg.x != null ? lg.x : 0.04, 0, 1, 0.01)}${propRange("__logo_y", "Position Y", lg.y != null ? lg.y : 0.04, 0, 1, 0.01)}</div>`;
-      logoBody += `<div class="tl-prop-grid">${propRange("__logo_w", "Size (width %)", lg.w != null ? lg.w : 0.18, 0.03, 0.6, 0.01)}${propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05)}</div>`;
+      logoBody += `<div class="tl-prop-grid">${propRange("__logo_w", "Width", lg.w != null ? lg.w : 0.18, 0.03, 0.8, 0.01)}${propRange("__logo_h", "Height", lg.h != null ? lg.h : 0.1, 0.03, 0.8, 0.01)}</div>`;
+      logoBody += propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05);
+      logoBody += `<button class="btn btn-secondary btn-block" data-act="select-logo" type="button" style="margin-top:6px">Select logo on preview</button>`;
     }
-    html += propSection("🏷 Persistent logo / watermark", logoBody, !!lg.asset_id);
+    html += propSection("🏷 Logo / watermark", logoBody, !!lg.asset_id);
 
     const sc = tl.speaker_colors || {};
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
-    const st = normalizeTlStyle(tl.style || {});
-    const primary = st.primary_color || st.primary || "#FFFFFF";
-    const highlight = st.highlight_color || st.highlight || "#FFD60A";
-    const fontName = st.font_name || st.font || "Anton";
-    const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
-    let lookBody = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:10px;background:#12151e;border:1px solid #2a2f3a;border-radius:8px">
-      <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.05rem;letter-spacing:.02em">
-        <span style="color:${esc(primary)}">here with.</span>
-        <span style="color:${esc(highlight)}"> Vanessa,</span>
-      </span>
-      <span class="muted" style="font-size:.7rem">${esc(fontName)} · ${fontSize}px</span>
-    </div>`;
-    lookBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
-      <button class="btn btn-primary" data-act="open-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🎨 Open Look</button>
-      <button class="btn btn-secondary" data-act="open-look-audio" style="flex:1;font-size:.78rem">🔊 Audio Enhancement</button>
-    </div>`;
-    lookBody += `<p class="muted" style="font-size:.72rem;line-height:1.4">Audio filters apply on <strong>▶ Render</strong> (not Preview cut).</p>`;
-    if (tl.ai_edit) {
-      lookBody += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
-    }
-    html += propSection("🎨 Captions &amp; audio", lookBody, true);
-
     const mainClip = (tl.tracks.main || [])[0] || null;
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
-    let spkBody = "";
+
+    let spkBody = `<div class="tl-spk-panel">`;
     if (!mainClip) {
-      spkBody += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Add a Main clip first, then Analyze on the Transcript panel (or select that clip).</p>`;
+      spkBody += `<p class="muted" style="font-size:.72rem;margin:0 0 10px;line-height:1.4">Add a Main clip first, then Analyze.</p>`;
     } else {
-      spkBody += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Analyze the selected / first Main clip for multi-speaker colors and 9:16 reframe.</p>`;
-      spkBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
-        <button class="btn btn-secondary" data-act="analyze-speakers" style="flex:1;font-size:.78rem">Analyze speakers</button>
-      </div>`;
+      spkBody += `<button class="btn btn-secondary btn-block" data-act="analyze-speakers" type="button">Analyze speakers</button>`;
+      spkBody += `<p class="muted" style="font-size:.72rem;margin:6px 0 12px;line-height:1.4">Runs diarization (+ faces when available) for speaker colors and 9:16 reframe.</p>`;
     }
-    spkBody += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints</p>`;
-    spkBody += `<div class="tl-prop-grid">`;
+    spkBody += `<div class="tl-spk-colors">`;
     spkKeys.forEach((key) => {
       const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
-      spkBody += `<label>${label} <input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
+      spkBody += `<label class="tl-spk-swatch"><span>${label}</span><input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
     });
     spkBody += `</div>`;
-    spkBody += `<label class="tl-prop">Headline<input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional banner"></label>`;
-    html += propSection("👥 Speakers (Analyze)", spkBody, false);
+    spkBody += `<label class="tl-prop tl-headline-row"><span>Headline banner</span><input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional lower-third / banner text"></label>`;
+    spkBody += `</div>`;
+    html += propSection("👥 Speakers", spkBody, false);
+
+    if (tl.ai_edit) {
+      html += `<p class="muted" style="font-size:.72rem;margin-top:8px">AI Edit seed: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
+    }
 
     html += `<button class="tl-del-btn" data-act="delete-project" type="button" style="margin-top:12px">🗑 Delete project</button>`;
     wrap.innerHTML = html;
 
-    const openCap = wrap.querySelector('[data-act="open-caption-look"]');
-    if (openCap) openCap.onclick = () => {
-      setLeftTab("look", { pin: true });
-      mountCaptionLookIntoTimeline();
-      jumpLookSection("captions");
-    };
-    const openAud = wrap.querySelector('[data-act="open-look-audio"]');
+    const openCap = wrap.querySelector('[data-act="open-captions"]');
+    if (openCap) openCap.onclick = () => jumpLookSection("captions");
+    const openAud = wrap.querySelector('[data-act="open-audio"]');
     if (openAud) openAud.onclick = () => jumpLookSection("audio");
+    const selLogo = wrap.querySelector('[data-act="select-logo"]');
+    if (selLogo) selLogo.onclick = () => {
+      selected = null;
+      logoSelected = true;
+      updateStageCompositor();
+      renderProps();
+    };
     const delProj = wrap.querySelector('[data-act="delete-project"]');
     if (delProj) delProj.onclick = () => deleteCurrentProject();
     const analyzeProj = wrap.querySelector('[data-act="analyze-speakers"]');
@@ -3167,6 +3269,23 @@
           }
         } else if (key === "__transition") {
           c.transition = v ? { type: v } : null;
+        } else if (key === "__style_font" || key === "__style_size" || key === "__style_primary" || key === "__style_highlight") {
+          tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}));
+          if (key === "__style_font") {
+            tl.style.font_name = v; tl.style.font = v;
+          } else if (key === "__style_size") {
+            tl.style.font_size = v; tl.style.size = v;
+          } else if (key === "__style_primary") {
+            tl.style.primary_color = v; tl.style.primary = v;
+          } else if (key === "__style_highlight") {
+            tl.style.highlight_color = v; tl.style.highlight = v;
+          }
+          syncStyleToCaptionLook(tl.style);
+          // Rebuild so the live preview chip updates.
+          renderProps();
+          updateStageCompositor();
+          scheduleSave();
+          return;
         } else if (key.indexOf(".") >= 0) {
           // Nested key like "ken_burns.enabled" — create the object if needed.
           const [obj, field] = key.split(".");
@@ -3193,6 +3312,8 @@
     });
     const del = wrap.querySelector('[data-act="del"]');
     if (del) del.onclick = () => deleteClip(track, c.id);
+    const openCap = wrap.querySelector('[data-act="open-captions"]');
+    if (openCap) openCap.onclick = () => jumpLookSection("captions");
     const et = wrap.querySelector('[data-act="edittext"]');
     if (et) et.onclick = () => { setLeftTab("transcript"); renderTranscript(c); };
     const setin = wrap.querySelector('[data-act="setin"]');
@@ -3220,6 +3341,18 @@
     wrap.querySelectorAll('[data-act="ovlayout"]').forEach((btn) => {
       btn.onclick = () => applyOverlayLayout(c, btn.dataset.layout);
     });
+  }
+
+  /** Push Timeline style knobs into the Look form so both stay canonical. */
+  function syncStyleToCaptionLook(style) {
+    style = normalizeTlStyle(style || {});
+    try {
+      if (typeof window.applyStyle === "function") window.applyStyle(style);
+      else if (typeof applyStyle === "function") applyStyle(style);
+    } catch (_) { /* optional */ }
+    try {
+      if (typeof window.updateFontPreview === "function") window.updateFontPreview();
+    } catch (_) { /* optional */ }
   }
 
   // ---- AI camera moves -------------------------------------------------
@@ -3934,11 +4067,20 @@
         // Keep Look available even if user never opens the tab yet — mount once.
         window.openTimelineLook = () => {
           if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
-          setLeftTab("look", { pin: true });
-          mountCaptionLookIntoTimeline();
+          jumpLookSection("captions");
           selected = null;
+          logoSelected = false;
           renderProps();
         };
+        window.jumpTimelineLook = (which) => {
+          if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
+          jumpLookSection(which === "audio" ? "audio" : "captions");
+          selected = null;
+          logoSelected = false;
+          renderProps();
+        };
+        on("tlCaptionsBtn", "onclick", () => window.jumpTimelineLook("captions"));
+        on("tlAudioBtn", "onclick", () => window.jumpTimelineLook("audio"));
         on("tlUndoBtn", "onclick", undo);
         on("tlRedoBtn", "onclick", redo);
         on("tlMagneticBtn", "onclick", () => {
