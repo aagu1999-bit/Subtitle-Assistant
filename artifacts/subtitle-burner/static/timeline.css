@@ -616,6 +616,8 @@
   padding: 8px;
   overflow-x: auto;
 }
+.tl-ruler { cursor: ew-resize; }
+.tl-track-lane { cursor: text; }
 /* Playhead line spanning the tracks */
 .tl-playhead {
   position: absolute;
