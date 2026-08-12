@@ -1,0 +1,240 @@
+/* ============================================================
+   Mobile / phone shell for Subtitle Assistant Studio
+   Loaded after style.css + timeline.css. Phone-first overrides.
+   ============================================================ */
+
+.tl-mobile-only { display: none !important; }
+
+.mobile-bottom-nav {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 200;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: rgba(12, 14, 20, 0.96);
+  border-top: 1px solid #2a2f3a;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+.mobile-nav-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #9aa3b2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border-radius: 10px;
+  font-size: .68rem;
+  font-weight: 600;
+  min-height: 48px;
+}
+.mobile-nav-btn .ico { font-size: 1.15rem; line-height: 1; }
+.mobile-nav-btn.active {
+  color: #fff;
+  background: rgba(108, 92, 255, 0.22);
+}
+.mobile-panel-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 180;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.tl-left-sheet-head {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #2a2f3a;
+  background: #12151e;
+}
+
+@media (max-width: 768px) {
+  .tl-mobile-only { display: inline-flex !important; }
+  .desktop-only-hint { display: none !important; }
+
+  body.studio-body {
+    padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+  }
+
+  header.app-header {
+    height: auto;
+    min-height: 52px;
+    padding: 8px 12px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  header.app-header .logo {
+    font-size: 1.05rem;
+  }
+  header.app-header .workflow-steps {
+    display: none;
+  }
+  header.app-header .header-actions {
+    margin-left: auto;
+  }
+  header.app-header .btn-export {
+    padding: 8px 12px;
+    font-size: .78rem;
+  }
+
+  .mobile-bottom-nav { display: grid; }
+  .main-tabs {
+    display: none !important;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: calc(100dvh - 52px - 64px);
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .main-area {
+    padding: 12px 12px 24px !important;
+    width: 100%;
+  }
+
+  .empty-state .empty-hero {
+    padding: 28px 16px;
+  }
+
+  .drop.drop-compact,
+  .drop {
+    min-height: 160px;
+    padding: 18px 14px;
+  }
+  .drop-inner .icon { font-size: 2rem; }
+  .drop-inner p { font-size: .95rem; }
+
+  #readyActions .btn {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+
+  /* ---- Timeline phone layout ---- */
+  .tl-editor {
+    min-height: unset;
+    gap: 8px;
+  }
+  .tl-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 8px;
+  }
+  .tl-toolbar-left,
+  .tl-toolbar-right {
+    width: 100%;
+    gap: 6px;
+  }
+  .tl-toolbar-left .tl-text {
+    min-width: 0;
+    flex: 1;
+    width: 100%;
+  }
+  .tl-toolbar-right .tl-toolbar-secondary,
+  .tl-toolbar-right .tl-workflow-hint,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlStitchMainBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlMagneticBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlUndoBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlRedoBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlDeleteProjectBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-left #tlNewBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-left #tlProjectSelect {
+    display: none !important;
+  }
+  body.tl-toolbar-expanded .tl-toolbar-right .tl-toolbar-secondary,
+  body.tl-toolbar-expanded .tl-toolbar-right #tlStitchMainBtn,
+  body.tl-toolbar-expanded .tl-toolbar-right #tlMagneticBtn,
+  body.tl-toolbar-expanded .tl-toolbar-right #tlUndoBtn,
+  body.tl-toolbar-expanded .tl-toolbar-right #tlRedoBtn {
+    display: inline-flex !important;
+  }
+
+  .tl-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tl-stage-wrap {
+    order: 1;
+  }
+  .tl-left {
+    order: 2;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 190;
+    max-height: min(78dvh, 640px);
+    border-radius: 16px 16px 0 0;
+    transform: translateY(110%);
+    transition: transform .22s ease;
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  }
+  body.tl-mobile-panel-open .tl-left {
+    transform: translateY(0);
+  }
+  body.tl-mobile-panel-open .mobile-panel-scrim {
+    display: block;
+  }
+  .tl-left-sheet-head {
+    display: flex !important;
+  }
+  .tl-props {
+    order: 3;
+    max-height: 36vh;
+  }
+
+  .tl-preview {
+    max-height: 42dvh;
+  }
+  .tl-stage {
+    max-height: 42dvh;
+  }
+  .tl-timeline {
+    min-height: 220px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tl-track-lane {
+    min-height: 64px;
+  }
+  .tl-clip-handle {
+    width: 14px;
+  }
+  .tl-tltoolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 6px;
+    padding-bottom: 4px;
+  }
+  .tl-tltoolbar .tl-keys-hint { display: none; }
+  .tl-chip-btn,
+  .tl-toolbar .btn {
+    min-height: 40px;
+  }
+
+  .tl-broll-btns .btn {
+    min-height: 40px;
+    flex: 1 1 auto;
+  }
+
+  /* Tips on tap devices: hide hover panels (they jam the UI) */
+  .tl-tippanel { display: none !important; }
+}
+
+@media (max-width: 480px) {
+  .logo { font-size: .98rem !important; }
+  .panel { padding: 12px; }
+  .tl-props { font-size: .86rem; }
+}

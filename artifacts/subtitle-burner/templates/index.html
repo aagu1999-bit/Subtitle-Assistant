@@ -2,12 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#090a0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Subtitle Burner</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_version }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='timeline.css') }}?v={{ asset_version }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='mobile.css') }}?v={{ asset_version }}">
 </head>
-<body>
+<body class="studio-body">
 
 <!-- Lightweight dismissible note strip. Does NOT cover the page or trap clicks.
      Script/load failures used to paint a huge red overlay that blocked nav. -->
@@ -180,14 +185,14 @@
           <section class="panel">
             <div class="section-title">📁 Project Files</div>
             <div id="drop" class="drop drop-compact">
-              <input type="file" id="file" accept="video/*" multiple class="offscreen-file">
+              <input type="file" id="file" accept="video/*,video/mp4,video/quicktime,.mov,.mp4" multiple class="offscreen-file">
               <!-- A real <label for> opens the picker natively, with no
                    script involved — it survives both iOS's restrictions on
                    programmatic .click() and any JS error earlier on the page. -->
               <label for="file" class="drop-inner drop-label">
                 <div class="icon">🎬</div>
-                <p><strong>Drag &amp; drop video(s)</strong></p>
-                <p class="muted">or tap to browse</p>
+                <p><strong>Tap to choose video(s)</strong></p>
+                <p class="muted desktop-only-hint">or drag &amp; drop on desktop</p>
                 <p id="filename" class="filename"></p>
               </label>
             </div>
@@ -1180,6 +1185,7 @@
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
+          <button id="tlMobilePanelBtn" class="btn btn-secondary tl-mobile-only" type="button" title="Open Transcript / Media / Look">📚 Library</button>
           <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
           <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
           <button id="tlMagneticBtn" class="tl-chip-btn active" title="Magnetic snap on — clip edges snap to nearby cuts / playhead">🧲 Snap on</button>
@@ -1191,7 +1197,7 @@
               <option value="4x5">4:5 (Feed)</option>
             </select>
           </label>
-          <label class="tl-inline">Fit
+          <label class="tl-inline tl-toolbar-secondary">Fit
             <select id="tlFit" class="tl-select">
               <option value="cover">Cover (crop)</option>
               <option value="contain">Contain (letterbox)</option>
@@ -1199,7 +1205,7 @@
           </label>
           <span id="tlSaveState" class="muted tl-savestate"></span>
           <span class="muted tl-workflow-hint" title="Typical Captions-style path">Media → edit Main → Preview cut → Render</span>
-          <button id="tlStitchMainBtn" class="btn btn-secondary" type="button"
+          <button id="tlStitchMainBtn" class="btn btn-secondary tl-toolbar-secondary" type="button"
             title="Bake the whole Main track into one combined source (word cuts applied). Then Preview cut / Render.">🎞 Stitch Main</button>
           <button id="tlPlaySeqBtn" class="btn btn-secondary tl-tipbtn" type="button"
             aria-describedby="tlPreviewTip">
@@ -1242,12 +1248,17 @@
               <em>Required after Co-editor / Caption look / B-roll changes.</em>
             </span>
           </button>
+          <button id="tlToolbarMoreBtn" class="tl-chip-btn tl-mobile-only" type="button" aria-expanded="false" title="More timeline tools">⋯ More</button>
         </div>
       </div>
 
       <div class="tl-body">
         <!-- Left: Transcript / Media tabs -->
-        <aside class="tl-left">
+        <aside class="tl-left" id="tlLeftPanel">
+          <div class="tl-left-sheet-head tl-mobile-only">
+            <strong>Editor panel</strong>
+            <button type="button" id="tlMobilePanelClose" class="tl-chip-btn" aria-label="Close panel">✕</button>
+          </div>
           <div class="tl-lefttabs">
             <button class="tl-lefttab active" data-ltab="transcript">📝 Transcript</button>
             <button class="tl-lefttab" data-ltab="media">📁 Media</button>
@@ -1493,9 +1504,27 @@
 </div>
 <!-- /app-shell -->
 
+<!-- Phone bottom navigation -->
+<nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Primary">
+  <button type="button" class="mobile-nav-btn active" data-tab="ingest">
+    <span class="ico">📁</span><span class="lbl">Ingest</span>
+  </button>
+  <button type="button" class="mobile-nav-btn" data-tab="highlights">
+    <span class="ico">🔥</span><span class="lbl">Shorts</span>
+  </button>
+  <button type="button" class="mobile-nav-btn" data-tab="editor">
+    <span class="ico">🎬</span><span class="lbl">Timeline</span>
+  </button>
+  <button type="button" class="mobile-nav-btn" data-tab="compilation">
+    <span class="ico">🎞</span><span class="lbl">Queue</span>
+  </button>
+</nav>
+<div id="mobilePanelScrim" class="mobile-panel-scrim" hidden></div>
+
 <script src="{{ url_for('static', filename='studio-logger.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='timeline.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='mobile.js') }}?v={{ asset_version }}"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
   // Step badge navigation handler

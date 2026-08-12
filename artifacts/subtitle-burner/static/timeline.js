@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-36-gif-broll";
+  const TL_BUILD = "studio-editor-build-37-mobile";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -696,7 +696,15 @@
     document.querySelectorAll(".tl-leftpanel").forEach((p) =>
       p.classList.toggle("hidden", p.dataset.lpanel !== name));
     if (name === "look") mountCaptionLookIntoTimeline();
+    // Phone: keep the bottom sheet open when switching Transcript / Media / Look.
+    if (opts.openSheet !== false && document.body.classList.contains("is-phone") &&
+        typeof window.openMobileTimelinePanel === "function") {
+      if (!document.body.classList.contains("tl-mobile-panel-open") && opts.pin) {
+        window.openMobileTimelinePanel(name);
+      }
+    }
   }
+  window.setTimelineLeftTab = setLeftTab;
 
   function jumpLookSection(which) {
     setLeftTab("look", { pin: true });
@@ -4558,6 +4566,9 @@
         window.openTimelineLook = () => {
           if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
           jumpLookSection("captions");
+          if (typeof window.openMobileTimelinePanel === "function") {
+            window.openMobileTimelinePanel("look");
+          }
           selected = null;
           logoSelected = false;
           renderProps();
@@ -4565,6 +4576,9 @@
         window.jumpTimelineLook = (which) => {
           if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
           jumpLookSection(which === "audio" ? "audio" : "captions");
+          if (typeof window.openMobileTimelinePanel === "function") {
+            window.openMobileTimelinePanel("look");
+          }
           selected = null;
           logoSelected = false;
           renderProps();
