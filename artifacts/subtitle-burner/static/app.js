@@ -4110,7 +4110,8 @@ if (aiEditNudgeBtn) {
     if (!currentJobId) return;
     if (typeof window.openAiEditPlanForJob === "function") {
       window.openAiEditPlanForJob(currentJobId, {
-        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "AI Edit",
+        full_video: true,
+        label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "Full-video AI Edit",
       });
     }
   };
