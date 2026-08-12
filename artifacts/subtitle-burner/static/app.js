@@ -3009,6 +3009,7 @@ window.styleHasCaptionFields = styleHasCaptionFields;
 window.captionLookStyle = captionLookStyle;
 window.flushCaptionLookToJob = flushCaptionLookToJob;
 window.getStyle = getStyle;
+window.getAudio = getAudio;
 Object.defineProperty(window, "currentJobId", {
   get() { return currentJobId; },
   configurable: true,
@@ -4750,8 +4751,19 @@ function openEditWords() {
 }
 
 function openCaptionLook() {
-  if (!requireReadyTranscript("Caption look")) return;
-  setActiveTab("branding");
+  // Caption look + audio live in Timeline → Look now.
+  if (typeof window.openTimelineLook === "function") {
+    window.openTimelineLook();
+    return;
+  }
+  if (typeof window.openTimelineEditor === "function" && currentJobId) {
+    window.openTimelineEditor(currentJobId);
+  } else if (typeof setActiveTab === "function") {
+    setActiveTab("editor");
+  }
+  setTimeout(() => {
+    if (typeof window.openTimelineLook === "function") window.openTimelineLook();
+  }, 50);
 }
 
 function openFindShorts() {

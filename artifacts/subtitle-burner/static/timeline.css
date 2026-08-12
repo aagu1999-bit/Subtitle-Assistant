@@ -289,7 +289,67 @@
   color: #aeb4c0;
 }
 .tl-hint { font-size: .74rem; margin: 0 0 10px; }
+.tl-media-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.tl-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  background: #12151e;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 2px;
+}
+.tl-view-btn {
+  border: none;
+  background: transparent;
+  color: #8892a8;
+  width: 28px;
+  height: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: .9rem;
+  line-height: 1;
+}
+.tl-view-btn.active {
+  background: #2a2f3a;
+  color: #e8eaee;
+}
+.tl-lib-sect {
+  margin: 12px 0 6px;
+  font-size: .78rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #aeb4c0;
+}
 .tl-source-list { display: flex; flex-direction: column; gap: 6px; }
+.tl-source-list.tl-view-icons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.tl-source-list.tl-view-icons .tl-source-item {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 8px;
+  gap: 6px;
+}
+.tl-source-list.tl-view-icons .tl-source-item .tl-asset-thumb,
+.tl-source-list.tl-view-icons .tl-source-item .tl-asset-thumb-ph {
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+.tl-source-list.tl-view-icons .tl-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
 .tl-source-item {
   display: flex;
   align-items: center;
@@ -299,7 +359,10 @@
   border-radius: 8px;
   padding: 7px 9px;
   font-size: .82rem;
+  cursor: grab;
 }
+.tl-source-item:active { cursor: grabbing; }
+.tl-source-item.dragging { opacity: .55; }
 .tl-source-item .tl-source-name {
   flex: 1;
   overflow: hidden;
@@ -307,6 +370,24 @@
   white-space: nowrap;
 }
 .tl-source-item .tl-source-meta { color: #8b91a0; font-size: .72rem; }
+.tl-look-mount {
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding-right: 4px;
+}
+.tl-look-mount .panel {
+  margin-bottom: 12px;
+}
+.tl-look-mount .panel h2 {
+  font-size: .95rem;
+}
+.caption-look-root.tl-embedded .panel {
+  background: #12151e;
+}
+.tl-track-lane.drag-over {
+  outline: 2px dashed #6c5cff;
+  background: rgba(108, 92, 255, 0.12);
+}
 .tl-chip-btn {
   background: #2a2f3a;
   border: none;

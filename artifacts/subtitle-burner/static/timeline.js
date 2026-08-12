@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-29-timeline-phrases-analyze";
+  const TL_BUILD = "studio-editor-build-30-look-media-dnd";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -112,6 +112,9 @@
     if (banner) {
       tl.headline_banner = typeof banner === "string" ? { text: banner } : banner;
     }
+    try {
+      if (typeof window.getAudio === "function") tl.audio = window.getAudio();
+    } catch (_) { /* optional */ }
     if (!opts.quiet) {
       setSaveState("Pulled Caption look → Timeline");
       scheduleSave();
@@ -336,6 +339,7 @@
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
       style: tl.style || null,
+      audio: tl.audio || null,
       ai_edit: tl.ai_edit || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
@@ -373,11 +377,48 @@
       data.timelines.forEach((p) => {
         const o = document.createElement("option");
         o.value = p.job_id;
-        o.textContent = `${(p.filename || "Untitled").replace(/\.mp4$/, "")} (${p.clip_count} clips)`;
+        const name = (p.filename || "Untitled").replace(/\.mp4$/, "");
+        o.textContent = `${name} (${p.clip_count} clip${p.clip_count === 1 ? "" : "s"})`;
         if (tl && p.job_id === tl.job_id) o.selected = true;
         sel.appendChild(o);
       });
     } catch (e) { /* ignore */ }
+  }
+
+  async function deleteCurrentProject() {
+    if (!tl || !tl.job_id) {
+      alert("No project open to delete.");
+      return;
+    }
+    const nMain = (tl.tracks.main || []).length;
+    const label = tl.label || "this project";
+    const msg = nMain
+      ? `Delete timeline "${label}" (${nMain} main clip${nMain === 1 ? "" : "s"})? Source videos stay in Media.`
+      : `Delete empty timeline "${label}"?`;
+    if (!confirm(msg)) return;
+    const doomed = tl.job_id;
+    try {
+      await api("/timeline/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: doomed }),
+      });
+    } catch (e) {
+      alert("Could not delete project: " + e.message);
+      return;
+    }
+    tl = null;
+    selected = null;
+    const data = await api("/timeline/list").catch(() => ({ timelines: [] }));
+    if (data.timelines && data.timelines.length) {
+      await openProject(data.timelines[0].job_id);
+    } else {
+      const labelEl = $("tlLabel");
+      if (labelEl) labelEl.value = "";
+      renderTimeline();
+      setSaveState("Project deleted");
+    }
+    await loadProjects();
   }
 
   async function loadSources() {
@@ -404,10 +445,49 @@
   }
 
   // ---- Library rendering ----
+  let libraryView = "list"; // "list" | "icons"
+
+  function applyLibraryViewClass() {
+    ["tlSourceList", "tlAssetList"].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      el.classList.toggle("tl-view-list", libraryView === "list");
+      el.classList.toggle("tl-view-icons", libraryView === "icons");
+    });
+    document.querySelectorAll(".tl-view-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === libraryView);
+    });
+  }
+
+  function wireLibraryViewToggle() {
+    document.querySelectorAll(".tl-view-btn").forEach((b) => {
+      b.onclick = () => {
+        libraryView = b.dataset.view === "icons" ? "icons" : "list";
+        applyLibraryViewClass();
+        renderSourceList();
+        renderAssetList();
+      };
+    });
+  }
+
+  function _bindLibraryDrag(el, payload) {
+    el.draggable = true;
+    el.addEventListener("dragstart", (e) => {
+      el.classList.add("dragging");
+      try {
+        e.dataTransfer.setData("application/x-tl-lib", JSON.stringify(payload));
+        e.dataTransfer.setData("text/plain", payload.kind + ":" + (payload.job_id || payload.asset_id || ""));
+        e.dataTransfer.effectAllowed = "copy";
+      } catch (_) { /* ignore */ }
+    });
+    el.addEventListener("dragend", () => el.classList.remove("dragging"));
+  }
+
   function renderSourceList() {
     const wrap = $("tlSourceList");
     if (!wrap) return;
     wrap.innerHTML = "";
+    applyLibraryViewClass();
     if (!sources.length) {
       wrap.innerHTML = '<p class="muted tl-hint">Upload &amp; transcribe a video first — it\'ll show up here.</p>';
       return;
@@ -415,29 +495,43 @@
     sources.forEach((s) => {
       const div = document.createElement("div");
       div.className = "tl-source-item";
+      const thumb = `<span class="tl-asset-thumb tl-asset-thumb-ph" aria-hidden="true">🎬</span>`;
       div.innerHTML =
-        `<span class="tl-source-name" title="${esc(s.filename || "")}">${esc(s.filename || s.job_id.slice(0, 8))}</span>`;
+        `${thumb}<span class="tl-source-name" title="${esc(s.filename || "")}">${esc(s.filename || s.job_id.slice(0, 8))}</span>`;
+      const actions = document.createElement("div");
+      actions.className = "tl-source-actions";
       const add = document.createElement("button");
       add.className = "tl-chip-btn";
-      add.textContent = "➕ Main";
-      add.title = "Add full clip to the main track";
-      add.onclick = () => addMainClip(s.job_id);
+      add.textContent = "➕";
+      add.title = "Add to Main";
+      add.onclick = (e) => { e.stopPropagation(); addMainClip(s.job_id); };
       const ov = document.createElement("button");
       ov.className = "tl-chip-btn";
-      ov.textContent = "🎬";
-      ov.title = "Add as video overlay / picture-in-picture";
-      ov.onclick = () => addOverlayClip({ source_job_id: s.job_id });
+      ov.textContent = "🖼";
+      ov.title = "Add as overlay";
+      ov.onclick = (e) => { e.stopPropagation(); addOverlayClip({ source_job_id: s.job_id }); };
+      const fx = document.createElement("button");
+      fx.className = "tl-chip-btn";
+      fx.textContent = "✨";
+      fx.title = "Add as Effects split second video";
+      fx.onclick = (e) => {
+        e.stopPropagation();
+        addEffectClip("split_screen", { source_job_id: s.job_id, placement: "second_bottom" });
+      };
       const del = document.createElement("button");
       del.className = "tl-chip-btn tl-chip-danger";
       del.textContent = "✕";
-      del.title = "Remove from Media list (and drop timeline clips that use it)";
+      del.title = "Remove from Media list";
       del.onclick = (e) => {
         e.stopPropagation();
         removeSourceFromMedia(s);
       };
-      div.appendChild(add);
-      div.appendChild(ov);
-      div.appendChild(del);
+      actions.appendChild(add);
+      actions.appendChild(ov);
+      actions.appendChild(fx);
+      actions.appendChild(del);
+      div.appendChild(actions);
+      _bindLibraryDrag(div, { kind: "source", job_id: s.job_id });
       wrap.appendChild(div);
     });
   }
@@ -511,6 +605,7 @@
     const wrap = $("tlAssetList");
     if (!wrap) return;
     wrap.innerHTML = "";
+    applyLibraryViewClass();
     if (!assets.length) {
       wrap.innerHTML = '<p class="muted tl-hint">No assets yet. Upload a file or Suggest B-roll overlays.</p>';
       return;
@@ -525,26 +620,30 @@
         : `<span class="tl-asset-thumb tl-asset-thumb-ph" aria-hidden="true">${icon}</span>`;
       div.innerHTML =
         `${thumb}<span class="tl-source-name" title="${esc(label)}">${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
+      const actions = document.createElement("div");
+      actions.className = "tl-source-actions";
       if (a.kind === "audio") {
         const m = document.createElement("button");
         m.className = "tl-chip-btn";
-        m.textContent = "🎵 Music";
-        m.onclick = () => addMusicClip(a);
-        div.appendChild(m);
-      } else if (a.kind === "video") {
-        const o = document.createElement("button");
-        o.className = "tl-chip-btn";
-        o.textContent = "🎬 Video";
-        o.title = "Add as video overlay (PiP / full-bleed)";
-        o.onclick = () => addOverlayClip({ asset_id: a.asset_id }, a);
-        div.appendChild(o);
+        m.textContent = "🎵";
+        m.title = "Add to Music";
+        m.onclick = (e) => { e.stopPropagation(); addMusicClip(a); };
+        actions.appendChild(m);
       } else {
         const o = document.createElement("button");
         o.className = "tl-chip-btn";
-        o.textContent = "🖼 Image";
-        o.title = "Add as image overlay / B-roll";
-        o.onclick = () => addOverlayClip({ asset_id: a.asset_id }, a);
-        div.appendChild(o);
+        o.textContent = a.kind === "video" ? "🎬" : "🖼";
+        o.title = "Add as overlay";
+        o.onclick = (e) => { e.stopPropagation(); addOverlayClip({ asset_id: a.asset_id }, a); };
+        actions.appendChild(o);
+        if (a.kind === "image") {
+          const fx = document.createElement("button");
+          fx.className = "tl-chip-btn";
+          fx.textContent = "✨";
+          fx.title = "Add Ken Burns on Effects lane";
+          fx.onclick = (e) => { e.stopPropagation(); addEffectClip("ken_burns", { intensity: "med" }); };
+          actions.appendChild(fx);
+        }
       }
       const del = document.createElement("button");
       del.className = "tl-chip-btn tl-chip-danger";
@@ -554,12 +653,9 @@
         e.stopPropagation();
         removeAssetFromMedia(a);
       };
-      div.appendChild(del);
-      // Clicking the row itself selects/highlights — also jump to Media tab.
-      div.addEventListener("click", (e) => {
-        if (e.target.closest("button")) return;
-        setLeftTab("media", { pin: true });
-      });
+      actions.appendChild(del);
+      div.appendChild(actions);
+      _bindLibraryDrag(div, { kind: "asset", asset_id: a.asset_id, asset_kind: a.kind });
       wrap.appendChild(div);
     });
   }
@@ -569,8 +665,8 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
-  // ---- Left column tabs (Transcript / Media) ----
-  let leftTabPinned = null; // "media" | "transcript" | null — user choice wins over auto-switch
+  // ---- Left column tabs (Transcript / Media / Look) ----
+  let leftTabPinned = null; // "media" | "transcript" | "look" | null
 
   function setLeftTab(name, opts) {
     opts = opts || {};
@@ -580,11 +676,119 @@
       b.classList.toggle("active", b.dataset.ltab === name));
     document.querySelectorAll(".tl-leftpanel").forEach((p) =>
       p.classList.toggle("hidden", p.dataset.lpanel !== name));
+    if (name === "look") mountCaptionLookIntoTimeline();
   }
 
   function wireLeftTabs() {
     document.querySelectorAll(".tl-lefttab").forEach((b) => {
       b.onclick = () => setLeftTab(b.dataset.ltab, { pin: true });
+    });
+  }
+
+  let _captionLookMounted = false;
+  function mountCaptionLookIntoTimeline() {
+    const mount = $("tlLookMount");
+    const root = $("captionLookRoot");
+    if (!mount || !root) return;
+    if (root.parentElement !== mount) {
+      mount.appendChild(root);
+      root.classList.add("tl-embedded");
+      const back = $("brandingBackIngestBtn");
+      if (back) back.classList.add("hidden");
+      _captionLookMounted = true;
+      wireCaptionLookAutoSync();
+    }
+  }
+
+  let _lookSyncWired = false;
+  function wireCaptionLookAutoSync() {
+    if (_lookSyncWired) return;
+    const root = $("captionLookRoot");
+    if (!root) return;
+    _lookSyncWired = true;
+    const sync = () => {
+      if (!tl) return;
+      pullCaptionLookOntoTimeline(null, { quiet: true });
+      // Also stash audio settings onto the timeline job when available.
+      try {
+        if (typeof window.getAudio === "function") {
+          tl.audio = window.getAudio();
+        } else if (typeof getAudio === "function") {
+          tl.audio = getAudio();
+        }
+      } catch (_) { /* optional */ }
+      scheduleSave();
+      if (!selected) renderProps();
+    };
+    root.addEventListener("input", sync);
+    root.addEventListener("change", sync);
+    root.addEventListener("click", (e) => {
+      if (e.target && e.target.closest && e.target.closest("#viralPresets .theme, #themes .theme")) {
+        setTimeout(sync, 0);
+      }
+    });
+  }
+
+  async function dropLibraryOnLane(lane, payload) {
+    if (!payload || !lane) return;
+    if (!(await ensureProject())) return;
+    if (payload.kind === "source" && payload.job_id) {
+      if (lane === "main") return addMainClip(payload.job_id);
+      if (lane === "overlay") return addOverlayClip({ source_job_id: payload.job_id });
+      if (lane === "effects") {
+        return addEffectClip("split_screen", {
+          source_job_id: payload.job_id,
+          placement: "second_bottom",
+        });
+      }
+      if (lane === "music") {
+        alert("Transcribed videos go on Main / Overlay / Effects — not Music. Upload an audio asset for the music lane.");
+        return;
+      }
+    }
+    if (payload.kind === "asset" && payload.asset_id) {
+      const asset = assets.find((a) => a.asset_id === payload.asset_id);
+      if (!asset) return;
+      if (lane === "music" || asset.kind === "audio") {
+        if (asset.kind !== "audio") {
+          alert("Only audio assets can go on the Music lane.");
+          return;
+        }
+        return addMusicClip(asset);
+      }
+      if (lane === "main") {
+        // Main track is transcribed jobs today — place media assets as overlay.
+        return addOverlayClip({ asset_id: asset.asset_id }, asset);
+      }
+      if (lane === "overlay") return addOverlayClip({ asset_id: asset.asset_id }, asset);
+      if (lane === "effects") {
+        if (asset.kind === "image") return addEffectClip("ken_burns", { intensity: "med" });
+        return addOverlayClip({ asset_id: asset.asset_id }, asset);
+      }
+    }
+  }
+
+  function wireLibraryLaneDrop() {
+    document.querySelectorAll(".tl-track-lane[data-lane]").forEach((laneEl) => {
+      const lane = laneEl.dataset.lane;
+      if (!lane || lane === "text") return;
+      laneEl.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        laneEl.classList.add("drag-over");
+      });
+      laneEl.addEventListener("dragleave", () => laneEl.classList.remove("drag-over"));
+      laneEl.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        laneEl.classList.remove("drag-over");
+        let payload = null;
+        try {
+          payload = JSON.parse(e.dataTransfer.getData("application/x-tl-lib") || "null");
+        } catch (_) { payload = null; }
+        if (!payload) return;
+        await dropLibraryOnLane(lane, payload);
+      });
     });
   }
 
@@ -2748,10 +2952,13 @@
     const lg = tl.logo || {};
     const opts = [["", "— no logo —"]].concat(imgVid.map((a) => [a.asset_id, `${a.kind} · ${a.ext}`]));
     let html = `<h3>⚙ Project</h3>`;
-    html += `<p class="muted" style="font-size:.74rem">Select a clip for its settings, or set a logo that stays on the whole video.</p>`;
+    html += `<p class="muted" style="font-size:.74rem;line-height:1.4">No clip selected — project settings. Select a Main clip for transcript Analyze, or open <strong>Look</strong> for captions + audio.</p>`;
+    if (!(tl.tracks.main || []).length) {
+      html += `<p class="muted" style="font-size:.74rem;padding:8px 10px;background:#181c28;border:1px solid #2a2f3a;border-radius:8px;line-height:1.45">This project has <strong>0 Main clips</strong>. Drag a video from <strong>Media</strong> onto the Main lane to start.</p>`;
+    }
     html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🏷 Persistent logo / watermark</label>`;
     if (!imgVid.length) {
-      html += `<p class="muted" style="font-size:.74rem">Upload a logo image first (Assets → Upload asset).</p>`;
+      html += `<p class="muted" style="font-size:.74rem">Upload a logo image first (Media → Assets).</p>`;
     }
     html += propSelect("__logo_asset", "Logo image", lg.asset_id || "", opts);
     if (lg.asset_id) {
@@ -2766,8 +2973,7 @@
     const highlight = st.highlight_color || st.highlight || "#FFD60A";
     const fontName = st.font_name || st.font || "Anton";
     const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
-    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Captions (from Caption look)</label>`;
-    html += `<p class="muted" style="font-size:.74rem;line-height:1.4"><strong>Caption look</strong> is the source of truth for karaoke style (white base + yellow active word, fonts, etc.). Timeline does not keep a second style editor — transfer it over.</p>`;
+    html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🎨 Captions &amp; audio</label>`;
     html += `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:10px;background:#12151e;border:1px solid #2a2f3a;border-radius:8px">
       <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.05rem;letter-spacing:.02em">
         <span style="color:${esc(primary)}">here with.</span>
@@ -2776,20 +2982,24 @@
       <span class="muted" style="font-size:.7rem">${esc(fontName)} · ${fontSize}px</span>
     </div>`;
     html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
-      <button class="btn btn-secondary" data-act="open-caption-look" style="flex:1;font-size:.78rem">🎨 Open Caption look</button>
-      <button class="btn btn-primary" data-act="pull-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">⬇ Pull into Timeline</button>
+      <button class="btn btn-primary" data-act="open-caption-look" style="flex:1;font-size:.78rem;background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">🎨 Open Look (captions + audio)</button>
     </div>`;
     if (tl.ai_edit) {
       html += `<p class="muted" style="font-size:.72rem;margin-top:6px">AI Edit: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
     }
+    const mainClip = (tl.tracks.main || [])[0] || null;
     const spkKeys = Object.keys(sc).filter((k) => /^SPEAKER_\d+$/i.test(k)).sort();
     if (!spkKeys.length) spkKeys.push("SPEAKER_00", "SPEAKER_01");
     html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">👥 Speakers (Analyze)</label>`;
-    html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Run Analyze for multi-speaker colors and 9:16 reframe. Lives here in Timeline — not on upload.</p>`;
-    html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
-      <button class="btn btn-secondary" data-act="analyze-speakers" style="flex:1;font-size:.78rem">Analyze speakers</button>
-    </div>`;
-    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints — inactive words; active karaoke stays Caption look Highlight yellow.</p>`;
+    if (!mainClip) {
+      html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Add a Main clip first, then Analyze on the Transcript panel (or select that clip).</p>`;
+    } else {
+      html += `<p class="muted" style="font-size:.72rem;margin:4px 0 8px;line-height:1.4">Analyze the selected / first Main clip for multi-speaker colors and 9:16 reframe.</p>`;
+      html += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary" data-act="analyze-speakers" style="flex:1;font-size:.78rem">Analyze speakers</button>
+      </div>`;
+    }
+    html += `<p class="muted" style="font-size:.72rem;margin:8px 0 4px">Speaker tints</p>`;
     html += `<div class="tl-prop-grid">`;
     spkKeys.forEach((key) => {
       const label = key === "SPEAKER_00" ? "Host" : (key === "SPEAKER_01" ? "Guest" : key.replace("SPEAKER_", "Spk "));
@@ -2801,18 +3011,8 @@
 
     const openCap = wrap.querySelector('[data-act="open-caption-look"]');
     if (openCap) openCap.onclick = () => {
-      if (typeof window.setActiveTab === "function") window.setActiveTab("branding");
-      else {
-        const btn = document.querySelector('.main-tab[data-tab="branding"]');
-        if (btn) btn.click();
-      }
-    };
-    const pullCap = wrap.querySelector('[data-act="pull-caption-look"]');
-    if (pullCap) pullCap.onclick = () => {
-      pushHistory();
-      if (!pullCaptionLookOntoTimeline(null, { quiet: false })) {
-        alert("Open Caption look first and set fonts/colors (Hormozi = white + yellow karaoke), then Pull again.");
-      }
+      setLeftTab("look", { pin: true });
+      mountCaptionLookIntoTimeline();
     };
     const analyzeProj = wrap.querySelector('[data-act="analyze-speakers"]');
     if (analyzeProj) {
@@ -3672,6 +3872,7 @@
 
       try {
         on("tlNewBtn", "onclick", newProject);
+        on("tlDeleteProjectBtn", "onclick", () => deleteCurrentProject());
         on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
         on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
         on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
@@ -3686,6 +3887,17 @@
         on("tlPasteBtn", "onclick", () => pasteClip());
         on("tlDupBtn", "onclick", () => duplicateSelectedClip());
         wireCaptionsToolbar();
+        wireLibraryViewToggle();
+        wireLibraryLaneDrop();
+        mountCaptionLookIntoTimeline();
+        // Keep Look available even if user never opens the tab yet — mount once.
+        window.openTimelineLook = () => {
+          if (typeof window.setActiveTab === "function") window.setActiveTab("editor");
+          setLeftTab("look", { pin: true });
+          mountCaptionLookIntoTimeline();
+          selected = null;
+          renderProps();
+        };
         on("tlUndoBtn", "onclick", undo);
         on("tlRedoBtn", "onclick", redo);
         on("tlMagneticBtn", "onclick", () => {
@@ -3757,11 +3969,15 @@
       _skipAutoOpenOnce = false;
       if (!skipAuto) {
         try {
-          const data = await api("/timeline/list");
-          if (data.timelines.length) await openProject(data.timelines[0].job_id);
-          else await newProject();
+          // Prefer projects that already have clips; avoid auto-creating empty clutter.
+          const data = await api("/timeline/list?include_empty=1");
+          const all = data.timelines || [];
+          const withClips = all.filter((p) => (p.clip_count || 0) > 0);
+          if (withClips.length) await openProject(withClips[0].job_id);
+          else if (all.length) await openProject(all[0].job_id);
+          // else: wait until user clicks + New or drops media (ensureProject)
         } catch (e) {
-          try { await newProject(); } catch (e2) { console.error("[timeline] project init failed", e2); }
+          console.warn("[timeline] project init skipped", e);
         }
       }
 

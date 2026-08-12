@@ -169,7 +169,7 @@
       <!-- Secondary panels — not numbered steps; opened from ready CTAs -->
       <!-- Edit Words retired — phrase editing lives in Timeline Transcript. -->
       <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav" aria-hidden="true" tabindex="-1">✂️ Edit words</button>
-      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav">🎨 Caption look</button>
+      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav" aria-hidden="true" tabindex="-1">🎨 Caption look</button>
       <button class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
     </nav>
 
@@ -222,7 +222,7 @@
             <div style="display:flex;flex-wrap:wrap;gap:8px">
               <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Edit in Timeline</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
-              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
+              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
             </div>
           </section>
         </div>
@@ -230,12 +230,11 @@
           <section class="panel">
             <div class="section-title">✨ Suggested next steps</div>
             <div style="font-size:0.8rem;color:#c8cdd8;line-height:1.65;background:rgba(30,41,59,0.4);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-              <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, cut fillers, speaker colors after Analyze, Effects lane.</div>
-              <div style="margin-bottom:10px"><strong>2. Caption look</strong> — white + yellow karaoke style (pulled into Timeline on render).</div>
+              <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, Look (captions + audio), speakers, Effects.</div>
+              <div style="margin-bottom:10px"><strong>2. Caption &amp; audio</strong> — Timeline → Look (Hormozi white + yellow karaoke, optional enhancement).</div>
               <div style="margin-bottom:10px"><strong>3. Find Shorts</strong> — optional Gemini clip suggestions on the AI Shorts tab (never auto-runs on upload).</div>
               <div class="muted" style="font-size:.74rem;margin-top:8px;line-height:1.45">
-                Speaker diarization / Analyze lives in <strong>Timeline → Project</strong> (not on upload).
-                Audio enhancement stays under Caption look when you want it on render.
+                Speaker Analyze lives on a selected Main clip in Timeline (Transcript / Project).
               </div>
             </div>
             <div class="section-title" style="margin-top:20px">⚡ Pipeline</div>
@@ -261,6 +260,7 @@
 
     <!-- Panel: Caption look (was step 4 — opened via ready CTA / Timeline) -->
     <div class="tab-content hidden" data-tab-group="branding">
+  <div id="captionLookRoot" class="caption-look-root">
 
   <!-- Style panel -->
   <section class="panel">
@@ -269,9 +269,8 @@
       <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
     </div>
     <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">
-      <strong>Canonical caption style</strong> for this video — white base + yellow karaoke highlight (Hormozi / Classic).
-      Instant Export, Export clip, and Timeline all <em>transfer from here</em> (not a second editor).
-      Use <strong>Apply → Timeline</strong> or Timeline’s <strong>Pull into Timeline</strong>.
+      <strong>Canonical caption + audio style</strong> — edited inside Timeline → <strong>Look</strong>.
+      White base + yellow karaoke (Hormozi / Classic). Changes sync into the open project automatically.
     </p>
 
     <!-- CapCut Master Viral Templates -->
@@ -765,8 +764,9 @@
     <button id="addRuleBtn" class="add-rule-btn">+ Add rule</button>
   </details>
 
+  </div><!-- /#captionLookRoot -->
     </div>
-    <!-- /Tab: Branding -->
+    <!-- /Tab: Branding (content mounts into Timeline → Look) -->
 
     <!-- Panel: Edit words (was step 2 — opened via ready CTA) -->
     <div class="tab-content hidden" data-tab-group="transcript">
@@ -1168,6 +1168,7 @@
         <div class="tl-toolbar-left">
           <select id="tlProjectSelect" class="tl-select" title="Open an existing timeline project"></select>
           <button id="tlNewBtn" class="btn btn-secondary">+ New project</button>
+          <button id="tlDeleteProjectBtn" class="btn btn-secondary" type="button" title="Delete the open timeline project">🗑 Delete</button>
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
         </div>
         <div class="tl-toolbar-right">
@@ -1210,7 +1211,7 @@
               <em>Use to check pacing. Click Render for the real export.</em>
             </span>
           </button>
-          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Caption fonts and colors for this project">Caption look</button>
+          <button id="tlCaptionLookBtn" class="btn btn-secondary" type="button" title="Caption fonts, colors, and audio enhancement">Caption &amp; audio</button>
           <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
             aria-describedby="tlRenderTip"
             style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">
@@ -1239,6 +1240,7 @@
           <div class="tl-lefttabs">
             <button class="tl-lefttab active" data-ltab="transcript">📝 Transcript</button>
             <button class="tl-lefttab" data-ltab="media">📁 Media</button>
+            <button class="tl-lefttab" data-ltab="look">🎨 Look</button>
           </div>
 
           <div class="tl-leftpanel" data-lpanel="transcript">
@@ -1256,10 +1258,17 @@
           </div>
 
           <div class="tl-leftpanel hidden" data-lpanel="media">
-            <h3>Your videos</h3>
-            <p class="muted tl-hint">Click ➕ to add a clip to the main track.</p>
-            <div id="tlSourceList" class="tl-source-list"></div>
-            <h3 style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>
+            <div class="tl-media-head">
+              <h3 style="margin:0">Library</h3>
+              <div class="tl-view-toggle" role="group" aria-label="Library view">
+                <button type="button" class="tl-view-btn active" data-view="list" title="List view">☰</button>
+                <button type="button" class="tl-view-btn" data-view="icons" title="Icon grid">▦</button>
+              </div>
+            </div>
+            <p class="muted tl-hint">Drag videos/assets onto <strong>Main</strong>, <strong>Overlay</strong>, <strong>Effects</strong>, or <strong>Music</strong> — or use the quick buttons.</p>
+            <h3 class="tl-lib-sect">Your videos</h3>
+            <div id="tlSourceList" class="tl-source-list tl-view-list"></div>
+            <h3 class="tl-lib-sect" style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>
             <div class="tl-asset-upload">
               <input type="file" id="tlAssetFile" accept="video/*,image/*,audio/*" class="offscreen-file">
               <button id="tlAssetBtn" class="btn btn-secondary btn-block">⬆ Upload asset</button>
@@ -1287,7 +1296,12 @@
                 </p>
               </div>
             </div>
-            <div id="tlAssetList" class="tl-source-list"></div>
+            <div id="tlAssetList" class="tl-source-list tl-view-list"></div>
+          </div>
+
+          <div class="tl-leftpanel hidden" data-lpanel="look" id="tlLookPanel">
+            <p class="muted tl-hint" style="margin-bottom:10px">Caption fonts/colors and audio enhancement for this project. Edits sync into Timeline automatically.</p>
+            <div id="tlLookMount" class="tl-look-mount"></div>
           </div>
         </aside>
 

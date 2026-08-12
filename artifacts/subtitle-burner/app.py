@@ -8441,6 +8441,11 @@ def timeline_save():
         return jsonify({"error": "Unknown job"}), 404
     timeline = _normalize_timeline(data.get("timeline") or {})
     jobs[job_id]["timeline"] = timeline
+    # Keep style/audio mirrors on the job so renders and other tabs stay in sync.
+    if timeline.get("style") is not None:
+        jobs[job_id]["style"] = timeline.get("style")
+    if timeline.get("audio") is not None:
+        jobs[job_id]["audio"] = timeline.get("audio")
     if data.get("label"):
         jobs[job_id]["filename"] = f"{str(data['label']).strip()[:80]}.mp4"
     _db_save_job(job_id)
@@ -8484,10 +8489,19 @@ def timeline_render():
 
 @app.route("/timeline/list", methods=["GET"])
 def timeline_list():
-    """List timeline editor jobs, newest first."""
+    """List timeline editor jobs, newest first.
+
+    Query:
+      include_empty=1 — keep 0-clip projects (default hides them so empty
+      autosaves don't clutter the picker).
+    """
+    include_empty = str(request.args.get("include_empty") or "").lower() in ("1", "true", "yes")
     out = []
     for jid, job in jobs.items():
         if not job.get("is_timeline"):
+            continue
+        clip_count = len((job.get("timeline") or {}).get("tracks", {}).get("main", []))
+        if not include_empty and clip_count <= 0:
             continue
         out.append({
             "job_id": jid,
@@ -8495,10 +8509,38 @@ def timeline_list():
             "status": job.get("status"),
             "output": job.get("output"),
             "created_at": job.get("created_at"),
-            "clip_count": len((job.get("timeline") or {}).get("tracks", {}).get("main", [])),
+            "clip_count": clip_count,
         })
     out.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
     return jsonify({"timelines": out})
+
+
+@app.route("/timeline/delete", methods=["POST"])
+def timeline_delete():
+    """Delete a timeline project job (and its DB row). Does not delete source videos."""
+    data = request.get_json(force=True) or {}
+    job_id = (data.get("job_id") or "").strip()
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    job = jobs.get(job_id) or {}
+    if not job.get("is_timeline"):
+        return jsonify({"error": "Not a timeline project"}), 400
+    # Best-effort: remove rendered output files for this timeline job.
+    try:
+        for folder in (OUTPUT_DIR, UPLOAD_DIR):
+            for p in Path(folder).glob(f"{job_id}*"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    jobs.pop(job_id, None)
+    try:
+        _db_delete_job(job_id)
+    except Exception as e:
+        return jsonify({"error": f"Deleted from memory but DB failed: {e}"}), 500
+    return jsonify({"ok": True, "job_id": job_id})
 
 
 # =====================================================================
