@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-42-gemini-broll";
+  const TL_BUILD = "studio-editor-build-43-long-render";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4382,7 +4382,7 @@
   async function renderTimelineVideo() {
     if (!tl || !tl.tracks.main.length) {
       alert("Add at least one clip to the Main track first.");
-      return;
+      return null;
     }
     const btn = $("tlRenderBtn");
     if (btn) btn.disabled = true;
@@ -4396,10 +4396,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: tl.job_id, timeline: serialize() }),
       });
-      pollRender();
+      return await pollRender();
     } catch (e) {
       setRenderStatus("Error: " + e.message);
       if (btn) btn.disabled = false;
+      throw e;
     }
   }
   window.renderTimelineVideo = renderTimelineVideo;
@@ -4408,33 +4409,54 @@
   };
 
   function pollRender() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      try {
-        const s = await api("/status/" + tl.job_id);
-        if (s.status === "done" && s.output) {
-          clearInterval(pollTimer);
-          setRenderStatus("Done ✓");
-          $("tlRenderBtn").disabled = false;
-          const v = $("tlPreviewVideo");
-          v.src = "/preview/" + s.output + "?t=" + Date.now();
-          previewingOutput = true;   // preview is now the full output (1:1 playhead)
-          v.closest(".tl-preview").classList.add("has-video");
-          v.load();
-          v.play().catch(() => {});
-        } else if (s.status === "error") {
-          clearInterval(pollTimer);
-          setRenderStatus("Error: " + (s.error || "render failed"));
-          $("tlRenderBtn").disabled = false;
-        } else {
-          setRenderStatus(`${s.status || "working"}… ${s.progress || 0}%`);
+    return new Promise((resolve, reject) => {
+      clearInterval(pollTimer);
+      let failStreak = 0;
+      pollTimer = setInterval(async () => {
+        try {
+          const s = await api("/status/" + tl.job_id);
+          failStreak = 0;
+          if (typeof window.showExportProgressUpdate === "function") {
+            window.showExportProgressUpdate(s);
+          }
+          if (s.status === "done" && s.output) {
+            clearInterval(pollTimer);
+            setRenderStatus("Done ✓ — download ready on Ingest");
+            if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            const v = $("tlPreviewVideo");
+            if (v) {
+              v.src = "/preview/" + s.output + "?t=" + Date.now();
+              previewingOutput = true;   // preview is now the full output (1:1 playhead)
+              const wrap = v.closest(".tl-preview");
+              if (wrap) wrap.classList.add("has-video");
+              v.load();
+              v.play().catch(() => {});
+            }
+            if (typeof window.showExportDone === "function") {
+              window.showExportDone(s.output, { jobId: tl.job_id });
+            }
+            resolve(s);
+          } else if (s.status === "error") {
+            clearInterval(pollTimer);
+            setRenderStatus("Error: " + (s.error || "render failed"));
+            if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            reject(new Error(s.error || "render failed"));
+          } else {
+            setRenderStatus(`${s.status || "working"}… ${s.progress || 0}%`);
+          }
+        } catch (e) {
+          failStreak += 1;
+          setRenderStatus("Reconnecting… (" + failStreak + ")");
+          // Long encodes often hitch the proxy briefly — retry before giving up.
+          if (failStreak >= 12) {
+            clearInterval(pollTimer);
+            setRenderStatus("Error: " + e.message);
+            if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            reject(e);
+          }
         }
-      } catch (e) {
-        clearInterval(pollTimer);
-        setRenderStatus("Error: " + e.message);
-        $("tlRenderBtn").disabled = false;
-      }
-    }, 1500);
+      }, 1500);
+    });
   }
 
   function setRenderStatus(s) {

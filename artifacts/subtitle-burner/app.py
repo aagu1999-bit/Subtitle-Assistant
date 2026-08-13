@@ -197,6 +197,31 @@ CAPCUT_TEMPLATES = {
         "broll_placement": "center",
         "broll_scope": "playhead",
     },
+    # CapCut Always–style: match stills to spoken keywords (photos / AI photos).
+    "capcut_always": {
+        "label": "Always · Photo Match",
+        "ai_edit_pack": "always",
+        "canvas": "9x16",
+        "font": "Montserrat Thin Black",
+        "size": 62,
+        "primary": "#FFFFFF",
+        "highlight": "#FFE566",
+        "accent": "#FF6B9A",
+        "group": 2,
+        "headline": "",
+        "viral_preset": "hormozi",
+        "speaker_colors": False,
+        "reframe": {"enabled": False},
+        "punch_zoom": {"enabled": False, "intensity": "med"},
+        "ken_burns": {"enabled": True, "direction": "in", "intensity": "med"},
+        "color_grade": "warm",
+        "auto_overlays": True,
+        "photo_match": True,
+        "use_ai_photos": True,
+        "broll_mode": "photo",
+        "broll_placement": "center",
+        "broll_scope": "full",
+    },
 }
 
 # Canonical Caption look schema used by build_ass / Instant Export / Shorts.
@@ -322,6 +347,21 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
         },
         "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
+    },
+    "always": {
+        "label": "Always",
+        "blurb": "Photo-match B-roll — keyword stills (stock/AI) with soft Ken Burns",
+        "canvas": "9x16",
+        "transition": "crossfade",
+        "caption_preset": "hormozi",
+        "photo_match": True,
+        "use_ai_photos": True,
+        "style": {
+            "font": "Montserrat Thin Black", "size": 62, "primary": "#FFFFFF",
+            "highlight": "#FFE566", "accent": "#FF6B9A", "group": 2,
+        },
+        "color_grade": {"preset": "warm", "brightness": 0.03, "contrast": 0.06, "saturation": 0.1},
+        "ken_burns": {"enabled": True, "direction": "in", "intensity": "med"},
     },
 }
 
@@ -555,11 +595,22 @@ def _load_jobs_from_db() -> None:
             filename = row["filename"]
         except (IndexError, KeyError):
             pass
+        status = row["status"]
+        error = row["error"]
+        # Daemon render/transcribe threads die with the process. Mark any
+        # in-progress work as error so the UI does not poll forever after
+        # Stop+Run / gunicorn restart (common on long >2–3 min encodes).
+        if _is_stale_in_progress_status(status):
+            status = "error"
+            error = (
+                error
+                or "Interrupted by server restart. Click Instant Export / Render again."
+            )
         jobs[row["job_id"]] = {
-            "status": row["status"],
+            "status": status,
             "progress": row["progress"],
             "output": row["output"],
-            "error": row["error"],
+            "error": error,
             "words": words,
             "style": style,
             "audio": audio,
@@ -578,9 +629,30 @@ def _load_jobs_from_db() -> None:
         }
 
 
+def _is_stale_in_progress_status(status: str | None) -> bool:
+    """True if this status needed a live worker that no longer exists after restart."""
+    s = (status or "").strip().lower()
+    if not s or s in ("done", "error", "awaiting_edit"):
+        return False
+    if s in ("queued", "transcribing", "uploading", "analyzing", "processing"):
+        return True
+    hints = (
+        "render", "remux", "mix", "build", "encod", "compos", "burn",
+        "final", "mux", "stitch", "overlay", "export", "writing",
+    )
+    return any(h in s for h in hints)
+
+
 # Initialise DB and reload persisted jobs before the cleanup thread starts.
 _db_init()
 _load_jobs_from_db()
+# Persist abandoned-job fixes so /status stays honest after reload.
+try:
+    for _jid, _job in list(jobs.items()):
+        if (_job.get("error") or "").startswith("Interrupted by server restart"):
+            _db_save_job(_jid)
+except Exception:
+    pass
 
 
 def allowed_file(name: str) -> bool:
@@ -3630,6 +3702,7 @@ def burn_subtitles(
     quality_boost: bool = False,
     silent: bool = False,
     punch_cfg: dict | None = None,
+    job_id: str | None = None,
 ):
     """Burn the ASS file into the video using FFmpeg.
 
@@ -3640,6 +3713,7 @@ def burn_subtitles(
     otherwise the source video's audio is copied through.
     If *quality_boost* is True, the source is upscaled (lanczos) so the short
     edge is at least 1080 px, with a light unsharp pass.
+    Optional *job_id* streams encode progress into jobs[job_id]["progress"].
     """
     fonts_arg = str(FONT_DIR).replace("\\", "/").replace(":", r"\:")
     ass_arg = str(ass_path).replace("\\", "/").replace(":", r"\:")
@@ -3682,8 +3756,16 @@ def burn_subtitles(
             cmd += ["-shortest"]
     cmd += [str(output_path)]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 and VIDEO_ENC_NAME == "h264_videotoolbox":
+    duration_hint = _media_duration(video_path) or None
+    ok = _run_ffmpeg_encode(
+        cmd,
+        what="caption burn",
+        job_id=job_id,
+        progress_lo=80,
+        progress_hi=94,
+        duration_hint=duration_hint,
+    )
+    if not ok and VIDEO_ENC_NAME == "h264_videotoolbox":
         # Hardware encoder can fail on unusual inputs (e.g. exotic pixel
         # formats). Retry once with libx264 so the user still gets a result.
         fb_cut = cmd.index("-vf") + 2
@@ -3698,10 +3780,114 @@ def burn_subtitles(
             if audio_path:
                 fallback += ["-shortest"]
         fallback += [str(output_path)]
-        proc = subprocess.run(fallback, capture_output=True, text=True)
+        ok = _run_ffmpeg_encode(
+            fallback,
+            what="caption burn (libx264 fallback)",
+            job_id=job_id,
+            progress_lo=80,
+            progress_hi=94,
+            duration_hint=duration_hint,
+        )
+
+    if not ok:
+        raise RuntimeError("FFmpeg caption burn failed (see ffmpeg_render.log)")
+
+
+def _run_ffmpeg_encode(
+    cmd: list,
+    what: str = "FFmpeg",
+    job_id: str | None = None,
+    progress_lo: int | None = None,
+    progress_hi: int | None = None,
+    duration_hint: float | None = None,
+) -> bool:
+    """Run an ffmpeg encode without buffering all stderr in memory.
+
+    When *job_id* + progress range are set, streams `-progress` so long
+    encodes (>2–3 min) keep updating /status instead of freezing at 80%.
+    Returns True on exit code 0.
+    """
+    if not cmd or cmd[0] != FFMPEG:
+        raise ValueError(f"{what}: command must start with FFMPEG binary")
+
+    run_cmd = [FFMPEG, "-hide_banner", "-nostats"]
+    rest = cmd[1:]
+    track_progress = bool(job_id and progress_lo is not None and progress_hi is not None)
+    if track_progress:
+        run_cmd += ["-progress", "pipe:1"]
+    run_cmd += rest
+
+    try:
+        proc = subprocess.Popen(
+            run_cmd,
+            stdout=subprocess.PIPE if track_progress else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as e:
+        ffmpeg_logger.error(f"{what} spawn failed: {e}")
+        return False
+
+    last_pct = int(progress_lo) if progress_lo is not None else 0
+    last_db = 0.0
+    stderr_tail: list[str] = []
+
+    def _drain_stderr():
+        if not proc.stderr:
+            return
+        for line in proc.stderr:
+            line = line.rstrip()
+            if not line:
+                continue
+            stderr_tail.append(line)
+            if len(stderr_tail) > 40:
+                stderr_tail.pop(0)
+
+    # Drain stderr on a side thread so a full pipe can't deadlock.
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    err_thread.start()
+
+    try:
+        if track_progress and proc.stdout:
+            for raw in proc.stdout:
+                line = (raw or "").strip()
+                if not line:
+                    continue
+                if line.startswith("out_time_ms=") and duration_hint and duration_hint > 0.5:
+                    try:
+                        ms = int(line.split("=", 1)[1].strip() or "0")
+                    except ValueError:
+                        continue
+                    frac = min(1.0, max(0.0, (ms / 1000.0) / duration_hint))
+                    pct = int(progress_lo + (progress_hi - progress_lo) * frac)
+                    if pct > last_pct and job_id in jobs:
+                        last_pct = pct
+                        jobs[job_id]["progress"] = pct
+                        # Throttle SQLite writes during long encodes.
+                        now = time.time()
+                        if now - last_db >= 2.5:
+                            last_db = now
+                            try:
+                                _db_save_job(job_id)
+                            except Exception:
+                                pass
+                elif line == "progress=end":
+                    break
+        proc.wait()
+    finally:
+        err_thread.join(timeout=5)
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed: {proc.stderr[-2000:]}")
+        tail = "\n".join(stderr_tail)[-2000:]
+        ffmpeg_logger.error(f"{what} failed (code {proc.returncode}): {tail}")
+        return False
+    return True
 
 
 def mux_audio_into_video(silent_video: Path, audio_source: Path, output_path: Path) -> None:
@@ -3722,9 +3908,8 @@ def mux_audio_into_video(silent_video: Path, audio_source: Path, output_path: Pa
         "-shortest",
         str(output_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Audio remux failed: {proc.stderr[-2000:]}")
+    if not _run_ffmpeg_encode(cmd, what="audio remux"):
+        raise RuntimeError("Audio remux failed (see ffmpeg_render.log)")
 
 
 def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Path, job_id: str = "") -> str:
@@ -4656,6 +4841,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 quality_boost=bool(style.get("quality_boost")),
                 silent=True,
                 punch_cfg=style.get("punch_zoom"),
+                job_id=job_id,
             )
             # Cache the silent burn for next render.
             try:
@@ -7564,11 +7750,19 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
         _safe_unlink(enhanced.with_suffix(".offset.aac"))
 
 
-def _tl_run(cmd: list, what: str) -> None:
+def _tl_run(cmd: list, what: str, job_id: str | None = None,
+            progress_lo: int | None = None, progress_hi: int | None = None,
+            duration_hint: float | None = None) -> None:
     """Run an ffmpeg command, raising a trimmed error on failure."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"{what} failed: {proc.stderr[-800:]}")
+    if not _run_ffmpeg_encode(
+        cmd,
+        what=what,
+        job_id=job_id,
+        progress_lo=progress_lo,
+        progress_hi=progress_hi,
+        duration_hint=duration_hint,
+    ):
+        raise RuntimeError(f"{what} failed (see ffmpeg_render.log)")
 
 
 # Color-grade presets (ffmpeg filter fragments). Mirrors the Descript-style
@@ -9491,17 +9685,24 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "anchor": pieces[0]["id"] if pieces else None,
         })
 
-    # Keyword callouts → text track + optional badge overlays (Phase 5).
+    # Keyword callouts → text track + photo-match / badge overlays (Phase 5/3).
     overlay_track = []
     if insert_media and words:
-        media_budget = {"low": 1, "med": 3, "high": 5}.get((intensity or "med").lower(), 3)
+        photo_match = bool(pack.get("photo_match"))
+        use_ai = bool(pack.get("use_ai_photos")) and _gemini_image_ready()
+        media_budget = {"low": 2, "med": 4, "high": 6}.get((intensity or "med").lower(), 4) if photo_match else {
+            "low": 1, "med": 3, "high": 5
+        }.get((intensity or "med").lower(), 3)
         callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
         style = pack.get("style") or {}
+        ken_default = pack.get("ken_burns") if isinstance(pack.get("ken_burns"), dict) else None
         for i, co in enumerate(callouts):
             # Map source time into output time roughly as offset from t_in
             # (before cut compression — good enough for seed placement).
             start = max(0.0, float(co["start"]) - t_in)
-            dur = min(2.2, max(1.2, float(co.get("duration") or 1.8)))
+            dur = min(2.8, max(1.4, float(co.get("duration") or 1.8))) if photo_match else min(
+                2.2, max(1.2, float(co.get("duration") or 1.8))
+            )
             text_track.append({
                 "id": _uid_short(),
                 "text": str(co["text"])[:40],
@@ -9515,16 +9716,67 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                 "bold": True, "align": 2, "anim": "slideup",
                 "anchor": pieces[0]["id"] if pieces else None,
             })
-            # Also seed a PiP keyword badge on the overlay track when possible.
+            # Photo-match: prefer real stills (Gemini / stock); else keyword badge.
             try:
                 asset_id = uuid.uuid4().hex
-                dest = ASSET_DIR / f"{asset_id}.png"
-                if _make_keyword_badge_png(str(co["text"]), dest):
-                    corners = [
-                        {"x": 0.58, "y": 0.06}, {"x": 0.04, "y": 0.06},
-                        {"x": 0.58, "y": 0.62}, {"x": 0.04, "y": 0.62},
-                    ]
-                    pos = corners[i % 4]
+                dest_stem = ASSET_DIR / asset_id
+                asset_path = None
+                source = "badge"
+                if photo_match and (_broll_any_photo_provider() or use_ai):
+                    asset_path, src_tag = _fetch_broll_image_for_keyword_ex(
+                        str(co["text"]), dest_stem, use_ai=use_ai,
+                    )
+                    if asset_path:
+                        source = src_tag or "photo"
+                        final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
+                        if asset_path.resolve() != final.resolve():
+                            try:
+                                if final.exists():
+                                    _safe_unlink(final)
+                                asset_path.replace(final)
+                                asset_path = final
+                            except OSError:
+                                pass
+                if asset_path is None:
+                    dest = ASSET_DIR / f"{asset_id}.png"
+                    if _make_keyword_badge_png(str(co["text"]), dest):
+                        asset_path = dest
+                        source = "badge"
+                    else:
+                        _safe_unlink(dest)
+                if asset_path is not None:
+                    _write_asset_meta(
+                        asset_id,
+                        filename=f"{co['text']}{asset_path.suffix.lower()}",
+                        keyword=str(co["text"]),
+                        source=source,
+                    )
+                    if photo_match and source in ("photo", "gemini"):
+                        # Center full-bleed still with Ken Burns (Always look).
+                        pos = {"x": 0.08, "y": 0.12, "w": 0.84, "h": 0.55}
+                        layout = "center"
+                        opacity = 1.0
+                        border = 0
+                        ken = None
+                        if ken_default and ken_default.get("enabled"):
+                            ken = {
+                                "enabled": True,
+                                "direction": ken_default.get("direction") or "in",
+                                "intensity": ken_default.get("intensity") or "med",
+                            }
+                        else:
+                            ken = {"enabled": True, "direction": "in", "intensity": "med"}
+                    else:
+                        corners = [
+                            {"x": 0.58, "y": 0.06}, {"x": 0.04, "y": 0.06},
+                            {"x": 0.58, "y": 0.62}, {"x": 0.04, "y": 0.62},
+                        ]
+                        pos = corners[i % 4]
+                        pos = {"x": pos["x"], "y": pos["y"], "w": 0.36, "h": 0.20}
+                        layout = "pip_auto"
+                        opacity = 0.92
+                        border = 0
+                        ken = None
                     overlay_track.append({
                         "id": _uid_short(),
                         "asset_id": asset_id,
@@ -9532,17 +9784,16 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                         "out": dur,
                         "start": start,
                         "x": pos["x"], "y": pos["y"],
-                        "w": 0.36, "h": 0.20,
-                        "opacity": 0.92,
-                        "fit": "contain",
-                        "fade_in": 0.15, "fade_out": 0.2,
-                        "border_px": 0,
-                        "layout": "pip_auto",
+                        "w": pos["w"], "h": pos["h"],
+                        "opacity": opacity,
+                        "fit": "cover" if layout == "center" else "contain",
+                        "fade_in": 0.15, "fade_out": 0.25,
+                        "border_px": border,
+                        "layout": layout,
+                        "ken_burns": ken,
                         "anchor": pieces[0]["id"] if pieces else None,
                         "anchor_offset": start,
                     })
-                else:
-                    _safe_unlink(dest)
             except Exception:
                 pass
 

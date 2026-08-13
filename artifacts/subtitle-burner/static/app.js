@@ -2265,8 +2265,11 @@ async function pollRender(jobId) {
   try {
     const res = await fetch("/status/" + jobId);
     if (res.status === 404) {
-      showError("Job is no longer available on the server. Please re-upload.");
-      renderBtn.disabled = false;
+      // Only surface if this is still the active job.
+      if (!currentJobId || currentJobId === jobId) {
+        showError("Job is no longer available on the server. Please re-upload.");
+        renderBtn.disabled = false;
+      }
       return;
     }
     s = await res.json();
@@ -2275,29 +2278,41 @@ async function pollRender(jobId) {
     return;
   }
 
-  // Drop UI updates if user switched jobs mid-render.
-  if (currentJobId && currentJobId !== jobId) return;
-
-  barFill.style.width = (s.progress || 10) + "%";
-  statusText.textContent = capitalize(s.status) + "…";
+  const isActive = !currentJobId || currentJobId === jobId;
+  if (isActive) {
+    barFill.style.width = (s.progress || 10) + "%";
+    statusText.textContent = capitalize(s.status) + "… " + (s.progress != null ? (s.progress + "%") : "");
+  }
 
   if (s.status === "done") {
-    barFill.style.width = "100%";
-    progress.classList.add("hidden");
-    result.classList.remove("hidden");
-    player.src = "/preview/" + s.output;
-    dl.href = "/download/" + s.output;
-    renderBtn.disabled = false;
-    result.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Always wire download for the finished job — long renders often finish
+    // after the user browsed away; still surface the file when they return
+    // or when Instant Export left Ingest waiting.
+    if (typeof window.showExportDone === "function") {
+      window.showExportDone(s.output, { jobId, force: isActive });
+    } else if (isActive) {
+      barFill.style.width = "100%";
+      progress.classList.add("hidden");
+      result.classList.remove("hidden");
+      player.src = "/preview/" + s.output;
+      dl.href = "/download/" + s.output;
+      renderBtn.disabled = false;
+      result.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (renderBtn) renderBtn.disabled = false;
     return;
   }
 
   if (s.status === "error") {
-    showError("Render error: " + s.error);
-    renderBtn.disabled = false;
+    if (isActive) {
+      showError("Render error: " + s.error);
+      renderBtn.disabled = false;
+    }
     return;
   }
 
+  // Keep polling even if the user switched jobs — long (>2.5 min) encodes
+  // must not be abandoned by the UI.
   setTimeout(() => pollRender(jobId), 2000);
 }
 
@@ -5821,6 +5836,38 @@ function _renderAssemblyBar() {
     } catch (e) { /* ignore */ }
   }
 
+  function showExportProgressUpdate(s) {
+    if (!s) return;
+    if (progress) progress.classList.remove("hidden");
+    if (barFill) barFill.style.width = Math.max(8, Number(s.progress) || 10) + "%";
+    if (statusText) {
+      statusText.textContent = capitalize(s.status || "Rendering") + "… "
+        + (s.progress != null ? (s.progress + "%") : "");
+    }
+  }
+
+  function showExportDone(output, opts) {
+    opts = opts || {};
+    if (!output) return;
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    if (barFill) barFill.style.width = "100%";
+    if (progress) progress.classList.add("hidden");
+    if (result) result.classList.remove("hidden");
+    if (player) {
+      player.src = "/preview/" + output + "?t=" + Date.now();
+      try { player.load(); } catch (e) { /* ignore */ }
+    }
+    if (dl) dl.href = "/download/" + output;
+    if (renderBtn) renderBtn.disabled = false;
+    if (statusText) statusText.textContent = "Done — download ready";
+    try {
+      result?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    } catch (e) { /* ignore */ }
+  }
+
+  window.showExportProgressUpdate = showExportProgressUpdate;
+  window.showExportDone = showExportDone;
+
   async function renderCurrentJobDirect() {
     if (!currentJobId) throw new Error("No active video.");
     const edited = (typeof collectEditedWords === "function")
@@ -5886,8 +5933,9 @@ function _renderAssemblyBar() {
       if (!opts.forceJobRender && tabName === "editor" && typeof window.renderTimelineVideo === "function") {
         const hasMain = !!(window.timelineHasMainClips && window.timelineHasMainClips());
         if (hasMain) {
-          showExportProgress("Rendering Timeline…");
-          await window.renderTimelineVideo();
+          showExportProgress("Rendering Timeline… (long videos can take several minutes)");
+          const s = await window.renderTimelineVideo();
+          if (s && s.output) showExportDone(s.output, { jobId: s.job_id || (window.tl && window.tl.job_id) });
           return;
         }
       }
@@ -6049,6 +6097,18 @@ const CAPCUT_TEMPLATES = (typeof window !== "undefined" && window.CAPCUT_TEMPLAT
         color_grade: "cinematic", auto_overlays: false, broll_mode: "auto",
         broll_placement: "center", broll_scope: "playhead",
       },
+      capcut_always: {
+        label: "Always · Photo Match",
+        ai_edit_pack: "always",
+        canvas: "9x16", font: "Montserrat Thin Black", size: 62,
+        primary: "#FFFFFF", highlight: "#FFE566", accent: "#FF6B9A", group: 2,
+        headline: "", viral_preset: "hormozi", speaker_colors: false,
+        punch_zoom: { enabled: false },
+        ken_burns: { enabled: true, direction: "in", intensity: "med" },
+        color_grade: "warm", auto_overlays: true, photo_match: true,
+        use_ai_photos: true, broll_mode: "photo", broll_placement: "center",
+        broll_scope: "full",
+      },
     };
 
 window._activeCapcutKey = window._activeCapcutKey || "podcast_interview";
@@ -6079,6 +6139,7 @@ function applyCapcutTemplateToUi(tKey, opts) {
     capcut_reels: "pulse",
     product_spotlight: "velocity",
     cinematic_vlog: "film",
+    capcut_always: "always",
   };
   const aiPack = t.ai_edit_pack || packMap[tKey] || "pulse";
   t.ai_edit_pack = aiPack;
@@ -6128,6 +6189,7 @@ function applyCapcutTemplateToUi(tKey, opts) {
     capcut_reels: "mrbeast",
     product_spotlight: "neon",
     cinematic_vlog: "karaoke",
+    capcut_always: "hormozi",
   })[tKey];
   const presetBtn = preset
     ? document.querySelector(`#viralPresets .theme[data-preset="${preset}"]`)
@@ -6152,10 +6214,17 @@ function applyCapcutTemplateToUi(tKey, opts) {
 
   const hint = $("capcutTemplateHint");
   if (hint) {
-    hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> → AI Edit pack <strong>"
-      + aiPack + "</strong>. "
-      + "Find highlights, then <strong>AI Edit…</strong> on a card for cuts/zooms. "
-      + "Caption Look stays for fonts/colors/brand only.";
+    if (tKey === "capcut_always" || t.photo_match) {
+      hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> → AI Edit pack <strong>"
+        + aiPack + "</strong>. "
+        + "Matches stills to spoken keywords (stock or Gemini AI photos) with Ken Burns. "
+        + "Run <strong>Find highlights</strong>, then <strong>AI Edit…</strong>.";
+    } else {
+      hint.innerHTML = "<strong>" + (t.label || tKey) + "</strong> → AI Edit pack <strong>"
+        + aiPack + "</strong>. "
+        + "Find highlights, then <strong>AI Edit…</strong> on a card for cuts/zooms. "
+        + "Caption Look stays for fonts/colors/brand only.";
+    }
   }
 
   if (typeof scheduleDraftSave === "function") scheduleDraftSave();
