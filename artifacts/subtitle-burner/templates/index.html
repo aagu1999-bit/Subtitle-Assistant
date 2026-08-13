@@ -1332,6 +1332,10 @@
                     <option value="center">Center overlay</option>
                   </select>
                 </label>
+                <label class="muted tl-broll-ai-opt" style="font-size:.74rem;display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                  <input type="checkbox" id="tlBrollAiPhotos" style="margin-top:2px" {% if not gemini_enabled %}disabled{% endif %}>
+                  <span>Generate AI photos (Gemini){% if not gemini_enabled %} — set <code>GEMINI_API_KEY</code>{% else %} — opt-in; falls back to stock{% endif %}</span>
+                </label>
                 <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll</button>
                 <div class="tl-broll-status-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                   <button id="tlBrollTestBtn" class="tl-chip-btn" type="button" title="Live-check PEXELS_API_KEY on this host (never shows the full key)">Test Pexels</button>

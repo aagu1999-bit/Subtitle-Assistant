@@ -3755,6 +3755,8 @@ def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Pat
 # ---- AI clip suggestions (Gemini) ----
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# Native image model for optional Suggest B-roll AI photos (opt-in).
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
@@ -4780,6 +4782,7 @@ def _broll_provider_status() -> dict:
         ),
         "pexels": bool(_pexels_api_key()),
         "unsplash": bool((os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()),
+        "gemini_image": bool((os.environ.get("GEMINI_API_KEY") or "").strip()),
         "badge": True,
     }
 
@@ -4865,8 +4868,80 @@ def _probe_pexels_key() -> dict:
 
 
 def _broll_any_photo_provider() -> bool:
+    """Stock photo providers only — Gemini AI photos are opt-in separately."""
     st = _broll_provider_status()
     return bool(st["google_cse"] or st["pexels"] or st["unsplash"])
+
+
+def _gemini_image_ready() -> bool:
+    return bool((os.environ.get("GEMINI_API_KEY") or "").strip())
+
+
+def _generate_broll_gemini_image(query: str, dest_stem: Path) -> Path | None:
+    """Generate a B-roll still via Gemini image model. Returns saved Path or None."""
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    q = (query or "").strip()
+    if not q:
+        return None
+    prompt = (
+        "Generate a single realistic photo suitable as video B-roll (no text, "
+        "no logos, no watermarks, no UI chrome). Landscape-friendly composition. "
+        f"Subject: {q}"
+    )
+    model = (GEMINI_IMAGE_MODEL or "gemini-2.5-flash-image").strip()
+    url = f"{_GEMINI_BASE_URL}/{model}:generateContent?key={api_key}"
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+        },
+    }
+    try:
+        import requests as _req
+        resp = _req.post(url, json=body, timeout=90)
+        if resp.status_code >= 400:
+            ai_logger.warning(
+                f"Gemini image B-roll HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+            return None
+        data = resp.json() or {}
+        parts = (
+            ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")
+            or []
+        )
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            raw_b64 = inline.get("data")
+            if not raw_b64:
+                continue
+            mime = (inline.get("mimeType") or inline.get("mime_type") or "image/png").lower()
+            ext = "png"
+            if "jpeg" in mime or "jpg" in mime:
+                ext = "jpg"
+            elif "webp" in mime:
+                ext = "webp"
+            elif "gif" in mime:
+                ext = "gif"
+            try:
+                blob = base64.b64decode(raw_b64)
+            except Exception as e:
+                ai_logger.warning(f"Gemini image base64 decode failed: {e}")
+                continue
+            if len(blob) < 800:
+                continue
+            dest = dest_stem.with_suffix(f".{ext}")
+            dest.write_bytes(blob)
+            if dest.exists() and dest.stat().st_size > 800:
+                return dest
+            _safe_unlink(dest)
+        return None
+    except Exception as e:
+        ai_logger.warning(f"Gemini image B-roll failed: {e}")
+        return None
 
 
 def _download_url_to_asset(url: str, dest_stem: Path, timeout: int = 25) -> Path | None:
@@ -4988,31 +5063,55 @@ def _search_broll_unsplash(query: str) -> str | None:
         return None
 
 
-def _fetch_broll_image_for_keyword(query: str, dest_stem: Path,
-                                   prefer_gif: bool = False) -> Path | None:
-    """Search providers in order and download the first hit next to dest_stem.
+def _fetch_broll_image_for_keyword(
+    query: str,
+    dest_stem: Path,
+    prefer_gif: bool = False,
+    use_ai: bool = False,
+) -> Path | None:
+    """Search providers and download the first hit. Prefer Gemini when use_ai."""
+    path, _src = _fetch_broll_image_for_keyword_ex(
+        query, dest_stem, prefer_gif=prefer_gif, use_ai=use_ai,
+    )
+    return path
 
-    prefer_gif=True uses Google CSE fileType=gif (Pexels/Unsplash stay photos).
-    """
+
+def _fetch_broll_image_for_keyword_ex(
+    query: str,
+    dest_stem: Path,
+    prefer_gif: bool = False,
+    use_ai: bool = False,
+) -> tuple:
+    """Returns (Path|None, source) where source is 'gemini'|'gif'|'photo'|None."""
     q = (query or "").strip()
     if not q:
-        return None
+        return None, None
+
+    if use_ai and not prefer_gif and _gemini_image_ready():
+        ai_path = _generate_broll_gemini_image(q, dest_stem)
+        if ai_path:
+            return ai_path, "gemini"
+
     if prefer_gif:
         url = _search_broll_google_cse(q, file_type="gif")
         if not url:
-            # Broaden: same query without fileType, keep only if URL looks like a gif.
             url = _search_broll_google_cse(q)
             if url and ".gif" not in url.lower().split("?")[0]:
                 url = None
-    else:
-        url = (
-            _search_broll_google_cse(q)
-            or _search_broll_pexels(q)
-            or _search_broll_unsplash(q)
-        )
+        if not url:
+            return None, None
+        path = _download_url_to_asset(url, dest_stem)
+        return (path, "gif") if path else (None, None)
+
+    url = (
+        _search_broll_google_cse(q)
+        or _search_broll_pexels(q)
+        or _search_broll_unsplash(q)
+    )
     if not url:
-        return None
-    return _download_url_to_asset(url, dest_stem)
+        return None, None
+    path = _download_url_to_asset(url, dest_stem)
+    return (path, "photo") if path else (None, None)
 
 
 def _overlay_layout_for_index(i: int, placement: str = "pip") -> dict:
@@ -5059,9 +5158,10 @@ def fetch_auto_overlays():
 
     Body: {
       words?: [...], job_id?: str, budget?: int,
-      mode?: "auto"|"photo"|"badge",
+      mode?: "auto"|"photo"|"badge"|"gif",
       placement?: "pip"|"center",
-      start?: float, end?: float   # optional source-time window (long-form)
+      start?: float, end?: float,   # optional source-time window (long-form)
+      use_ai_photos?: bool          # opt-in Gemini stills before stock
     }
     """
     data = request.get_json(force=True) or {}
@@ -5077,6 +5177,7 @@ def fetch_auto_overlays():
     if mode not in ("auto", "photo", "badge", "gif"):
         mode = "auto"
     placement = str(data.get("placement") or "pip").lower().strip()
+    use_ai_photos = bool(data.get("use_ai_photos")) and _gemini_image_ready()
 
     try:
         win_start = float(data["start"]) if data.get("start") is not None else 0.0
@@ -5121,6 +5222,7 @@ def fetch_auto_overlays():
     used_photo = 0
     used_badge = 0
     used_gif = 0
+    used_gemini = 0
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
     for co in callouts:
@@ -5132,9 +5234,11 @@ def fetch_auto_overlays():
         source = "badge"
 
         want_gif = mode == "gif" and bool(providers.get("google_cse"))
-        want_photo = mode in ("photo", "auto") and _broll_any_photo_provider()
+        want_photo = mode in ("photo", "auto") and (
+            _broll_any_photo_provider() or use_ai_photos
+        )
         if want_gif:
-            asset_path = _fetch_broll_image_for_keyword(
+            asset_path, src_tag = _fetch_broll_image_for_keyword_ex(
                 label, ASSET_DIR / asset_id, prefer_gif=True,
             )
             if asset_path:
@@ -5150,14 +5254,20 @@ def fetch_auto_overlays():
                     except OSError:
                         pass
         elif want_photo:
-            asset_path = _fetch_broll_image_for_keyword(label, ASSET_DIR / asset_id)
+            asset_path, src_tag = _fetch_broll_image_for_keyword_ex(
+                label, ASSET_DIR / asset_id, use_ai=use_ai_photos,
+            )
             if asset_path:
-                is_gif = _is_gif_path(asset_path)
-                source = "gif" if is_gif else "photo"
-                if is_gif:
-                    used_gif += 1
+                if src_tag == "gemini":
+                    source = "gemini"
+                    used_gemini += 1
                 else:
-                    used_photo += 1
+                    is_gif = _is_gif_path(asset_path)
+                    source = "gif" if is_gif else "photo"
+                    if is_gif:
+                        used_gif += 1
+                    else:
+                        used_photo += 1
                 final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
                 if asset_path.resolve() != final.resolve():
                     try:
@@ -5208,7 +5318,7 @@ def fetch_auto_overlays():
             "fit": pos["fit"],
             "fade_in": 0.15,
             "fade_out": 0.25,
-            "border_px": 2 if source in ("photo", "gif") else 0,
+            "border_px": 2 if source in ("photo", "gif", "gemini") else 0,
             "layout": pos["layout"],
             # Ken Burns is opt-in in the Timeline inspector / Effects lane.
             "ken_burns": None,
@@ -5220,14 +5330,22 @@ def fetch_auto_overlays():
         "count": len(overlays),
         "mode": mode,
         "placement": placement,
+        "use_ai_photos": use_ai_photos,
         "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
         "photo_ready": _broll_any_photo_provider(),
-        "stats": {"photo": used_photo, "badge": used_badge, "gif": used_gif},
+        "gemini_image_ready": _gemini_image_ready(),
+        "stats": {
+            "photo": used_photo,
+            "badge": used_badge,
+            "gif": used_gif,
+            "gemini": used_gemini,
+        },
         "hint": (
-            None if _broll_any_photo_provider() or mode == "badge"
+            None if _broll_any_photo_provider() or use_ai_photos or mode == "badge"
             else "No photo API key in this Studio process. "
                  "On Replit: Tools → Secrets → PEXELS_API_KEY, then Stop + Run. "
+                 "Or enable Generate AI photos (needs GEMINI_API_KEY). "
                  "Cursor secrets do not sync to Replit."
         ),
     })
@@ -5245,7 +5363,8 @@ def broll_status():
     out = {
         "providers": st,
         "photo_ready": _broll_any_photo_provider(),
-        "build": "broll-status-v3",
+        "gemini_image_ready": _gemini_image_ready(),
+        "build": "broll-status-v4",
         # Diagnostics only — never includes the key value.
         "pexels_env": {
             "present": bool(_pexels_api_key()) or (raw is not None),
@@ -5258,7 +5377,8 @@ def broll_status():
         "hint": (
             "Set PEXELS_API_KEY on the same host that runs Studio "
             "(Replit Tools→Secrets, then Stop+Run — Cursor secrets do not sync). "
-            "Call /broll/status?probe=1 to validate."
+            "Optional: GEMINI_API_KEY for Generate AI photos. "
+            "Call /broll/status?probe=1 to validate Pexels."
         ),
     }
     if str(request.args.get("probe") or "").strip() in ("1", "true", "yes"):

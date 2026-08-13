@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-41-mobile-capcut";
+  const TL_BUILD = "studio-editor-build-42-gemini-broll";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -335,45 +335,53 @@
     const statusEl = $("tlBrollStatus");
     const hintEl = $("tlBrollHint");
     const modeEl = $("tlBrollMode");
+    const aiEl = $("tlBrollAiPhotos");
     try {
       const q = opts.probe ? "?probe=1" : "";
       const data = await api("/broll/status" + q);
       const st = data.providers || {};
       const photoReady = !!data.photo_ready;
+      const geminiReady = !!(data.gemini_image_ready || st.gemini_image);
       const bits = [];
       if (st.pexels) bits.push("Pexels ✓");
       else bits.push("Pexels ✗");
       if (st.unsplash) bits.push("Unsplash ✓");
       if (st.google_cse) bits.push("CSE ✓");
       else bits.push("CSE ✗");
+      bits.push(geminiReady ? "Gemini ✓" : "Gemini ✗");
       bits.push("badges ✓");
       if (statusEl) {
         statusEl.textContent = bits.join(" · ") + (data.build ? " · " + data.build : "");
-        statusEl.style.color = photoReady ? "#7ddea0" : "#f0c674";
+        statusEl.style.color = (photoReady || geminiReady) ? "#7ddea0" : "#f0c674";
+      }
+      if (aiEl) {
+        aiEl.disabled = !geminiReady;
+        if (!geminiReady) aiEl.checked = false;
       }
       if (modeEl) {
         const photoOpt = modeEl.querySelector('option[value="photo"]');
         const gifOpt = modeEl.querySelector('option[value="gif"]');
         const autoOpt = modeEl.querySelector('option[value="auto"]');
         const badgeOpt = modeEl.querySelector('option[value="badge"]');
-        if (photoOpt) photoOpt.disabled = !photoReady;
+        if (photoOpt) photoOpt.disabled = !(photoReady || geminiReady);
         if (gifOpt) gifOpt.disabled = !st.google_cse;
         // If photos just became available and UI was stuck on badges, flip to Auto.
-        if (photoReady && modeEl.value === "badge" && autoOpt) {
+        if ((photoReady || geminiReady) && modeEl.value === "badge" && autoOpt) {
           modeEl.value = "auto";
         }
-        if (!photoReady && modeEl.value === "photo" && badgeOpt) {
+        if (!(photoReady || geminiReady) && modeEl.value === "photo" && badgeOpt) {
           modeEl.value = "badge";
         }
         if (!st.google_cse && modeEl.value === "gif" && badgeOpt) {
-          modeEl.value = photoReady ? "auto" : "badge";
+          modeEl.value = (photoReady || geminiReady) ? "auto" : "badge";
         }
       }
       if (hintEl) {
-        if (photoReady) {
+        if (photoReady || geminiReady) {
           hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
             + "Each Suggest returns up to ~4–5 clips (max 12)."
-            + (st.google_cse ? " GIF mode uses Google CSE." : "");
+            + (st.google_cse ? " GIF mode uses Google CSE." : "")
+            + (geminiReady ? " Check <em>Generate AI photos</em> to prefer Gemini stills." : "");
         } else {
           const aliases = (data.pexels_env && data.pexels_env.alias_names) || [];
           const aliasNote = aliases.length
@@ -381,7 +389,8 @@
             : " No PEXELS_* env visible in this process.";
           hintEl.innerHTML = "No photo API key in <em>this</em> Studio process — badges still work. "
             + "On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>, then <strong>Stop + Run</strong> "
-            + "(Cursor secrets do not sync)." + aliasNote;
+            + "(Cursor secrets do not sync)." + aliasNote
+            + " Optional: <code>GEMINI_API_KEY</code> for AI photos.";
         }
       }
       if (opts.probe && data.pexels_probe) {
@@ -4896,11 +4905,18 @@
     const modeEl = $("tlBrollMode");
     const placeEl = $("tlBrollPlacement");
     const scopeEl = $("tlBrollScope");
+    const aiEl = $("tlBrollAiPhotos");
     const mode = modeEl ? modeEl.value : "auto";
     const placement = placeEl ? placeEl.value : "pip";
     const scope = scopeEl ? scopeEl.value : "full";
+    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled);
     const isLong = tl && tl.canvas === "16x9";
-    if (btn) { btn.disabled = true; btn.textContent = mode === "badge" ? "Making badges…" : (mode === "gif" ? "Fetching GIFs…" : "Fetching B-roll…"); }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = useAiPhotos && mode !== "badge" && mode !== "gif"
+        ? "Generating AI photos…"
+        : (mode === "badge" ? "Making badges…" : (mode === "gif" ? "Fetching GIFs…" : "Fetching B-roll…"));
+    }
     try {
       let jobId = null;
       let winStart = null;
@@ -4948,8 +4964,9 @@
       if (scope === "playhead") budget = Math.min(budget, 3);
       if (scope === "selected") budget = isLong ? 4 : 5;
       if (mode === "gif") budget = Math.min(budget, 4);
+      if (useAiPhotos) budget = Math.min(budget, 3);
 
-      const body = { budget, mode, placement };
+      const body = { budget, mode, placement, use_ai_photos: useAiPhotos };
       if (jobId) body.job_id = jobId;
       if (winStart != null) body.start = winStart;
       if (winEnd != null) body.end = winEnd;
@@ -4963,7 +4980,9 @@
         alert(mode === "gif"
           ? "No GIFs found. Needs Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) with Image search on, and sites like giphy.com / tenor.com / imgur.com."
           : mode === "photo"
-          ? "No photo B-roll found. Check API keys / try Auto or Badges."
+          ? (useAiPhotos
+            ? "No AI/stock photo B-roll found. Check GEMINI_API_KEY / stock keys, or try Badges."
+            : "No photo B-roll found. Check API keys / try Auto or Badges.")
           : "No keyword overlay moments found in this window.");
         return;
       }
@@ -4976,13 +4995,14 @@
       updateStageCompositor();
       const st = data.stats || {};
       const bits = [];
+      if (st.gemini) bits.push(`${st.gemini} AI`);
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.gif) bits.push(`${st.gif} gif`);
       if (st.badge) bits.push(`${st.badge} badge`);
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
       setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip` +
         (bits.length ? ` · ${bits.join(", ")}` : ""));
-      if (!data.photo_ready && mode !== "badge" && st.badge && !st.photo) {
+      if (!data.photo_ready && !data.gemini_image_ready && mode !== "badge" && st.badge && !st.photo && !st.gemini) {
         const hint = data.hint || "No photo API key in this Studio process. On Replit set PEXELS_API_KEY then Stop+Run.";
         const statusEl = $("tlBrollStatus");
         if (statusEl) {
@@ -4991,7 +5011,7 @@
         }
         refreshBrollStatus().catch(() => {});
       }
-      if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}:${scope}`);
+      if (window.StudioLogger) StudioLogger.clip("auto_overlays_pending", `${list.length}:${mode}:${scope}:ai=${useAiPhotos ? 1 : 0}`);
     } catch (e) {
       alert("Could not suggest overlays: " + e.message);
     } finally {
@@ -5020,7 +5040,10 @@
     pendingBroll.forEach((p) => {
       const start = Number(p.start || 0);
       const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
-      const srcLabel = p.source === "gif" ? "GIF" : (p.source === "photo" ? "Photo" : (p.source === "badge" ? "Badge" : (p.source || "Asset")));
+      const srcLabel = p.source === "gif" ? "GIF"
+        : (p.source === "gemini" ? "AI photo"
+        : (p.source === "photo" ? "Photo"
+        : (p.source === "badge" ? "Badge" : (p.source || "Asset"))));
       html += `<div class="tl-broll-card" data-pending-id="${p.id}">
         <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
         <div class="tl-broll-meta">
@@ -5156,8 +5179,10 @@
     if (btn) { btn.disabled = true; btn.textContent = "…"; }
     const modeEl = $("tlBrollMode");
     const placeEl = $("tlBrollPlacement");
+    const aiEl = $("tlBrollAiPhotos");
     const mode = modeEl ? modeEl.value : "auto";
     const placement = placeEl ? placeEl.value : "pip";
+    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled);
     let jobId = null;
     if (tl && tl.tracks.main[0]) jobId = tl.tracks.main[0].source_job_id;
     if (!jobId && typeof window.currentJobId !== "undefined") jobId = window.currentJobId;
@@ -5166,6 +5191,7 @@
         budget: 1,
         mode,
         placement,
+        use_ai_photos: useAiPhotos,
         keywords: [{
           text: p.keyword || "B-roll",
           start: p.start || 0,
