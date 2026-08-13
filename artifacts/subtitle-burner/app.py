@@ -9780,6 +9780,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     overlay_track.append({
                         "id": _uid_short(),
                         "asset_id": asset_id,
+                        "keyword": str(co["text"])[:40],
+                        "source": source,
                         "in": 0,
                         "out": dur,
                         "start": start,
@@ -9805,6 +9807,10 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         # For job-scoped bg music we keep a hint the UI can surface.
         pass
 
+    photo_n = sum(1 for o in overlay_track if o.get("source") in ("photo", "gemini"))
+    badge_n = sum(1 for o in overlay_track if o.get("source") == "badge")
+    gemini_n = sum(1 for o in overlay_track if o.get("source") == "gemini")
+
     return {
         "canvas": pack.get("canvas") or "9x16",
         "fit": "cover",
@@ -9814,8 +9820,15 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "caption_preset": pack.get("caption_preset"),
         "ai_edit": {
             "style_pack": pack.get("label"),
+            "style_pack_id": (pack.get("_id") or (pack.get("label") or "").lower()),
             "intensity": intensity,
             "insert_media": bool(insert_media),
+            "photo_match": bool(pack.get("photo_match")),
+            "use_ai_photos": bool(pack.get("use_ai_photos")),
+            "broll_mode": "photo" if pack.get("photo_match") else "auto",
+            "broll_placement": "center" if pack.get("photo_match") else "pip",
+            "broll_scope": "full",
+            "ken_burns_on_accept": bool(pack.get("photo_match")),
         },
         "tracks": {
             "main": pieces,
@@ -9827,6 +9840,11 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "bg_music_available": bool(bg_music_files),
             "callout_count": max(0, len(text_track) - (1 if pack.get("add_title") and label else 0)),
             "overlay_count": len(overlay_track),
+            "photo_count": photo_n,
+            "badge_count": badge_n,
+            "gemini_count": gemini_n,
+            "photo_match": bool(pack.get("photo_match")),
+            "review_overlays": bool(pack.get("photo_match")),
         },
     }
 
@@ -9976,7 +9994,8 @@ def ai_edit_seed():
         return jsonify({"error": "Transcript not available"}), 400
 
     pack_id = (data.get("style_pack") or "pulse").lower()
-    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    pack = dict(AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"])
+    pack["_id"] = pack_id
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in ("low", "med", "high"):
         intensity = "med"
@@ -10087,6 +10106,7 @@ def ai_edit_seed():
         "applied_cuts": cuts,
         "effects": effects,
         "timeline": timeline,
+        "media_hints": (timeline or {}).get("media_hints") or {},
         "warning": gemini_warning,
     })
 

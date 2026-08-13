@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-43-long-render";
+  const TL_BUILD = "studio-editor-build-44-always-handoff";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -329,6 +329,163 @@
     return data;
   }
 
+  function isAlwaysPhotoMatchSession() {
+    if (window._activeCapcutKey === "capcut_always") return true;
+    const pending = window._pendingCapcutTemplate;
+    if (pending && (pending.photo_match || pending.ai_edit_pack === "always")) return true;
+    const ae = tl && tl.ai_edit;
+    if (!ae) return false;
+    const id = String(ae.style_pack_id || "").toLowerCase();
+    const label = String(ae.style_pack || "").toLowerCase();
+    return !!(ae.photo_match || id === "always" || label === "always" || label.includes("always"));
+  }
+
+  function syncAlwaysBrollDefaults(opts) {
+    opts = opts || {};
+    const ae = (tl && tl.ai_edit) || {};
+    const pack = window._pendingCapcutTemplate || {};
+    const wantPhoto = !!(opts.photo_match || ae.photo_match || pack.photo_match || isAlwaysPhotoMatchSession());
+    if (!wantPhoto) return false;
+
+    const modeEl = $("tlBrollMode");
+    const placeEl = $("tlBrollPlacement");
+    const scopeEl = $("tlBrollScope");
+    const aiEl = $("tlBrollAiPhotos");
+    const mode = opts.broll_mode || ae.broll_mode || pack.broll_mode || "photo";
+    const place = opts.broll_placement || ae.broll_placement || pack.broll_placement || "center";
+    const scope = opts.broll_scope || ae.broll_scope || pack.broll_scope || "full";
+    if (modeEl) {
+      const opt = modeEl.querySelector(`option[value="${mode}"]`);
+      if (opt && !opt.disabled) modeEl.value = mode;
+      else if (modeEl.querySelector('option[value="auto"]:not([disabled])')) modeEl.value = "auto";
+    }
+    if (placeEl) placeEl.value = place;
+    if (scopeEl) scopeEl.value = scope;
+    if (aiEl && !aiEl.disabled) {
+      const wantAi = opts.use_ai_photos != null
+        ? !!opts.use_ai_photos
+        : !!(ae.use_ai_photos || pack.use_ai_photos);
+      aiEl.checked = wantAi;
+    }
+    return true;
+  }
+
+  function alwaysKenBurnsDefault() {
+    const pack = window._pendingCapcutTemplate || {};
+    const kb = pack.ken_burns || {};
+    return {
+      enabled: true,
+      direction: kb.direction || "in",
+      intensity: kb.intensity || "med",
+    };
+  }
+
+  /** Move seeded Always overlays into the Suggest review queue (Accept / Skip). */
+  function promoteOverlaysToPendingReview(opts) {
+    opts = opts || {};
+    if (!tl) return 0;
+    const list = (tl.tracks.overlay || []).slice();
+    if (!list.length) return 0;
+    pendingBroll = list.map((ov) => {
+      const ken = ov.ken_burns && ov.ken_burns.enabled
+        ? Object.assign({}, ov.ken_burns)
+        : (opts.kenBurns !== false ? alwaysKenBurnsDefault() : null);
+      return Object.assign({}, ov, {
+        id: uid(),
+        _status: "pending",
+        keyword: ov.keyword || "B-roll",
+        source: ov.source || "photo",
+        ken_burns: ken,
+      });
+    });
+    tl.tracks.overlay = [];
+    renderPendingBroll();
+    return pendingBroll.length;
+  }
+
+  async function finishAlwaysSeedHandoff(seed, mediaHints) {
+    const hints = mediaHints || (seed && seed.media_hints) || {};
+    const always = !!(hints.photo_match || (seed && seed.ai_edit && seed.ai_edit.photo_match)
+      || isAlwaysPhotoMatchSession());
+    if (!always) return;
+
+    syncAlwaysBrollDefaults({
+      photo_match: true,
+      use_ai_photos: !!(seed && seed.ai_edit && seed.ai_edit.use_ai_photos),
+      broll_mode: (seed && seed.ai_edit && seed.ai_edit.broll_mode) || "photo",
+      broll_placement: (seed && seed.ai_edit && seed.ai_edit.broll_placement) || "center",
+      broll_scope: (seed && seed.ai_edit && seed.ai_edit.broll_scope) || "full",
+    });
+    await loadAssets().catch(() => {});
+    setLeftTab("media", { pin: true });
+
+    const n = promoteOverlaysToPendingReview({ kenBurns: true });
+    const photos = hints.photo_count || 0;
+    const badges = hints.badge_count || 0;
+    const gemini = hints.gemini_count || 0;
+
+    if (n) {
+      const bits = [];
+      if (gemini) bits.push(gemini + " AI");
+      if (photos - gemini > 0) bits.push((photos - gemini) + " photo");
+      if (badges) bits.push(badges + " badge");
+      setSaveState(
+        `Always · ${n} still${n === 1 ? "" : "s"} ready to review`
+        + (bits.length ? ` (${bits.join(", ")})` : "")
+        + " — Accept / As Main / Skip"
+      );
+      return;
+    }
+
+    // No overlays seeded (no providers / no keywords) — run Suggest once with Always defaults.
+    setSaveState("Always · no stills seeded — running Suggest B-roll…");
+    try {
+      await suggestKeywordOverlays();
+    } catch (e) {
+      setSaveState("Always · open Media and Suggest B-roll (check Generate AI photos)");
+    }
+  }
+
+  window.syncAlwaysBrollDefaults = syncAlwaysBrollDefaults;
+  window.isAlwaysPhotoMatchSession = isAlwaysPhotoMatchSession;
+  window.applyAlwaysPackToTimeline = async function applyAlwaysPackToTimeline() {
+    if (!(await ensureProject())) return false;
+    if (typeof window.applyCapcutTemplateToUi === "function") {
+      window.applyCapcutTemplateToUi("capcut_always");
+    }
+    window._activeCapcutKey = "capcut_always";
+    const t = (typeof window.CAPCUT_TEMPLATES === "object" && window.CAPCUT_TEMPLATES.capcut_always)
+      || window._pendingCapcutTemplate
+      || {};
+    if (typeof window.applyTimelineBranding === "function") {
+      window.applyTimelineBranding(tl.style || {}, {
+        canvas: t.canvas || "9x16",
+        ken_burns: null, // stills get KB on Accept; don't auto on Main A-roll
+        color_grade: t.color_grade || "warm",
+        broll_mode: "photo",
+        broll_placement: "center",
+        broll_scope: "full",
+      });
+    }
+    if (!tl.ai_edit) tl.ai_edit = {};
+    tl.ai_edit = Object.assign({}, tl.ai_edit, {
+      style_pack: "Always",
+      style_pack_id: "always",
+      photo_match: true,
+      use_ai_photos: true,
+      broll_mode: "photo",
+      broll_placement: "center",
+      broll_scope: "full",
+      ken_burns_on_accept: true,
+    });
+    syncAlwaysBrollDefaults({ photo_match: true, use_ai_photos: true });
+    await refreshBrollStatus().catch(() => {});
+    setLeftTab("media", { pin: true });
+    setSaveState("Always pack on — Suggest B-roll to match stills");
+    scheduleSave();
+    return true;
+  };
+
   /** Live-refresh B-roll mode dropdown from /broll/status (avoids stale HTML). */
   async function refreshBrollStatus(opts) {
     opts = opts || {};
@@ -376,8 +533,16 @@
           modeEl.value = (photoReady || geminiReady) ? "auto" : "badge";
         }
       }
+      // Always session: re-apply photo/AI defaults after providers unlock.
+      if (!opts.probe && isAlwaysPhotoMatchSession()) {
+        syncAlwaysBrollDefaults({ photo_match: true });
+      }
       if (hintEl) {
-        if (photoReady || geminiReady) {
+        if (isAlwaysPhotoMatchSession()) {
+          hintEl.innerHTML = "<strong>Always · Photo Match</strong> — Suggest stills for keywords, then Accept. "
+            + (geminiReady ? "AI photos preferred when checked. " : "Set <code>GEMINI_API_KEY</code> for AI stills. ")
+            + "Ken Burns applies on Accept.";
+        } else if (photoReady || geminiReady) {
           hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
             + "Each Suggest returns up to ~4–5 clips (max 12)."
             + (st.google_cse ? " GIF mode uses Google CSE." : "")
@@ -4764,6 +4929,16 @@
         wireTranscriptToolbar();
         wireLeftTabs();
         on("tlAutoOverlaysBtn", "onclick", () => suggestKeywordOverlays());
+        on("tlAlwaysPackBtn", "onclick", () => {
+          if (typeof window.applyAlwaysPackToTimeline === "function") {
+            window.applyAlwaysPackToTimeline().then((ok) => {
+              if (ok) {
+                const go = confirm("Always pack applied. Run Suggest B-roll now?");
+                if (go) suggestKeywordOverlays();
+              }
+            });
+          }
+        });
         on("tlBrollTestBtn", "onclick", () => testPexelsKey());
         on("tlAssetBtn", "onclick", () => $("tlAssetFile")?.click());
         on("tlAssetFile", "onchange", async (e) => {
@@ -4928,10 +5103,18 @@
     const placeEl = $("tlBrollPlacement");
     const scopeEl = $("tlBrollScope");
     const aiEl = $("tlBrollAiPhotos");
+    // Always session: lock photo + AI defaults before Suggest.
+    if (isAlwaysPhotoMatchSession()) {
+      syncAlwaysBrollDefaults({ photo_match: true });
+      await refreshBrollStatus().catch(() => {});
+      syncAlwaysBrollDefaults({ photo_match: true });
+    }
     const mode = modeEl ? modeEl.value : "auto";
     const placement = placeEl ? placeEl.value : "pip";
     const scope = scopeEl ? scopeEl.value : "full";
-    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled);
+    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled)
+      || (isAlwaysPhotoMatchSession() && aiEl && !aiEl.disabled);
+    if (isAlwaysPhotoMatchSession() && aiEl && !aiEl.disabled) aiEl.checked = true;
     const isLong = tl && tl.canvas === "16x9";
     if (btn) {
       btn.disabled = true;
@@ -5009,7 +5192,19 @@
         return;
       }
       // Review queue — do NOT auto-place on Overlay until Accept.
-      pendingBroll = list.map((ov) => Object.assign({}, ov, { id: uid(), _status: "pending" }));
+      const always = isAlwaysPhotoMatchSession();
+      pendingBroll = list.map((ov) => {
+        const item = Object.assign({}, ov, { id: uid(), _status: "pending" });
+        if (always && ov.source !== "gif" && !(item.ken_burns && item.ken_burns.enabled)) {
+          item.ken_burns = alwaysKenBurnsDefault();
+        }
+        if (always && (!item.layout || item.layout === "pip_auto") && item.source !== "badge") {
+          item.layout = "center";
+          item.x = 0.08; item.y = 0.12; item.w = 0.84; item.h = 0.55;
+          item.fit = "cover";
+        }
+        return item;
+      });
       await loadAssets();
       setLeftTab("media", { pin: true });
       renderPendingBroll();
@@ -5022,8 +5217,11 @@
       if (st.gif) bits.push(`${st.gif} gif`);
       if (st.badge) bits.push(`${st.badge} badge`);
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
-      setSaveState(`${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip` +
-        (bits.length ? ` · ${bits.join(", ")}` : ""));
+      setSaveState(
+        (always ? "Always · " : "")
+        + `${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip`
+        + (bits.length ? ` · ${bits.join(", ")}` : "")
+      );
       if (!data.photo_ready && !data.gemini_image_ready && mode !== "badge" && st.badge && !st.photo && !st.gemini) {
         const hint = data.hint || "No photo API key in this Studio process. On Replit set PEXELS_API_KEY then Stop+Run.";
         const statusEl = $("tlBrollStatus");
@@ -5116,6 +5314,9 @@
     pendingBroll = pendingBroll.filter((x) => x.id !== id);
     renderPendingBroll();
     const { id: _drop, _status, ...ref } = p;
+    if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
+      ref.ken_burns = alwaysKenBurnsDefault();
+    }
     await addOverlayClip(ref);
     renderTracks();
     updateStageCompositor();
@@ -5128,6 +5329,10 @@
     pendingBroll = pendingBroll.filter((x) => x.id !== id);
     renderPendingBroll();
     const { id: _drop, _status, ...ref } = p;
+    // Main cutaways: Ken Burns OK for Always stills (not GIFs).
+    if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
+      ref.ken_burns = alwaysKenBurnsDefault();
+    }
     const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
     await addMainCutawayClip(ref, asset);
     renderTracks();
@@ -5156,6 +5361,9 @@
     renderPendingBroll();
     for (const p of list) {
       const { id: _drop, _status, ...ref } = p;
+      if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
+        ref.ken_burns = alwaysKenBurnsDefault();
+      }
       await addOverlayClip(ref);
     }
     renderTracks();
@@ -5172,6 +5380,9 @@
     list.sort((a, b) => Number(b.start || 0) - Number(a.start || 0));
     for (const p of list) {
       const { id: _drop, _status, ...ref } = p;
+      if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
+        ref.ken_burns = alwaysKenBurnsDefault();
+      }
       const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
       await addMainCutawayClip(ref, asset);
     }
@@ -5398,6 +5609,11 @@
         await refreshMaxTrims();
         renderTimeline();
         scheduleSave();
+        try {
+          await finishAlwaysSeedHandoff(opts.seedTimeline, opts.mediaHints || opts.seedTimeline.media_hints);
+        } catch (e) {
+          console.warn("[timeline] Always handoff:", e);
+        }
         return;
       }
 

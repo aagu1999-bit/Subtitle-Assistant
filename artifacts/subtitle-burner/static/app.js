@@ -4040,6 +4040,7 @@ async function runAiEditGenerate() {
         newProject: true,
         replace: true,
         seedTimeline: data.timeline,
+        mediaHints: data.media_hints || (data.timeline && data.timeline.media_hints),
         label: data.label || "AI Edit",
       });
     } else {
