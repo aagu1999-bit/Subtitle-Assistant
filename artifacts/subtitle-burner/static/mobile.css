@@ -64,6 +64,10 @@
   body.studio-body {
     padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
   }
+  /* Room for contextual tool strip when Timeline is open on phone */
+  body.is-phone.tab-editor-active {
+    padding-bottom: calc(64px + 56px + env(safe-area-inset-bottom, 0px));
+  }
 
   header.app-header {
     height: auto;
@@ -194,13 +198,52 @@
     order: 3;
     max-height: 36vh;
   }
+  /* On phone, desktop props stack is secondary — context strip + sheet own editing */
+  body.is-phone .tl-props {
+    display: none !important;
+  }
 
   .tl-preview {
-    max-height: 42dvh;
+    position: relative;
+    max-height: 28dvh;
+    transition: max-height .2s ease;
   }
   .tl-stage {
-    max-height: 42dvh;
+    max-height: 28dvh;
+    transition: max-height .2s ease;
   }
+  body.tl-preview-compact .tl-preview {
+    max-height: 16dvh;
+  }
+  body.tl-preview-compact .tl-stage {
+    max-height: 16dvh;
+  }
+  body.tl-preview-collapsed .tl-preview {
+    max-height: 48px;
+  }
+  body.tl-preview-collapsed .tl-stage,
+  body.tl-preview-collapsed .tl-preview-empty {
+    display: none !important;
+  }
+  body.tl-preview-collapsed .tl-preview-collapse {
+    /* keep the bar visible */
+  }
+  .tl-preview-collapse {
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    z-index: 5;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid #3b4252;
+    background: rgba(16, 19, 29, 0.92);
+    color: #fff;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0;
+  }
+
   .tl-timeline {
     min-height: 220px;
     -webkit-overflow-scrolling: touch;
@@ -227,6 +270,123 @@
   .tl-broll-btns .btn {
     min-height: 40px;
     flex: 1 1 auto;
+  }
+
+  /* CapCut-style contextual strip — sits above app bottom nav */
+  .tl-context-tools {
+    display: none;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+    z-index: 195;
+    padding: 6px 8px;
+    background: rgba(12, 14, 20, 0.97);
+    border-top: 1px solid #2a2f3a;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 4px;
+    align-items: stretch;
+  }
+  body.is-phone.tab-editor-active .tl-context-tools:not([hidden]) {
+    display: flex;
+  }
+  .tl-ctx-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: #c8cdd8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 64px;
+    min-height: 48px;
+    padding: 6px 8px;
+    border-radius: 10px;
+    font-size: .68rem;
+    font-weight: 600;
+    flex: 0 0 auto;
+  }
+  .tl-ctx-btn .ico { font-size: 1.1rem; line-height: 1; }
+  .tl-ctx-btn.active,
+  .tl-ctx-btn:active {
+    background: rgba(108, 92, 255, 0.22);
+    color: #fff;
+  }
+
+  .tl-tool-sheet-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 205;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .tl-tool-sheet {
+    display: none;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 210;
+    max-height: min(72dvh, 560px);
+    background: #12151e;
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+    flex-direction: column;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  body.tl-tool-sheet-open .tl-tool-sheet-scrim {
+    display: block;
+  }
+  body.tl-tool-sheet-open .tl-tool-sheet {
+    display: flex;
+  }
+  .tl-tool-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2f3a;
+  }
+  .tl-tool-sheet-body {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 12px 14px 24px;
+    flex: 1;
+  }
+
+  .tl-clip-style-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .tl-clip-style-card {
+    appearance: none;
+    border: 1px solid #3b4252;
+    background: #181c28;
+    color: #e8eaf0;
+    border-radius: 12px;
+    padding: 12px 10px;
+    text-align: left;
+    min-height: 88px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tl-clip-style-card strong {
+    font-size: .88rem;
+  }
+  .tl-clip-style-card span {
+    font-size: .72rem;
+    color: #9aa3b2;
+    line-height: 1.35;
+  }
+  .tl-clip-style-card:active,
+  .tl-clip-style-card.active {
+    border-color: #6c5cff;
+    background: rgba(108, 92, 255, 0.18);
   }
 
   /* Tips on tap devices: hide hover panels (they jam the UI) */

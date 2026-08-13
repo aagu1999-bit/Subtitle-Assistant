@@ -1366,7 +1366,8 @@
 
         <!-- Center: preview + timeline -->
         <section class="tl-stage-wrap">
-          <div class="tl-preview">
+          <div class="tl-preview" id="tlPreviewWrap">
+            <button type="button" id="tlPreviewCollapseBtn" class="tl-preview-collapse tl-mobile-only" title="Shrink or expand preview" aria-expanded="true" aria-controls="tlStage">▾</button>
             <div id="tlStage" class="tl-stage">
               <video id="tlPreviewVideo" controls playsinline preload="metadata"></video>
               <div id="tlOverlayLayer" class="tl-overlay-layer"></div>
@@ -1426,13 +1427,26 @@
           <div class="tl-actions">
             <span id="tlRenderStatus" class="muted"></span>
           </div>
+
+          <!-- CapCut-style contextual tools (phone). Desktop keeps #tlProps. -->
+          <nav id="tlContextTools" class="tl-context-tools tl-mobile-only" aria-label="Clip tools" hidden></nav>
         </section>
 
-        <!-- Right: properties -->
+        <!-- Right: properties (desktop); on phone also hosts tool-sheet body -->
         <aside class="tl-props" id="tlProps">
           <div class="tl-props-empty muted">Select a clip on the timeline to edit its properties.</div>
         </aside>
       </div>
+    </div>
+
+    <!-- Phone tool sheet (Clip style / props focus) -->
+    <div id="tlToolSheetScrim" class="tl-tool-sheet-scrim tl-mobile-only" hidden></div>
+    <div id="tlToolSheet" class="tl-tool-sheet tl-mobile-only" hidden aria-hidden="true">
+      <div class="tl-tool-sheet-head">
+        <strong id="tlToolSheetTitle">Tools</strong>
+        <button type="button" id="tlToolSheetClose" class="tl-chip-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="tlToolSheetBody" class="tl-tool-sheet-body"></div>
     </div>
   </div>
   <!-- /Tab: Editor -->

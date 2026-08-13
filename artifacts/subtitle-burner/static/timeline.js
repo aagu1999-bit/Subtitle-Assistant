@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-40-export-capcut";
+  const TL_BUILD = "studio-editor-build-41-mobile-capcut";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -2069,6 +2069,9 @@
     }
     applyStage();
     renderTimeline();   // renderProps() (inside) redraws the preview boxes
+    if (typeof window.refreshMobileContextTools === "function") {
+      try { window.refreshMobileContextTools(); } catch (e) { /* optional */ }
+    }
   }
 
   const CANVAS_AR = { "9x16": "9 / 16", "16x9": "16 / 9", "1x1": "1 / 1", "4x5": "4 / 5" };
@@ -3649,6 +3652,9 @@
       };
     });
     updateStageCompositor();
+    if (typeof window.refreshMobileContextTools === "function") {
+      try { window.refreshMobileContextTools(); } catch (e) { /* optional */ }
+    }
   }
 
   const COLOR_PRESETS = [
@@ -3788,6 +3794,9 @@
         scheduleSave();
       });
     });
+    if (typeof window.refreshMobileContextTools === "function") {
+      try { window.refreshMobileContextTools(); } catch (e) { /* optional */ }
+    }
   }
 
   const FONT_OPTS = [
@@ -4775,6 +4784,111 @@
   window.ensureTimelineInit = ensureInit;
   window.addOverlayClip = addOverlayClip;
   window.addEffectClip = addEffectClip;
+  window.getTimelineSelection = function () {
+    return selected ? { track: selected.track, id: selected.id } : null;
+  };
+  window.refreshTimelineProps = function () {
+    try { renderProps(); } catch (e) { /* ignore */ }
+  };
+  window.bindTimelinePropsHost = function (host) {
+    if (!host || !selected) return;
+    const c = findClip(selected.track, selected.id);
+    if (!c) {
+      // Project props panel — re-run renderProjectProps wiring by cloning from #tlProps.
+      return;
+    }
+    wireProps(host, selected.track, c);
+    host.querySelectorAll(".tl-swatch").forEach((sw) => {
+      sw.onclick = () => {
+        pushHistory();
+        if (selected.track === "effects") c.preset = sw.dataset.preset;
+        else {
+          if (!c.color) c.color = {};
+          c.color.preset = sw.dataset.preset;
+        }
+        renderProps();
+        renderTracks();
+        scheduleSave();
+        if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+      };
+    });
+  };
+
+  const CLIP_STYLES = [
+    { id: "talking_head", label: "Talking head", blurb: "Punch zoom on the beat — CapCut social default" },
+    { id: "split_stack", label: "Split / stack", blurb: "Top/bottom second video on Effects lane" },
+    { id: "pip_corner", label: "Corner PiP", blurb: "Selected overlay → top-right PiP (or B-roll default)" },
+    { id: "word_emphasis", label: "Word emphasis", blurb: "Punchwords on + tighter caption groups" },
+    { id: "cinematic", label: "Cinematic push", blurb: "Subtle Ken Burns on Main (you chose this style)" },
+    { id: "clarity", label: "Clarity", blurb: "Clean talking-head — no punch, Hormozi-style captions" },
+  ];
+
+  window.listClipStyles = function () { return CLIP_STYLES.slice(); };
+
+  window.applyClipStyle = function (styleId) {
+    if (!tl) {
+      alert("Open a Timeline project first.");
+      return false;
+    }
+    const mainSel = selected && selected.track === "main"
+      ? findClip("main", selected.id)
+      : (tl.tracks.main[0] || null);
+    const ovSel = selected && selected.track === "overlay"
+      ? findClip("overlay", selected.id)
+      : null;
+
+    pushHistory();
+    if (styleId === "talking_head") {
+      if (!mainSel) { alert("Select a Main clip first."); return false; }
+      mainSel.punch_zoom = { enabled: true, intensity: "med" };
+      if (mainSel.ken_burns) mainSel.ken_burns = null;
+    } else if (styleId === "split_stack") {
+      addEffectClip("split_screen", { layout: "stack", placement: "second_bottom" });
+    } else if (styleId === "pip_corner") {
+      if (ovSel) applyOverlayLayout(ovSel, "pip_tr");
+      else {
+        const placeEl = $("tlBrollPlacement");
+        if (placeEl) placeEl.value = "pip";
+        alert("PiP default set for B-roll. Select an Overlay clip to reposition it, or Suggest B-roll.");
+      }
+    } else if (styleId === "word_emphasis") {
+      tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}, {
+        punchword_emphasis: true,
+        group_size: 2,
+        group: 2,
+      }));
+      syncStyleToCaptionLook(tl.style);
+    } else if (styleId === "cinematic") {
+      if (!mainSel) { alert("Select a Main clip first."); return false; }
+      mainSel.ken_burns = { enabled: true, direction: "in", intensity: "low" };
+      if (mainSel.punch_zoom) mainSel.punch_zoom = { enabled: false };
+      if ($("tlCanvas") && tl.canvas === "9x16") {
+        // Keep canvas; cinematic pack often 16:9 but don't force without asking.
+      }
+    } else if (styleId === "clarity") {
+      if (mainSel) {
+        mainSel.punch_zoom = null;
+        mainSel.ken_burns = null;
+      }
+      tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}, {
+        font_name: "Montserrat Thin Black",
+        font: "Montserrat Thin Black",
+        primary_color: "#FFFFFF",
+        highlight_color: "#FFD60A",
+        group_size: 2,
+        group: 2,
+        punchword_emphasis: true,
+      }));
+      syncStyleToCaptionLook(tl.style);
+    } else {
+      return false;
+    }
+    renderTimeline();
+    scheduleSave();
+    setSaveState("Clip style · " + styleId);
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+    return true;
+  };
 
   async function suggestKeywordOverlays() {
     if (!(await ensureProject())) return;

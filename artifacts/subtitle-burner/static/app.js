@@ -4795,6 +4795,11 @@ function setActiveTab(tab) {
     }
   });
 
+  document.body.classList.toggle("tab-editor-active", tab === "editor");
+  if (typeof window.refreshMobileContextTools === "function") {
+    try { window.refreshMobileContextTools(); } catch (e) { /* optional */ }
+  }
+
   document.querySelectorAll(".step-badge").forEach(b => {
     b.classList.toggle("active", b.dataset.step === step);
   });
