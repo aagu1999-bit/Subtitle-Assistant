@@ -10210,10 +10210,16 @@ def detect_shots():
 
 @app.route("/co-editor", methods=["POST"])
 def co_editor():
-    """Natural-language → validated timeline mutation ops (Captions Co-editor)."""
+    """Natural-language → validated timeline mutation ops (Captions Co-editor).
+
+    Purpose: a remote control for THIS Timeline project — not a general chatbot.
+    The model may only emit allowlisted ops the Studio UI can apply. It cannot
+    invent features, rewrite the renderer, or finish an export (user still Renders).
+    """
     data = request.get_json(force=True) or {}
     prompt = (data.get("prompt") or "").strip()
     timeline = data.get("timeline") or {}
+    client_ctx = data.get("context") or {}
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
     if not timeline:
@@ -10221,10 +10227,17 @@ def co_editor():
 
     main = (timeline.get("tracks") or {}).get("main") or []
     overlays = (timeline.get("tracks") or {}).get("overlay") or []
+    music = (timeline.get("tracks") or {}).get("music") or []
+    texts = (timeline.get("tracks") or {}).get("text") or []
+    effects = (timeline.get("tracks") or {}).get("effects") or []
     style = timeline.get("style") or {}
     speaker_colors = timeline.get("speaker_colors") or {}
     summary = {
         "canvas": timeline.get("canvas"),
+        "fit": timeline.get("fit"),
+        "selection": client_ctx.get("selection"),
+        "playhead_s": client_ctx.get("playhead_s"),
+        "transcript_near_playhead": client_ctx.get("transcript_near_playhead"),
         "main_clip_count": len(main),
         "main_clips": [
             {
@@ -10237,6 +10250,7 @@ def co_editor():
                 "color_preset": ((c.get("color") or c.get("color_grade") or {}).get("preset")),
                 "cut_count": len(c.get("cuts") or []),
                 "transition": (c.get("transition") or {}).get("type") if isinstance(c.get("transition"), dict) else c.get("transition"),
+                "burn_captions": c.get("burn_captions"),
             }
             for i, c in enumerate(main[:24])
         ],
@@ -10246,42 +10260,74 @@ def co_editor():
                 "index": i,
                 "keyword": c.get("keyword"),
                 "source": c.get("source"),
+                "layout": c.get("layout"),
                 "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
                 "start": c.get("start"),
                 "duration": (float(c.get("out") or 0) - float(c.get("in") or 0)) if c.get("out") is not None else None,
             }
             for i, c in enumerate(overlays[:16])
         ],
-        "text_count": len((timeline.get("tracks") or {}).get("text") or []),
-        "music_count": len((timeline.get("tracks") or {}).get("music") or []),
+        "music_clips": [
+            {
+                "index": i,
+                "gain_db": c.get("gain_db", -18),
+                "duck": bool(c.get("duck")),
+                "start": c.get("start"),
+            }
+            for i, c in enumerate(music[:8])
+        ],
+        "text_clips": [
+            {
+                "index": i,
+                "text": str(c.get("text") or "")[:80],
+                "start": c.get("start"),
+            }
+            for i, c in enumerate(texts[:8])
+        ],
+        "effects_count": len(effects),
         "caption_style": {
             "font": style.get("font") or style.get("font_name"),
             "size": style.get("size") or style.get("font_size"),
             "primary": style.get("primary") or style.get("primary_color"),
             "highlight": style.get("highlight") or style.get("highlight_color"),
             "accent": style.get("accent") or style.get("accent_color"),
+            "group": style.get("group") or style.get("group_size"),
+            "position_y": style.get("position_y"),
+            "punchword_emphasis": style.get("punchword_emphasis"),
         },
         "speaker_colors": speaker_colors,
+        "clip_styles": [
+            "talking_head", "split_stack", "pip_corner", "center_overlay",
+            "word_emphasis", "hook_broll", "cinematic", "clarity",
+        ],
+        "overlay_layouts": ["pip_tr", "pip_tl", "pip_br", "pip_bl", "full", "lower"],
     }
 
-    system_prompt = f"""You are a Timeline co-editor. Convert the user's request into JSON ops that mutate THIS timeline.
+    system_prompt = f"""You are the Studio Timeline co-editor — a natural-language REMOTE CONTROL for this project.
 
-You can ONLY change timeline project state via the ops below. You cannot invent new features.
-Caption style changes update the Timeline project's burn style (primary/highlight/accent/font/size).
-Speaker colors (Host/Guest) are separate — use set_speaker_colors for those.
-Ken Burns on Overlay is preferred for photo B-roll moments; punch zoom stays on Main.
-Color grades must use presets: none, neutral, warm, cool, vivid, bw.
-After ops apply in the UI, the user still must click Render to bake captions/effects into the export MP4.
+PURPOSE
+- User describes an edit in plain language → you return structured ops the UI applies now.
+- You mutate project state only (captions look, shots, overlays, music, titles, styles).
+- You are NOT a general assistant, NOT a video generator, and you cannot finish export.
+- After ops apply, the user still clicks ▶ Render / Instant Export to bake the MP4.
+- If they ask what you can do / how something works, return ops: [] and explain clearly in message.
 
-Current timeline summary:
+HARD LIMITS (say no in message, ops: [])
+- Cannot invent ops outside the allowlist.
+- Cannot rewrite individual transcript words, approve pending B-roll one-by-one, or download files.
+- Cannot change secrets/API keys or run arbitrary code.
+- suggest_broll only queues suggestions for review — it does not auto-accept media onto the timeline.
+
+Current timeline + selection:
 {json.dumps(summary, indent=2)}
 
 Return ONLY JSON:
 {{
   "ops": [
-    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88", "group": 2, "position_y": 75, "punchword_emphasis": true}},
     {{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}},
     {{"op": "delete_shot", "index": 2}},
+    {{"op": "delete_clip", "track": "overlay", "index": 0}},
     {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
     {{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}},
     {{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}},
@@ -10289,22 +10335,33 @@ Return ONLY JSON:
     {{"op": "clear_effects", "index": 0}},
     {{"op": "clear_effects", "track": "overlay", "index": 0}},
     {{"op": "set_canvas", "canvas": "9x16"}},
+    {{"op": "set_fit", "fit": "cover"}},
     {{"op": "set_color_grade", "index": 0, "preset": "warm"}},
     {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
+    {{"op": "set_text", "index": 0, "text": "New lower third"}},
     {{"op": "apply_recommended_cuts", "index": 0}},
     {{"op": "merge_shots", "index": 0}},
-    {{"op": "reorder_shot", "from": 2, "to": 0}}
+    {{"op": "reorder_shot", "from": 2, "to": 0}},
+    {{"op": "set_overlay_layout", "index": 0, "layout": "pip_tr"}},
+    {{"op": "set_music", "index": 0, "gain_db": -20, "duck": true}},
+    {{"op": "apply_clip_style", "style": "cinematic"}},
+    {{"op": "suggest_broll", "mode": "photo", "placement": "center", "scope": "playhead", "use_ai": false}},
+    {{"op": "split_at_playhead"}},
+    {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}}
   ],
-  "message": "Short confirmation of what you changed (mention Render if captions/styles changed)"
+  "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
 
 Rules:
-- Use only the ops listed above.
-- Shot indexes refer to main track clips (0-based) unless track is "overlay".
-- Prefer 1-5 ops. If the request is unclear, return ops: [] and explain in message.
-- Colors must be #RRGGBB. Canvas must be one of 9x16, 16x9, 1x1, 4x5.
-- For "make captions yellow/blue/…" prefer set_caption_style primary/highlight. For Host/Guest colors use set_speaker_colors.
-- For B-roll / overlay motion requests, use enable_ken_burns with track:"overlay".
+- Use only the ops listed above (examples show shapes; emit only what the user asked for).
+- Indexes are 0-based. For "this / selected / current clip", set "target":"selected" (and track if needed).
+- Prefer 1-8 ops. If unclear or out of scope, ops: [] + honest message.
+- Colors #RRGGBB. Canvas: 9x16, 16x9, 1x1, 4x5. Fit: cover|contain. Color presets: none,neutral,warm,cool,vivid,bw.
+- Caption color requests → set_caption_style. Host/Guest → set_speaker_colors.
+- Overlay motion → enable_ken_burns track:"overlay". PiP / full-bleed → set_overlay_layout.
+- Music volume/duck → set_music. CapCut clip looks → apply_clip_style.
+- "find B-roll / suggest photos" → suggest_broll (review queue; do not claim clips were placed).
+- "split here" → split_at_playhead (uses current playhead).
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -10317,13 +10374,15 @@ Rules:
     raw_ops = raw_ops or []
     message = ""
     if isinstance(result, dict):
-        message = str(result.get("message") or "")[:400]
+        message = str(result.get("message") or "")[:500]
 
     allowed = {
-        "set_caption_style", "set_speaker_colors", "delete_shot", "set_transition",
-        "enable_punch_zoom", "enable_ken_burns", "clear_effects", "set_canvas",
-        "set_color_grade", "add_title", "apply_recommended_cuts", "merge_shots",
-        "reorder_shot",
+        "set_caption_style", "set_speaker_colors", "delete_shot", "delete_clip",
+        "set_transition", "enable_punch_zoom", "enable_ken_burns", "clear_effects",
+        "set_canvas", "set_fit", "set_color_grade", "add_title", "set_text",
+        "apply_recommended_cuts", "merge_shots", "reorder_shot",
+        "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
+        "split_at_playhead",
     }
     ops = []
     for op in raw_ops:
@@ -10333,7 +10392,7 @@ Rules:
         if name not in allowed:
             continue
         ops.append(op)
-        if len(ops) >= 8:
+        if len(ops) >= 12:
             break
 
     return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})

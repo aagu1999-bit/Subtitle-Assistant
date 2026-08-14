@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-47-sound-chat";
+  const TL_BUILD = "studio-editor-build-48-coeditor-power";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -6322,7 +6322,13 @@
     const log = $("coEditorLog");
     if (log && !log.dataset.booted) {
       log.dataset.booted = "1";
-      appendCoMsg("bot", "I can change caption colors/fonts, speaker colors, canvas, transitions, punch zoom / Ken Burns (Main or Overlay), color grade, titles, cuts, merge/reorder shots. Ask in plain language — then click ▶ Render to bake it in.");
+      appendCoMsg("bot",
+        "I'm your Timeline remote — describe the edit you want on this project. " +
+        "I apply structured ops now (captions, shots, overlays, music, styles). " +
+        "I can't invent new features, rewrite transcript words, or finish the export — you still ▶ Render. " +
+        "Select a clip and say “this” to target it."
+      );
+      renderCoEditorChips();
     }
     try { if ($("coEditorInput")) $("coEditorInput").focus(); } catch (e) {}
     try {
@@ -6353,6 +6359,71 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  const CO_EDITOR_CHIPS = [
+    { label: "Bigger captions", prompt: "Make the captions bigger and punchier" },
+    { label: "Duck music", prompt: "Duck the music bed under speech" },
+    { label: "PiP this overlay", prompt: "Make the selected overlay a top-right PiP" },
+    { label: "Cinematic look", prompt: "Apply the cinematic clip style to this shot" },
+    { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
+    { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
+  ];
+
+  function renderCoEditorChips() {
+    const host = $("coEditorChips");
+    if (!host || host.dataset.ready) return;
+    host.dataset.ready = "1";
+    host.innerHTML = CO_EDITOR_CHIPS.map((c) =>
+      `<button type="button" class="co-editor-chip" data-co-prompt="${String(c.prompt).replace(/"/g, "&quot;")}">${c.label}</button>`
+    ).join("");
+    host.addEventListener("click", (e) => {
+      const btn = e.target && e.target.closest && e.target.closest("[data-co-prompt]");
+      if (!btn) return;
+      const input = $("coEditorInput");
+      if (input) input.value = btn.dataset.coPrompt || "";
+      sendCoEditorPrompt();
+    });
+  }
+
+  function transcriptNearPlayhead() {
+    const words = transcriptWords || [];
+    if (!words.length) return null;
+    const t = playheadOutputTime();
+    if (t == null) return null;
+    // Approximate: words use source time; near current transcript cache is fine.
+    const nearby = words.filter((w) => {
+      const s = Number(w.start != null ? w.start : w.begin) || 0;
+      const e = Number(w.end) || (s + 0.3);
+      return e >= t - 4 && s <= t + 4;
+    }).slice(0, 28);
+    if (!nearby.length) return null;
+    return nearby.map((w) => w.word || w.text || "").filter(Boolean).join(" ").slice(0, 220);
+  }
+
+  function coEditorClientContext() {
+    const sel = selected
+      ? {
+          track: selected.track,
+          id: selected.id,
+          index: (tl && tl.tracks[selected.track])
+            ? tl.tracks[selected.track].findIndex((c) => c.id === selected.id)
+            : -1,
+        }
+      : null;
+    let playhead = null;
+    try {
+      playhead = playheadOutputTime();
+      if (playhead == null) {
+        const v = $("tlPreviewVideo");
+        playhead = v ? (v.currentTime || 0) : null;
+      }
+    } catch (e) {}
+    return {
+      selection: sel,
+      playhead_s: playhead,
+      transcript_near_playhead: transcriptNearPlayhead(),
+    };
+  }
+
   function timelinePayloadForCoEditor() {
     if (!tl) return null;
     return {
@@ -6368,6 +6439,22 @@
         music: tl.tracks.music,
       },
     };
+  }
+
+  function resolveOpTrackIndex(op, defaultTrack) {
+    let track = op.track || defaultTrack || "main";
+    const wantsSelected = op.target === "selected"
+      || op.index === "selected"
+      || op.index === -1
+      || op.use_selection === true;
+    if (wantsSelected) {
+      if (!selected) return { track, index: -1 };
+      if (op.track && selected.track !== op.track) return { track: op.track, index: -1 };
+      track = selected.track;
+      const arr = (tl.tracks[track] || []);
+      return { track, index: arr.findIndex((c) => c.id === selected.id) };
+    }
+    return { track, index: Number(op.index) };
   }
 
   function coerceHexColor(val, fallback) {
@@ -6386,7 +6473,7 @@
   }
 
   async function applyCoEditorOps(ops) {
-    if (!tl || !Array.isArray(ops) || !ops.length) return 0;
+    if (!tl || !Array.isArray(ops) || !ops.length) return { applied: 0, notes: [] };
     pushHistory();
     historySuspended = true;
     let applied = 0;
@@ -6418,7 +6505,10 @@
           if (op.group != null || op.group_size != null) {
             patch.group = Number(op.group != null ? op.group : op.group_size) || 3;
           }
+          if (op.position_y != null) patch.position_y = Number(op.position_y);
+          if (op.punchword_emphasis != null) patch.punchword_emphasis = !!op.punchword_emphasis;
           tl.style = normalizeTlStyle(Object.assign({}, prev, patch));
+          try { if (typeof syncStyleToCaptionLook === "function") syncStyleToCaptionLook(tl.style); } catch (e) {}
           notes.push("caption style");
           applied++;
         } else if (name === "set_speaker_colors") {
@@ -6436,15 +6526,23 @@
           notes.push("speaker colors");
           applied++;
         } else if (name === "delete_shot") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length) {
             const id = tl.tracks.main[i].id;
             deleteClip("main", id);
             notes.push(`deleted shot ${i}`);
             applied++;
           }
+        } else if (name === "delete_clip") {
+          const { track, index: i } = resolveOpTrackIndex(op, op.track || "overlay");
+          const arr = tl.tracks[track] || [];
+          if (i >= 0 && i < arr.length && ["main", "overlay", "music", "text", "effects"].includes(track)) {
+            deleteClip(track, arr[i].id);
+            notes.push(`deleted ${track}[${i}]`);
+            applied++;
+          }
         } else if (name === "set_transition") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length) {
             tl.tracks.main[i].transition = {
               type: op.type || "crossfade",
@@ -6453,14 +6551,15 @@
             applied++;
           }
         } else if (name === "enable_punch_zoom") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length) {
             tl.tracks.main[i].punch_zoom = { enabled: true, intensity: op.intensity || "med" };
             applied++;
           }
         } else if (name === "enable_ken_burns") {
-          const track = (op.track === "overlay") ? "overlay" : "main";
-          const i = Number(op.index);
+          const resolved = resolveOpTrackIndex(op, op.track === "overlay" ? "overlay" : "main");
+          const track = resolved.track === "overlay" ? "overlay" : "main";
+          const i = resolved.index;
           const arr = tl.tracks[track] || [];
           if (i >= 0 && i < arr.length) {
             arr[i].ken_burns = {
@@ -6472,8 +6571,9 @@
             applied++;
           }
         } else if (name === "clear_effects") {
-          const track = (op.track === "overlay") ? "overlay" : "main";
-          const i = Number(op.index);
+          const resolved = resolveOpTrackIndex(op, op.track === "overlay" ? "overlay" : "main");
+          const track = resolved.track === "overlay" ? "overlay" : "main";
+          const i = resolved.index;
           const arr = tl.tracks[track] || [];
           if (i >= 0 && i < arr.length) {
             if (track === "main") {
@@ -6492,8 +6592,17 @@
             applyStage();
             applied++;
           }
+        } else if (name === "set_fit") {
+          const fit = String(op.fit || "").toLowerCase();
+          if (fit === "cover" || fit === "contain") {
+            tl.fit = fit;
+            if ($("tlFit")) $("tlFit").value = fit;
+            applyStage();
+            notes.push("fit " + fit);
+            applied++;
+          }
         } else if (name === "set_color_grade") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length) {
             // Render + preview read `color` (not the legacy `color_grade` alias).
             const grade = { preset: op.preset || "warm" };
@@ -6516,8 +6625,16 @@
           reanchor(tc);
           tl.tracks.text.push(tc);
           applied++;
+        } else if (name === "set_text") {
+          const { index: i } = resolveOpTrackIndex(op, "text");
+          const arr = tl.tracks.text || [];
+          if (i >= 0 && i < arr.length && op.text != null) {
+            arr[i].text = String(op.text).slice(0, 200);
+            notes.push("title text");
+            applied++;
+          }
         } else if (name === "apply_recommended_cuts") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length) {
             const clip = tl.tracks.main[i];
             const res = await fetch("/recommended-cuts", {
@@ -6536,7 +6653,7 @@
             }
           }
         } else if (name === "merge_shots") {
-          const i = Number(op.index);
+          const { index: i } = resolveOpTrackIndex(op, "main");
           if (i >= 0 && i < tl.tracks.main.length - 1) {
             selectClip("main", tl.tracks.main[i].id);
             mergeSelectedWithNext();
@@ -6550,6 +6667,54 @@
             tl.tracks.main.splice(to, 0, item);
             applied++;
           }
+        } else if (name === "set_overlay_layout") {
+          const { index: i } = resolveOpTrackIndex(op, "overlay");
+          const arr = tl.tracks.overlay || [];
+          let layout = String(op.layout || op.layout_id || "pip_tr");
+          if (layout === "center" || layout === "full_bleed") layout = "full";
+          if (i >= 0 && i < arr.length && OVERLAY_LAYOUTS[layout]) {
+            // applyOverlayLayout pushes history — suspended so skip via direct set
+            const L = OVERLAY_LAYOUTS[layout];
+            const clip = arr[i];
+            clip.layout = layout;
+            clip.x = L.x; clip.y = L.y; clip.w = L.w; clip.h = L.h; clip.fit = L.fit;
+            notes.push("overlay " + layout);
+            applied++;
+          }
+        } else if (name === "set_music") {
+          const { index: i } = resolveOpTrackIndex(op, "music");
+          const arr = tl.tracks.music || [];
+          if (i >= 0 && i < arr.length) {
+            if (op.gain_db != null) arr[i].gain_db = Number(op.gain_db);
+            if (op.duck != null) arr[i].duck = !!op.duck;
+            notes.push("music");
+            applied++;
+          }
+        } else if (name === "apply_clip_style") {
+          const styleId = op.style || op.style_id || op.id;
+          if (styleId && typeof window.applyClipStyle === "function") {
+            const ok = window.applyClipStyle(String(styleId));
+            if (ok) {
+              notes.push("clip style " + styleId);
+              applied++;
+            }
+          }
+        } else if (name === "suggest_broll") {
+          if (op.mode && $("tlBrollMode")) {
+            const modeEl = $("tlBrollMode");
+            const opt = modeEl.querySelector(`option[value="${op.mode}"]:not([disabled])`);
+            if (opt) modeEl.value = op.mode;
+          }
+          if (op.placement && $("tlBrollPlacement")) $("tlBrollPlacement").value = op.placement;
+          if (op.scope && $("tlBrollScope")) $("tlBrollScope").value = op.scope;
+          if (op.use_ai != null && $("tlBrollAiPhotos")) $("tlBrollAiPhotos").checked = !!op.use_ai;
+          await suggestKeywordOverlays();
+          notes.push("B-roll suggestions queued");
+          applied++;
+        } else if (name === "split_at_playhead") {
+          splitAtPlayhead();
+          notes.push("split at playhead");
+          applied++;
         }
       } catch (e) {
         console.warn("[co-editor] op failed", name, e);
@@ -6566,6 +6731,7 @@
       updateLiveCaptions(ot != null ? ot : (v ? v.currentTime || 0 : 0));
     } catch (e) {}
     scheduleSave();
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
     return { applied, notes };
   }
 
@@ -6589,6 +6755,7 @@
         body: JSON.stringify({
           prompt,
           timeline: timelinePayloadForCoEditor(),
+          context: coEditorClientContext(),
         }),
       });
       const data = await res.json();
@@ -6600,7 +6767,6 @@
       let msg = data.message || (n ? `Applied ${n} edit(s).` : "No edits applied.");
       if (n && notes.length) msg += " · " + notes.join(", ");
       if (n) msg += " · Click ▶ Render to burn into the export.";
-      else if (!(data.ops || []).length) msg += " (no ops returned)";
       appendCoMsg("bot", msg);
     } catch (e) {
       if (thinking) thinking.remove();

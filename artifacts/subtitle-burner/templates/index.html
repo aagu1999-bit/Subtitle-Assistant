@@ -1535,12 +1535,13 @@
   <div id="coEditorDrawer" class="co-editor-drawer hidden" aria-hidden="true">
     <div class="co-editor-head">
       <strong>💬 Co-editor</strong>
-      <span class="muted" style="font-size:.72rem">Describe edits — “make captions bigger”, “remove the third shot”</span>
+      <span class="muted" style="font-size:.72rem">Timeline remote — describe edits; select a clip + say “this”</span>
       <button type="button" id="coEditorClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
     </div>
+    <div id="coEditorChips" class="co-editor-chips" aria-label="Suggested edits"></div>
     <div id="coEditorLog" class="co-editor-log"></div>
     <div class="co-editor-compose">
-      <input type="text" id="coEditorInput" placeholder="Describe a change…" maxlength="400">
+      <input type="text" id="coEditorInput" placeholder="e.g. Duck music, PiP this overlay, bigger captions…" maxlength="400">
       <button type="button" id="coEditorSend" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Send</button>
     </div>
   </div>

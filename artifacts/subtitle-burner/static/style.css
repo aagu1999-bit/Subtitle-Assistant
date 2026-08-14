@@ -881,6 +881,33 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   padding: 8px 10px;
   font-size: .86rem;
 }
+.co-editor-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2f3a;
+  max-height: 72px;
+  overflow: auto;
+}
+.co-editor-chip {
+  appearance: none;
+  border: 1px solid #3b4252;
+  background: #1a1e2a;
+  color: #c8cdd8;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: .72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.co-editor-chip:active,
+.co-editor-chip:hover {
+  border-color: #6c5cff;
+  color: #fff;
+  background: rgba(108, 92, 255, 0.18);
+}
 
 /* ---- Compilation queue ---- */
 .compile-item {
