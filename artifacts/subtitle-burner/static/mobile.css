@@ -389,6 +389,30 @@
     background: rgba(108, 92, 255, 0.18);
   }
 
+  .tl-replace-mode-banner {
+    display: none;
+    margin: 8px 0;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid #6c5cff;
+    background: rgba(108, 92, 255, 0.16);
+    color: #e8eaf0;
+    font-size: .74rem;
+    line-height: 1.4;
+  }
+  body.tl-replace-mode .tl-replace-mode-banner:not([hidden]) {
+    display: block;
+  }
+  .tl-replace-candidate {
+    outline: 1px solid rgba(108, 92, 255, 0.35);
+    border-radius: 10px;
+  }
+  .tl-chip-primary {
+    background: #6c5cff !important;
+    color: #fff !important;
+    border-color: #6c5cff !important;
+  }
+
   /* Tips on tap devices: hide hover panels (they jam the UI) */
   .tl-tippanel { display: none !important; }
 }

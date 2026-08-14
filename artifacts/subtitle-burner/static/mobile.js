@@ -227,11 +227,12 @@
     }
   }
 
-  function replaceMediaSheetHtml() {
+  function replaceMediaSheetHtml(prefill) {
     const geminiOk = !!(window._brollGeminiReady);
-    return `<p class="muted" style="font-size:.78rem;margin:0 0 10px;line-height:1.4">CapCut-style <strong>Replace media</strong> — generate an AI still or pick from Library. Nothing auto-places until you Insert.</p>`
+    const seed = (prefill || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<p class="muted" style="font-size:.78rem;margin:0 0 10px;line-height:1.4">CapCut-style <strong>Replace media</strong> — generate an AI still or pick from Library. Updates the <em>same</em> overlay clip.</p>`
       + `<label class="muted" style="font-size:.74rem;display:block;margin-bottom:6px">AI prompt (9:16-friendly still)`
-      + `<textarea id="tlReplaceAiPrompt" rows="3" style="display:block;width:100%;margin-top:4px;padding:8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical" placeholder="e.g. warm coffee steam over a wooden table, photo"></textarea></label>`
+      + `<textarea id="tlReplaceAiPrompt" rows="3" style="display:block;width:100%;margin-top:4px;padding:8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical" placeholder="e.g. warm coffee steam over a wooden table, photo">${seed}</textarea></label>`
       + `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">`
       + `<button type="button" class="btn btn-primary" id="tlReplaceAiGen" ${geminiOk ? "" : "disabled"}>${geminiOk ? "✨ Generate AI photo" : "Set GEMINI_API_KEY"}</button>`
       + `<button type="button" class="btn btn-secondary" id="tlReplaceBrowse">📚 Library</button>`
@@ -260,7 +261,7 @@
       });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
-      if (status) status.textContent = "Ready — Insert to replace the selected overlay.";
+      if (status) status.textContent = "Ready — Insert to replace the same overlay.";
       if (preview) {
         preview.innerHTML =
           `<img src="${data.url}?t=${Date.now()}" alt="" style="max-width:100%;max-height:160px;border-radius:10px;border:1px solid #3b4252;display:block;margin-bottom:8px">`
@@ -349,13 +350,42 @@
       return;
     }
     if (toolId === "replace") {
-      // Refresh gemini flag from last status if present.
-      openToolSheet("Replace media", replaceMediaSheetHtml(), "replace");
+      const sel = typeof window.getTimelineSelection === "function"
+        ? window.getTimelineSelection()
+        : null;
+      if (!sel || sel.track !== "overlay") {
+        alert("Select an Overlay clip first.");
+        return;
+      }
+      let prefill = "";
+      if (typeof window.beginOverlayReplaceMode === "function") {
+        window.beginOverlayReplaceMode(sel.id, { openMedia: false });
+      }
+      // Prefill from selected overlay keyword when available.
+      try {
+        const props = document.getElementById("tlProps");
+        // Best-effort: keyword may be in save state; timeline exposes selection only.
+        if (window.getOverlayReplaceTargetId && typeof window._lastOverlayKeyword === "string") {
+          prefill = window._lastOverlayKeyword;
+        }
+      } catch (e) { /* ignore */ }
+      // Ask timeline for keyword via a tiny helper if present.
+      if (typeof window.getSelectedOverlayKeyword === "function") {
+        prefill = window.getSelectedOverlayKeyword() || prefill;
+      }
+      openToolSheet("Replace media", replaceMediaSheetHtml(prefill), "replace");
       const gen = document.getElementById("tlReplaceAiGen");
       const browse = document.getElementById("tlReplaceBrowse");
       if (gen) gen.addEventListener("click", () => generateReplaceAiPhoto());
-      if (browse) browse.addEventListener("click", () => openMobilePanel("media"));
-      // Live-check Gemini so the button enables when key is present.
+      if (browse) {
+        browse.addEventListener("click", () => {
+          closeToolSheet();
+          openMobilePanel("media");
+          if (typeof window.beginOverlayReplaceMode === "function") {
+            window.beginOverlayReplaceMode(sel.id);
+          }
+        });
+      }
       fetch("/broll/status").then((r) => r.json()).then((data) => {
         window._brollGeminiReady = !!(data.gemini_image_ready || (data.providers && data.providers.gemini_image));
         const g = document.getElementById("tlReplaceAiGen");

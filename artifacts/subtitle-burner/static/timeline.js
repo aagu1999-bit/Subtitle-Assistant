@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-45-capcut-plan";
+  const TL_BUILD = "studio-editor-build-46-replace-sticky";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -29,6 +29,7 @@
   let selected = null;     // { track, id }
   let logoSelected = false; // project logo selected for on-stage resize
   let pendingBroll = [];   // suggested overlays awaiting Accept / Skip / Replace
+  let _overlayReplaceTargetId = null; // sticky Overlay id during Replace media flow
   let sources = [];        // [{job_id, filename, ...}]
   let assets = [];         // [{asset_id, kind, duration, ext}]
   const srcDur = {};       // job_id -> duration cache
@@ -954,6 +955,20 @@
   function renderAssetList() {
     const wrap = $("tlAssetList");
     if (!wrap) return;
+    const replacing = !!_overlayReplaceTargetId;
+    document.body.classList.toggle("tl-replace-mode", replacing);
+    const banner = $("tlReplaceModeBanner");
+    if (banner) {
+      banner.hidden = !replacing;
+      if (replacing) {
+        const clip = findClip("overlay", _overlayReplaceTargetId);
+        const label = (clip && (clip.keyword || clip.source)) || "selected overlay";
+        banner.innerHTML = `Replace mode · tap <strong>Use</strong> on an asset for “${esc(label)}”. `
+          + `<button type="button" class="tl-chip-btn" id="tlReplaceModeCancel">Cancel</button>`;
+        const cancel = $("tlReplaceModeCancel");
+        if (cancel) cancel.onclick = () => endOverlayReplaceMode();
+      }
+    }
     wrap.innerHTML = "";
     applyLibraryViewClass();
     if (!assets.length) {
@@ -962,7 +977,7 @@
     }
     assets.forEach((a) => {
       const div = document.createElement("div");
-      div.className = "tl-source-item";
+      div.className = "tl-source-item" + (replacing ? " tl-replace-candidate" : "");
       const icon = a.kind === "audio" ? "🎵" : a.kind === "image" ? "🖼" : "🎞";
       const label = a.filename || a.keyword || `${a.ext || a.kind} ${String(a.asset_id || "").slice(0, 6)}`;
       const thumb = (a.kind === "image" || a.kind === "video")
@@ -979,6 +994,19 @@
         m.title = "Add to Music";
         m.onclick = (e) => { e.stopPropagation(); addMusicClip(a); };
         actions.appendChild(m);
+      } else if (replacing) {
+        const use = document.createElement("button");
+        use.className = "tl-chip-btn tl-chip-primary";
+        use.textContent = "Use";
+        use.title = "Replace selected overlay with this asset";
+        use.onclick = (e) => {
+          e.stopPropagation();
+          replaceSelectedOverlayAsset(a.asset_id, {
+            source: a.source || (a.kind === "gif" ? "gif" : (a.kind === "image" ? "photo" : null)),
+            keyword: a.keyword || a.filename || null,
+          });
+        };
+        actions.appendChild(use);
       } else {
         const o = document.createElement("button");
         o.className = "tl-chip-btn";
@@ -1017,6 +1045,41 @@
       wrap.appendChild(div);
     });
   }
+
+  function beginOverlayReplaceMode(overlayId, opts) {
+    opts = opts || {};
+    const id = overlayId || (selected && selected.track === "overlay" ? selected.id : null);
+    if (!id || !findClip("overlay", id)) {
+      alert("Select an Overlay clip first.");
+      return false;
+    }
+    _overlayReplaceTargetId = id;
+    selected = { track: "overlay", id };
+    if (opts.openMedia !== false) setLeftTab("media", { pin: true });
+    renderAssetList();
+    setSaveState("Replace mode — pick an asset or generate AI");
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+    return true;
+  }
+
+  function endOverlayReplaceMode() {
+    _overlayReplaceTargetId = null;
+    document.body.classList.remove("tl-replace-mode");
+    const banner = $("tlReplaceModeBanner");
+    if (banner) { banner.hidden = true; banner.innerHTML = ""; }
+    renderAssetList();
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+  }
+
+  window.beginOverlayReplaceMode = beginOverlayReplaceMode;
+  window.endOverlayReplaceMode = endOverlayReplaceMode;
+  window.getOverlayReplaceTargetId = function () { return _overlayReplaceTargetId; };
+  window.getSelectedOverlayKeyword = function () {
+    const id = _overlayReplaceTargetId
+      || (selected && selected.track === "overlay" ? selected.id : null);
+    const c = id ? findClip("overlay", id) : null;
+    return (c && (c.keyword || "")) || "";
+  };
 
   function esc(s) {
     return String(s || "").replace(/[&<>"]/g, (c) =>
@@ -3759,6 +3822,16 @@
         kbBody += `<p class="muted" style="font-size:.72rem">Best on photo B-roll and short inserts — keeps still frames alive for the beat.</p>`;
       }
       html += propSection("🔍 Ken Burns (B-roll motion)", kbBody, !!ovKb.enabled);
+      const geminiOk = !!window._brollGeminiReady;
+      let replaceBody = `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:0 0 8px">CapCut Replace — swap this overlay’s media without moving timing/layout.</p>`;
+      replaceBody += `<label class="muted" style="font-size:.74rem;display:block;margin-bottom:6px">AI prompt`
+        + `<textarea data-ov-ai-prompt rows="2" style="display:block;width:100%;margin-top:4px;padding:8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical" placeholder="e.g. festival crowd bokeh lights, photo">${esc(c.keyword || "")}</textarea></label>`;
+      replaceBody += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">`
+        + `<button type="button" class="btn btn-primary btn-sm" data-act="ov-ai-gen" ${geminiOk ? "" : "disabled"}>${geminiOk ? "✨ Generate + replace" : "Set GEMINI_API_KEY"}</button>`
+        + `<button type="button" class="btn btn-secondary btn-sm" data-act="ov-lib-replace">📚 Pick from Library</button>`
+        + `</div>`
+        + `<p class="muted" data-ov-ai-status style="font-size:.72rem;margin:8px 0 0"></p>`;
+      html += propSection("↻ Replace media", replaceBody, false);
     } else { // main
       const st = normalizeTlStyle(tl.style || {});
       const primary = st.primary_color || st.primary || "#FFFFFF";
@@ -4171,6 +4244,51 @@
     wrap.querySelectorAll('[data-act="ovlayout"]').forEach((btn) => {
       btn.onclick = () => applyOverlayLayout(c, btn.dataset.layout);
     });
+    const ovLibReplace = wrap.querySelector('[data-act="ov-lib-replace"]');
+    if (ovLibReplace) {
+      ovLibReplace.onclick = () => {
+        beginOverlayReplaceMode(c.id);
+        if (typeof window.openMobileTimelinePanel === "function") {
+          try { window.openMobileTimelinePanel("media"); } catch (e) { /* optional */ }
+        }
+      };
+    }
+    const ovAiGen = wrap.querySelector('[data-act="ov-ai-gen"]');
+    if (ovAiGen) {
+      ovAiGen.onclick = async () => {
+        const promptEl = wrap.querySelector("[data-ov-ai-prompt]");
+        const statusEl = wrap.querySelector("[data-ov-ai-status]");
+        const prompt = ((promptEl && promptEl.value) || c.keyword || "").trim();
+        if (prompt.length < 2) {
+          if (statusEl) statusEl.textContent = "Enter a short prompt first.";
+          return;
+        }
+        beginOverlayReplaceMode(c.id, { openMedia: false });
+        ovAiGen.disabled = true;
+        ovAiGen.textContent = "Generating…";
+        if (statusEl) statusEl.textContent = "Calling Gemini…";
+        try {
+          const res = await fetch("/broll/generate-ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, keyword: prompt.slice(0, 40) }),
+          });
+          const data = await res.json();
+          if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
+          const ok = replaceSelectedOverlayAsset(data.asset_id, {
+            source: "gemini",
+            keyword: data.keyword || prompt.slice(0, 40),
+          });
+          if (statusEl) statusEl.textContent = ok ? "Replaced ✓" : "Replace failed.";
+        } catch (e) {
+          endOverlayReplaceMode();
+          if (statusEl) statusEl.textContent = "Failed: " + (e.message || e);
+        } finally {
+          ovAiGen.disabled = !window._brollGeminiReady;
+          ovAiGen.textContent = window._brollGeminiReady ? "✨ Generate + replace" : "Set GEMINI_API_KEY";
+        }
+      };
+    }
   }
 
   /** Push Timeline style knobs into the Look form so both stay canonical. */
@@ -5097,22 +5215,33 @@
 
   window.replaceSelectedOverlayAsset = function (assetId, opts) {
     opts = opts || {};
-    if (!tl || !selected || selected.track !== "overlay") {
+    if (!tl || !assetId) return false;
+    const targetId = _overlayReplaceTargetId
+      || (selected && selected.track === "overlay" ? selected.id : null);
+    if (!targetId) {
       alert("Select an Overlay clip first.");
       return false;
     }
-    const c = findClip("overlay", selected.id);
-    if (!c || !assetId) return false;
+    const c = findClip("overlay", targetId);
+    if (!c) {
+      endOverlayReplaceMode();
+      alert("That Overlay clip is gone — select another and try Replace again.");
+      return false;
+    }
     pushHistory();
     c.asset_id = assetId;
     c.source_job_id = null;
     if (opts.source) c.source = opts.source;
     if (opts.keyword) c.keyword = opts.keyword;
-    if (opts.source === "gemini" || opts.source === "photo") {
+    if (opts.source === "gif" || (opts.keyword && /\.gif$/i.test(String(opts.keyword)))) {
+      c.ken_burns = null;
+    } else if (opts.source === "gemini" || opts.source === "photo") {
       if (!(c.ken_burns && c.ken_burns.enabled) && isAlwaysPhotoMatchSession()) {
         c.ken_burns = alwaysKenBurnsDefault();
       }
     }
+    selected = { track: "overlay", id: c.id };
+    endOverlayReplaceMode();
     loadAssets().catch(() => {});
     renderTimeline();
     scheduleSave();
