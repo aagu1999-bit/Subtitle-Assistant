@@ -19,14 +19,21 @@
         "tl-preview-compact",
         "tl-preview-collapsed",
         "tl-tool-sheet-open",
-        "tab-editor-active"
+        "tab-editor-active",
+        "tl-coeditor-open"
       );
       const scrim = document.getElementById("mobilePanelScrim");
       if (scrim) scrim.hidden = true;
       closeToolSheet();
       const ctx = document.getElementById("tlContextTools");
       if (ctx) ctx.hidden = true;
+      const chatDock = document.getElementById("mobileChatDock");
+      if (chatDock) chatDock.hidden = true;
+      syncMobileHomeVisibility(null);
     } else {
+      const active = document.querySelector(".main-tab.active[data-tab]");
+      const tab = active ? active.dataset.tab : "ingest";
+      setMobileNavActive(tab);
       refreshContextTools();
     }
   }
@@ -40,12 +47,18 @@
       btn.classList.toggle("active", btn.dataset.tab === tab);
     });
     document.body.classList.toggle("tab-editor-active", tab === "editor");
+    const chatDock = document.getElementById("mobileChatDock");
+    if (chatDock) {
+      if (isPhone() && tab === "editor") chatDock.hidden = false;
+      else chatDock.hidden = true;
+    }
     if (tab === "editor") refreshContextTools();
     else {
       const ctx = document.getElementById("tlContextTools");
       if (ctx) ctx.hidden = true;
       closeToolSheet();
     }
+    syncMobileHomeVisibility(tab);
   }
 
   function openMobilePanel(ltab) {
@@ -533,6 +546,192 @@
     }
   }
 
+  const HOME_PACKS = [
+    { key: "capcut_always", name: "Always · Photo", filter: "photo", blurb: "Photo Match", tone: "linear-gradient(160deg,#2a2438,#101018)" },
+    { key: "capcut_reels", name: "Pulse Reel", filter: "bold", blurb: "High energy", tone: "linear-gradient(160deg,#243248,#0f141c)" },
+    { key: "podcast_interview", name: "Clarity", filter: "polished", blurb: "Talking head", tone: "linear-gradient(160deg,#1f2e28,#0e1214)" },
+    { key: "product_spotlight", name: "Velocity", filter: "bold", blurb: "Product pop", tone: "linear-gradient(160deg,#352628,#120e12)" },
+    { key: "cinematic_vlog", name: "Film", filter: "minimal", blurb: "Cinematic", tone: "linear-gradient(160deg,#2b3348,#12161f)" },
+  ];
+
+  let _homePackKey = null;
+  let _homeFilter = "all";
+
+  function syncMobileHomeVisibility(tab) {
+    const shell = document.getElementById("mobileHomeShell");
+    const templates = document.getElementById("mobileHomeTemplates");
+    const onHome = isPhone() && (!tab || tab === "ingest");
+    if (shell) shell.hidden = !onHome;
+    if (templates) templates.hidden = !onHome;
+  }
+
+  function renderMobileHomeGallery() {
+    const host = document.getElementById("mobileHomeGallery");
+    if (!host) return;
+    const packs = HOME_PACKS.filter((p) => _homeFilter === "all" || p.filter === _homeFilter);
+    const list = packs.length ? packs : HOME_PACKS;
+    host.innerHTML = list.map((p) => {
+      const on = _homePackKey === p.key ? " on" : "";
+      return `<button type="button" class="mobile-home-card${on}" data-pack="${p.key}">` +
+        `<div class="art" style="background:${p.tone}"><div class="cap">${p.blurb}<br><span>${p.name}</span></div></div>` +
+        `<div class="name">${p.name}</div></button>`;
+    }).join("");
+  }
+
+  function selectHomePack(key) {
+    _homePackKey = key;
+    renderMobileHomeGallery();
+    if (typeof window.applyCapcutTemplateToUi === "function") {
+      window.applyCapcutTemplateToUi(key);
+    } else if (typeof applyCapcutTemplateToUi === "function") {
+      applyCapcutTemplateToUi(key);
+    }
+    const styleBtn = document.getElementById("mobileHomeStyleBtn");
+    if (styleBtn) {
+      const pack = HOME_PACKS.find((p) => p.key === key);
+      styleBtn.textContent = pack ? pack.name : "Add style";
+    }
+    syncMobileHomeContinue();
+  }
+
+  function syncMobileHomeContinue() {
+    const btn = document.getElementById("mobileHomeContinue");
+    if (!btn) return;
+    const ready = (() => {
+      const el = document.getElementById("readyActions");
+      return el && !el.classList.contains("hidden");
+    })();
+    const fname = (document.getElementById("filename") && document.getElementById("filename").textContent || "").trim();
+    const can = !!(ready || fname);
+    btn.disabled = !can;
+    btn.classList.toggle("ready", can);
+    btn.textContent = ready ? "Continue →" : (fname ? "Transcribing…" : "Continue →");
+    if (ready) btn.textContent = "Continue →";
+  }
+
+  function runMobileHomeContinue() {
+    const ready = (() => {
+      const el = document.getElementById("readyActions");
+      return el && !el.classList.contains("hidden");
+    })();
+    if (_homePackKey) selectHomePack(_homePackKey);
+    if (ready) {
+      const openTl = document.getElementById("readyOpenTimelineBtn");
+      if (openTl) openTl.click();
+      else {
+        const tab = document.querySelector('.main-tab[data-tab="editor"]');
+        if (tab) tab.click();
+      }
+      return;
+    }
+    const fname = (document.getElementById("filename") && document.getElementById("filename").textContent || "").trim();
+    if (fname) {
+      alert("Still transcribing — Continue unlocks when the transcript is ready.");
+      return;
+    }
+    const label = document.querySelector('label[for="file"]');
+    if (label) label.click();
+  }
+
+  function wireMobileHome() {
+    syncMobileHomeVisibility("ingest");
+    renderMobileHomeGallery();
+    syncMobileHomeContinue();
+
+    const attach = document.getElementById("mobileHomeAttach");
+    if (attach) {
+      attach.onclick = () => {
+        const label = document.querySelector('label[for="file"]');
+        if (label) label.click();
+      };
+    }
+    const styleBtn = document.getElementById("mobileHomeStyleBtn");
+    if (styleBtn) {
+      styleBtn.onclick = () => {
+        const host = document.getElementById("mobileHomeTemplates");
+        if (host) host.scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+    }
+    const cont = document.getElementById("mobileHomeContinue");
+    if (cont) cont.onclick = () => runMobileHomeContinue();
+    const maxHint = document.getElementById("mobileHomeMaxHint");
+    if (maxHint) {
+      maxHint.onclick = () => {
+        const host = document.getElementById("mobileHomeTemplates");
+        if (host) host.scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+    }
+    const chips = document.getElementById("mobileHomeChips");
+    if (chips) {
+      chips.addEventListener("click", (e) => {
+        const btn = e.target && e.target.closest && e.target.closest("[data-filter]");
+        if (!btn) return;
+        _homeFilter = btn.dataset.filter || "all";
+        chips.querySelectorAll(".mobile-home-chip").forEach((c) => {
+          c.classList.toggle("on", c === btn);
+        });
+        renderMobileHomeGallery();
+      });
+    }
+    const gallery = document.getElementById("mobileHomeGallery");
+    if (gallery) {
+      gallery.addEventListener("click", (e) => {
+        const card = e.target && e.target.closest && e.target.closest("[data-pack]");
+        if (!card) return;
+        selectHomePack(card.dataset.pack);
+      });
+    }
+
+    const ready = document.getElementById("readyActions");
+    const fname = document.getElementById("filename");
+    if (ready && !ready._mobileHomeObs) {
+      ready._mobileHomeObs = true;
+      new MutationObserver(() => syncMobileHomeContinue()).observe(ready, { attributes: true, attributeFilter: ["class"] });
+    }
+    if (fname && !fname._mobileHomeObs) {
+      fname._mobileHomeObs = true;
+      new MutationObserver(() => syncMobileHomeContinue()).observe(fname, { childList: true, characterData: true, subtree: true });
+    }
+    setInterval(syncMobileHomeContinue, 2500);
+  }
+
+  function sendMobileChat() {
+    const mobileIn = document.getElementById("mobileChatInput");
+    const prompt = (mobileIn && mobileIn.value || "").trim();
+    if (!prompt) {
+      if (typeof window.openCoEditor === "function") window.openCoEditor();
+      return;
+    }
+    const mainIn = document.getElementById("coEditorInput");
+    if (mainIn) mainIn.value = prompt;
+    if (mobileIn) mobileIn.value = "";
+    if (typeof window.openCoEditor === "function") window.openCoEditor();
+    const send = document.getElementById("coEditorSend");
+    if (send) send.click();
+  }
+
+  function wireMobileChatDock() {
+    const dock = document.getElementById("mobileChatDock");
+    if (!dock) return;
+    const openBtn = document.getElementById("mobileChatOpen");
+    const sendBtn = document.getElementById("mobileChatSend");
+    const input = document.getElementById("mobileChatInput");
+    if (openBtn) {
+      openBtn.onclick = () => {
+        if (typeof window.openCoEditor === "function") window.openCoEditor();
+      };
+    }
+    if (sendBtn) sendBtn.onclick = () => sendMobileChat();
+    if (input) {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          sendMobileChat();
+        }
+      });
+    }
+  }
+
   function wire() {
     syncPhoneClass();
     if (MQ.addEventListener) MQ.addEventListener("change", syncPhoneClass);
@@ -615,6 +814,14 @@
         refreshContextTools();
       }
     };
+
+    wireMobileHome();
+    wireMobileChatDock();
+    syncMobileHomeVisibility(
+      (document.querySelector(".main-tab.active[data-tab]") || {}).dataset
+        ? document.querySelector(".main-tab.active[data-tab]").dataset.tab
+        : "ingest"
+    );
 
     // If Timeline is already the active tab on load.
     const active = document.querySelector(".main-tab.active[data-tab]");

@@ -180,26 +180,51 @@
 
     <!-- Tab 1: Ingest & Diarize -->
     <div class="tab-content active" data-tab-group="ingest">
+      <!-- Phone Home chrome (upload lives in #drop — upload-first) -->
+      <div id="mobileHomeShell" class="mobile-home-shell phone-only" hidden>
+        <div class="mobile-home-top">
+          <div class="mobile-home-brand">Studio</div>
+          <button type="button" class="mobile-home-max" id="mobileHomeMaxHint" title="Template packs">✦ Templates</button>
+        </div>
+        <p class="mobile-home-lead">Add your video first, then optionally pick a look before Timeline.</p>
+        <div class="mobile-home-actions">
+          <button type="button" class="mobile-home-attach" id="mobileHomeAttach" title="Attach video">📎</button>
+          <button type="button" class="mobile-home-style" id="mobileHomeStyleBtn">Add style</button>
+          <button type="button" class="mobile-home-continue" id="mobileHomeContinue" disabled>Continue →</button>
+        </div>
+      </div>
+
       <div style="display:flex;gap:20px;flex-wrap:wrap;">
         <div style="flex:1;min-width:300px;">
-          <section class="panel">
-            <div class="section-title">📁 Project Files</div>
+          <section class="panel mobile-home-upload-panel">
+            <div class="section-title desktop-only-hint">📁 Project Files</div>
             <div id="drop" class="drop drop-compact">
               <input type="file" id="file" accept="video/*,video/mp4,video/quicktime,.mov,.mp4" multiple class="offscreen-file">
-              <!-- A real <label for> opens the picker natively, with no
-                   script involved — it survives both iOS's restrictions on
-                   programmatic .click() and any JS error earlier on the page. -->
               <label for="file" class="drop-inner drop-label">
                 <div class="icon">🎬</div>
                 <p><strong>Tap to choose video(s)</strong></p>
                 <p class="muted desktop-only-hint">or drag &amp; drop on desktop</p>
+                <p class="muted phone-only mobile-drop-hint" hidden>Add your video</p>
                 <p id="filename" class="filename"></p>
               </label>
             </div>
-            <p class="muted" style="font-size:.72rem;margin:8px 0 0;line-height:1.4">
+            <p class="muted desktop-only-hint" style="font-size:.72rem;margin:8px 0 0;line-height:1.4">
               Upload only transcribes. Find Shorts from the ready panel or <strong>AI Shorts</strong> tab — nothing auto-runs after Whisper.
             </p>
           </section>
+
+          <div id="mobileHomeTemplates" class="mobile-home-templates phone-only" hidden>
+            <div class="mobile-home-chips" id="mobileHomeChips" role="tablist" aria-label="Template filters">
+              <button type="button" class="mobile-home-chip on" data-filter="all">Trending</button>
+              <button type="button" class="mobile-home-chip" data-filter="photo">Photo</button>
+              <button type="button" class="mobile-home-chip" data-filter="bold">Bold</button>
+              <button type="button" class="mobile-home-chip" data-filter="polished">Polished</button>
+              <button type="button" class="mobile-home-chip" data-filter="minimal">Minimal</button>
+            </div>
+            <div class="mobile-home-gallery" id="mobileHomeGallery"></div>
+            <p class="mobile-home-foot muted">Packs set Caption look + B-roll defaults. Suggest → Accept still required for photos.</p>
+          </div>
+
           <section id="jobsPanel" class="panel hidden" style="margin-top:14px;padding:14px">
             <h2 style="display:flex;align-items:center;justify-content:space-between;font-size:0.92rem;margin-bottom:8px">
               <span>Your videos</span>
@@ -209,7 +234,7 @@
           </section>
           <button id="go" class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" disabled title="Drops/picks start automatically — use this to retry a failed job or if a file was staged manually">Transcribe Video</button>
           <p class="muted" style="font-size:.74rem;margin:6px 0 0">Drop or pick a video to upload + transcribe. If a job shows <strong>error</strong>, use <strong>Re-drop video</strong> (not only Retry).</p>
-          <p class="muted" style="font-size:.72rem;margin:8px 0 0;line-height:1.45;padding:8px 10px;background:rgba(30,41,59,0.45);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
+          <p class="muted desktop-only-hint" style="font-size:.72rem;margin:8px 0 0;line-height:1.45;padding:8px 10px;background:rgba(30,41,59,0.45);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
             <strong>iPhone / Windows tip:</strong> Many phone clips are <strong>HEVC</strong>. Windows often needs extra codecs to play them, while Google Drive works because it <em>re-encodes for streaming</em>. That does not mean the original has no audio — upload the full original file (or export <em>Most Compatible</em> / H.264 MP4 from the phone) and wait until upload hits 100%.
           </p>
           <div id="progress" class="progress hidden" style="margin-top:10px">
@@ -234,7 +259,7 @@
             </div>
           </section>
         </div>
-        <div style="flex:1;min-width:300px;">
+        <div class="ingest-desktop-aside" style="flex:1;min-width:300px;">
           <section class="panel">
             <div class="section-title">✨ Suggested next steps</div>
             <div style="font-size:0.8rem;color:#c8cdd8;line-height:1.65;background:rgba(30,41,59,0.4);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
@@ -248,11 +273,10 @@
             <div class="section-title" style="margin-top:20px">⚡ Pipeline</div>
             <div style="font-size:0.76rem;color:#94a3b8;line-height:1.6;background:rgba(30,41,59,0.4);padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
               • <b>Whisper / Faster-Whisper</b> — Word alignment on upload<br>
-              • <b>Timeline</b> — Phrase edit, fillers, Effects, speakers<br>
+              • <b>Timeline</b> — Phrase edit, Look, Effects, speakers<br>
               • <b>PyAnnote</b> — Optional Analyze in Timeline<br>
               • <b>FFmpeg + ASS</b> — Timeline Render
             </div>
-            <!-- Hidden stubs so legacy JS that still references ingest Analyze IDs does not throw. -->
             <div id="ingestSpeakerCards" class="hidden" aria-hidden="true"></div>
             <div id="speakerColorPickers" class="hidden" aria-hidden="true">
               <input type="color" id="hostColor" data-speaker-color="SPEAKER_00" value="#FFD700">
@@ -1546,6 +1570,13 @@
     </div>
   </div>
 
+  <!-- Phone: persistent Chat to edit dock above context tools / bottom nav -->
+  <div id="mobileChatDock" class="mobile-chat-dock phone-only" hidden>
+    <input type="text" id="mobileChatInput" placeholder="Chat to edit" maxlength="400" autocomplete="off" />
+    <button type="button" class="mobile-chat-max" id="mobileChatOpen" title="Open co-editor">MAX</button>
+    <button type="button" class="mobile-chat-send" id="mobileChatSend" title="Send">↑</button>
+  </div>
+
   <!-- Tab: Result -->
   <div class="tab-content hidden" data-tab-group="result">
     <div id="result" class="result hidden">
@@ -1569,7 +1600,7 @@
 <!-- Phone bottom navigation -->
 <nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Primary">
   <button type="button" class="mobile-nav-btn active" data-tab="ingest">
-    <span class="ico">📁</span><span class="lbl">Ingest</span>
+    <span class="ico">🏠</span><span class="lbl">Home</span>
   </button>
   <button type="button" class="mobile-nav-btn" data-tab="highlights">
     <span class="ico">🔥</span><span class="lbl">Shorts</span>
