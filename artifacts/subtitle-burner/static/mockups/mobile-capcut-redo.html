@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Studio · Mobile UI mockup (CapCut-inspired)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,500&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #07080c;
+    --panel: #12141c;
+    --panel-2: #181b26;
+    --line: #2a2f3a;
+    --text: #f2f4f8;
+    --muted: #9aa3b2;
+    --gold: #e8c56a;
+    --gold-dim: rgba(232, 197, 106, 0.18);
+    --export: #3b82f6;
+    --caption: #7c6cf0;
+    --video: #3d4456;
+    --ai: #c4a035;
+    --label: #d97706;
+    --sound: #b45fd6;
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background:
+      radial-gradient(900px 500px at 50% -10%, #1a2035 0%, transparent 55%),
+      #0b0d14;
+    color: var(--text);
+    font-family: "DM Sans", system-ui, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 48px;
+    gap: 18px;
+  }
+  .deck-note {
+    max-width: 420px;
+    text-align: center;
+    color: var(--muted);
+    font-size: .86rem;
+    line-height: 1.45;
+  }
+  .deck-note strong { color: var(--text); font-weight: 600; }
+  .switcher {
+    display: flex;
+    gap: 8px;
+    padding: 4px;
+    background: #12151e;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+  .switcher button {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: 600 .82rem "DM Sans", sans-serif;
+    padding: 10px 16px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .switcher button.active {
+    background: #222636;
+    color: #fff;
+  }
+
+  .phone {
+    width: min(390px, 100%);
+    height: min(844px, 92dvh);
+    background: var(--bg);
+    border: 1px solid #2c3244;
+    border-radius: 36px;
+    box-shadow:
+      0 0 0 1px #000,
+      0 30px 80px rgba(0,0,0,.55);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  .notch {
+    height: 28px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 4px;
+    color: #5a6275;
+    font-size: .65rem;
+    letter-spacing: .04em;
+  }
+
+  .screen { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  .screen.active { display: flex; }
+
+  /* ---- HOME ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px 10px;
+    gap: 10px;
+  }
+  .icon-btn {
+    width: 40px; height: 40px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text);
+    display: grid; place-items: center;
+    font-size: 1rem;
+  }
+  .top-right { display: flex; align-items: center; gap: 8px; }
+  .max-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--gold);
+    color: var(--gold);
+    background: var(--gold-dim);
+    border-radius: 999px;
+    padding: 7px 11px;
+    font-size: .72rem;
+    font-weight: 700;
+  }
+  .credits {
+    font-size: .78rem; font-weight: 700; color: #dde2ee;
+    padding: 0 4px;
+  }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: linear-gradient(135deg, #3b4560, #1c2233);
+    border: 1px solid #3a4258;
+    display: grid; place-items: center;
+    font-size: .72rem; font-weight: 700;
+  }
+
+  .home-scroll {
+    flex: 1;
+    overflow: auto;
+    padding: 0 14px 18px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .edit-row {
+    display: flex; justify-content: flex-end; margin-bottom: 8px;
+  }
+  .ghost-chip {
+    appearance: none; border: 0; background: transparent;
+    color: var(--muted); font: 600 .78rem "DM Sans", sans-serif;
+  }
+
+  .compose {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    padding: 14px;
+  }
+  .drop {
+    border: 1.5px dashed #3a4154;
+    border-radius: 18px;
+    min-height: 148px;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px;
+    background:
+      radial-gradient(circle at 50% 40%, rgba(232,197,106,.08), transparent 55%),
+      #0e1017;
+    color: var(--muted);
+    text-align: center;
+    padding: 18px;
+  }
+  .drop-ico {
+    width: 54px; height: 54px; border-radius: 16px;
+    background: #1a1e2a; border: 1px solid #32384a;
+    display: grid; place-items: center; font-size: 1.4rem; color: #fff;
+  }
+  .drop strong {
+    font-family: Syne, sans-serif;
+    font-size: 1.05rem; color: #fff; font-weight: 700;
+  }
+  .drop span { font-size: .78rem; line-height: 1.35; max-width: 220px; }
+  .compose-actions {
+    display: flex; align-items: center; gap: 8px; margin-top: 12px;
+  }
+  .round-ico {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--panel-2);
+    color: #fff; display: grid; place-items: center;
+  }
+  .add-style {
+    flex: 1;
+    height: 42px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--text); font: 600 .84rem "DM Sans", sans-serif;
+  }
+  .continue {
+    height: 42px; padding: 0 18px; border-radius: 999px;
+    border: 0; background: #2a3142; color: #7d8699;
+    font: 700 .84rem "DM Sans", sans-serif;
+  }
+  .continue.ready {
+    background: linear-gradient(135deg, #f0d27a, #c9a227);
+    color: #1a1405;
+  }
+
+  .chips {
+    display: flex; gap: 8px; overflow-x: auto;
+    padding: 16px 0 12px; scrollbar-width: none;
+  }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: 0 0 auto;
+    border: 0; border-radius: 999px;
+    background: #1a1e2a; color: #c8cdd8;
+    padding: 9px 14px; font: 600 .78rem "DM Sans", sans-serif;
+  }
+  .chip.on { background: #fff; color: #111; }
+
+  .gallery {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .card {
+    border: 0; padding: 0; background: transparent; text-align: left;
+    color: inherit; cursor: pointer;
+  }
+  .card-art {
+    aspect-ratio: 9 / 14;
+    border-radius: 18px;
+    overflow: hidden;
+    position: relative;
+    border: 1px solid #2a2f3a;
+    background-size: cover;
+    background-position: center;
+  }
+  .card-art::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 45%, rgba(0,0,0,.72));
+  }
+  .card-caption {
+    position: absolute; left: 10px; right: 10px; bottom: 12px; z-index: 1;
+    font-family: Syne, sans-serif; font-weight: 800; line-height: 1.05;
+    text-shadow: 0 2px 10px rgba(0,0,0,.55);
+  }
+  .card-caption .big { font-size: 1.15rem; display: block; }
+  .card-caption .hl {
+    display: inline-block; margin-top: 4px;
+    background: #f5d76e; color: #111; padding: 2px 6px; border-radius: 4px;
+    font-size: .72rem;
+  }
+  .card-name {
+    margin-top: 8px; font-size: .82rem; font-weight: 600; color: #e8eaf0;
+  }
+
+  .c1 { background-image: linear-gradient(160deg,#2b3348,#12161f), radial-gradient(circle at 60% 30%, #6b7c99, transparent 40%); }
+  .c2 { background-image: linear-gradient(160deg,#3a2f28,#141018), radial-gradient(circle at 40% 35%, #8a6b55, transparent 42%); }
+  .c3 { background-image: linear-gradient(160deg,#243248,#0f141c), radial-gradient(circle at 55% 28%, #4d6d8a, transparent 40%); }
+  .c4 { background-image: linear-gradient(160deg,#2a2438,#101018), radial-gradient(circle at 50% 30%, #6a5a88, transparent 42%); }
+  .c5 { background-image: linear-gradient(160deg,#1f2e28,#0e1214), radial-gradient(circle at 45% 32%, #4e7a68, transparent 40%); }
+  .c6 { background-image: linear-gradient(160deg,#352628,#120e12), radial-gradient(circle at 60% 30%, #8a5560, transparent 40%); }
+
+  /* ---- EDITOR ---- */
+  .ed-top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px 8px;
+  }
+  .export-btn {
+    background: var(--export); color: #fff; border: 0;
+    border-radius: 999px; padding: 9px 16px;
+    font: 700 .82rem "DM Sans", sans-serif;
+  }
+  .preview-wrap {
+    padding: 0 48px 8px;
+    display: flex; justify-content: center;
+  }
+  .preview {
+    width: 100%;
+    aspect-ratio: 9 / 12.5;
+    max-height: 34dvh;
+    border-radius: 14px;
+    overflow: hidden;
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(0,0,0,.15), rgba(0,0,0,.55)),
+      linear-gradient(145deg, #3a465c, #1a2030);
+    border: 1px solid #2c3344;
+  }
+  .preview .burn {
+    position: absolute; left: 50%; bottom: 18%;
+    transform: translateX(-50%);
+    text-align: center; width: 86%;
+    font-family: Syne, sans-serif; font-weight: 800;
+    text-shadow: 0 2px 8px rgba(0,0,0,.6);
+  }
+  .preview .burn .w1 { font-size: 1.35rem; letter-spacing: .04em; }
+  .preview .burn .w2 {
+    display: inline-block; margin-top: 4px;
+    background: #f0d27a; color: #111; padding: 2px 8px; border-radius: 5px;
+    font-size: .85rem;
+  }
+  .collapse {
+    position: absolute; right: -34px; top: 50%;
+    transform: translateY(-50%);
+    width: 28px; height: 28px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel);
+    color: var(--muted); font-size: .7rem;
+  }
+
+  .transport {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 12px 8px;
+  }
+  .play {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 0; background: #222636; color: #fff;
+  }
+  .time { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .time b { color: #fff; font-weight: 600; }
+  .clip-style {
+    margin-left: auto;
+    border: 0; background: transparent;
+    color: var(--gold); font: 700 .8rem "DM Sans", sans-serif;
+  }
+  .undo-pair { display: flex; gap: 6px; }
+  .undo-pair button {
+    width: 34px; height: 34px; border-radius: 10px;
+    border: 1px solid var(--line); background: transparent; color: var(--muted);
+  }
+
+  .timeline {
+    flex: 1; min-height: 0;
+    overflow: auto;
+    padding: 4px 0 8px;
+    background: #0a0b10;
+    border-top: 1px solid #1b1f2a;
+  }
+  .lane {
+    display: grid;
+    grid-template-columns: 54px 1fr;
+    gap: 6px;
+    align-items: center;
+    padding: 5px 10px;
+    position: relative;
+  }
+  .lane-lab {
+    font-size: .62rem; color: #7d8699; text-transform: uppercase;
+    letter-spacing: .04em; font-weight: 700;
+  }
+  .lane-track {
+    position: relative;
+    height: 36px;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .playhead {
+    position: absolute; top: 0; bottom: 0; left: 38%;
+    width: 2px; background: #fff; z-index: 5;
+    pointer-events: none;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.35);
+  }
+  .seg {
+    position: absolute; top: 3px; bottom: 3px;
+    border-radius: 7px; padding: 0 8px;
+    display: flex; align-items: center;
+    font-size: .68rem; font-weight: 650; white-space: nowrap;
+    overflow: hidden;
+  }
+  .seg.cap {
+    left: 8%; width: 70%;
+    background: var(--caption); color: #efeaff;
+  }
+  .seg.cap .word {
+    background: rgba(255,255,255,.22);
+    border-radius: 5px; padding: 1px 5px; margin: 0 2px;
+  }
+  .seg.vid {
+    left: 0; width: 92%;
+    background:
+      repeating-linear-gradient(90deg, #3a4256 0 28px, #32384a 28px 56px);
+    color: transparent;
+  }
+  .seg.ai {
+    left: 12%; width: 42%;
+    background: var(--ai); color: #1a1405;
+  }
+  .seg.label {
+    left: 48%; width: 28%;
+    background: var(--label); color: #1a1005;
+  }
+  .seg.sound {
+    left: 6%; width: 36%;
+    background: var(--sound); color: #fff;
+  }
+  .seg.sound2 {
+    left: 48%; width: 30%;
+    background: #9b4fc0; color: #fff;
+  }
+  .audio-rule {
+    margin: 6px 10px 4px 70px;
+    border-top: 1px dashed #2c3240;
+  }
+
+  .chat-dock {
+    padding: 8px 12px 6px;
+    background: #0c0e14;
+    border-top: 1px solid #1c2130;
+  }
+  .chat-box {
+    display: flex; align-items: center; gap: 8px;
+    background: #151822;
+    border: 1px solid #2a3142;
+    border-radius: 16px;
+    padding: 8px 8px 8px 14px;
+  }
+  .chat-box input {
+    flex: 1; border: 0; background: transparent; color: #fff;
+    font: 500 .88rem "DM Sans", sans-serif; outline: none;
+  }
+  .chat-box input::placeholder { color: #7a8396; }
+  .max-mini {
+    border: 1px solid var(--gold); color: var(--gold);
+    background: var(--gold-dim); border-radius: 999px;
+    padding: 6px 10px; font-size: .68rem; font-weight: 800;
+  }
+  .send {
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 0; background: #2a3142; color: #c8cdd8;
+  }
+
+  .tool-bar {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 2px;
+    padding: 6px 8px calc(10px + var(--safe-b));
+    background: #0c0e14;
+    border-top: 1px solid #1a1e28;
+  }
+  .tool {
+    flex: 1; min-width: 0;
+    appearance: none; border: 0; background: transparent;
+    color: #9aa3b2; display: flex; flex-direction: column;
+    align-items: center; gap: 3px; padding: 6px 2px;
+    font: 600 .62rem "DM Sans", sans-serif;
+  }
+  .tool .glyph { font-size: 1.15rem; line-height: 1; }
+  .tool.on { color: #fff; }
+  .tool.on .glyph { position: relative; }
+  .tool.on .glyph::after {
+    content: ""; position: absolute; top: -4px; right: -2px;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--export);
+  }
+  .tool.add {
+    flex: 0 0 48px;
+  }
+  .tool.add .glyph {
+    width: 40px; height: 40px; border-radius: 14px;
+    background: #1c2130; border: 1px solid #32384a;
+    display: grid; place-items: center; font-size: 1.35rem; color: #fff;
+  }
+</style>
+</head>
+<body>
+  <p class="deck-note">
+    <strong>Mobile UI mockup</strong> — CapCut-shaped shell for Studio:
+    template-first home, then compact preview + color lanes + <em>Chat to edit</em> dock.
+    Not wired to the live app.
+  </p>
+  <div class="switcher" role="tablist">
+    <button type="button" class="active" data-screen="home">1 · Home / Templates</button>
+    <button type="button" data-screen="editor">2 · Timeline editor</button>
+  </div>
+
+  <div class="phone" aria-label="Phone mockup">
+    <div class="notch">Studio mock</div>
+
+    <!-- HOME -->
+    <section class="screen active" id="screen-home">
+      <div class="topbar">
+        <div class="icon-btn" aria-hidden="true">☰</div>
+        <div class="top-right">
+          <span class="max-pill">✦ Get MAX</span>
+          <span class="credits">188</span>
+          <span class="avatar">AA</span>
+        </div>
+      </div>
+      <div class="home-scroll">
+        <div class="edit-row"><button class="ghost-chip" type="button">Edit ▾</button></div>
+        <div class="compose">
+          <div class="drop">
+            <div class="drop-ico">＋</div>
+            <strong>Add your video</strong>
+            <span>Drop a take — then pick a template look to fill the slots</span>
+          </div>
+          <div class="compose-actions">
+            <button class="round-ico" type="button" title="Attach">📎</button>
+            <button class="add-style" type="button">Add style</button>
+            <button class="continue" type="button">Continue →</button>
+          </div>
+        </div>
+
+        <div class="chips">
+          <button class="chip on" type="button">Trending</button>
+          <button class="chip" type="button">New</button>
+          <button class="chip" type="button">Bold</button>
+          <button class="chip" type="button">Polished</button>
+          <button class="chip" type="button">Minimal</button>
+          <button class="chip" type="button">Always</button>
+        </div>
+
+        <div class="gallery">
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c1">
+              <div class="card-caption"><span class="big">Real Estate</span><span class="hl">Focusing Only on Price</span></div>
+            </div>
+            <div class="card-name">Prism Pro</div>
+          </button>
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c2">
+              <div class="card-caption"><span class="big">One tip</span><span class="hl">know this</span></div>
+            </div>
+            <div class="card-name">Paper II</div>
+          </button>
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c3">
+              <div class="card-caption"><span class="big">LEARN</span><span class="hl">this one tip</span></div>
+            </div>
+            <div class="card-name">Prime</div>
+          </button>
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c4">
+              <div class="card-caption"><span class="big">WELLNESS</span><span class="hl">with Anthony</span></div>
+            </div>
+            <div class="card-name">Aperture</div>
+          </button>
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c5">
+              <div class="card-caption"><span class="big">Hook</span><span class="hl">first 3 seconds</span></div>
+            </div>
+            <div class="card-name">Always · Photo</div>
+          </button>
+          <button class="card" type="button" data-go-editor>
+            <div class="card-art c6">
+              <div class="card-caption"><span class="big">REALTY</span><span class="hl">tour walk</span></div>
+            </div>
+            <div class="card-name">Clarity</div>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- EDITOR -->
+    <section class="screen" id="screen-editor">
+      <div class="ed-top">
+        <button class="icon-btn" type="button" data-screen-btn="home" style="width:36px;height:36px">✕</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="icon-btn" type="button" style="width:36px;height:36px;border-radius:50%">?</button>
+          <button class="export-btn" type="button">Export</button>
+        </div>
+      </div>
+
+      <div class="preview-wrap" style="position:relative">
+        <div class="preview">
+          <div class="burn">
+            <div class="w1">WELLNESS</div>
+            <div class="w2">with Anthony</div>
+          </div>
+        </div>
+        <button class="collapse" type="button" title="Compact preview">▾</button>
+      </div>
+
+      <div class="transport">
+        <button class="play" type="button">▶</button>
+        <div class="time"><b>00:01</b> / 01:36</div>
+        <button class="clip-style" type="button">✦ Clip style ›</button>
+        <div class="undo-pair">
+          <button type="button">↶</button>
+          <button type="button">↷</button>
+        </div>
+      </div>
+
+      <div class="timeline">
+        <div class="playhead" style="left:calc(54px + 10px + 38%); top:0; bottom:0; position:absolute"></div>
+        <div class="lane">
+          <div class="lane-lab">Cc</div>
+          <div class="lane-track">
+            <div class="seg cap">Okay, it’s <span class="word">Anthony</span> with Central…</div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-lab">Main</div>
+          <div class="lane-track"><div class="seg vid"></div></div>
+        </div>
+        <div class="lane">
+          <div class="lane-lab">AI</div>
+          <div class="lane-track"><div class="seg ai">＋ AI Edit · Hook</div></div>
+        </div>
+        <div class="lane">
+          <div class="lane-lab">Overlay</div>
+          <div class="lane-track"><div class="seg label">＋ Wellness</div></div>
+        </div>
+        <div class="audio-rule"></div>
+        <div class="lane">
+          <div class="lane-lab">Sound</div>
+          <div class="lane-track">
+            <div class="seg sound">🔊 Sound</div>
+            <div class="seg sound2">🔊 Sound</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-dock">
+        <div class="chat-box">
+          <input type="text" placeholder="Chat to edit" readonly />
+          <span class="max-mini">MAX</span>
+          <button class="send" type="button">↑</button>
+        </div>
+      </div>
+
+      <nav class="tool-bar" aria-label="Editor tools">
+        <button class="tool add" type="button"><span class="glyph">＋</span><span>Add</span></button>
+        <button class="tool" type="button"><span class="glyph">CC</span><span>Captions</span></button>
+        <button class="tool" type="button"><span class="glyph">▣</span><span>Style</span></button>
+        <button class="tool" type="button"><span class="glyph">⛶</span><span>Scale</span></button>
+        <button class="tool on" type="button"><span class="glyph">🔍</span><span>Zoom</span></button>
+        <button class="tool" type="button"><span class="glyph">✨</span><span>AI</span></button>
+      </nav>
+    </section>
+  </div>
+
+  <p class="deck-note" style="max-width:480px">
+    Mapping to Studio today: Home ≈ Ingest + CapCut packs gallery;
+    Editor ≈ Timeline with compact preview, context tools, and Co-editor as the bottom <strong>Chat to edit</strong> dock (not a side drawer).
+  </p>
+
+<script>
+  const screens = {
+    home: document.getElementById("screen-home"),
+    editor: document.getElementById("screen-editor"),
+  };
+  function show(name) {
+    Object.entries(screens).forEach(([k, el]) => el.classList.toggle("active", k === name));
+    document.querySelectorAll(".switcher button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.screen === name);
+    });
+  }
+  document.querySelectorAll(".switcher button").forEach((b) => {
+    b.addEventListener("click", () => show(b.dataset.screen));
+  });
+  document.querySelectorAll("[data-go-editor]").forEach((b) => {
+    b.addEventListener("click", () => show("editor"));
+  });
+  document.querySelectorAll("[data-screen-btn]").forEach((b) => {
+    b.addEventListener("click", () => show(b.dataset.screenBtn));
+  });
+  document.querySelectorAll(".chips .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".chips .chip").forEach((c) => c.classList.remove("on"));
+      chip.classList.add("on");
+    });
+  });
+</script>
+</body>
+</html>
