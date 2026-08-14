@@ -131,7 +131,7 @@
         { id: "add", ico: "＋", label: "Add" },
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "captions", ico: "Aa", label: "Captions" },
-        { id: "library", ico: "📚", label: "Library" },
+        { id: "sound", ico: "♪", label: "Sound" },
         { id: "export", ico: "⚡", label: "Export" },
       ];
     }
@@ -141,36 +141,37 @@
         { id: "split", ico: "✂", label: "Split" },
         { id: "captions", ico: "Aa", label: "Captions" },
         { id: "effects", ico: "🎞", label: "Effects" },
-        { id: "edit", ico: "✎", label: "Edit" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
     if (track === "overlay") {
       return [
         { id: "layout", ico: "▢", label: "Layout" },
-        { id: "edit", ico: "✎", label: "Edit" },
-        { id: "library", ico: "📚", label: "Replace" },
+        { id: "size", ico: "⇔", label: "Size" },
+        { id: "kenburns", ico: "🔍", label: "Ken Burns" },
+        { id: "replace", ico: "↻", label: "Replace" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
     if (track === "effects") {
       return [
-        { id: "edit", ico: "✎", label: "Edit" },
-        { id: "effects", ico: "＋", label: "Add FX" },
+        { id: "type", ico: "🎞", label: "Type" },
+        { id: "strength", ico: "↕", label: "Strength" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
     if (track === "text") {
       return [
         { id: "edit", ico: "✎", label: "Edit" },
-        { id: "captions", ico: "Aa", label: "Look" },
+        { id: "font", ico: "Aa", label: "Font" },
+        { id: "timing", ico: "⏱", label: "Timing" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
     if (track === "music") {
       return [
-        { id: "edit", ico: "✎", label: "Edit" },
-        { id: "library", ico: "📚", label: "Library" },
+        { id: "volume", ico: "🔊", label: "Volume" },
+        { id: "duck", ico: "🔉", label: "Duck" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
@@ -226,17 +227,84 @@
     }
   }
 
+  function replaceMediaSheetHtml() {
+    const geminiOk = !!(window._brollGeminiReady);
+    return `<p class="muted" style="font-size:.78rem;margin:0 0 10px;line-height:1.4">CapCut-style <strong>Replace media</strong> — generate an AI still or pick from Library. Nothing auto-places until you Insert.</p>`
+      + `<label class="muted" style="font-size:.74rem;display:block;margin-bottom:6px">AI prompt (9:16-friendly still)`
+      + `<textarea id="tlReplaceAiPrompt" rows="3" style="display:block;width:100%;margin-top:4px;padding:8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical" placeholder="e.g. warm coffee steam over a wooden table, photo"></textarea></label>`
+      + `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">`
+      + `<button type="button" class="btn btn-primary" id="tlReplaceAiGen" ${geminiOk ? "" : "disabled"}>${geminiOk ? "✨ Generate AI photo" : "Set GEMINI_API_KEY"}</button>`
+      + `<button type="button" class="btn btn-secondary" id="tlReplaceBrowse">📚 Library</button>`
+      + `</div>`
+      + `<p id="tlReplaceAiStatus" class="muted" style="font-size:.72rem;margin:10px 0 0"></p>`
+      + `<div id="tlReplaceAiPreview" style="margin-top:10px"></div>`;
+  }
+
+  async function generateReplaceAiPhoto() {
+    const promptEl = document.getElementById("tlReplaceAiPrompt");
+    const status = document.getElementById("tlReplaceAiStatus");
+    const preview = document.getElementById("tlReplaceAiPreview");
+    const btn = document.getElementById("tlReplaceAiGen");
+    const prompt = (promptEl && promptEl.value || "").trim();
+    if (prompt.length < 2) {
+      if (status) status.textContent = "Enter a short prompt first.";
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
+    if (status) status.textContent = "Calling Gemini…";
+    try {
+      const res = await fetch("/broll/generate-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, keyword: prompt.slice(0, 40) }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
+      if (status) status.textContent = "Ready — Insert to replace the selected overlay.";
+      if (preview) {
+        preview.innerHTML =
+          `<img src="${data.url}?t=${Date.now()}" alt="" style="max-width:100%;max-height:160px;border-radius:10px;border:1px solid #3b4252;display:block;margin-bottom:8px">`
+          + `<button type="button" class="btn btn-primary" id="tlReplaceAiInsert">Insert</button>`;
+        const insert = document.getElementById("tlReplaceAiInsert");
+        if (insert) {
+          insert.onclick = () => {
+            if (typeof window.replaceSelectedOverlayAsset === "function") {
+              const ok = window.replaceSelectedOverlayAsset(data.asset_id, {
+                source: "gemini",
+                keyword: data.keyword || prompt.slice(0, 40),
+              });
+              if (ok) {
+                closeToolSheet();
+                refreshContextTools();
+              }
+            } else {
+              alert("Timeline replace helper not ready — try again.");
+            }
+          };
+        }
+      }
+    } catch (e) {
+      if (status) status.textContent = "Failed: " + (e.message || e);
+    } finally {
+      if (btn) {
+        btn.disabled = !window._brollGeminiReady;
+        btn.textContent = window._brollGeminiReady ? "✨ Generate AI photo" : "Set GEMINI_API_KEY";
+      }
+    }
+  }
+
   function onContextTool(toolId) {
     if (toolId === "export") {
       if (typeof window.runInstantExport === "function") window.runInstantExport();
       return;
     }
-    if (toolId === "library") {
-      openMobilePanel("media");
-      return;
-    }
-    if (toolId === "add") {
-      openMobilePanel("media");
+    if (toolId === "library" || toolId === "add" || toolId === "sound") {
+      openMobilePanel(toolId === "sound" ? "media" : "media");
+      if (toolId === "sound") {
+        // Jump music section if helper exists; else Media library for uploads.
+        const musicHint = document.getElementById("tlAssetList");
+        if (musicHint) setTimeout(() => musicHint.scrollIntoView({ behavior: "smooth", block: "nearest" }), 200);
+      }
       return;
     }
     if (toolId === "captions") {
@@ -262,12 +330,40 @@
       openPropsInSheet("Effect", "edit");
       return;
     }
-    if (toolId === "layout") {
-      openPropsInSheet("Overlay layout", "layout");
+    if (toolId === "layout" || toolId === "size" || toolId === "kenburns"
+        || toolId === "edit" || toolId === "type" || toolId === "strength"
+        || toolId === "font" || toolId === "timing" || toolId === "volume" || toolId === "duck") {
+      const titles = {
+        layout: "Overlay layout",
+        size: "Size & position",
+        kenburns: "Ken Burns",
+        edit: "Edit",
+        type: "Effect type",
+        strength: "Strength",
+        font: "Font & look",
+        timing: "Timing",
+        volume: "Volume",
+        duck: "Duck under voice",
+      };
+      openPropsInSheet(titles[toolId] || "Edit", toolId);
       return;
     }
-    if (toolId === "edit") {
-      openPropsInSheet("Edit", "edit");
+    if (toolId === "replace") {
+      // Refresh gemini flag from last status if present.
+      openToolSheet("Replace media", replaceMediaSheetHtml(), "replace");
+      const gen = document.getElementById("tlReplaceAiGen");
+      const browse = document.getElementById("tlReplaceBrowse");
+      if (gen) gen.addEventListener("click", () => generateReplaceAiPhoto());
+      if (browse) browse.addEventListener("click", () => openMobilePanel("media"));
+      // Live-check Gemini so the button enables when key is present.
+      fetch("/broll/status").then((r) => r.json()).then((data) => {
+        window._brollGeminiReady = !!(data.gemini_image_ready || (data.providers && data.providers.gemini_image));
+        const g = document.getElementById("tlReplaceAiGen");
+        if (g) {
+          g.disabled = !window._brollGeminiReady;
+          g.textContent = window._brollGeminiReady ? "✨ Generate AI photo" : "Set GEMINI_API_KEY";
+        }
+      }).catch(() => {});
       return;
     }
     if (toolId === "clipstyle") {

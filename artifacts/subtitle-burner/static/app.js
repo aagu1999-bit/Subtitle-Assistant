@@ -6109,6 +6109,7 @@ const CAPCUT_TEMPLATES = (typeof window !== "undefined" && window.CAPCUT_TEMPLAT
         color_grade: "warm", auto_overlays: true, photo_match: true,
         use_ai_photos: true, broll_mode: "photo", broll_placement: "center",
         broll_scope: "full",
+        brand_kit: { apply_logo: true, apply_colors: true, caption_preset: "hormozi" },
       },
     };
 

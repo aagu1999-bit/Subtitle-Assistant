@@ -221,6 +221,12 @@ CAPCUT_TEMPLATES = {
         "broll_mode": "photo",
         "broll_placement": "center",
         "broll_scope": "full",
+        # Brand kit composition — Caption Look logo/colors/preset merge on apply.
+        "brand_kit": {
+            "apply_logo": True,
+            "apply_colors": True,
+            "caption_preset": "hormozi",
+        },
     },
 }
 
@@ -5570,6 +5576,55 @@ def broll_status():
     if str(request.args.get("probe") or "").strip() in ("1", "true", "yes"):
         out["pexels_probe"] = _probe_pexels_key()
     return jsonify(out)
+
+
+@app.route("/broll/generate-ai", methods=["POST"])
+def broll_generate_ai():
+    """Generate one still via Gemini for Replace-media / explicit Insert.
+
+    Body: { prompt: str, keyword?: str }
+    Returns asset_id for Timeline overlay insert — never auto-places.
+    """
+    if not _gemini_image_ready():
+        return jsonify({
+            "error": "GEMINI_API_KEY is not set in this Studio process.",
+            "gemini_image_ready": False,
+        }), 400
+    data = request.get_json(force=True) or {}
+    prompt = str(data.get("prompt") or data.get("text") or "").strip()
+    keyword = str(data.get("keyword") or prompt or "AI photo").strip()[:80]
+    if len(prompt) < 2:
+        return jsonify({"error": "Prompt is required"}), 400
+    if len(prompt) > 500:
+        prompt = prompt[:500]
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    asset_id = uuid.uuid4().hex
+    path = _generate_broll_gemini_image(prompt, ASSET_DIR / asset_id)
+    if not path:
+        return jsonify({"error": "Gemini did not return an image. Try a simpler prompt."}), 502
+    final = ASSET_DIR / f"{asset_id}{path.suffix.lower()}"
+    if path.resolve() != final.resolve():
+        try:
+            if final.exists():
+                _safe_unlink(final)
+            path.replace(final)
+            path = final
+        except OSError:
+            pass
+    _write_asset_meta(
+        asset_id,
+        filename=f"{keyword}{path.suffix.lower()}",
+        keyword=keyword,
+        source="gemini",
+        prompt=prompt[:200],
+    )
+    return jsonify({
+        "ok": True,
+        "asset_id": asset_id,
+        "source": "gemini",
+        "keyword": keyword,
+        "url": f"/asset/{asset_id}",
+    })
 
 
 @app.route("/broll/test-pexels", methods=["GET"])

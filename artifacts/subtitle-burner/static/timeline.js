@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-44-always-handoff";
+  const TL_BUILD = "studio-editor-build-45-capcut-plan";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -409,6 +409,29 @@
       || isAlwaysPhotoMatchSession());
     if (!always) return;
 
+    // Brand kit: merge Caption Look logo/colors into the Always project.
+    try {
+      let lookStyle = null;
+      if (typeof window.captionLookStyle === "function") lookStyle = window.captionLookStyle();
+      else if (typeof window.getStyle === "function") lookStyle = window.getStyle();
+      const brandOpts = {
+        broll_mode: "photo",
+        broll_placement: "center",
+        broll_scope: "full",
+      };
+      if (window._brandLogoAssetId) {
+        brandOpts.logo = {
+          asset_id: window._brandLogoAssetId,
+          x: 0.04, y: 0.04, w: 0.18, opacity: 0.9,
+        };
+      }
+      if (lookStyle && typeof window.applyTimelineBranding === "function") {
+        window.applyTimelineBranding(lookStyle, brandOpts);
+      } else if (brandOpts.logo && tl) {
+        tl.logo = Object.assign({}, tl.logo || {}, brandOpts.logo);
+      }
+    } catch (e) { /* best-effort */ }
+
     syncAlwaysBrollDefaults({
       photo_match: true,
       use_ai_photos: !!(seed && seed.ai_edit && seed.ai_edit.use_ai_photos),
@@ -457,16 +480,52 @@
     const t = (typeof window.CAPCUT_TEMPLATES === "object" && window.CAPCUT_TEMPLATES.capcut_always)
       || window._pendingCapcutTemplate
       || {};
-    if (typeof window.applyTimelineBranding === "function") {
-      window.applyTimelineBranding(tl.style || {}, {
-        canvas: t.canvas || "9x16",
-        ken_burns: null, // stills get KB on Accept; don't auto on Main A-roll
-        color_grade: t.color_grade || "warm",
-        broll_mode: "photo",
-        broll_placement: "center",
-        broll_scope: "full",
-      });
+    const brandKit = t.brand_kit || { apply_logo: true, apply_colors: true, caption_preset: "hormozi" };
+
+    // Compose Caption Look / brand kit into the Always session.
+    let lookStyle = null;
+    try {
+      if (typeof window.flushCaptionLookToJob === "function") {
+        lookStyle = await window.flushCaptionLookToJob();
+      } else if (typeof window.captionLookStyle === "function") {
+        lookStyle = window.captionLookStyle();
+      } else if (typeof window.getStyle === "function") {
+        lookStyle = window.getStyle();
+      }
+    } catch (e) { /* best-effort */ }
+
+    const brandOpts = {
+      canvas: t.canvas || "9x16",
+      ken_burns: null, // stills get KB on Accept; don't auto on Main A-roll
+      color_grade: t.color_grade || "warm",
+      broll_mode: "photo",
+      broll_placement: "center",
+      broll_scope: "full",
+    };
+    if (brandKit.apply_logo && window._brandLogoAssetId) {
+      brandOpts.logo = {
+        asset_id: window._brandLogoAssetId,
+        x: 0.04, y: 0.04, w: 0.18, opacity: 0.9,
+      };
     }
+    // Merge Always pack colors with Caption Look when brand kit asks for colors.
+    let styleForTl = lookStyle || tl.style || {};
+    if (brandKit.apply_colors) {
+      styleForTl = Object.assign({}, styleForTl, {
+        font_name: t.font || styleForTl.font_name || styleForTl.font,
+        font: t.font || styleForTl.font || styleForTl.font_name,
+        font_size: t.size != null ? t.size : styleForTl.font_size,
+        primary_color: t.primary || styleForTl.primary_color,
+        highlight_color: t.highlight || styleForTl.highlight_color,
+        accent_color: t.accent || styleForTl.accent_color,
+        group_size: t.group != null ? t.group : styleForTl.group_size,
+      });
+      if (t.headline) styleForTl.headline_banner = t.headline;
+    }
+    if (typeof window.applyTimelineBranding === "function") {
+      window.applyTimelineBranding(styleForTl, brandOpts);
+    }
+
     if (!tl.ai_edit) tl.ai_edit = {};
     tl.ai_edit = Object.assign({}, tl.ai_edit, {
       style_pack: "Always",
@@ -477,11 +536,13 @@
       broll_placement: "center",
       broll_scope: "full",
       ken_burns_on_accept: true,
+      brand_kit: brandKit,
+      caption_preset: brandKit.caption_preset || t.viral_preset || "hormozi",
     });
     syncAlwaysBrollDefaults({ photo_match: true, use_ai_photos: true });
     await refreshBrollStatus().catch(() => {});
     setLeftTab("media", { pin: true });
-    setSaveState("Always pack on — Suggest B-roll to match stills");
+    setSaveState("Always pack + brand kit — Suggest B-roll to match stills");
     scheduleSave();
     return true;
   };
@@ -499,6 +560,7 @@
       const st = data.providers || {};
       const photoReady = !!data.photo_ready;
       const geminiReady = !!(data.gemini_image_ready || st.gemini_image);
+      window._brollGeminiReady = geminiReady;
       const bits = [];
       if (st.pexels) bits.push("Pexels ✓");
       else bits.push("Pexels ✗");
@@ -5024,12 +5086,40 @@
     { id: "talking_head", label: "Talking head", blurb: "Punch zoom on the beat — CapCut social default" },
     { id: "split_stack", label: "Split / stack", blurb: "Top/bottom second video on Effects lane" },
     { id: "pip_corner", label: "Corner PiP", blurb: "Selected overlay → top-right PiP (or B-roll default)" },
+    { id: "center_overlay", label: "Center overlay", blurb: "Selected overlay → center media (Always look)" },
     { id: "word_emphasis", label: "Word emphasis", blurb: "Punchwords on + tighter caption groups" },
+    { id: "hook_broll", label: "Hook · B-roll density", blurb: "Center placement + denser Suggest near playhead" },
     { id: "cinematic", label: "Cinematic push", blurb: "Subtle Ken Burns on Main (you chose this style)" },
     { id: "clarity", label: "Clarity", blurb: "Clean talking-head — no punch, Hormozi-style captions" },
   ];
 
   window.listClipStyles = function () { return CLIP_STYLES.slice(); };
+
+  window.replaceSelectedOverlayAsset = function (assetId, opts) {
+    opts = opts || {};
+    if (!tl || !selected || selected.track !== "overlay") {
+      alert("Select an Overlay clip first.");
+      return false;
+    }
+    const c = findClip("overlay", selected.id);
+    if (!c || !assetId) return false;
+    pushHistory();
+    c.asset_id = assetId;
+    c.source_job_id = null;
+    if (opts.source) c.source = opts.source;
+    if (opts.keyword) c.keyword = opts.keyword;
+    if (opts.source === "gemini" || opts.source === "photo") {
+      if (!(c.ken_burns && c.ken_burns.enabled) && isAlwaysPhotoMatchSession()) {
+        c.ken_burns = alwaysKenBurnsDefault();
+      }
+    }
+    loadAssets().catch(() => {});
+    renderTimeline();
+    scheduleSave();
+    setSaveState("Replaced overlay media");
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+    return true;
+  };
 
   window.applyClipStyle = function (styleId) {
     if (!tl) {
@@ -5057,6 +5147,13 @@
         if (placeEl) placeEl.value = "pip";
         alert("PiP default set for B-roll. Select an Overlay clip to reposition it, or Suggest B-roll.");
       }
+    } else if (styleId === "center_overlay") {
+      if (ovSel) applyOverlayLayout(ovSel, "full");
+      else {
+        const placeEl = $("tlBrollPlacement");
+        if (placeEl) placeEl.value = "center";
+        alert("Center overlay default set. Select an Overlay or Suggest B-roll.");
+      }
     } else if (styleId === "word_emphasis") {
       tl.style = normalizeTlStyle(Object.assign({}, tl.style || {}, {
         punchword_emphasis: true,
@@ -5064,13 +5161,27 @@
         group: 2,
       }));
       syncStyleToCaptionLook(tl.style);
+    } else if (styleId === "hook_broll") {
+      const placeEl = $("tlBrollPlacement");
+      const scopeEl = $("tlBrollScope");
+      const modeEl = $("tlBrollMode");
+      if (placeEl) placeEl.value = "center";
+      if (scopeEl) scopeEl.value = "playhead";
+      if (modeEl) {
+        const photoOpt = modeEl.querySelector('option[value="photo"]:not([disabled])');
+        const autoOpt = modeEl.querySelector('option[value="auto"]:not([disabled])');
+        if (photoOpt) modeEl.value = "photo";
+        else if (autoOpt) modeEl.value = "auto";
+      }
+      setLeftTab("media", { pin: true });
+      setSaveState("Hook · B-roll — Suggest near playhead (center)");
+      if (typeof window.openMobileTimelinePanel === "function") {
+        try { window.openMobileTimelinePanel("media"); } catch (e) { /* optional */ }
+      }
     } else if (styleId === "cinematic") {
       if (!mainSel) { alert("Select a Main clip first."); return false; }
       mainSel.ken_burns = { enabled: true, direction: "in", intensity: "low" };
       if (mainSel.punch_zoom) mainSel.punch_zoom = { enabled: false };
-      if ($("tlCanvas") && tl.canvas === "9x16") {
-        // Keep canvas; cinematic pack often 16:9 but don't force without asking.
-      }
     } else if (styleId === "clarity") {
       if (mainSel) {
         mainSel.punch_zoom = null;
