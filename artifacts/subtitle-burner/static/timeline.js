@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-48-coeditor-power";
+  const TL_BUILD = "studio-editor-build-49-always-accept";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -379,6 +379,44 @@
       direction: kb.direction || "in",
       intensity: kb.intensity || "med",
     };
+  }
+
+  /** Resolve Always / placement into a concrete overlay layout recipe. */
+  function resolveBrollLayoutId(ref) {
+    const placeEl = $("tlBrollPlacement");
+    const place = (placeEl && placeEl.value) || (ref && ref.layout) || "center";
+    if (place === "pip" || place === "pip_tr") return "pip_tr";
+    if (place === "pip_tl" || place === "pip_br" || place === "pip_bl") return place;
+    if (place === "lower") return "lower";
+    if (place === "full" || place === "full_bleed") return "full";
+    // Always photo-match + default Suggest placement "center"
+    if (place === "center" || place === "center_match" || isAlwaysPhotoMatchSession()) return "center";
+    return "center";
+  }
+
+  function applyBrollLayoutRecipe(ref) {
+    if (!ref || ref.source === "badge") return ref;
+    const layoutId = resolveBrollLayoutId(ref);
+    const L = OVERLAY_LAYOUTS[layoutId];
+    if (!L) return ref;
+    ref.layout = layoutId;
+    ref.x = L.x; ref.y = L.y; ref.w = L.w; ref.h = L.h; ref.fit = L.fit;
+    return ref;
+  }
+
+  /** Strip queue fields + Always Ken Burns + layout recipe before place. */
+  function prepareBrollAcceptRef(p) {
+    const { id: _drop, _status, ...ref } = p;
+    if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
+      ref.ken_burns = alwaysKenBurnsDefault();
+    }
+    if (ref.source !== "badge" && ref.source !== "gif") {
+      // Keep explicit pip/full if already set; otherwise apply recipe.
+      if (!ref.layout || ref.layout === "pip_auto" || ref.layout === "center" || isAlwaysPhotoMatchSession()) {
+        applyBrollLayoutRecipe(ref);
+      }
+    }
+    return ref;
   }
 
   /** Move seeded Always overlays into the Suggest review queue (Accept / Skip). */
@@ -1951,6 +1989,8 @@
     pip_br: { x: 0.58, y: 0.68, w: 0.36, h: 0.22, fit: "cover", label: "PiP BR" },
     pip_bl: { x: 0.04, y: 0.68, w: 0.36, h: 0.22, fit: "cover", label: "PiP BL" },
     full:   { x: 0, y: 0, w: 1, h: 1, fit: "cover", label: "Full-bleed" },
+    // Always · Photo Match default — large centered still (not edge-to-edge).
+    center: { x: 0.08, y: 0.12, w: 0.84, h: 0.55, fit: "cover", label: "Center match" },
     lower:  { x: 0.08, y: 0.62, w: 0.84, h: 0.28, fit: "cover", label: "Lower media" },
   };
 
@@ -5443,10 +5483,10 @@
         if (always && ov.source !== "gif" && !(item.ken_burns && item.ken_burns.enabled)) {
           item.ken_burns = alwaysKenBurnsDefault();
         }
-        if (always && (!item.layout || item.layout === "pip_auto") && item.source !== "badge") {
-          item.layout = "center";
-          item.x = 0.08; item.y = 0.12; item.w = 0.84; item.h = 0.55;
-          item.fit = "cover";
+        if (always && item.source !== "badge" && item.source !== "gif") {
+          applyBrollLayoutRecipe(item);
+        } else if ((!item.layout || item.layout === "pip_auto") && item.source !== "badge") {
+          applyBrollLayoutRecipe(item);
         }
         return item;
       });
@@ -5494,8 +5534,10 @@
     }
     host.classList.remove("hidden");
     const asMainDefault = tl && tl.canvas === "16x9";
+    const always = isAlwaysPhotoMatchSession();
+    const recipe = always ? "Always · center match + Ken Burns" : null;
     let html = `<div class="tl-broll-pending-head">
-      <strong>Review B-roll (${pendingBroll.length})</strong>
+      <strong>Review B-roll (${pendingBroll.length})${recipe ? ` · ${recipe}` : ""}</strong>
       <div class="tl-broll-pending-actions">
         <button type="button" class="tl-chip-btn" data-broll-act="accept-all">${asMainDefault ? "Accept all → Overlay" : "Accept all"}</button>
         <button type="button" class="tl-chip-btn" data-broll-act="accept-all-main">Accept all → Main</button>
@@ -5558,10 +5600,7 @@
     if (!p) return;
     pendingBroll = pendingBroll.filter((x) => x.id !== id);
     renderPendingBroll();
-    const { id: _drop, _status, ...ref } = p;
-    if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
-      ref.ken_burns = alwaysKenBurnsDefault();
-    }
+    const ref = prepareBrollAcceptRef(p);
     await addOverlayClip(ref);
     renderTracks();
     updateStageCompositor();
@@ -5573,11 +5612,7 @@
     if (!p) return;
     pendingBroll = pendingBroll.filter((x) => x.id !== id);
     renderPendingBroll();
-    const { id: _drop, _status, ...ref } = p;
-    // Main cutaways: Ken Burns OK for Always stills (not GIFs).
-    if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
-      ref.ken_burns = alwaysKenBurnsDefault();
-    }
+    const ref = prepareBrollAcceptRef(p);
     const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
     await addMainCutawayClip(ref, asset);
     renderTracks();
@@ -5602,38 +5637,62 @@
 
   async function acceptAllPendingBroll() {
     const list = pendingBroll.slice();
+    if (!list.length) return;
     pendingBroll = [];
     renderPendingBroll();
-    for (const p of list) {
-      const { id: _drop, _status, ...ref } = p;
-      if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
-        ref.ken_burns = alwaysKenBurnsDefault();
+    const ownHistory = !historySuspended;
+    if (ownHistory) pushHistory();
+    const prevSuspend = historySuspended;
+    historySuspended = true;
+    setSaveState(`Accepting ${list.length} overlays…`);
+    try {
+      for (const p of list) {
+        const ref = prepareBrollAcceptRef(p);
+        await addOverlayClip(ref);
       }
-      await addOverlayClip(ref);
+    } finally {
+      historySuspended = prevSuspend;
     }
     renderTracks();
     updateStageCompositor();
-    setSaveState(`Accepted ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}`);
+    const always = isAlwaysPhotoMatchSession();
+    setSaveState(
+      `Accepted ${list.length} B-roll overlay${list.length === 1 ? "" : "s"}`
+      + (always ? " · Always layout + Ken Burns" : "")
+      + (ownHistory ? " (one Undo)" : "")
+    );
   }
 
   async function acceptAllPendingBrollAsMain() {
     const list = pendingBroll.slice();
+    if (!list.length) return;
     pendingBroll = [];
     renderPendingBroll();
     // Later cutaways shift Main — accept in reverse chronological order so
     // earlier `start` times stay valid as we splice.
     list.sort((a, b) => Number(b.start || 0) - Number(a.start || 0));
-    for (const p of list) {
-      const { id: _drop, _status, ...ref } = p;
-      if (isAlwaysPhotoMatchSession() && ref.source !== "gif" && !(ref.ken_burns && ref.ken_burns.enabled)) {
-        ref.ken_burns = alwaysKenBurnsDefault();
+    const ownHistory = !historySuspended;
+    if (ownHistory) pushHistory();
+    const prevSuspend = historySuspended;
+    historySuspended = true;
+    setSaveState(`Accepting ${list.length} Main cutaways…`);
+    try {
+      for (const p of list) {
+        const ref = prepareBrollAcceptRef(p);
+        const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
+        await addMainCutawayClip(ref, asset);
       }
-      const asset = assets.find((x) => x.asset_id === p.asset_id) || null;
-      await addMainCutawayClip(ref, asset);
+    } finally {
+      historySuspended = prevSuspend;
     }
     renderTracks();
     updateStageCompositor();
-    setSaveState(`Accepted ${list.length} Main cutaway${list.length === 1 ? "" : "s"}`);
+    const always = isAlwaysPhotoMatchSession();
+    setSaveState(
+      `Accepted ${list.length} Main cutaway${list.length === 1 ? "" : "s"}`
+      + (always ? " · Always Ken Burns" : "")
+      + (ownHistory ? " (one Undo)" : "")
+    );
   }
 
   function skipAllPendingBroll() {
@@ -6365,6 +6424,7 @@
     { label: "PiP this overlay", prompt: "Make the selected overlay a top-right PiP" },
     { label: "Cinematic look", prompt: "Apply the cinematic clip style to this shot" },
     { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
+    { label: "Accept all B-roll", prompt: "Accept all pending B-roll suggestions onto Overlay" },
     { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
   ];
 
@@ -6421,6 +6481,8 @@
       selection: sel,
       playhead_s: playhead,
       transcript_near_playhead: transcriptNearPlayhead(),
+      pending_broll_count: (typeof pendingBroll !== "undefined" && pendingBroll) ? pendingBroll.length : 0,
+      always_photo_match: !!isAlwaysPhotoMatchSession(),
     };
   }
 
@@ -6671,7 +6733,8 @@
           const { index: i } = resolveOpTrackIndex(op, "overlay");
           const arr = tl.tracks.overlay || [];
           let layout = String(op.layout || op.layout_id || "pip_tr");
-          if (layout === "center" || layout === "full_bleed") layout = "full";
+          if (layout === "full_bleed") layout = "full";
+          if (layout === "center_match") layout = "center";
           if (i >= 0 && i < arr.length && OVERLAY_LAYOUTS[layout]) {
             // applyOverlayLayout pushes history — suspended so skip via direct set
             const L = OVERLAY_LAYOUTS[layout];
@@ -6711,6 +6774,24 @@
           await suggestKeywordOverlays();
           notes.push("B-roll suggestions queued");
           applied++;
+        } else if (name === "accept_all_broll") {
+          const asMain = op.as_main === true || op.lane === "main" || op.track === "main";
+          const n = pendingBroll.length;
+          if (n) {
+            if (asMain) await acceptAllPendingBrollAsMain();
+            else await acceptAllPendingBroll();
+            notes.push(asMain ? `accepted ${n} → Main` : `accepted ${n} → Overlay`);
+            applied++;
+          } else {
+            notes.push("no pending B-roll");
+          }
+        } else if (name === "skip_all_broll") {
+          const n = pendingBroll.length;
+          if (n) {
+            skipAllPendingBroll();
+            notes.push(`skipped ${n} B-roll`);
+            applied++;
+          }
         } else if (name === "split_at_playhead") {
           splitAtPlayhead();
           notes.push("split at playhead");

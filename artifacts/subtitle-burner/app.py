@@ -10300,7 +10300,7 @@ def co_editor():
             "talking_head", "split_stack", "pip_corner", "center_overlay",
             "word_emphasis", "hook_broll", "cinematic", "clarity",
         ],
-        "overlay_layouts": ["pip_tr", "pip_tl", "pip_br", "pip_bl", "full", "lower"],
+        "overlay_layouts": ["pip_tr", "pip_tl", "pip_br", "pip_bl", "full", "center", "lower"],
     }
 
     system_prompt = f"""You are the Studio Timeline co-editor — a natural-language REMOTE CONTROL for this project.
@@ -10316,7 +10316,7 @@ HARD LIMITS (say no in message, ops: [])
 - Cannot invent ops outside the allowlist.
 - Cannot rewrite individual transcript words, approve pending B-roll one-by-one, or download files.
 - Cannot change secrets/API keys or run arbitrary code.
-- suggest_broll only queues suggestions for review — it does not auto-accept media onto the timeline.
+- suggest_broll queues suggestions for review. Only use accept_all_broll when pending_broll_count > 0 and the user explicitly asks to accept/place them.
 
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
@@ -10346,6 +10346,8 @@ Return ONLY JSON:
     {{"op": "set_music", "index": 0, "gain_db": -20, "duck": true}},
     {{"op": "apply_clip_style", "style": "cinematic"}},
     {{"op": "suggest_broll", "mode": "photo", "placement": "center", "scope": "playhead", "use_ai": false}},
+    {{"op": "accept_all_broll", "as_main": false}},
+    {{"op": "skip_all_broll"}},
     {{"op": "split_at_playhead"}},
     {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}}
   ],
@@ -10361,6 +10363,8 @@ Rules:
 - Overlay motion → enable_ken_burns track:"overlay". PiP / full-bleed → set_overlay_layout.
 - Music volume/duck → set_music. CapCut clip looks → apply_clip_style.
 - "find B-roll / suggest photos" → suggest_broll (review queue; do not claim clips were placed).
+- "accept all B-roll / place suggestions" → accept_all_broll (only if pending_broll_count > 0). as_main:true for Main cutaways.
+- "skip all suggestions" → skip_all_broll.
 - "split here" → split_at_playhead (uses current playhead).
 """
     try:
@@ -10382,7 +10386,7 @@ Rules:
         "set_canvas", "set_fit", "set_color_grade", "add_title", "set_text",
         "apply_recommended_cuts", "merge_shots", "reorder_shot",
         "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
-        "split_at_playhead",
+        "accept_all_broll", "skip_all_broll", "split_at_playhead",
     }
     ops = []
     for op in raw_ops:
