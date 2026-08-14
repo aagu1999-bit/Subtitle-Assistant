@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-46-replace-sticky";
+  const TL_BUILD = "studio-editor-build-47-sound-chat";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4818,6 +4818,11 @@
       await api("/upload-asset", { method: "POST", body: fd });
       await loadAssets();
       setSaveState("Saved ✓");
+      try {
+        if (typeof window.refreshSoundSheetIfOpen === "function") {
+          window.refreshSoundSheetIfOpen();
+        }
+      } catch (e) {}
     } catch (e) {
       alert("Asset upload failed: " + e.message);
       setSaveState("");
@@ -6320,6 +6325,11 @@
       appendCoMsg("bot", "I can change caption colors/fonts, speaker colors, canvas, transitions, punch zoom / Ken Burns (Main or Overlay), color grade, titles, cuts, merge/reorder shots. Ask in plain language — then click ▶ Render to bake it in.");
     }
     try { if ($("coEditorInput")) $("coEditorInput").focus(); } catch (e) {}
+    try {
+      if (document.body.classList.contains("is-phone")) {
+        document.body.classList.add("tl-coeditor-open");
+      }
+    } catch (e) {}
   }
   function closeCoEditor() {
     const drawer = $("coEditorDrawer");
@@ -6329,6 +6339,9 @@
     drawer.setAttribute("aria-hidden", "true");
     const btn = $("tlCoEditorBtn");
     if (btn) btn.classList.remove("active-co");
+    try {
+      if (typeof window.onCoEditorClosed === "function") window.onCoEditorClosed();
+    } catch (e) {}
   }
   function appendCoMsg(role, text) {
     const log = $("coEditorLog");
@@ -6662,5 +6675,54 @@
   wireCaptionsToolbar();
   window.openCoEditor = openCoEditor;
   window.closeCoEditor = closeCoEditor;
+
+  window.listTimelineAudioAssets = function () {
+    return (assets || []).filter((a) => a.kind === "audio");
+  };
+  window.getTimelineMusicClips = function () {
+    if (!tl || !tl.tracks) return [];
+    return (tl.tracks.music || []).map((c) => {
+      const a = assets.find((x) => x.asset_id === c.asset_id);
+      return {
+        id: c.id,
+        asset_id: c.asset_id,
+        gain_db: c.gain_db != null ? c.gain_db : -18,
+        duck: !!c.duck,
+        label: (a && (a.filename || a.keyword)) || c.asset_id || "Music",
+      };
+    });
+  };
+  window.addMusicAssetToTimeline = async function (assetId) {
+    const a = (assets || []).find((x) => x.asset_id === assetId);
+    if (!a) {
+      alert("Audio asset not found — upload first.");
+      return false;
+    }
+    await addMusicClip(a);
+    if (typeof window.refreshMobileContextTools === "function") window.refreshMobileContextTools();
+    return true;
+  };
+  window.setMusicClipDuck = function (clipId, duckOn) {
+    if (!tl) return false;
+    const c = findClip("music", clipId);
+    if (!c) return false;
+    pushHistory();
+    c.duck = !!duckOn;
+    renderTimeline();
+    scheduleSave();
+    return true;
+  };
+  window.triggerTimelineAssetUpload = function (accept) {
+    const input = $("tlAssetFile");
+    if (!input) return false;
+    if (accept) input.setAttribute("accept", accept);
+    else input.setAttribute("accept", "video/*,image/*,audio/*");
+    input.click();
+    // Restore broad accept after pick so Media upload still works for all kinds.
+    setTimeout(() => {
+      try { input.setAttribute("accept", "video/*,image/*,audio/*"); } catch (e) {}
+    }, 1500);
+    return true;
+  };
   window.restyleSelectedShot = restyleSelectedShot;
 })();

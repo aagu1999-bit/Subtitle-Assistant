@@ -132,6 +132,7 @@
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "captions", ico: "Aa", label: "Captions" },
         { id: "sound", ico: "♪", label: "Sound" },
+        { id: "chat", ico: "💬", label: "Chat" },
         { id: "export", ico: "⚡", label: "Export" },
       ];
     }
@@ -294,18 +295,134 @@
     }
   }
 
+  function escHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function soundSheetHtml() {
+    const audioAssets = (typeof window.listTimelineAudioAssets === "function")
+      ? window.listTimelineAudioAssets()
+      : [];
+    const musicClips = (typeof window.getTimelineMusicClips === "function")
+      ? window.getTimelineMusicClips()
+      : [];
+    let html = `<p class="muted" style="font-size:.78rem;margin:0 0 10px;line-height:1.4">Add a music bed. Duck lowers the bed under speech (CapCut-style).</p>`;
+    html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">`
+      + `<button type="button" class="btn btn-primary" id="tlSoundUpload">⬆ Upload audio</button>`
+      + `<button type="button" class="btn btn-secondary" id="tlSoundOpenMedia">📚 Media</button>`
+      + `</div>`;
+
+    html += `<h4 style="margin:0 0 6px;font-size:.82rem;color:#c8cdd8">On timeline</h4>`;
+    if (!musicClips.length) {
+      html += `<p class="muted" style="font-size:.74rem;margin:0 0 12px">No music clips yet.</p>`;
+    } else {
+      html += `<div class="tl-sound-list">`;
+      musicClips.forEach((m) => {
+        const id = escHtml(m.id);
+        html += `<div class="tl-sound-row" data-music-id="${id}">`
+          + `<div class="tl-sound-meta"><strong>${escHtml(m.label)}</strong><span>${escHtml(m.gain_db)} dB</span></div>`
+          + `<label class="tl-sound-duck"><input type="checkbox" data-sound-duck="${id}" ${m.duck ? "checked" : ""}> Duck</label>`
+          + `</div>`;
+      });
+      html += `</div>`;
+    }
+
+    html += `<h4 style="margin:14px 0 6px;font-size:.82rem;color:#c8cdd8">Audio library</h4>`;
+    if (!audioAssets.length) {
+      html += `<p class="muted" style="font-size:.74rem;margin:0">Upload an MP3/WAV/M4A to add a bed.</p>`;
+    } else {
+      html += `<div class="tl-sound-list">`;
+      audioAssets.forEach((a) => {
+        const label = a.filename || a.keyword || a.asset_id;
+        const aid = escHtml(a.asset_id);
+        html += `<div class="tl-sound-row">`
+          + `<div class="tl-sound-meta"><strong>${escHtml(label)}</strong></div>`
+          + `<button type="button" class="tl-chip-btn tl-chip-primary" data-sound-add="${aid}">Add</button>`
+          + `</div>`;
+      });
+      html += `</div>`;
+    }
+    return html;
+  }
+
+  function refreshSoundSheetIfOpen() {
+    if (_activeTool !== "sound") return;
+    const sheet = document.getElementById("tlToolSheet");
+    if (!sheet || sheet.hidden) return;
+    openToolSheet("Sound", soundSheetHtml(), "sound");
+    wireSoundSheet();
+  }
+
+  function wireSoundSheet() {
+    const upload = document.getElementById("tlSoundUpload");
+    const media = document.getElementById("tlSoundOpenMedia");
+    if (upload) {
+      upload.onclick = () => {
+        if (typeof window.triggerTimelineAssetUpload === "function") {
+          window.triggerTimelineAssetUpload("audio/*");
+        } else {
+          const input = document.getElementById("tlAssetFile");
+          if (input) input.click();
+        }
+      };
+    }
+    if (media) {
+      media.onclick = () => {
+        closeToolSheet();
+        openMobilePanel("media");
+      };
+    }
+    document.querySelectorAll("[data-sound-add]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.soundAdd;
+        btn.disabled = true;
+        try {
+          if (typeof window.addMusicAssetToTimeline === "function") {
+            await window.addMusicAssetToTimeline(id);
+            openToolSheet("Sound", soundSheetHtml(), "sound");
+            wireSoundSheet();
+          }
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+    document.querySelectorAll("[data-sound-duck]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        if (typeof window.setMusicClipDuck === "function") {
+          window.setMusicClipDuck(cb.dataset.soundDuck, cb.checked);
+        }
+      });
+    });
+  }
+
   function onContextTool(toolId) {
     if (toolId === "export") {
       if (typeof window.runInstantExport === "function") window.runInstantExport();
       return;
     }
-    if (toolId === "library" || toolId === "add" || toolId === "sound") {
-      openMobilePanel(toolId === "sound" ? "media" : "media");
-      if (toolId === "sound") {
-        // Jump music section if helper exists; else Media library for uploads.
-        const musicHint = document.getElementById("tlAssetList");
-        if (musicHint) setTimeout(() => musicHint.scrollIntoView({ behavior: "smooth", block: "nearest" }), 200);
-      }
+    if (toolId === "chat") {
+      closeToolSheet();
+      closeMobilePanel();
+      _activeTool = "chat";
+      refreshContextTools();
+      document.body.classList.add("tl-coeditor-open");
+      if (typeof window.openCoEditor === "function") window.openCoEditor();
+      else alert("Co-editor is still loading — open Timeline again in a second.");
+      return;
+    }
+    if (toolId === "sound") {
+      openToolSheet("Sound", soundSheetHtml(), "sound");
+      wireSoundSheet();
+      return;
+    }
+    if (toolId === "library" || toolId === "add") {
+      openMobilePanel("media");
       return;
     }
     if (toolId === "captions") {
@@ -490,6 +607,14 @@
     window.closeMobileTimelinePanel = closeMobilePanel;
     window.refreshMobileContextTools = refreshContextTools;
     window.closeMobileToolSheet = closeToolSheet;
+    window.refreshSoundSheetIfOpen = refreshSoundSheetIfOpen;
+    window.onCoEditorClosed = function () {
+      document.body.classList.remove("tl-coeditor-open");
+      if (_activeTool === "chat") {
+        _activeTool = null;
+        refreshContextTools();
+      }
+    };
 
     // If Timeline is already the active tab on load.
     const active = document.querySelector(".main-tab.active[data-tab]");

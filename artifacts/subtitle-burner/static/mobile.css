@@ -413,6 +413,77 @@
     border-color: #6c5cff !important;
   }
 
+  /* Sound tool sheet */
+  .tl-sound-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tl-sound-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    background: #181c28;
+    border: 1px solid #2a2f3a;
+    border-radius: 10px;
+  }
+  .tl-sound-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .tl-sound-meta strong {
+    font-size: .82rem;
+    color: #e8eaf0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tl-sound-meta span {
+    font-size: .7rem;
+    color: #9aa3b2;
+  }
+  .tl-sound-duck {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .74rem;
+    color: #c8cdd8;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .tl-sound-duck input {
+    width: 18px;
+    height: 18px;
+  }
+
+  /* Co-editor as phone bottom sheet above nav / context strip */
+  body.is-phone .co-editor-drawer {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-width: none;
+    height: min(62dvh, 480px);
+    border-radius: 16px 16px 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    z-index: 220;
+  }
+  body.is-phone .co-editor-head .muted {
+    display: none;
+  }
+  body.is-phone.tl-coeditor-open .tl-context-tools {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
   /* Tips on tap devices: hide hover panels (they jam the UI) */
   .tl-tippanel { display: none !important; }
 }
