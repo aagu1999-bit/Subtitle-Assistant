@@ -104,6 +104,14 @@ def _patch_huggingface_hub() -> None:
 _patch_huggingface_hub()
 
 app = Flask(__name__)
+# Always re-read templates after git pull. Without this, Replit's long-lived
+# Flask/gunicorn process keeps a stale compiled index.html while ?v=-busted
+# JS reloads — exactly the "missing tlPolishBtn / stale index.html" skew.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+try:
+    app.jinja_env.auto_reload = True
+except Exception:
+    pass
 
 CAPCUT_TEMPLATES = {
     # Rich packs applied by Caption look → CapCut Template (and Apply → Timeline).
@@ -6443,12 +6451,19 @@ def index():
     # `git pull`). Browsers caching old app.js/style.css was producing
     # phantom layout bugs (e.g. tab content appearing blank).
     static_dir = BASE_DIR / "static"
+    templates_dir = BASE_DIR / "templates"
     try:
-        latest_mtime = max(
-            (p.stat().st_mtime for p in static_dir.iterdir() if p.is_file()),
-            default=0,
-        )
-        asset_version = str(int(latest_mtime))
+        mtimes = []
+        for d in (static_dir, templates_dir):
+            if not d.is_dir():
+                continue
+            for p in d.rglob("*"):
+                if p.is_file():
+                    try:
+                        mtimes.append(p.stat().st_mtime)
+                    except OSError:
+                        pass
+        asset_version = str(int(max(mtimes) if mtimes else time.time()))
     except OSError:
         asset_version = str(int(time.time()))
     html = render_template(

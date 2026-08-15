@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-54-polish-visible";
+  const TL_BUILD = "studio-editor-build-55-polish-dom-inject";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -5060,6 +5060,97 @@
     }
   }
 
+  // If Replit served a stale index.html (new JS, old DOM), inject Polish UI
+  // so the feature still appears without requiring a perfect hard-refresh.
+  function ensurePolishDom() {
+    const renderBtn = $("tlRenderBtn");
+    if (!$("tlPolishBtn") && renderBtn && renderBtn.parentNode) {
+      const btn = document.createElement("button");
+      btn.id = "tlPolishBtn";
+      btn.type = "button";
+      btn.className = "btn btn-secondary tl-tipbtn tl-polish-btn";
+      btn.title = "Open Polish options — silence cut, jump-cut, B-roll, audio master";
+      btn.textContent = "✨ Polish";
+      renderBtn.parentNode.insertBefore(btn, renderBtn);
+      console.warn("[timeline] injected #tlPolishBtn (HTML was stale — restart Flask after git pull)");
+    }
+    const co = $("tlCoEditorBtn");
+    if (!$("tlPolishChip") && co && co.parentNode) {
+      const chip = document.createElement("button");
+      chip.id = "tlPolishChip";
+      chip.type = "button";
+      chip.className = "tl-chip-btn tl-chip-polish";
+      chip.title = "Polish cut — silence, jump-cut, B-roll, audio master";
+      chip.textContent = "✨ Polish";
+      if (co.nextSibling) co.parentNode.insertBefore(chip, co.nextSibling);
+      else co.parentNode.appendChild(chip);
+      console.warn("[timeline] injected #tlPolishChip (HTML was stale)");
+    }
+    if ($("tlPolishModal")) return;
+    const modal = document.createElement("div");
+    modal.id = "tlPolishModal";
+    modal.className = "ai-edit-modal hidden";
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = `
+      <div class="ai-edit-modal-card" style="max-width:520px">
+        <div class="ai-edit-modal-head">
+          <strong>✨ Polish cut</strong>
+          <span class="muted" style="font-size:.78rem">Silence · jump-cut · B-roll · audio master</span>
+          <button type="button" id="tlPolishClose" class="tl-chip-btn" style="margin-left:auto" aria-label="Close">✕</button>
+        </div>
+        <div class="ai-edit-modal-body">
+          <p class="muted" style="font-size:.78rem;line-height:1.4;margin:0 0 12px">
+            Rough polish on the primary Main source. Does not replace Timeline Render.
+          </p>
+          <div class="row"><label style="min-width:110px" for="tlPolishPacing">Pacing</label>
+            <select id="tlPolishPacing" style="flex:1">
+              <option value="fast">Fast</option>
+              <option value="informative" selected>Informative</option>
+              <option value="cinematic">Cinematic</option>
+            </select></div>
+          <div class="row"><label style="min-width:110px" for="tlPolishBrollMode">B-roll</label>
+            <select id="tlPolishBrollMode" style="flex:1">
+              <option value="pip" selected>PiP</option>
+              <option value="center">Center</option>
+            </select></div>
+          <div class="row"><label style="min-width:110px" for="tlPolishKeywords">Keywords</label>
+            <input type="text" id="tlPolishKeywords" maxlength="400" style="flex:1;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px"></div>
+          <div class="row"><label style="min-width:110px" for="tlPolishRes">Output</label>
+            <select id="tlPolishRes" style="flex:1">
+              <option value="1920x1080@60" selected>1080p60</option>
+              <option value="1920x1080@30">1080p30</option>
+              <option value="1080x1920@60">9:16 1080</option>
+            </select></div>
+          <div class="row"><label style="min-width:110px" for="tlPolishSilenceEngine">Silence</label>
+            <select id="tlPolishSilenceEngine" style="flex:1">
+              <option value="auto" selected>Auto (Auto-Editor / FFmpeg)</option>
+              <option value="auto-editor">Auto-Editor</option>
+              <option value="ffmpeg">FFmpeg</option>
+            </select></div>
+          <div class="row"><label style="min-width:110px" for="tlPolishComposite">Overlays</label>
+            <select id="tlPolishComposite" style="flex:1">
+              <option value="ffmpeg" selected>FFmpeg</option>
+              <option value="moviepy">MoviePy</option>
+            </select></div>
+          <div class="row"><label style="min-width:110px">Options</label>
+            <div style="display:flex;flex-direction:column;gap:6px;font-size:.86rem">
+              <label><input type="checkbox" id="tlPolishNle" checked> Kdenlive + Shotcut projects</label>
+              <label><input type="checkbox" id="tlPolishFace" checked> Face reframe</label>
+              <label><input type="checkbox" id="tlPolishStumbles" checked> Cut stumbles / retakes</label>
+              <label><input type="checkbox" id="tlPolishLowerThirds" checked> Lower-thirds</label>
+              <label><input type="checkbox" id="tlPolishEdl" checked> EDL export</label>
+            </div></div>
+        </div>
+        <div class="ai-edit-modal-foot">
+          <button type="button" class="btn btn-secondary" id="tlPolishCancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="tlPolishRun"
+            style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Run Polish</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    console.warn("[timeline] injected #tlPolishModal (HTML was stale — restart the Replit workflow)");
+  }
+
   // Null-safe event binding so one missing/stale element can never abort the
   // rest of the wiring (the old code threw on the first null and left the whole
   // editor dead — no drag, no buttons, nothing).
@@ -5267,6 +5358,7 @@
       console.log("[timeline] " + TL_BUILD + " initializing");
 
       try {
+        ensurePolishDom();
         on("tlNewBtn", "onclick", newProject);
         on("tlDeleteProjectBtn", "onclick", () => deleteCurrentProject());
         on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
