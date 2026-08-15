@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-58-polish-honest-preview";
+  const TL_BUILD = "studio-editor-build-59-polish-visual-beats";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4825,7 +4825,7 @@
       ? kwRaw.split(/[,;]+/).map((s) => s.trim()).filter(Boolean)
       : undefined;
     return {
-      pacing: ($("tlPolishPacing") && $("tlPolishPacing").value) || "informative",
+      pacing: ($("tlPolishPacing") && $("tlPolishPacing").value) || "fast",
       broll_mode: ($("tlPolishBrollMode") && $("tlPolishBrollMode").value) || "pip",
       silence_engine: ($("tlPolishSilenceEngine") && $("tlPolishSilenceEngine").value) || "auto",
       composite_engine: ($("tlPolishComposite") && $("tlPolishComposite").value) || "ffmpeg",
@@ -4903,7 +4903,7 @@
       const body = {
         job_id: tl.job_id,
         timeline: serialize(),
-        pacing: opts.pacing || "informative",
+        pacing: opts.pacing || "fast",
         broll_mode: opts.broll_mode || "pip",
         face_reframe: opts.face_reframe !== false,
         cut_stumbles: opts.cut_stumbles !== false,
@@ -5149,12 +5149,13 @@
         </div>
         <div class="ai-edit-modal-body">
           <p class="muted" style="font-size:.78rem;line-height:1.4;margin:0 0 12px">
-            Rough polish on the primary Main source. Does not replace Timeline Render.
+            Rough polish on the primary Main source — jump zooms every ~3s, face punch, grade.
+            Does not replace Timeline Render.
           </p>
           <div class="row"><label style="min-width:110px" for="tlPolishPacing">Pacing</label>
             <select id="tlPolishPacing" style="flex:1">
-              <option value="fast">Fast</option>
-              <option value="informative" selected>Informative</option>
+              <option value="fast" selected>Fast — punchy zooms</option>
+              <option value="informative">Informative</option>
               <option value="cinematic">Cinematic</option>
             </select></div>
           <div class="row"><label style="min-width:110px" for="tlPolishBrollMode">B-roll</label>
@@ -6770,7 +6771,7 @@
     { label: "Cinematic look", prompt: "Apply the cinematic clip style to this shot" },
     { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
     { label: "Accept all B-roll", prompt: "Accept all pending B-roll suggestions onto Overlay" },
-    { label: "Run Polish", prompt: "Run polish cut on the Main source with informative pacing and PiP B-roll" },
+    { label: "Run Polish", prompt: "Run polish cut on the Main source with fast pacing and PiP B-roll" },
     { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
   ];
 
@@ -7144,7 +7145,7 @@
           applied++;
         } else if (name === "run_polish") {
           const polishOpts = {
-            pacing: op.pacing || "informative",
+            pacing: op.pacing || "fast",
             broll_mode: op.broll_mode || op.broll || "pip",
             face_reframe: op.face_reframe !== false,
             cut_stumbles: op.cut_stumbles !== false,

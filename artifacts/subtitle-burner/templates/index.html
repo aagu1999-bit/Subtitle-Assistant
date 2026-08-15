@@ -1514,16 +1514,17 @@
       <div class="ai-edit-modal-body">
         <p class="muted" style="font-size:.78rem;line-height:1.4;margin:0 0 12px">
           Rough cut of the <strong>primary Main source</strong> (not your full timeline).
-          Expect shorter length if silences/fillers are cut; jump-zooms are subtle.
-          Face reframe needs a detectable face — otherwise only a mild talking-head crop.
+          Expect shorter length if silences/fillers are cut; jump-zooms punch every few seconds
+          on long takes (visual beats). Face reframe samples the talking head when detectable.
+          Blank keywords → auto cues from the transcript (lower-thirds even without B-roll files).
           <em>Does not burn captions</em> — still use ▶ Render for that.
           After polish, stay on this preview; scrubbing the timeline returns to the original source.
         </p>
         <div class="row">
           <label style="min-width:110px" for="tlPolishPacing">Pacing</label>
           <select id="tlPolishPacing" style="flex:1">
-            <option value="fast">Fast — tight silence cuts, punchy social</option>
-            <option value="informative" selected>Informative — balanced talk cut</option>
+            <option value="fast" selected>Fast — tight cuts, punchy jump zooms</option>
+            <option value="informative">Informative — balanced talk cut</option>
             <option value="cinematic">Cinematic — looser pads, softer grade</option>
           </select>
         </div>
@@ -1538,9 +1539,9 @@
           <label style="min-width:110px;padding-top:6px" for="tlPolishKeywords">Keywords</label>
           <div style="flex:1;min-width:200px">
             <input type="text" id="tlPolishKeywords" maxlength="400"
-              placeholder="wellness, focus, price — leave blank to use Overlay keywords"
+              placeholder="money, focus, gym — blank = auto from transcript"
               style="width:100%;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font:inherit">
-            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Comma-separated. Matches assets in Media / assets folder at those words in the transcript.</p>
+            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Comma-separated. Matches Media assets when present; otherwise lower-third text only.</p>
           </div>
         </div>
         <div class="row">

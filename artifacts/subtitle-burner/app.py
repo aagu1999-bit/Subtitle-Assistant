@@ -10378,7 +10378,7 @@ Return ONLY JSON:
     {{"op": "skip_all_broll"}},
     {{"op": "split_at_playhead"}},
     {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}},
-    {{"op": "run_polish", "pacing": "informative", "broll_mode": "pip", "face_reframe": true}}
+    {{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}}
   ],
   "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
@@ -10514,7 +10514,7 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
         result = mod.run_polish(
             video=Path(opts["video"]),
             out=Path(opts["out"]),
-            pacing_name=opts.get("pacing") or "informative",
+            pacing_name=opts.get("pacing") or "fast",
             audio=Path(opts["audio"]) if opts.get("audio") else None,
             music=Path(opts["music"]) if opts.get("music") else None,
             words=opts.get("words") or [],
@@ -10594,9 +10594,9 @@ def timeline_polish():
     if not video:
         return jsonify({"error": "Source video file missing on disk."}), 404
 
-    pacing = str(data.get("pacing") or "informative").lower().strip()
+    pacing = str(data.get("pacing") or "fast").lower().strip()
     if pacing not in ("fast", "fast-paced", "cinematic", "informative"):
-        pacing = "informative"
+        pacing = "fast"
     broll_mode = str(data.get("broll_mode") or "pip").lower()
     if broll_mode not in ("pip", "center"):
         broll_mode = "pip"

@@ -221,39 +221,39 @@ def composite_with_moviepy(
 
     layers = [base]
     for ct, hit in overlays:
-        asset = Path(getattr(hit, "asset", hit.get("asset") if isinstance(hit, dict) else ""))
-        if not asset or not asset.exists():
-            continue
+        raw_asset = getattr(hit, "asset", hit.get("asset") if isinstance(hit, dict) else None)
+        asset = Path(raw_asset) if raw_asset else None
         dur = float(getattr(hit, "duration", 2.5) or 2.5)
         keyword = str(getattr(hit, "keyword", "") or "")
-        try:
-            if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-                clip = ImageClip(str(asset)).with_duration(dur)
-            else:
-                clip = VideoFileClip(str(asset)).subclipped(0, min(dur, 8.0))
-            target_w = int(width * (0.36 if broll_mode == "pip" else 0.84))
-            clip = clip.resized(width=target_w)
-            if broll_mode == "pip":
-                clip = clip.with_position((width - clip.w - 48, height - clip.h - 48))
-            else:
-                clip = clip.with_position(("center", "center"))
-            clip = clip.with_start(ct).with_opacity(0.92 if broll_mode == "pip" else 0.88)
-            layers.append(clip)
-            if lower_thirds and keyword:
-                try:
-                    txt = TextClip(
-                        text=keyword.strip().title()[:48],
-                        font_size=max(28, int(width * 0.028)),
-                        color="white",
-                        bg_color="black",
-                        method="label",
-                    ).with_duration(min(2.2, dur)).with_start(ct).with_position((56, height - 140))
-                    layers.append(txt)
-                except Exception:
-                    # TextClip needs a system font; skip rather than fail polish.
-                    pass
-        except Exception as e:
-            print(f"[polish_oss] MoviePy overlay skip {asset.name}: {e}")
+        if asset and asset.exists():
+            try:
+                if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                    clip = ImageClip(str(asset)).with_duration(dur)
+                else:
+                    clip = VideoFileClip(str(asset)).subclipped(0, min(dur, 8.0))
+                target_w = int(width * (0.42 if broll_mode == "pip" else 0.92))
+                clip = clip.resized(width=target_w)
+                if broll_mode == "pip":
+                    clip = clip.with_position((width - clip.w - 40, height - clip.h - 40))
+                else:
+                    clip = clip.with_position(("center", "center"))
+                clip = clip.with_start(ct).with_opacity(0.92 if broll_mode == "pip" else 0.88)
+                layers.append(clip)
+            except Exception as e:
+                print(f"[polish_oss] MoviePy overlay skip {asset.name}: {e}")
+        if lower_thirds and keyword:
+            try:
+                txt = TextClip(
+                    text=keyword.strip().title()[:48],
+                    font_size=max(28, int(width * 0.028)),
+                    color="white",
+                    bg_color="black",
+                    method="label",
+                ).with_duration(min(2.2, dur)).with_start(ct).with_position((56, height - 140))
+                layers.append(txt)
+            except Exception:
+                # TextClip needs a system font; skip rather than fail polish.
+                pass
 
     final = CompositeVideoClip(layers, size=(width, height)).with_duration(base.duration)
 

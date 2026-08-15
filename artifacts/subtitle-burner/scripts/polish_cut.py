@@ -8,10 +8,10 @@ Open-source stack (real tools, not just clones of the idea):
      also writes native Kdenlive (.kdenlive) + Shotcut (.mlt) projects.
      FFmpeg silencedetect remains the fallback.
   2) Whisper word timestamps (from Studio) — stumble / retake cuts + keyword hits.
-  3) Jump-cut ±2% zoom, optional OpenCV face reframe (FFmpeg filter graph).
+  3) Visual beats (~3.2s) + CapCut-style jump-zoom ladder + OpenCV face punch.
   4) MoviePy — optional code-driven B-roll + lower-third composite
      (FFmpeg filter_complex is the default compositor).
-  5) Color + speech acompressor + loudnorm (−14 LUFS) + music duck (~−18 dB).
+  5) Contrast/sat grade + speech acompressor + loudnorm (−14 LUFS) + music duck.
   6) Self-evaluation + CMX EDL beside Auto-Editor NLE projects.
 
 Remotion (React/Node) is outside this Python Studio path; MoviePy covers
@@ -429,16 +429,84 @@ def subtract_cuts_from_keeps(
 
 
 # ---------------------------------------------------------------------------
-# 2) Jump-cut zoom assignment
+# 2) Visual beats + jump-cut zoom ladder
 # ---------------------------------------------------------------------------
 
-def assign_jumpcut_zooms(keeps: list[KeepRange], amount: float = 0.02) -> None:
-    """Alternate 1.0 and 1±amount scale so jump cuts read as intentional switches."""
+# Split long continuous keeps so jump zooms / face punches fire on monologues
+# (silence detection alone often leaves one 60s keep → one zoom = invisible edit).
+VISUAL_BEAT_SEC = 3.2
+MIN_BEAT_SEC = 1.35
+
+# Spoken tokens that often deserve a lower-third / B-roll cue when user left
+# keywords blank (matched against Whisper words, case-insensitive).
+AUTO_KEYWORD_HINTS = {
+    "money", "cash", "dollar", "revenue", "profit", "pay", "price", "cost",
+    "gym", "workout", "fitness", "muscle", "training", "health", "wellness",
+    "ai", "code", "software", "app", "tech", "phone", "computer", "data",
+    "travel", "plane", "flight", "trip", "city", "skyline", "street",
+    "business", "meeting", "office", "growth", "success", "focus", "habit",
+    "energy", "mindset", "goal", "results", "system", "process", "team",
+    "product", "launch", "brand", "customer", "sales", "marketing",
+}
+
+_STOPWORDS = {
+    "the", "and", "for", "that", "this", "with", "you", "your", "are", "was",
+    "were", "have", "has", "had", "from", "they", "them", "their", "what",
+    "when", "where", "which", "who", "whom", "will", "would", "could", "should",
+    "about", "into", "just", "like", "been", "being", "than", "then", "there",
+    "here", "some", "very", "really", "actually", "basically", "gonna", "wanna",
+    "yeah", "okay", "alright", "right", "know", "think", "going", "because",
+}
+
+
+def split_keeps_into_visual_beats(
+    keeps: list[KeepRange],
+    *,
+    beat_sec: float = VISUAL_BEAT_SEC,
+    min_beat: float = MIN_BEAT_SEC,
+) -> list[KeepRange]:
+    """Chop long keeps into short visual beats so jump zooms actually land."""
+    beat_sec = max(1.5, float(beat_sec))
+    min_beat = max(0.6, float(min_beat))
+    out: list[KeepRange] = []
+    for kr in keeps:
+        dur = kr.duration
+        if dur <= beat_sec + min_beat:
+            out.append(KeepRange(kr.start, kr.end, zoom=kr.zoom))
+            continue
+        t = kr.start
+        while t < kr.end - 1e-3:
+            remaining = kr.end - t
+            if remaining <= beat_sec + min_beat:
+                out.append(KeepRange(t, kr.end, zoom=kr.zoom))
+                break
+            chunk = beat_sec
+            # Prefer ending near mid-word silence-ish boundaries later; for now
+            # keep hard beats so zooms are predictable and visible.
+            end = min(kr.end, t + chunk)
+            if kr.end - end < min_beat:
+                end = kr.end
+            out.append(KeepRange(t, end, zoom=kr.zoom))
+            t = end
+    return out
+
+
+def assign_jumpcut_zooms(keeps: list[KeepRange], amount: float = 0.10) -> None:
+    """CapCut-style punch ladder — wide → medium → tight → punch → reset.
+
+    ``amount`` is the first step size (fast ≈ 0.10 → ~10/18/28/35% class).
+    Older ±2–5% alternation was too subtle on talking-head / park footage.
+    """
+    a = max(0.04, float(amount))
+    ladder = (
+        1.0,
+        1.0 + a,
+        1.0 + a * 1.8,
+        1.0 + a * 2.8,
+        1.0 + a * 3.5,
+    )
     for i, kr in enumerate(keeps):
-        if i % 2 == 0:
-            kr.zoom = 1.0 + amount
-        else:
-            kr.zoom = 1.0  # pull / wider feel relative to previous push
+        kr.zoom = ladder[i % len(ladder)]
 
 
 # ---------------------------------------------------------------------------
@@ -490,12 +558,12 @@ def detect_face_center_norm(video: Path, t: float) -> tuple[float, float] | None
         cascade = cv2.CascadeClassifier(str(cascade_path))
         if cascade.empty():
             return None
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
+        faces = cascade.detectMultiScale(gray, 1.08, 3, minSize=(36, 36))
         if faces is None or len(faces) == 0:
             return None
-        # Largest face
+        # Largest face — bias crop slightly above geometric center (forehead room)
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        return ((x + fw / 2) / w, (y + fh / 2) / h)
+        return ((x + fw / 2) / w, (y + fh * 0.38) / h)
     except Exception:
         return None
     finally:
@@ -503,6 +571,33 @@ def detect_face_center_norm(video: Path, t: float) -> tuple[float, float] | None
             frame.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def detect_face_center_multisample(
+    video: Path,
+    t0: float,
+    t1: float,
+    *,
+    samples: int = 5,
+) -> tuple[float, float] | None:
+    """Sample several frames in [t0, t1] and median the face center (more stable)."""
+    if t1 <= t0:
+        return detect_face_center_norm(video, max(0.0, t0))
+    n = max(3, int(samples))
+    pts = [t0 + (t1 - t0) * (i + 0.5) / n for i in range(n)]
+    hits: list[tuple[float, float]] = []
+    for t in pts:
+        hit = detect_face_center_norm(video, t)
+        if hit:
+            hits.append(hit)
+    if not hits:
+        return None
+    hits.sort(key=lambda p: p[0])
+    mid = hits[len(hits) // 2]
+    # Prefer median x; average y among near-median samples for stability
+    xs = sorted(h[0] for h in hits)
+    ys = sorted(h[1] for h in hits)
+    return (xs[len(xs) // 2], ys[len(ys) // 2] if ys else mid[1])
 
 
 def reframe_crop_filter(
@@ -514,18 +609,16 @@ def reframe_crop_filter(
     zoom: float,
 ) -> str:
     """Build scale+crop chain for 1080p output with optional face bias."""
-    # Work in a scaled space then crop to target.
     # Effective zoom: scale up then crop centered (or face-biased).
-    z = max(1.0, float(zoom))
-    # First scale so short side covers target * z
-    # Then crop WxH around face or center.
-    # Using FFmpeg expressions for dynamic crop x/y.
+    # Extra 1.04 multiplier tightens the frame so punch-ins read clearly.
+    z = max(1.0, float(zoom)) * 1.04
     if face_cx is None:
         face_cx = 0.5
     if face_cy is None:
-        face_cy = 0.45  # slight upper bias for talking heads
-    # crop x/y: keep subject near center
-    # x = (in_w - out_w) * face_cx , clamped
+        face_cy = 0.40  # talking-head upper bias
+    # Soft clamp face toward center so extreme detections don't crop ears off
+    face_cx = 0.5 + (float(face_cx) - 0.5) * 0.85
+    face_cy = 0.42 + (float(face_cy) - 0.42) * 0.75
     return (
         f"scale={width * z:.0f}:{height * z:.0f}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height}:"
@@ -543,7 +636,7 @@ def reframe_crop_filter(
 class BrollHit:
     keyword: str
     time: float
-    asset: Path
+    asset: Path | None = None
     duration: float = 2.5
 
 
@@ -558,29 +651,67 @@ def load_words(path: Path | None) -> list[dict]:
     return data
 
 
+def infer_keywords_from_words(words: list[dict], *, limit: int = 14) -> list[str]:
+    """Pull visual cue words from the transcript when the user left keywords blank."""
+    if not words:
+        return []
+    counts: dict[str, int] = {}
+    first_t: dict[str, float] = {}
+    for w in words:
+        tok = re.sub(r"[^a-z0-9]+", "", _word_token(w).lower())
+        if len(tok) < 3 or tok in _STOPWORDS:
+            continue
+        # Prefer curated hints; also keep longer content words
+        if tok not in AUTO_KEYWORD_HINTS and len(tok) < 5:
+            continue
+        counts[tok] = counts.get(tok, 0) + 1
+        try:
+            t = float(w.get("start") or 0)
+        except (TypeError, ValueError):
+            t = 0.0
+        first_t.setdefault(tok, t)
+    # Rank: hint words first, then by frequency, then earlier mention
+    ranked = sorted(
+        counts.keys(),
+        key=lambda k: (
+            0 if k in AUTO_KEYWORD_HINTS else 1,
+            -counts[k],
+            first_t.get(k, 0.0),
+        ),
+    )
+    out: list[str] = []
+    for k in ranked:
+        if k not in out:
+            out.append(k)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def find_keyword_hits(
     words: list[dict],
     keywords: list[str],
     assets_dir: Path | None,
 ) -> list[BrollHit]:
-    if not keywords or not assets_dir or not assets_dir.is_dir():
+    """Match keywords in Whisper words. Assets optional — text-only hits still drive lower-thirds."""
+    if not keywords:
         return []
-    assets = sorted(
-        [
-            p for p in assets_dir.iterdir()
-            if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".gif"}
-        ]
-    )
-    if not assets:
-        return []
+    assets: list[Path] = []
+    if assets_dir and assets_dir.is_dir():
+        assets = sorted(
+            [
+                p for p in assets_dir.iterdir()
+                if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".gif"}
+            ]
+        )
 
-    # Map keyword → asset by filename stem contains keyword
-    def asset_for(kw: str) -> Path:
+    def asset_for(kw: str) -> Path | None:
+        if not assets:
+            return None
         k = kw.lower().strip()
         for a in assets:
             if k in a.stem.lower():
                 return a
-        # Round-robin fallback by hash
         return assets[abs(hash(k)) % len(assets)]
 
     hits: list[BrollHit] = []
@@ -599,7 +730,7 @@ def find_keyword_hits(
         if not k:
             continue
         for tok, t in joined:
-            if tok == k or k in tok:
+            if tok == k or (len(k) >= 4 and k in tok) or (len(tok) >= 4 and tok in k):
                 hits.append(BrollHit(keyword=kw, time=t, asset=asset_for(kw)))
                 break  # first mention per keyword
     hits.sort(key=lambda h: h.time)
@@ -717,14 +848,16 @@ class Pacing:
     contrast: float
     broll_opacity: float
     music_duck_db: float
+    saturation: float = 1.18
+    visual_beat_sec: float = VISUAL_BEAT_SEC
 
 
 PACINGS = {
-    # jump_zoom bumped so the effect is actually visible (was ±2%, easy to miss)
-    "fast": Pacing("fast", -30, 0.35, 0.15, 0.05, 1.05, 0.40, -18),
-    "fast-paced": Pacing("fast", -30, 0.35, 0.15, 0.05, 1.05, 0.40, -18),
-    "cinematic": Pacing("cinematic", -32, 0.55, 0.25, 0.03, 1.04, 0.55, -16),
-    "informative": Pacing("informative", -30, 0.45, 0.20, 0.04, 1.05, 0.40, -18),
+    # jump_zoom is first ladder step (~10–35% punch on fast). Beats force zooms on long takes.
+    "fast": Pacing("fast", -30, 0.35, 0.12, 0.10, 1.14, 0.55, -18, 1.28, 2.8),
+    "fast-paced": Pacing("fast", -30, 0.35, 0.12, 0.10, 1.14, 0.55, -18, 1.28, 2.8),
+    "cinematic": Pacing("cinematic", -32, 0.55, 0.22, 0.07, 1.10, 0.62, -16, 1.16, 3.8),
+    "informative": Pacing("informative", -30, 0.45, 0.18, 0.09, 1.12, 0.52, -18, 1.22, 3.2),
 }
 
 
@@ -839,27 +972,47 @@ def build_and_encode(
     which_or_die("ffmpeg")
     seg_paths: list[Path] = []
 
-    # Sample a face center near first keep mid (optional)
-    face = None
+    # Multi-sample face centers per segment ( visibly punches toward subject on zooms )
+    face_cache: dict[int, tuple[float, float] | None] = {}
     if face_reframe and keeps:
-        mid = (keeps[0].start + keeps[0].end) / 2
-        face = detect_face_center_norm(video, mid)
-        if face:
-            print(f"[polish_cut] face center ≈ ({face[0]:.2f}, {face[1]:.2f})")
+        print(f"[polish_cut] face reframe: sampling up to {min(12, len(keeps))} segment(s)")
+        for i, kr in enumerate(keeps[:12]):
+            face_cache[i] = detect_face_center_multisample(video, kr.start, kr.end, samples=4)
+        # Propagate last good face to later segments (talking-head continuity)
+        last_good: tuple[float, float] | None = None
+        for i in range(len(keeps)):
+            if i in face_cache and face_cache[i]:
+                last_good = face_cache[i]
+            elif last_good is not None:
+                face_cache[i] = last_good
+            else:
+                face_cache.setdefault(i, None)
+        found = sum(1 for v in face_cache.values() if v)
+        if found:
+            print(f"[polish_cut] face hits on {found}/{len(keeps)} segment(s)")
         else:
-            print("[polish_cut] face detect unavailable/miss — using talking-head bias crop")
+            print("[polish_cut] face detect miss — using talking-head bias crop")
 
-    face_cx = face[0] if face else 0.5
-    face_cy = face[1] if face else 0.42
+    sat = float(getattr(pacing, "saturation", 1.18) or 1.18)
 
     # ---- Per-segment extract with zoom/reframe + color ----
     for i, kr in enumerate(keeps):
         seg = work / f"seg_{i:04d}.mp4"
+        face = face_cache.get(i) if face_reframe else None
+        face_cx = face[0] if face else 0.5
+        face_cy = face[1] if face else 0.40
+        # Extra punch on odd beats when face is known (CapCut-style face zoom)
+        zoom = float(kr.zoom)
+        if face and zoom > 1.05:
+            zoom = min(1.55, zoom + 0.04)
         vf = reframe_crop_filter(
-            width=width, height=height, face_cx=face_cx, face_cy=face_cy, zoom=kr.zoom,
+            width=width, height=height, face_cx=face_cx, face_cy=face_cy, zoom=zoom,
         )
-        # Contrast boost ~5% via eq
-        vf = f"{vf},eq=contrast={pacing.contrast:.3f}:brightness=0.02,fps={fps}"
+        # Stronger grade so polished output is obviously different from source
+        vf = (
+            f"{vf},eq=contrast={pacing.contrast:.3f}:brightness=0.035:"
+            f"saturation={sat:.3f},fps={fps}"
+        )
         cmd = [
             "ffmpeg", "-hide_banner", "-y", "-loglevel", "error",
             "-ss", f"{kr.start:.3f}", "-to", f"{kr.end:.3f}",
@@ -946,11 +1099,11 @@ def build_and_encode(
         inputs += ["-i", str(music)]
         music_idx = 1 if audio_idx is None else 2
 
-    # B-roll inputs
+    # B-roll inputs (skip text-only hits — those still feed lower-thirds)
     broll_inputs: list[tuple[int, float, BrollHit]] = []
     for ct, h in overlays:
-        idx = (1 if audio_idx is None else 2) + (1 if music_idx is not None else 0) + len(broll_inputs)
-        # Actually compute index from how many -i we add:
+        if not h.asset or not Path(h.asset).exists():
+            continue
         idx = 1 + (1 if audio_idx is not None else 0) + (1 if music_idx is not None else 0) + len(broll_inputs)
         inputs += ["-loop", "1", "-t", f"{h.duration:.3f}", "-i", str(h.asset)] if h.asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else ["-i", str(h.asset)]
         broll_inputs.append((idx, ct, h))
@@ -964,16 +1117,16 @@ def build_and_encode(
         next_v = f"[v{n}o]"
         # Scale overlay
         if broll_mode == "pip":
-            # PiP bottom-right ~36% width
+            # PiP bottom-right ~42% width (was 36% — easier to notice)
             fc.append(
-                f"[{idx}:v]scale={int(width * 0.36)}:-1,format=rgba,"
+                f"[{idx}:v]scale={int(width * 0.42)}:-1,format=rgba,"
                 f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
             )
-            x, y = "W-w-48", "H-h-48"
+            x, y = "W-w-40", "H-h-40"
         else:
             # Full-ish center plate
             fc.append(
-                f"[{idx}:v]scale={int(width * 0.84)}:-1,format=rgba,"
+                f"[{idx}:v]scale={int(width * 0.92)}:-1,format=rgba,"
                 f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
             )
             x, y = "(W-w)/2", "(H-h)/2"
@@ -1037,13 +1190,13 @@ def build_and_encode(
         for n, (idx, ct, h) in enumerate(broll_inputs):
             if broll_mode == "pip":
                 fc_v.append(
-                    f"[{idx}:v]scale={int(width * 0.36)}:-1,format=rgba,"
+                    f"[{idx}:v]scale={int(width * 0.42)}:-1,format=rgba,"
                     f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
                 )
-                x, y = "W-w-48", "H-h-48"
+                x, y = "W-w-40", "H-h-40"
             else:
                 fc_v.append(
-                    f"[{idx}:v]scale={int(width * 0.84)}:-1,format=rgba,"
+                    f"[{idx}:v]scale={int(width * 0.92)}:-1,format=rgba,"
                     f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
                 )
                 x, y = "(W-w)/2", "(H-h)/2"
@@ -1120,13 +1273,13 @@ def build_and_encode(
         for n, (idx, ct, h) in enumerate(broll_inputs):
             if broll_mode == "pip":
                 fc_v.append(
-                    f"[{idx}:v]scale={int(width * 0.36)}:-1,format=rgba,"
+                    f"[{idx}:v]scale={int(width * 0.42)}:-1,format=rgba,"
                     f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
                 )
-                x, y = "W-w-48", "H-h-48"
+                x, y = "W-w-40", "H-h-40"
             else:
                 fc_v.append(
-                    f"[{idx}:v]scale={int(width * 0.84)}:-1,format=rgba,"
+                    f"[{idx}:v]scale={int(width * 0.92)}:-1,format=rgba,"
                     f"colorchannelmixer=aa={pacing.broll_opacity:.2f}[ov{n}]"
                 )
                 x, y = "(W-w)/2", "(H-h)/2"
@@ -1202,7 +1355,7 @@ def run_polish(
     *,
     video: Path,
     out: Path,
-    pacing_name: str = "informative",
+    pacing_name: str = "fast",
     audio: Path | None = None,
     music: Path | None = None,
     words: list[dict] | None = None,
@@ -1234,9 +1387,9 @@ def run_polish(
     if not has_video_stream(video):
         raise RuntimeError(f"no video stream in {video}")
 
-    key = str(pacing_name or "informative").lower().strip()
+    key = str(pacing_name or "fast").lower().strip()
     if key not in PACINGS:
-        key = "informative"
+        key = "fast"
     pacing = PACINGS[key]
     silence_db_v = pacing.silence_db if silence_db is None else float(silence_db)
     min_silence_v = pacing.min_silence if min_silence is None else float(min_silence)
@@ -1248,6 +1401,11 @@ def run_polish(
     if words is None:
         words = load_words(words_json) if words_json else []
     keywords = list(keywords or [])
+    if not keywords and words:
+        keywords = infer_keywords_from_words(words)
+        if keywords:
+            print(f"[polish_cut] auto keywords from transcript: {', '.join(keywords[:10])}"
+                  + ("…" if len(keywords) > 10 else ""))
 
     silence_engine = str(silence_engine or "auto").lower().strip()
     composite_engine = str(composite_engine or "ffmpeg").lower().strip()
@@ -1327,7 +1485,17 @@ def run_polish(
         if not keep_work:
             shutil.rmtree(ae_work, ignore_errors=True)
 
+    before_beats = len(keeps)
+    beat_sec = float(getattr(pacing, "visual_beat_sec", VISUAL_BEAT_SEC) or VISUAL_BEAT_SEC)
+    keeps = split_keeps_into_visual_beats(keeps, beat_sec=beat_sec)
+    if len(keeps) != before_beats:
+        print(f"[polish_cut] visual beats: {before_beats} keep(s) → {len(keeps)} edit beat(s) "
+              f"(~{beat_sec:.1f}s)")
+
     assign_jumpcut_zooms(keeps, amount=pacing.jump_zoom)
+    zooms = sorted({round(k.zoom, 3) for k in keeps})
+    print(f"[polish_cut] jump-zoom ladder: {zooms}")
+
     hits = find_keyword_hits(words, keywords, Path(assets_dir) if assets_dir else None)
     hits_sorted = sorted(hits, key=lambda h: h.time)
     spaced: list[BrollHit] = []
@@ -1340,6 +1508,10 @@ def run_polish(
         spaced.append(h)
         last_t = h.time
     hits = spaced[:24]
+    if hits:
+        with_asset = sum(1 for h in hits if h.asset)
+        print(f"[polish_cut] keyword hits: {len(hits)} "
+              f"({with_asset} with B-roll asset, {len(hits) - with_asset} text-only)")
 
     report = self_evaluate(
         keeps=keeps, hits=hits, duration_src=dur,
@@ -1350,6 +1522,9 @@ def run_polish(
     report.stats["composite_engine"] = composite_engine
     report.stats["auto_editor"] = bool(ae_bin)
     report.stats["moviepy"] = bool(_OSS and _OSS["moviepy_available"]())
+    report.stats["visual_beats"] = len(keeps)
+    report.stats["zoom_levels"] = zooms
+    report.stats["keywords"] = keywords[:24]
 
     plan = {
         "video": str(video),
@@ -1452,7 +1627,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--video", required=True, type=Path, help="Raw video file")
     p.add_argument("--audio", type=Path, default=None, help="Optional separate speech/audio bed")
     p.add_argument("--music", type=Path, default=None, help="Optional background music to duck under speech")
-    p.add_argument("--pacing", default="informative",
+    p.add_argument("--pacing", default="fast",
                    choices=sorted(set(PACINGS.keys())),
                    help="Desired pacing preset")
     p.add_argument("--words-json", type=Path, default=None,
