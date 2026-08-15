@@ -2,36 +2,26 @@
 """
 polish_cut.py — programmatic rough-cut → polish → master (no synthetic AI video).
 
-Implements an FFmpeg-first post pipeline (Auto-Editor / Kdenlive–class goals,
-no synthetic AI visuals):
+Open-source stack (real tools, not just clones of the idea):
 
-  1) Silence removal (silencedetect, -30 dBFS, >0.4s) — Auto-Editor equivalent —
-     with optional 0.2s sentence padding from a Whisper-style words JSON.
-  2) Verbal stumble / repeated-take cuts from Whisper word timestamps.
-  3) Jump-cut smoothing via alternating ±2% digital zoom on keep segments.
-  4) Optional face-centered reframe (OpenCV Haar if available; else talking-head bias).
-  5) Keyword-triggered B-roll PiP/center + lower-third text accents from assets.
-  6) Color grade (contrast ~+5%) + speech acompressor + loudnorm (-14 LUFS)
-     + music sidechain duck (~−18 dB under speech).
-  7) Self-evaluation loop + optional CMX EDL / JSON timeline for Kdenlive/Shotcut.
+  1) Auto-Editor — silence / loudness rough-cut (−30 dB class) when installed;
+     also writes native Kdenlive (.kdenlive) + Shotcut (.mlt) projects.
+     FFmpeg silencedetect remains the fallback.
+  2) Whisper word timestamps (from Studio) — stumble / retake cuts + keyword hits.
+  3) Jump-cut ±2% zoom, optional OpenCV face reframe (FFmpeg filter graph).
+  4) MoviePy — optional code-driven B-roll + lower-third composite
+     (FFmpeg filter_complex is the default compositor).
+  5) Color + speech acompressor + loudnorm (−14 LUFS) + music duck (~−18 dB).
+  6) Self-evaluation + CMX EDL beside Auto-Editor NLE projects.
 
-Does NOT generate synthetic visuals — only edits / composites real media.
+Remotion (React/Node) is outside this Python Studio path; MoviePy covers
+code-driven overlays here.
 
 Examples
 --------
-  # Fast social rough cut (video-only)
-  python3 scripts/polish_cut.py \\
-    --video raw.mp4 --pacing fast --out final.mp4
-
-  # Cinematic with separate music + keyword B-roll
-  python3 scripts/polish_cut.py \\
-    --video interview.mov --audio bed.mp3 --pacing cinematic \\
-    --words-json words.json --assets-dir ./broll \\
-    --keywords "wellness,focus,price" --broll-mode pip \\
-    --out wellness_cut.mp4 --fps 60 --height 1080
-
-  # Plan only (no encode) — writes keep-ranges + self-eval report
-  python3 scripts/polish_cut.py --video raw.mp4 --dry-run --report report.json
+  python3 scripts/polish_cut.py --video raw.mp4 --pacing fast --out final.mp4
+  python3 scripts/polish_cut.py --video raw.mp4 --silence-engine auto-editor \\
+      --composite moviepy --export-nle --out final.mp4
 """
 
 from __future__ import annotations
@@ -48,6 +38,47 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _load_polish_oss():
+    """Load sibling polish_oss.py whether we are a package or importlib file."""
+    try:
+        from polish_oss import (  # type: ignore
+            composite_with_moviepy,
+            moviepy_available,
+            run_auto_editor,
+            which_auto_editor,
+        )
+        return {
+            "which_auto_editor": which_auto_editor,
+            "moviepy_available": moviepy_available,
+            "run_auto_editor": run_auto_editor,
+            "composite_with_moviepy": composite_with_moviepy,
+        }
+    except Exception:
+        pass
+    import importlib.util
+    sibling = Path(__file__).resolve().parent / "polish_oss.py"
+    if not sibling.exists():
+        return None
+    name = "studio_polish_oss"
+    if name in sys.modules:
+        mod = sys.modules[name]
+    else:
+        spec = importlib.util.spec_from_file_location(name, sibling)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return {
+        "which_auto_editor": mod.which_auto_editor,
+        "moviepy_available": mod.moviepy_available,
+        "run_auto_editor": mod.run_auto_editor,
+        "composite_with_moviepy": mod.composite_with_moviepy,
+    }
+
+
+_OSS = _load_polish_oss()
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +804,7 @@ def build_and_encode(
     face_reframe: bool,
     work: Path,
     lower_thirds: bool = True,
+    composite_engine: str = "ffmpeg",
 ) -> Path:
     which_or_die("ffmpeg")
     seg_paths: list[Path] = []
@@ -834,7 +866,45 @@ def build_and_encode(
             continue
         overlays.append((ct, h))
 
-    # ---- Composite B-roll + audio master ----
+    # ---- Optional MoviePy composite (B-roll + lower-thirds) ----
+    use_moviepy = str(composite_engine or "ffmpeg").lower() in ("moviepy", "auto")
+    if use_moviepy and _OSS and overlays:
+        if _OSS["moviepy_available"]():
+            print("[polish_cut] compositing overlays with MoviePy")
+            try:
+                polished_mp = work / "polished_moviepy.mp4"
+                _OSS["composite_with_moviepy"](
+                    rough=rough,
+                    out=polished_mp,
+                    overlays=overlays,
+                    broll_mode=broll_mode,
+                    lower_thirds=lower_thirds,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    music=music if (music and Path(music).exists()) else None,
+                    music_duck_db=pacing.music_duck_db,
+                )
+                # Still run speech loudnorm pass via FFmpeg on MoviePy output
+                mastered = work / "polished.mp4"
+                af = SPEECH_DYN
+                run([
+                    "ffmpeg", "-hide_banner", "-y", "-loglevel", "error",
+                    "-i", str(polished_mp),
+                    "-af", af,
+                    "-c:v", "copy",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    str(mastered),
+                ])
+                shutil.copy2(mastered, out)
+                return out
+            except Exception as e:
+                print(f"[polish_cut] MoviePy composite failed ({e}); falling back to FFmpeg")
+        elif str(composite_engine).lower() == "moviepy":
+            print("[polish_cut] MoviePy requested but not installed — using FFmpeg")
+
+    # ---- Composite B-roll + audio master (FFmpeg) ----
     inputs = ["-i", str(rough)]
     # Optional replacement/narration audio (trim to cut length later)
     audio_idx = None
@@ -1061,6 +1131,9 @@ def run_polish(
     cut_stumbles: bool = True,
     lower_thirds: bool = True,
     export_edl: bool = True,
+    silence_engine: str = "auto",
+    composite_engine: str = "ffmpeg",
+    export_nle: bool = True,
     dry_run: bool = False,
     report_path: Path | None = None,
     keep_work: bool = False,
@@ -1088,26 +1161,86 @@ def run_polish(
         words = load_words(words_json) if words_json else []
     keywords = list(keywords or [])
 
+    silence_engine = str(silence_engine or "auto").lower().strip()
+    composite_engine = str(composite_engine or "ffmpeg").lower().strip()
+    ae_bin = _OSS["which_auto_editor"]() if _OSS else None
+    prefer_ae = silence_engine in ("auto-editor", "autoeditor") or (
+        silence_engine == "auto" and bool(ae_bin)
+    )
+
     print(f"[polish_cut] source={video} duration={dur:.2f}s pacing={pacing.name}")
-    print(f"[polish_cut] silence noise={silence_db_v}dB min={min_silence_v}s")
+    print(f"[polish_cut] silence noise={silence_db_v}dB min={min_silence_v}s "
+          f"engine={'auto-editor' if prefer_ae and ae_bin else 'ffmpeg'}")
 
     probe_media = Path(audio) if (audio and Path(audio).exists()) else video
     if not has_audio_stream(probe_media):
         raise RuntimeError(f"no audio stream to scan for silence in {probe_media}")
 
-    silences = detect_silence_ranges(probe_media, noise_db=silence_db_v, min_silence=min_silence_v)
-    keeps = keep_ranges_from_silence(
-        dur, silences, sentence_pad=pacing.sentence_pad, words=words or None,
-    )
     stumble_cuts: list[tuple[float, float]] = []
     if cut_stumbles and words:
         stumble_cuts = find_stumble_ranges(words)
         if stumble_cuts:
             print(f"[polish_cut] cutting {len(stumble_cuts)} stumble/retake span(s)")
+
+    nle_artifacts: dict[str, Any] = {}
+    keeps: list[KeepRange] = []
+    silences: list[tuple[float, float]] = []
+    ae_work = Path(tempfile.mkdtemp(prefix="polish_ae_"))
+
+    try:
+        if prefer_ae and ae_bin and _OSS:
+            try:
+                print("[polish_cut] Auto-Editor: silence analysis + Kdenlive/Shotcut export")
+                nle_artifacts = _OSS["run_auto_editor"](
+                    video,
+                    work=ae_work,
+                    noise_db=silence_db_v,
+                    margin_s=pacing.sentence_pad,
+                    fps=fps,
+                    width=width,
+                    height=height,
+                    cut_outs=stumble_cuts or None,
+                    render_mp4=False,  # we encode with jump-zoom ourselves
+                    export_kdenlive=bool(export_nle),
+                    export_shotcut=bool(export_nle),
+                )
+                ae_keeps = nle_artifacts.get("keeps") or []
+                if ae_keeps:
+                    keeps = [KeepRange(a, b) for a, b in ae_keeps]
+                    print(f"[polish_cut] Auto-Editor keep ranges: {len(keeps)}")
+            except Exception as e:
+                print(f"[polish_cut] Auto-Editor unavailable/failed ({e}); using FFmpeg silencedetect")
+                nle_artifacts = {"error": str(e)}
+
+        if not keeps:
+            silences = detect_silence_ranges(
+                probe_media, noise_db=silence_db_v, min_silence=min_silence_v,
+            )
+            keeps = keep_ranges_from_silence(
+                dur, silences, sentence_pad=pacing.sentence_pad, words=words or None,
+            )
+            if stumble_cuts:
+                keeps = subtract_cuts_from_keeps(keeps, stumble_cuts)
+        elif stumble_cuts:
+            # AE export may not have applied cut-outs to the XML keeps — subtract.
             keeps = subtract_cuts_from_keeps(keeps, stumble_cuts)
+
+        # Copy NLE projects next to final output
+        if export_nle and nle_artifacts:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            for key_name, suffix in (("kdenlive", ".kdenlive"), ("shotcut", ".mlt")):
+                src = nle_artifacts.get(key_name)
+                if src and Path(src).exists():
+                    dest = out.with_suffix(suffix)
+                    shutil.copy2(src, dest)
+                    nle_artifacts[key_name] = str(dest)
+                    print(f"[polish_cut] wrote {key_name} project {dest}")
+    finally:
+        if not keep_work:
+            shutil.rmtree(ae_work, ignore_errors=True)
+
     assign_jumpcut_zooms(keeps, amount=pacing.jump_zoom)
     hits = find_keyword_hits(words, keywords, Path(assets_dir) if assets_dir else None)
-    # Cap stacked B-roll density for self-eval: keep earliest unique keywords spaced ≥1.2s
     hits_sorted = sorted(hits, key=lambda h: h.time)
     spaced: list[BrollHit] = []
     last_t = -999.0
@@ -1125,11 +1258,18 @@ def run_polish(
         width=width, height=height, fps=fps,
         stumble_cuts=stumble_cuts, lower_thirds=lower_thirds,
     )
+    report.stats["silence_engine"] = "auto-editor" if (prefer_ae and ae_bin and nle_artifacts.get("kdenlive")) else "ffmpeg"
+    report.stats["composite_engine"] = composite_engine
+    report.stats["auto_editor"] = bool(ae_bin)
+    report.stats["moviepy"] = bool(_OSS and _OSS["moviepy_available"]())
+
     plan = {
         "video": str(video),
         "audio": str(audio) if audio else None,
         "music": str(music) if music else None,
         "pacing": asdict(pacing),
+        "silence_engine": report.stats["silence_engine"],
+        "composite_engine": composite_engine,
         "silence_spans": silences,
         "stumble_cuts": [{"start": a, "end": b} for a, b in stumble_cuts],
         "keep_ranges": [asdict(k) for k in keeps],
@@ -1143,20 +1283,24 @@ def run_polish(
             for h in hits
         ],
         "lower_thirds": bool(lower_thirds),
+        "nle": {
+            "kdenlive": nle_artifacts.get("kdenlive"),
+            "shotcut": nle_artifacts.get("shotcut"),
+        },
         "eval": asdict(report),
         "export": {
             "width": width,
             "height": height,
             "fps": fps,
-            "format_hint": "1080p60 ready for Kdenlive/Shotcut fine-tune via EDL",
+            "format_hint": "1080p60 — open .kdenlive / .mlt / .edl for fine-tune",
         },
     }
     if report_path:
         Path(report_path).write_text(json.dumps(plan, indent=2))
         print(f"[polish_cut] wrote report {report_path}")
 
-    edl_path = out.with_suffix(".edl") if export_edl else None
     if export_edl:
+        edl_path = out.with_suffix(".edl")
         write_cmx_edl(edl_path, video=video, keeps=keeps, fps=fps, title=out.stem)
         plan["edl"] = str(edl_path)
         print(f"[polish_cut] wrote EDL {edl_path}")
@@ -1190,6 +1334,7 @@ def run_polish(
             face_reframe=face_reframe,
             work=work_root,
             lower_thirds=lower_thirds,
+            composite_engine=composite_engine,
         )
         out_dur = media_duration(encoded)
         if out_dur < 0.2:
@@ -1238,6 +1383,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Skip keyword lower-third drawtext accents")
     p.add_argument("--no-edl", action="store_true",
                    help="Skip CMX EDL export for Kdenlive/Shotcut")
+    p.add_argument("--silence-engine", default="auto",
+                   choices=["auto", "auto-editor", "ffmpeg"],
+                   help="Silence cut: Auto-Editor when installed (auto), or FFmpeg")
+    p.add_argument("--composite", default="ffmpeg",
+                   choices=["ffmpeg", "moviepy", "auto"],
+                   help="B-roll/lower-third compositor (MoviePy when chosen/available)")
+    p.add_argument("--export-nle", action="store_true", default=True,
+                   help="Write Auto-Editor Kdenlive + Shotcut projects (default on)")
+    p.add_argument("--no-export-nle", action="store_true",
+                   help="Skip Auto-Editor Kdenlive/Shotcut project export")
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--fps", type=int, default=60)
@@ -1270,6 +1425,9 @@ def main(argv: list[str] | None = None) -> int:
             cut_stumbles=not args.no_stumbles,
             lower_thirds=not args.no_lower_thirds,
             export_edl=not args.no_edl,
+            silence_engine=args.silence_engine,
+            composite_engine=args.composite,
+            export_nle=not args.no_export_nle,
             dry_run=args.dry_run,
             report_path=args.report,
             keep_work=args.keep_work,

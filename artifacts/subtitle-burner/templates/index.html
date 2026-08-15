@@ -1276,14 +1276,14 @@
             <span id="tlPolishTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
               <strong>Polish cut</strong> — FFmpeg toolkit on the primary Main source
               <ul>
-                <li>✓ Silence removal (pacing: fast / informative / cinematic)</li>
+                <li>✓ Auto-Editor silence cut (fallback: FFmpeg)</li>
                 <li>✓ Whisper stumble / retake cuts</li>
                 <li>✓ Alternating ±2% jump-cut zoom</li>
                 <li>✓ Face-bias reframe (optional)</li>
-                <li>✓ Keyword B-roll PiP/center + lower-thirds</li>
+                <li>✓ Keyword B-roll + lower-thirds (FFmpeg or MoviePy)</li>
                 <li>✓ Contrast grade + speech compress + −14 LUFS</li>
                 <li>✓ Music sidechain duck (~−18 dB) if Music lane set</li>
-                <li>✓ CMX EDL for Kdenlive / Shotcut fine-tune</li>
+                <li>✓ Kdenlive + Shotcut projects + CMX EDL</li>
               </ul>
               <em>Opens options first. Does not replace Timeline Render (captions/effects bake).</em>
             </span>
@@ -1547,6 +1547,29 @@
             <option value="1080x1920@60">1080×1920 · 9:16</option>
             <option value="1080x1920@30">1080×1920@30 · 9:16</option>
           </select>
+        </div>
+        <div class="row">
+          <label style="min-width:110px" for="tlPolishSilenceEngine">Silence engine</label>
+          <select id="tlPolishSilenceEngine" style="flex:1">
+            <option value="auto" selected>Auto — Auto-Editor if installed, else FFmpeg</option>
+            <option value="auto-editor">Auto-Editor (required)</option>
+            <option value="ffmpeg">FFmpeg silencedetect only</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:110px" for="tlPolishComposite">Overlays</label>
+          <select id="tlPolishComposite" style="flex:1">
+            <option value="ffmpeg" selected>FFmpeg filter graph</option>
+            <option value="moviepy">MoviePy (code-driven B-roll / titles)</option>
+            <option value="auto">Auto — MoviePy when available</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:110px">NLE projects</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="tlPolishNle" checked>
+            Auto-Editor → Kdenlive (.kdenlive) + Shotcut (.mlt)
+          </label>
         </div>
         <div class="row">
           <label style="min-width:110px">Face reframe</label>

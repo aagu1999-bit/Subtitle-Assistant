@@ -10484,6 +10484,9 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
             cut_stumbles=bool(opts.get("cut_stumbles", True)),
             lower_thirds=bool(opts.get("lower_thirds", True)),
             export_edl=bool(opts.get("export_edl", True)),
+            silence_engine=str(opts.get("silence_engine") or "auto"),
+            composite_engine=str(opts.get("composite_engine") or "ffmpeg"),
+            export_nle=bool(opts.get("export_nle", True)),
             dry_run=False,
             report_path=Path(opts["report"]) if opts.get("report") else None,
         )
@@ -10566,6 +10569,9 @@ def timeline_polish():
         "cut_stumbles": data.get("cut_stumbles", True) is not False,
         "lower_thirds": data.get("lower_thirds", True) is not False,
         "export_edl": data.get("export_edl", True) is not False,
+        "silence_engine": str(data.get("silence_engine") or "auto"),
+        "composite_engine": str(data.get("composite_engine") or "ffmpeg"),
+        "export_nle": data.get("export_nle", True) is not False,
     }
     t = threading.Thread(target=_run_polish_job, args=(polish_id, opts), daemon=True)
     t.start()

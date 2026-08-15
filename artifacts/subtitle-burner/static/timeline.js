@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-52-polish-expert";
+  const TL_BUILD = "studio-editor-build-53-oss-engines";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4820,6 +4820,9 @@
     return {
       pacing: ($("tlPolishPacing") && $("tlPolishPacing").value) || "informative",
       broll_mode: ($("tlPolishBrollMode") && $("tlPolishBrollMode").value) || "pip",
+      silence_engine: ($("tlPolishSilenceEngine") && $("tlPolishSilenceEngine").value) || "auto",
+      composite_engine: ($("tlPolishComposite") && $("tlPolishComposite").value) || "ffmpeg",
+      export_nle: !($("tlPolishNle") && !$("tlPolishNle").checked),
       face_reframe: !($("tlPolishFace") && !$("tlPolishFace").checked),
       cut_stumbles: !($("tlPolishStumbles") && !$("tlPolishStumbles").checked),
       lower_thirds: !($("tlPolishLowerThirds") && !$("tlPolishLowerThirds").checked),
@@ -4899,6 +4902,9 @@
         cut_stumbles: opts.cut_stumbles !== false,
         lower_thirds: opts.lower_thirds !== false,
         export_edl: opts.export_edl !== false,
+        silence_engine: opts.silence_engine || "auto",
+        composite_engine: opts.composite_engine || "ffmpeg",
+        export_nle: opts.export_nle !== false,
         width: opts.width || 1920,
         height: opts.height || 1080,
         fps: opts.fps || 60,

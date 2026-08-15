@@ -3,6 +3,10 @@ faster-whisper>=1.0.0
 requests>=2.31.0
 gunicorn>=21.0.0
 
+# Polish cut — real open-source engines (optional at boot; polish falls back to FFmpeg)
+auto-editor>=29.0.0
+moviepy>=2.0.0
+
 # Interview-reframe pipeline (optional — feature is gated to lazy imports
 # so the app still boots without these installed). pyannote.audio pulls
 # torch (~2 GB) so install only if you want the reframe feature.
