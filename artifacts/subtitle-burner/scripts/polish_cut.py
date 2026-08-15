@@ -288,9 +288,10 @@ def detect_face_center_norm(video: Path, t: float) -> tuple[float, float] | None
             return None
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        if not Path(cascade_path).exists():
+            return None
+        cascade = cv2.CascadeClassifier(cascade_path)
         if cascade.empty():
             return None
         faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
