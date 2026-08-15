@@ -9346,8 +9346,20 @@ def timeline_create():
     return jsonify({"job_id": job_id, "timeline": timeline})
 
 
+_TIMELINE_RESERVED_IDS = frozenset({
+    "create", "save", "render", "list", "delete", "polish", "new", "export",
+})
+
+
 @app.route("/timeline/<job_id>", methods=["GET"])
 def timeline_get(job_id: str):
+    # Prevent POST-to-/timeline/polish hitting this GET rule as job_id="polish"
+    # when an old process lacked the dedicated polish route (Flask → 405).
+    if job_id in _TIMELINE_RESERVED_IDS:
+        return jsonify({
+            "error": f"/{job_id} is a Timeline action path, not a project id",
+            "hint": "For Polish use POST /polish/run (restart the Replit app after git pull)",
+        }), 404
     if job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
     job = jobs[job_id]
@@ -10518,11 +10530,37 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
         print(f"[polish] {polish_id} failed: {e}", flush=True)
 
 
+@app.route("/polish/ping", methods=["GET"])
+def polish_ping():
+    """Capability probe — UI can detect a stale Flask process after git pull."""
+    ae = False
+    mp = False
+    try:
+        import shutil
+        ae = bool(shutil.which("auto-editor"))
+    except Exception:
+        pass
+    try:
+        import importlib.util
+        mp = importlib.util.find_spec("moviepy") is not None
+    except Exception:
+        pass
+    return jsonify({
+        "ok": True,
+        "polish": True,
+        "endpoints": {"run": "/polish/run", "status": "/polish/status/<id>"},
+        "engines": {"auto_editor": ae, "moviepy": mp},
+        "note": "Polish is a source rough-cut; Timeline Render still burns captions.",
+    })
+
+
+@app.route("/polish/run", methods=["POST"])
 @app.route("/timeline/polish", methods=["POST"])
 def timeline_polish():
     """Kick off polish_cut on the Timeline's primary source take.
 
-    Uses source video + transcript words (not a full multi-clip timeline bake).
+    Prefer POST /polish/run (avoids clashing with GET /timeline/<job_id>).
+    Legacy alias: POST /timeline/polish.
     Poll `/polish/status/<polish_id>`; download via `/download/<output>`.
     """
     data = request.get_json(force=True) or {}
@@ -10598,6 +10636,14 @@ def timeline_polish():
         "has_music": bool(music),
         "word_count": len(words),
     })
+
+
+@app.route("/timeline/polish", methods=["GET"])
+def timeline_polish_get_hint():
+    return jsonify({
+        "error": "Use POST /polish/run to start a polish job",
+        "hint": "If you saw HTTP 405 before, Stop+Run the Replit workflow after git pull",
+    }), 405
 
 
 @app.route("/polish/status/<polish_id>", methods=["GET"])

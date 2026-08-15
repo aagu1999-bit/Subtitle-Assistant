@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-55-polish-dom-inject";
+  const TL_BUILD = "studio-editor-build-56-polish-run-path";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -324,6 +324,13 @@
       const msg = (data && (data.error || data.message)) || res.statusText || ("HTTP " + res.status);
       if (res.status === 404) {
         throw new Error(msg + " (404 — route missing on this host; pull latest code and Stop+Run / Redeploy)");
+      }
+      if (res.status === 405) {
+        throw new Error(
+          msg + " (405 — Flask is still on an old process, or wrong method. " +
+          "In Replit: Stop the Project workflow, Start it again, hard-refresh. " +
+          "Polish must POST /polish/run.)"
+        );
       }
       throw new Error(msg);
     }
@@ -4892,6 +4899,22 @@
     if (runBtn) runBtn.disabled = true;
     setRenderStatus("Polish queued…");
     try {
+      // Probe so a stale Flask process fails with a clear message before POST.
+      try {
+        const ping = await fetch("/polish/ping");
+        if (!ping.ok) {
+          throw new Error(
+            "Polish API not on this server yet (GET /polish/ping failed). " +
+            "Stop+Start the Replit workflow after git pull, then hard-refresh."
+          );
+        }
+      } catch (pe) {
+        if (pe && pe.message && pe.message.includes("Polish API not")) throw pe;
+        throw new Error(
+          "Cannot reach /polish/ping — Flask needs a restart after pull. " +
+          "Stop+Start the Replit Project workflow."
+        );
+      }
       await saveNow();
       const body = {
         job_id: tl.job_id,
@@ -4910,7 +4933,8 @@
         fps: opts.fps || 60,
       };
       if (opts.keywords && opts.keywords.length) body.keywords = opts.keywords;
-      const res = await api("/timeline/polish", {
+      // /polish/run avoids clashing with GET /timeline/<job_id>
+      const res = await api("/polish/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
