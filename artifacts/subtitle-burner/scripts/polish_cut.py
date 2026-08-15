@@ -67,6 +67,10 @@ def run(cmd: list[str], *, capture: bool = False, check: bool = True) -> subproc
 
 
 def which_or_die(name: str) -> str:
+    if name == "ffmpeg":
+        env = os.environ.get("FFMPEG") or os.environ.get("FFMPEG_BINARY")
+        if env and Path(env).exists():
+            return env
     p = shutil.which(name)
     if not p:
         die(f"{name} not found on PATH")
@@ -807,6 +811,134 @@ def build_and_encode(
     return out
 
 
+
+def run_polish(
+    *,
+    video: Path,
+    out: Path,
+    pacing_name: str = "informative",
+    audio: Path | None = None,
+    music: Path | None = None,
+    words: list[dict] | None = None,
+    words_json: Path | None = None,
+    keywords: list[str] | None = None,
+    assets_dir: Path | None = None,
+    broll_mode: str = "pip",
+    silence_db: float | None = None,
+    min_silence: float | None = None,
+    width: int = 1920,
+    height: int = 1080,
+    fps: int = 60,
+    face_reframe: bool = True,
+    dry_run: bool = False,
+    report_path: Path | None = None,
+    keep_work: bool = False,
+) -> dict:
+    """Library entry used by Studio + CLI. Raises RuntimeError on failure."""
+    video = Path(video)
+    out = Path(out)
+    if not video.exists():
+        raise RuntimeError(f"video not found: {video}")
+    if not has_video_stream(video):
+        raise RuntimeError(f"no video stream in {video}")
+
+    key = str(pacing_name or "informative").lower().strip()
+    if key not in PACINGS:
+        key = "informative"
+    pacing = PACINGS[key]
+    silence_db_v = pacing.silence_db if silence_db is None else float(silence_db)
+    min_silence_v = pacing.min_silence if min_silence is None else float(min_silence)
+
+    dur = media_duration(video)
+    if dur <= 0:
+        raise RuntimeError("could not read source duration")
+
+    if words is None:
+        words = load_words(words_json) if words_json else []
+    keywords = list(keywords or [])
+
+    print(f"[polish_cut] source={video} duration={dur:.2f}s pacing={pacing.name}")
+    print(f"[polish_cut] silence noise={silence_db_v}dB min={min_silence_v}s")
+
+    probe_media = Path(audio) if (audio and Path(audio).exists()) else video
+    if not has_audio_stream(probe_media):
+        raise RuntimeError(f"no audio stream to scan for silence in {probe_media}")
+
+    silences = detect_silence_ranges(probe_media, noise_db=silence_db_v, min_silence=min_silence_v)
+    keeps = keep_ranges_from_silence(
+        dur, silences, sentence_pad=pacing.sentence_pad, words=words or None,
+    )
+    assign_jumpcut_zooms(keeps, amount=pacing.jump_zoom)
+    hits = find_keyword_hits(words, keywords, Path(assets_dir) if assets_dir else None)
+    report = self_evaluate(
+        keeps=keeps, hits=hits, duration_src=dur,
+        width=width, height=height, fps=fps,
+    )
+    plan = {
+        "video": str(video),
+        "audio": str(audio) if audio else None,
+        "music": str(music) if music else None,
+        "pacing": asdict(pacing),
+        "silence_spans": silences,
+        "keep_ranges": [asdict(k) for k in keeps],
+        "broll": [
+            {
+                "keyword": h.keyword,
+                "src_time": h.time,
+                "asset": str(h.asset),
+                "cut_time": map_source_time_to_cut(h.time, keeps),
+            }
+            for h in hits
+        ],
+        "eval": asdict(report),
+    }
+    if report_path:
+        Path(report_path).write_text(json.dumps(plan, indent=2))
+        print(f"[polish_cut] wrote report {report_path}")
+
+    for wmsg in report.warnings:
+        print(f"[polish_cut] WARN: {wmsg}")
+    for emsg in report.errors:
+        print(f"[polish_cut] ERR: {emsg}")
+    if not report.ok:
+        raise RuntimeError("self-evaluation failed — aborting encode")
+
+    if dry_run:
+        plan["output"] = None
+        plan["dry_run"] = True
+        return plan
+
+    work_root = Path(tempfile.mkdtemp(prefix="polish_cut_"))
+    try:
+        encoded = build_and_encode(
+            video=video,
+            audio=Path(audio) if audio else None,
+            music=Path(music) if music else None,
+            keeps=keeps,
+            hits=hits,
+            out=out,
+            width=width,
+            height=height,
+            fps=fps,
+            pacing=pacing,
+            broll_mode=broll_mode,
+            face_reframe=face_reframe,
+            work=work_root,
+        )
+        out_dur = media_duration(encoded)
+        if out_dur < 0.2:
+            raise RuntimeError("output too short after encode")
+        plan["output"] = str(encoded)
+        plan["output_duration_s"] = out_dur
+        print(f"[polish_cut] OK → {encoded} ({out_dur:.2f}s) {width}x{height}@{fps}")
+        return plan
+    finally:
+        if not keep_work:
+            shutil.rmtree(work_root, ignore_errors=True)
+        else:
+            print(f"[polish_cut] work dir kept: {work_root}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -846,103 +978,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    video: Path = args.video
-    if not video.exists():
-        die(f"video not found: {video}")
-    if not has_video_stream(video):
-        die(f"no video stream in {video}")
-
-    pacing = PACINGS[args.pacing]
-    silence_db = args.silence_db if args.silence_db is not None else pacing.silence_db
-    min_silence = args.min_silence if args.min_silence is not None else pacing.min_silence
-
-    dur = media_duration(video)
-    if dur <= 0:
-        die("could not read source duration")
-
-    words = load_words(args.words_json)
-    keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
-
-    print(f"[polish_cut] source={video} duration={dur:.2f}s pacing={pacing.name}")
-    print(f"[polish_cut] silence noise={silence_db}dB min={min_silence}s")
-
-    # Detect on audio preference: external audio else video
-    probe_media = args.audio if (args.audio and args.audio.exists()) else video
-    if not has_audio_stream(probe_media):
-        die(f"no audio stream to scan for silence in {probe_media}")
-
-    silences = detect_silence_ranges(probe_media, noise_db=silence_db, min_silence=min_silence)
-    keeps = keep_ranges_from_silence(
-        dur, silences, sentence_pad=pacing.sentence_pad, words=words or None,
-    )
-    assign_jumpcut_zooms(keeps, amount=pacing.jump_zoom)
-
-    hits = find_keyword_hits(words, keywords, args.assets_dir)
-    report = self_evaluate(
-        keeps=keeps, hits=hits, duration_src=dur,
-        width=args.width, height=args.height, fps=args.fps,
-    )
-
-    plan = {
-        "video": str(video),
-        "audio": str(args.audio) if args.audio else None,
-        "music": str(args.music) if args.music else None,
-        "pacing": asdict(pacing),
-        "silence_spans": silences,
-        "keep_ranges": [asdict(k) for k in keeps],
-        "broll": [
-            {"keyword": h.keyword, "src_time": h.time, "asset": str(h.asset),
-             "cut_time": map_source_time_to_cut(h.time, keeps)}
-            for h in hits
-        ],
-        "eval": asdict(report),
-    }
-
-    if args.report:
-        args.report.write_text(json.dumps(plan, indent=2))
-        print(f"[polish_cut] wrote report {args.report}")
-
-    print(json.dumps(report.stats, indent=2))
-    for w in report.warnings:
-        print(f"[polish_cut] WARN: {w}")
-    for e in report.errors:
-        print(f"[polish_cut] ERR: {e}")
-
-    if not report.ok:
-        die("self-evaluation failed — aborting encode", 2)
-
-    if args.dry_run:
-        print("[polish_cut] dry-run complete — no encode")
-        return 0
-
-    work_root = Path(tempfile.mkdtemp(prefix="polish_cut_"))
     try:
-        out = build_and_encode(
-            video=video,
+        run_polish(
+            video=args.video,
+            out=args.out,
+            pacing_name=args.pacing,
             audio=args.audio,
             music=args.music,
-            keeps=keeps,
-            hits=hits,
-            out=args.out,
+            words_json=args.words_json,
+            keywords=[k.strip() for k in (args.keywords or "").split(",") if k.strip()],
+            assets_dir=args.assets_dir,
+            broll_mode=args.broll_mode,
+            silence_db=args.silence_db,
+            min_silence=args.min_silence,
             width=args.width,
             height=args.height,
             fps=args.fps,
-            pacing=pacing,
-            broll_mode=args.broll_mode,
             face_reframe=not args.no_face_reframe,
-            work=work_root,
+            dry_run=args.dry_run,
+            report_path=args.report,
+            keep_work=args.keep_work,
         )
-        # Final probe self-check
-        out_dur = media_duration(out)
-        if out_dur < 0.2:
-            die("output too short after encode")
-        print(f"[polish_cut] OK → {out} ({out_dur:.2f}s) {args.width}x{args.height}@{args.fps}")
         return 0
-    finally:
-        if not args.keep_work:
-            shutil.rmtree(work_root, ignore_errors=True)
-        else:
-            print(f"[polish_cut] work dir kept: {work_root}")
+    except RuntimeError as e:
+        print(f"[polish_cut] ERROR: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -10402,6 +10402,192 @@ Rules:
     return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
 
 
+# ---- Polish cut (silence / jump-cut / B-roll master via scripts/polish_cut.py) ----
+_polish_jobs: dict = {}
+
+
+def _load_polish_cut_module():
+    import importlib.util
+    import sys
+    path = BASE_DIR / "scripts" / "polish_cut.py"
+    if not path.exists():
+        raise RuntimeError("scripts/polish_cut.py missing")
+    name = "studio_polish_cut"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _timeline_primary_source_job(timeline: dict) -> str | None:
+    for c in ((timeline or {}).get("tracks") or {}).get("main") or []:
+        sj = c.get("source_job_id")
+        if sj and sj in jobs and find_video_path(sj):
+            return sj
+    return None
+
+
+def _timeline_music_path(timeline: dict) -> Path | None:
+    for c in ((timeline or {}).get("tracks") or {}).get("music") or []:
+        aid = c.get("asset_id")
+        if not aid:
+            continue
+        p = _find_asset_path(aid)
+        if p and p.exists():
+            return p
+    return None
+
+
+def _timeline_broll_keywords(timeline: dict, limit: int = 12) -> list[str]:
+    kws = []
+    for c in ((timeline or {}).get("tracks") or {}).get("overlay") or []:
+        kw = (c.get("keyword") or "").strip()
+        if kw and kw.lower() not in {x.lower() for x in kws}:
+            kws.append(kw)
+        if len(kws) >= limit:
+            break
+    return kws
+
+
+def _run_polish_job(polish_id: str, opts: dict) -> None:
+    job = _polish_jobs.get(polish_id)
+    if not job:
+        return
+    try:
+        job["status"] = "running"
+        job["progress"] = 10
+        # Prefer Studio's FFmpeg binary for polish_cut subprocesses.
+        os.environ["FFMPEG"] = FFMPEG
+        mod = _load_polish_cut_module()
+        job["progress"] = 25
+        result = mod.run_polish(
+            video=Path(opts["video"]),
+            out=Path(opts["out"]),
+            pacing_name=opts.get("pacing") or "informative",
+            audio=Path(opts["audio"]) if opts.get("audio") else None,
+            music=Path(opts["music"]) if opts.get("music") else None,
+            words=opts.get("words") or [],
+            keywords=opts.get("keywords") or [],
+            assets_dir=Path(opts["assets_dir"]) if opts.get("assets_dir") else None,
+            broll_mode=opts.get("broll_mode") or "pip",
+            width=int(opts.get("width") or 1920),
+            height=int(opts.get("height") or 1080),
+            fps=int(opts.get("fps") or 60),
+            face_reframe=bool(opts.get("face_reframe", True)),
+            dry_run=False,
+            report_path=Path(opts["report"]) if opts.get("report") else None,
+        )
+        out_name = Path(result["output"]).name if result.get("output") else None
+        job["status"] = "done"
+        job["progress"] = 100
+        job["output"] = out_name
+        job["stats"] = (result.get("eval") or {}).get("stats") or {}
+        job["warnings"] = (result.get("eval") or {}).get("warnings") or []
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        job["progress"] = 100
+        print(f"[polish] {polish_id} failed: {e}", flush=True)
+
+
+@app.route("/timeline/polish", methods=["POST"])
+def timeline_polish():
+    """Kick off polish_cut on the Timeline's primary source take.
+
+    Uses source video + transcript words (not a full multi-clip timeline bake).
+    Poll `/polish/status/<polish_id>`; download via `/download/<output>`.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown timeline job"}), 404
+    timeline = _normalize_timeline(data.get("timeline") or jobs[job_id].get("timeline") or {})
+    source_id = _timeline_primary_source_job(timeline)
+    if not source_id:
+        return jsonify({"error": "Add a Main clip with a transcribed source video first."}), 400
+    video = find_video_path(source_id)
+    if not video:
+        return jsonify({"error": "Source video file missing on disk."}), 404
+
+    pacing = str(data.get("pacing") or "informative").lower().strip()
+    if pacing not in ("fast", "fast-paced", "cinematic", "informative"):
+        pacing = "informative"
+    broll_mode = str(data.get("broll_mode") or "pip").lower()
+    if broll_mode not in ("pip", "center"):
+        broll_mode = "pip"
+
+    keywords = data.get("keywords")
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+    if not keywords:
+        keywords = _timeline_broll_keywords(timeline)
+    words = list(jobs.get(source_id, {}).get("words") or [])
+    music = _timeline_music_path(timeline)
+
+    polish_id = uuid.uuid4().hex[:16]
+    out_name = f"polish_{polish_id}.mp4"
+    out_path = OUTPUT_DIR / out_name
+    report_path = OUTPUT_DIR / f"polish_{polish_id}_report.json"
+
+    _polish_jobs[polish_id] = {
+        "status": "queued",
+        "progress": 0,
+        "output": None,
+        "error": None,
+        "timeline_job_id": job_id,
+        "source_job_id": source_id,
+        "pacing": pacing,
+        "created_at": time.time(),
+    }
+    opts = {
+        "video": str(video),
+        "out": str(out_path),
+        "report": str(report_path),
+        "pacing": pacing,
+        "words": words,
+        "keywords": keywords,
+        "assets_dir": str(ASSET_DIR),
+        "broll_mode": broll_mode,
+        "music": str(music) if music else None,
+        "width": int(data.get("width") or 1920),
+        "height": int(data.get("height") or 1080),
+        "fps": int(data.get("fps") or 60),
+        "face_reframe": data.get("face_reframe", True) is not False,
+    }
+    t = threading.Thread(target=_run_polish_job, args=(polish_id, opts), daemon=True)
+    t.start()
+    return jsonify({
+        "polish_id": polish_id,
+        "source_job_id": source_id,
+        "pacing": pacing,
+        "keywords": keywords,
+        "has_music": bool(music),
+        "word_count": len(words),
+    })
+
+
+@app.route("/polish/status/<polish_id>", methods=["GET"])
+def polish_status(polish_id: str):
+    job = _polish_jobs.get(polish_id)
+    if not job:
+        return jsonify({"error": "Unknown polish job"}), 404
+    return jsonify({
+        "polish_id": polish_id,
+        "status": job.get("status"),
+        "progress": job.get("progress") or 0,
+        "output": job.get("output"),
+        "error": job.get("error"),
+        "stats": job.get("stats") or {},
+        "warnings": job.get("warnings") or [],
+        "pacing": job.get("pacing"),
+        "source_job_id": job.get("source_job_id"),
+    })
+
+
 @app.route("/job-duration/<job_id>", methods=["GET"])
 def job_duration(job_id):
     """Duration helper for long-form routing (words end, else ffprobe)."""

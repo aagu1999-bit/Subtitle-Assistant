@@ -1269,6 +1269,21 @@
           <button id="tlCaptionsBtn" class="btn btn-secondary" type="button" title="Caption fonts, colors, karaoke">Captions</button>
           <button id="tlAudioBtn" class="btn btn-secondary" type="button" title="Audio enhancement options">Audio</button>
           <button id="tlCaptionLookBtn" class="btn btn-secondary hidden" type="button" title="Open Look" aria-hidden="true" tabindex="-1">Open Look</button>
+          <button id="tlPolishBtn" class="btn btn-secondary tl-tipbtn" type="button"
+            aria-describedby="tlPolishTip"
+            title="Silence cut + jump-cut zoom + B-roll polish on the Main source">
+            ✨ Polish
+            <span id="tlPolishTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
+              <strong>Polish cut</strong> — FFmpeg rough cut on the primary Main source
+              <ul>
+                <li>✓ Silence removal (tight pacing)</li>
+                <li>✓ Alternating jump-cut zoom</li>
+                <li>✓ Keyword B-roll PiP from assets</li>
+                <li>✓ −14 LUFS + music duck if Music lane set</li>
+              </ul>
+              <em>Does not replace Timeline Render (captions/effects bake).</em>
+            </span>
+          </button>
           <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
             aria-describedby="tlRenderTip"
             style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">

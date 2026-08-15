@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-49-always-accept";
+  const TL_BUILD = "studio-editor-build-50-polish-cut";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4793,6 +4793,89 @@
     return !!(tl && tl.tracks && tl.tracks.main && tl.tracks.main.length);
   };
 
+  async function runTimelinePolish(opts) {
+    opts = opts || {};
+    if (!tl || !tl.tracks.main.length) {
+      alert("Add at least one Main clip (transcribed source) first.");
+      return null;
+    }
+    const btn = $("tlPolishBtn");
+    if (btn) btn.disabled = true;
+    setRenderStatus("Polish queued…");
+    try {
+      await saveNow();
+      const res = await api("/timeline/polish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: tl.job_id,
+          timeline: serialize(),
+          pacing: opts.pacing || "informative",
+          broll_mode: opts.broll_mode || "pip",
+          keywords: opts.keywords || undefined,
+        }),
+      });
+      const polishId = res.polish_id;
+      setRenderStatus(
+        `Polish running (${res.pacing || "informative"})…`
+        + (res.keywords && res.keywords.length ? ` · ${res.keywords.length} B-roll keys` : "")
+      );
+      return await pollPolish(polishId);
+    } catch (e) {
+      setRenderStatus("Polish error: " + e.message);
+      if (btn) btn.disabled = false;
+      throw e;
+    }
+  }
+  window.runTimelinePolish = runTimelinePolish;
+
+  function pollPolish(polishId) {
+    return new Promise((resolve, reject) => {
+      clearInterval(pollTimer);
+      let failStreak = 0;
+      pollTimer = setInterval(async () => {
+        try {
+          const s = await api("/polish/status/" + polishId);
+          failStreak = 0;
+          if (s.status === "done" && s.output) {
+            clearInterval(pollTimer);
+            setRenderStatus("Polish done ✓ — " + s.output);
+            if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            const v = $("tlPreviewVideo");
+            if (v) {
+              v.src = "/preview/" + s.output + "?t=" + Date.now();
+              previewingOutput = true;
+              const wrap = v.closest(".tl-preview");
+              if (wrap) wrap.classList.add("has-video");
+              v.load();
+              v.play().catch(() => {});
+            }
+            if (typeof window.showExportDone === "function") {
+              window.showExportDone(s.output, { jobId: tl && tl.job_id, polish: true });
+            }
+            resolve(s);
+          } else if (s.status === "error") {
+            clearInterval(pollTimer);
+            setRenderStatus("Polish error: " + (s.error || "failed"));
+            if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            reject(new Error(s.error || "polish failed"));
+          } else {
+            setRenderStatus(`Polish ${s.status || "working"}… ${s.progress || 0}%`);
+          }
+        } catch (e) {
+          failStreak += 1;
+          setRenderStatus("Polish reconnecting… (" + failStreak + ")");
+          if (failStreak >= 12) {
+            clearInterval(pollTimer);
+            setRenderStatus("Polish error: " + e.message);
+            if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            reject(e);
+          }
+        }
+      }, 1200);
+    });
+  }
+
   function pollRender() {
     return new Promise((resolve, reject) => {
       clearInterval(pollTimer);
@@ -5083,6 +5166,7 @@
         on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
+        on("tlPolishBtn", "onclick", () => runTimelinePolish());
         on("tlAddTitleBtn", "onclick", () => addTitle());
         ensureEffectsChrome();
         on("tlAddEffectBtn", "onclick", () => addEffectClip("punch_zoom"));
@@ -6425,6 +6509,7 @@
     { label: "Cinematic look", prompt: "Apply the cinematic clip style to this shot" },
     { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
     { label: "Accept all B-roll", prompt: "Accept all pending B-roll suggestions onto Overlay" },
+    { label: "Polish cut", prompt: "What does Polish cut do, and should I run it before Render?" },
     { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
   ];
 

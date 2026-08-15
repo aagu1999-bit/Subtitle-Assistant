@@ -145,6 +145,7 @@
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "captions", ico: "Aa", label: "Captions" },
         { id: "sound", ico: "♪", label: "Sound" },
+        { id: "polish", ico: "✨", label: "Polish" },
         { id: "chat", ico: "💬", label: "Chat" },
         { id: "export", ico: "⚡", label: "Export" },
       ];
@@ -154,6 +155,7 @@
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "split", ico: "✂", label: "Split" },
         { id: "captions", ico: "Aa", label: "Captions" },
+        { id: "polish", ico: "✨", label: "Polish" },
         { id: "effects", ico: "🎞", label: "Effects" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
@@ -417,6 +419,11 @@
   function onContextTool(toolId) {
     if (toolId === "export") {
       if (typeof window.runInstantExport === "function") window.runInstantExport();
+      return;
+    }
+    if (toolId === "polish") {
+      if (typeof window.runTimelinePolish === "function") window.runTimelinePolish();
+      else alert("Polish is still loading — open Timeline again in a second.");
       return;
     }
     if (toolId === "chat") {
