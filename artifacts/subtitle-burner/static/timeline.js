@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-51-polish-sheet";
+  const TL_BUILD = "studio-editor-build-52-polish-expert";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4821,6 +4821,9 @@
       pacing: ($("tlPolishPacing") && $("tlPolishPacing").value) || "informative",
       broll_mode: ($("tlPolishBrollMode") && $("tlPolishBrollMode").value) || "pip",
       face_reframe: !($("tlPolishFace") && !$("tlPolishFace").checked),
+      cut_stumbles: !($("tlPolishStumbles") && !$("tlPolishStumbles").checked),
+      lower_thirds: !($("tlPolishLowerThirds") && !$("tlPolishLowerThirds").checked),
+      export_edl: !($("tlPolishEdl") && !$("tlPolishEdl").checked),
       keywords,
       width: res.width,
       height: res.height,
@@ -4842,6 +4845,15 @@
       if (prefill.broll_mode && $("tlPolishBrollMode")) $("tlPolishBrollMode").value = prefill.broll_mode;
       if (prefill.face_reframe != null && $("tlPolishFace")) {
         $("tlPolishFace").checked = !!prefill.face_reframe;
+      }
+      if (prefill.cut_stumbles != null && $("tlPolishStumbles")) {
+        $("tlPolishStumbles").checked = !!prefill.cut_stumbles;
+      }
+      if (prefill.lower_thirds != null && $("tlPolishLowerThirds")) {
+        $("tlPolishLowerThirds").checked = !!prefill.lower_thirds;
+      }
+      if (prefill.export_edl != null && $("tlPolishEdl")) {
+        $("tlPolishEdl").checked = !!prefill.export_edl;
       }
       if (prefill.keywords && $("tlPolishKeywords")) {
         $("tlPolishKeywords").value = Array.isArray(prefill.keywords)
@@ -4884,6 +4896,9 @@
         pacing: opts.pacing || "informative",
         broll_mode: opts.broll_mode || "pip",
         face_reframe: opts.face_reframe !== false,
+        cut_stumbles: opts.cut_stumbles !== false,
+        lower_thirds: opts.lower_thirds !== false,
+        export_edl: opts.export_edl !== false,
         width: opts.width || 1920,
         height: opts.height || 1080,
         fps: opts.fps || 60,
@@ -6984,6 +6999,9 @@
             pacing: op.pacing || "informative",
             broll_mode: op.broll_mode || op.broll || "pip",
             face_reframe: op.face_reframe !== false,
+            cut_stumbles: op.cut_stumbles !== false,
+            lower_thirds: op.lower_thirds !== false,
+            export_edl: op.export_edl !== false,
           };
           if (op.keywords) {
             polishOpts.keywords = Array.isArray(op.keywords)

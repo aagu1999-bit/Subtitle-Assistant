@@ -1277,11 +1277,13 @@
               <strong>Polish cut</strong> — FFmpeg toolkit on the primary Main source
               <ul>
                 <li>✓ Silence removal (pacing: fast / informative / cinematic)</li>
+                <li>✓ Whisper stumble / retake cuts</li>
                 <li>✓ Alternating ±2% jump-cut zoom</li>
                 <li>✓ Face-bias reframe (optional)</li>
-                <li>✓ Keyword B-roll PiP or center plate</li>
+                <li>✓ Keyword B-roll PiP/center + lower-thirds</li>
                 <li>✓ Contrast grade + speech compress + −14 LUFS</li>
-                <li>✓ Music sidechain duck if Music lane set</li>
+                <li>✓ Music sidechain duck (~−18 dB) if Music lane set</li>
+                <li>✓ CMX EDL for Kdenlive / Shotcut fine-tune</li>
               </ul>
               <em>Opens options first. Does not replace Timeline Render (captions/effects bake).</em>
             </span>
@@ -1551,6 +1553,27 @@
           <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
             <input type="checkbox" id="tlPolishFace" checked>
             Bias crop toward talking-head / face when detected
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:110px">Stumbles</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="tlPolishStumbles" checked>
+            Cut fillers / stutters / repeated takes (Whisper words)
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:110px">Lower-thirds</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="tlPolishLowerThirds" checked>
+            Keyword text accents with B-roll hits
+          </label>
+        </div>
+        <div class="row">
+          <label style="min-width:110px">EDL export</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="tlPolishEdl" checked>
+            Write CMX EDL beside output for Kdenlive / Shotcut
           </label>
         </div>
       </div>

@@ -10481,6 +10481,9 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
             height=int(opts.get("height") or 1080),
             fps=int(opts.get("fps") or 60),
             face_reframe=bool(opts.get("face_reframe", True)),
+            cut_stumbles=bool(opts.get("cut_stumbles", True)),
+            lower_thirds=bool(opts.get("lower_thirds", True)),
+            export_edl=bool(opts.get("export_edl", True)),
             dry_run=False,
             report_path=Path(opts["report"]) if opts.get("report") else None,
         )
@@ -10560,6 +10563,9 @@ def timeline_polish():
         "height": int(data.get("height") or 1080),
         "fps": int(data.get("fps") or 60),
         "face_reframe": data.get("face_reframe", True) is not False,
+        "cut_stumbles": data.get("cut_stumbles", True) is not False,
+        "lower_thirds": data.get("lower_thirds", True) is not False,
+        "export_edl": data.get("export_edl", True) is not False,
     }
     t = threading.Thread(target=_run_polish_job, args=(polish_id, opts), daemon=True)
     t.start()

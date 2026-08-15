@@ -2,15 +2,18 @@
 """
 polish_cut.py — programmatic rough-cut → polish → master (no synthetic AI video).
 
-Implements an FFmpeg-first post pipeline:
+Implements an FFmpeg-first post pipeline (Auto-Editor / Kdenlive–class goals,
+no synthetic AI visuals):
 
-  1) Silence removal (silencedetect, -30 dBFS, >0.4s) with optional 0.2s
-     sentence padding from a Whisper-style words JSON.
-  2) Jump-cut smoothing via alternating ±2% digital zoom on keep segments.
-  3) Optional face-centered reframe (OpenCV Haar if available; else center crop).
-  4) Keyword-triggered B-roll PiP / opacity overlays from an asset folder.
-  5) Color grade (contrast ~+5%) + speech acompressor + loudnorm (-14 LUFS)
-     + music sidechain duck.
+  1) Silence removal (silencedetect, -30 dBFS, >0.4s) — Auto-Editor equivalent —
+     with optional 0.2s sentence padding from a Whisper-style words JSON.
+  2) Verbal stumble / repeated-take cuts from Whisper word timestamps.
+  3) Jump-cut smoothing via alternating ±2% digital zoom on keep segments.
+  4) Optional face-centered reframe (OpenCV Haar if available; else talking-head bias).
+  5) Keyword-triggered B-roll PiP/center + lower-third text accents from assets.
+  6) Color grade (contrast ~+5%) + speech acompressor + loudnorm (-14 LUFS)
+     + music sidechain duck (~−18 dB under speech).
+  7) Self-evaluation loop + optional CMX EDL / JSON timeline for Kdenlive/Shotcut.
 
 Does NOT generate synthetic visuals — only edits / composites real media.
 
@@ -258,6 +261,127 @@ def _merge_ranges(ranges: list[KeepRange], gap: float = 0.02) -> list[KeepRange]
     return out
 
 
+def _merge_intervals(spans: list[tuple[float, float]], gap: float = 0.05) -> list[tuple[float, float]]:
+    if not spans:
+        return []
+    spans = sorted((max(0.0, a), max(a, b)) for a, b in spans)
+    out = [spans[0]]
+    for a, b in spans[1:]:
+        pa, pb = out[-1]
+        if a <= pb + gap:
+            out[-1] = (pa, max(pb, b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _word_token(w: dict) -> str:
+    tok = str(w.get("word") or w.get("text") or "").strip().lower()
+    return re.sub(r"[^a-z0-9']+", "", tok)
+
+
+def _word_times(w: dict) -> tuple[float, float]:
+    try:
+        s = float(w.get("start") if w.get("start") is not None else w.get("begin") or 0)
+    except (TypeError, ValueError):
+        s = 0.0
+    try:
+        e = float(w.get("end") or s)
+    except (TypeError, ValueError):
+        e = s
+    if e < s:
+        e = s
+    return s, e
+
+
+# Common verbal stumbles / filled pauses (not content words like "like" alone).
+_FILLERS = frozenset({
+    "um", "uh", "uhm", "umm", "uhh", "er", "erm", "ah", "eh", "hmm", "mm", "mmm",
+    "mhm", "uhhuh", "huh",
+})
+
+
+def find_stumble_ranges(
+    words: list[dict],
+    *,
+    cut_fillers: bool = True,
+    cut_repeats: bool = True,
+    cut_retakes: bool = True,
+) -> list[tuple[float, float]]:
+    """Return source-time spans to cut: fillers, stuttered repeats, false-start retakes."""
+    if not words:
+        return []
+    cuts: list[tuple[float, float]] = []
+    tokens = [(_word_token(w), *_word_times(w), w) for w in words]
+    tokens = [(t, s, e, w) for (t, s, e, w) in tokens if t]
+
+    if cut_fillers:
+        for tok, s, e, _w in tokens:
+            if tok in _FILLERS and (e - s) <= 1.2:
+                cuts.append((max(0.0, s - 0.02), e + 0.04))
+
+    if cut_repeats:
+        for i in range(len(tokens) - 1):
+            t0, s0, e0, _ = tokens[i]
+            t1, s1, e1, _ = tokens[i + 1]
+            if t0 == t1 and t0 not in _FILLERS and (s1 - e0) <= 0.45:
+                # Keep the second utterance; drop the first stutter.
+                cuts.append((s0, min(e0 + 0.02, s1)))
+
+    if cut_retakes and len(tokens) >= 8:
+        # Near-duplicate 4-grams within 12s → keep the later take, cut earlier false start.
+        n = 4
+        seen: dict[tuple[str, ...], list[int]] = {}
+        for i in range(len(tokens) - n + 1):
+            gram = tuple(tokens[j][0] for j in range(i, i + n))
+            if any(g in _FILLERS for g in gram):
+                continue
+            if len(set(gram)) < 2:
+                continue
+            seen.setdefault(gram, []).append(i)
+        for gram, idxs in seen.items():
+            if len(idxs) < 2:
+                continue
+            for a, b in zip(idxs, idxs[1:]):
+                if b < a + n:
+                    continue
+                _ta, sa, _ea, _ = tokens[a]
+                _tb, sb, _eb, _ = tokens[b]
+                gap = sb - tokens[a + n - 1][2]
+                if 0.25 <= gap <= 12.0:
+                    # Cut from start of first take through start of retake.
+                    cuts.append((sa, sb))
+
+    return _merge_intervals(cuts)
+
+
+def subtract_cuts_from_keeps(
+    keeps: list[KeepRange],
+    cuts: list[tuple[float, float]],
+) -> list[KeepRange]:
+    """Remove cut intervals from keep ranges (e.g. stumbles inside kept speech)."""
+    if not keeps:
+        return []
+    if not cuts:
+        return keeps
+    out: list[KeepRange] = []
+    for kr in keeps:
+        pieces = [KeepRange(kr.start, kr.end, zoom=kr.zoom)]
+        for cs, ce in cuts:
+            nxt: list[KeepRange] = []
+            for p in pieces:
+                if ce <= p.start or cs >= p.end:
+                    nxt.append(p)
+                    continue
+                if cs > p.start + 0.05:
+                    nxt.append(KeepRange(p.start, min(p.end, cs), zoom=p.zoom))
+                if ce < p.end - 0.05:
+                    nxt.append(KeepRange(max(p.start, ce), p.end, zoom=p.zoom))
+            pieces = nxt
+        out.extend(p for p in pieces if p.duration >= 0.08)
+    return _merge_ranges(out)
+
+
 # ---------------------------------------------------------------------------
 # 2) Jump-cut zoom assignment
 # ---------------------------------------------------------------------------
@@ -432,6 +556,93 @@ def map_source_time_to_cut(src_t: float, keeps: list[KeepRange]) -> float | None
     return None
 
 
+def _escape_drawtext(text: str) -> str:
+    t = str(text or "").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    t = t.replace("%", "%%").replace("\n", " ")
+    return t[:64]
+
+
+def append_lower_thirds(
+    fc: list[str],
+    vlabel: str,
+    overlays: list[tuple[float, BrollHit]],
+    *,
+    width: int,
+    hold: float = 2.2,
+) -> str:
+    """Keyword lower-third text accents (drawtext) — no synthetic imagery."""
+    fontsize = max(28, int(width * 0.028))
+    seen: set[str] = set()
+    n = 0
+    for ct, h in overlays:
+        key = f"{h.keyword.lower()}@{ct:.1f}"
+        if key in seen:
+            continue
+        seen.add(key)
+        label = str(h.keyword or "").strip()
+        if not label:
+            continue
+        text = _escape_drawtext(label.title())
+        end = ct + min(hold, float(h.duration or hold))
+        enable = f"between(t\\,{ct:.3f}\\,{end:.3f})"
+        next_v = f"[lt{n}]"
+        fc.append(
+            f"{vlabel}drawtext=text='{text}':fontsize={fontsize}:fontcolor=white:"
+            f"borderw=2:bordercolor=black@0.65:"
+            f"box=1:boxcolor=black@0.55:boxborderw=14:"
+            f"x=56:y=h-132:enable='{enable}'{next_v}"
+        )
+        vlabel = next_v
+        n += 1
+    return vlabel
+
+
+def seconds_to_timecode(t: float, fps: int) -> str:
+    fps = max(1, int(fps))
+    total = max(0, int(round(float(t) * fps)))
+    ff = total % fps
+    total //= fps
+    ss = total % 60
+    total //= 60
+    mm = total % 60
+    hh = total // 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
+
+def write_cmx_edl(
+    path: Path,
+    *,
+    video: Path,
+    keeps: list[KeepRange],
+    fps: int,
+    title: str = "Polish Cut",
+) -> Path:
+    """Write a CMX 3600 EDL for further fine-tuning in Kdenlive / Shotcut / Resolve."""
+    lines = [
+        f"TITLE: {title}",
+        "FCM: NON-DROP FRAME",
+        "",
+    ]
+    rec_in = 0.0
+    for i, kr in enumerate(keeps, start=1):
+        src_in = seconds_to_timecode(kr.start, fps)
+        src_out = seconds_to_timecode(kr.end, fps)
+        rec_out_t = rec_in + kr.duration
+        rec_in_tc = seconds_to_timecode(rec_in, fps)
+        rec_out_tc = seconds_to_timecode(rec_out_t, fps)
+        lines.append(
+            f"{i:03d}  AX       V     C        "
+            f"{src_in} {src_out} {rec_in_tc} {rec_out_tc}"
+        )
+        lines.append(f"* FROM CLIP NAME: {video.name}")
+        lines.append(f"* SOURCE FILE: {video}")
+        lines.append("")
+        rec_in = rec_out_t
+    path = Path(path)
+    path.write_text("\n".join(lines))
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Pacing presets
 # ---------------------------------------------------------------------------
@@ -483,6 +694,8 @@ def self_evaluate(
     width: int,
     height: int,
     fps: int,
+    stumble_cuts: list[tuple[float, float]] | None = None,
+    lower_thirds: bool = True,
 ) -> EvalReport:
     report = EvalReport()
     if not keeps:
@@ -493,6 +706,8 @@ def self_evaluate(
         "cut_duration_s": round(total, 3),
         "segments": len(keeps),
         "broll_overlays": len(hits),
+        "stumble_cuts": len(stumble_cuts or []),
+        "lower_thirds": bool(lower_thirds and hits),
         "output": f"{width}x{height}@{fps}",
     }
     if total < 0.5:
@@ -557,6 +772,7 @@ def build_and_encode(
     broll_mode: str,
     face_reframe: bool,
     work: Path,
+    lower_thirds: bool = True,
 ) -> Path:
     which_or_die("ffmpeg")
     seg_paths: list[Path] = []
@@ -667,6 +883,9 @@ def build_and_encode(
         )
         vlabel = next_v
 
+    if lower_thirds and overlays:
+        vlabel = append_lower_thirds(fc, vlabel, overlays, width=width)
+
     # Audio graph
     # Speech from rough or external audio → acompressor + loudnorm
     # Music → sidechaincompress duck keyed by speech, then amix
@@ -732,6 +951,8 @@ def build_and_encode(
             next_v = f"[v{n}o]"
             fc_v.append(f"{vlabel}[ov{n}]overlay=x={x}:y={y}:enable='{enable}'{next_v}")
             vlabel = next_v
+        if lower_thirds and overlays:
+            vlabel = append_lower_thirds(fc_v, vlabel, overlays, width=width)
         # speech compress + loudnorm from rough/external
         if audio_idx is not None:
             fc_v.append(
@@ -781,6 +1002,8 @@ def build_and_encode(
             next_v = f"[v{n}o]"
             fc_v.append(f"{vlabel}[ov{n}]overlay=x={x}:y={y}:enable='{enable}'{next_v}")
             vlabel = next_v
+        if lower_thirds and overlays:
+            vlabel = append_lower_thirds(fc_v, vlabel, overlays, width=width)
         if audio_idx is not None:
             fc_v.append(
                 f"[{audio_idx}:a]atrim=0:{cut_dur:.3f},asetpts=PTS-STARTPTS,"
@@ -835,6 +1058,9 @@ def run_polish(
     height: int = 1080,
     fps: int = 60,
     face_reframe: bool = True,
+    cut_stumbles: bool = True,
+    lower_thirds: bool = True,
+    export_edl: bool = True,
     dry_run: bool = False,
     report_path: Path | None = None,
     keep_work: bool = False,
@@ -873,11 +1099,31 @@ def run_polish(
     keeps = keep_ranges_from_silence(
         dur, silences, sentence_pad=pacing.sentence_pad, words=words or None,
     )
+    stumble_cuts: list[tuple[float, float]] = []
+    if cut_stumbles and words:
+        stumble_cuts = find_stumble_ranges(words)
+        if stumble_cuts:
+            print(f"[polish_cut] cutting {len(stumble_cuts)} stumble/retake span(s)")
+            keeps = subtract_cuts_from_keeps(keeps, stumble_cuts)
     assign_jumpcut_zooms(keeps, amount=pacing.jump_zoom)
     hits = find_keyword_hits(words, keywords, Path(assets_dir) if assets_dir else None)
+    # Cap stacked B-roll density for self-eval: keep earliest unique keywords spaced ≥1.2s
+    hits_sorted = sorted(hits, key=lambda h: h.time)
+    spaced: list[BrollHit] = []
+    last_t = -999.0
+    for h in hits_sorted:
+        if h.time - last_t < 1.2 and spaced and spaced[-1].keyword.lower() != h.keyword.lower():
+            continue
+        if spaced and abs(h.time - spaced[-1].time) < 0.8:
+            continue
+        spaced.append(h)
+        last_t = h.time
+    hits = spaced[:24]
+
     report = self_evaluate(
         keeps=keeps, hits=hits, duration_src=dur,
         width=width, height=height, fps=fps,
+        stumble_cuts=stumble_cuts, lower_thirds=lower_thirds,
     )
     plan = {
         "video": str(video),
@@ -885,6 +1131,7 @@ def run_polish(
         "music": str(music) if music else None,
         "pacing": asdict(pacing),
         "silence_spans": silences,
+        "stumble_cuts": [{"start": a, "end": b} for a, b in stumble_cuts],
         "keep_ranges": [asdict(k) for k in keeps],
         "broll": [
             {
@@ -895,11 +1142,24 @@ def run_polish(
             }
             for h in hits
         ],
+        "lower_thirds": bool(lower_thirds),
         "eval": asdict(report),
+        "export": {
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "format_hint": "1080p60 ready for Kdenlive/Shotcut fine-tune via EDL",
+        },
     }
     if report_path:
         Path(report_path).write_text(json.dumps(plan, indent=2))
         print(f"[polish_cut] wrote report {report_path}")
+
+    edl_path = out.with_suffix(".edl") if export_edl else None
+    if export_edl:
+        write_cmx_edl(edl_path, video=video, keeps=keeps, fps=fps, title=out.stem)
+        plan["edl"] = str(edl_path)
+        print(f"[polish_cut] wrote EDL {edl_path}")
 
     for wmsg in report.warnings:
         print(f"[polish_cut] WARN: {wmsg}")
@@ -929,6 +1189,7 @@ def run_polish(
             broll_mode=broll_mode,
             face_reframe=face_reframe,
             work=work_root,
+            lower_thirds=lower_thirds,
         )
         out_dur = media_duration(encoded)
         if out_dur < 0.2:
@@ -971,6 +1232,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--silence-db", type=float, default=None, help="Override silence threshold dBFS")
     p.add_argument("--min-silence", type=float, default=None, help="Override min silence duration (s)")
     p.add_argument("--no-face-reframe", action="store_true", help="Disable OpenCV face bias crop")
+    p.add_argument("--no-stumbles", action="store_true",
+                   help="Keep fillers / stutters / retakes (default: cut from Whisper words)")
+    p.add_argument("--no-lower-thirds", action="store_true",
+                   help="Skip keyword lower-third drawtext accents")
+    p.add_argument("--no-edl", action="store_true",
+                   help="Skip CMX EDL export for Kdenlive/Shotcut")
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--fps", type=int, default=60)
@@ -1000,6 +1267,9 @@ def main(argv: list[str] | None = None) -> int:
             height=args.height,
             fps=args.fps,
             face_reframe=not args.no_face_reframe,
+            cut_stumbles=not args.no_stumbles,
+            lower_thirds=not args.no_lower_thirds,
+            export_edl=not args.no_edl,
             dry_run=args.dry_run,
             report_path=args.report,
             keep_work=args.keep_work,
