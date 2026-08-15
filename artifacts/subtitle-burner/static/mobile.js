@@ -139,13 +139,14 @@
 
   function toolsForSelection(sel) {
     const track = sel && sel.track;
+    const polish = { id: "polish", ico: "✨", label: "Polish" };
     if (!track) {
       return [
         { id: "add", ico: "＋", label: "Add" },
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "captions", ico: "Aa", label: "Captions" },
         { id: "sound", ico: "♪", label: "Sound" },
-        { id: "polish", ico: "✨", label: "Polish" },
+        polish,
         { id: "chat", ico: "💬", label: "Chat" },
         { id: "export", ico: "⚡", label: "Export" },
       ];
@@ -155,13 +156,14 @@
         { id: "clipstyle", ico: "✨", label: "Clip style" },
         { id: "split", ico: "✂", label: "Split" },
         { id: "captions", ico: "Aa", label: "Captions" },
-        { id: "polish", ico: "✨", label: "Polish" },
+        polish,
         { id: "effects", ico: "🎞", label: "Effects" },
         { id: "delete", ico: "🗑", label: "Delete" },
       ];
     }
     if (track === "overlay") {
       return [
+        polish,
         { id: "layout", ico: "▢", label: "Layout" },
         { id: "size", ico: "⇔", label: "Size" },
         { id: "kenburns", ico: "🔍", label: "Ken Burns" },

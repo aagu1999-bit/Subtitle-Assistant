@@ -152,9 +152,20 @@
   body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlUndoBtn,
   body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlRedoBtn,
   body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlDeleteProjectBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlCaptionsBtn,
+  body:not(.tl-toolbar-expanded) .tl-toolbar-right #tlAudioBtn,
   body:not(.tl-toolbar-expanded) .tl-toolbar-left #tlNewBtn,
   body:not(.tl-toolbar-expanded) .tl-toolbar-left #tlProjectSelect {
     display: none !important;
+  }
+  /* Always keep Polish + Render visible on phone toolbar */
+  body.is-phone .tl-toolbar-right #tlPolishBtn,
+  body.is-phone .tl-toolbar-right #tlRenderBtn {
+    display: inline-flex !important;
+  }
+  body.is-phone .tl-tltoolbar #tlPolishChip {
+    display: inline-flex !important;
+    order: -1;
   }
   body.tl-toolbar-expanded .tl-toolbar-right .tl-toolbar-secondary,
   body.tl-toolbar-expanded .tl-toolbar-right #tlStitchMainBtn,

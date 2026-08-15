@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-53-oss-engines";
+  const TL_BUILD = "studio-editor-build-54-polish-visible";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -5275,6 +5275,7 @@
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
         on("tlPolishBtn", "onclick", () => openPolishSheet());
+        on("tlPolishChip", "onclick", () => openPolishSheet());
         on("tlPolishClose", "onclick", () => closePolishSheet());
         on("tlPolishCancel", "onclick", () => closePolishSheet());
         on("tlPolishRun", "onclick", () => {
