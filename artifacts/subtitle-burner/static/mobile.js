@@ -422,7 +422,8 @@
       return;
     }
     if (toolId === "polish") {
-      if (typeof window.runTimelinePolish === "function") window.runTimelinePolish();
+      if (typeof window.openPolishSheet === "function") window.openPolishSheet();
+      else if (typeof window.runTimelinePolish === "function") window.runTimelinePolish();
       else alert("Polish is still loading — open Timeline again in a second.");
       return;
     }

@@ -9,7 +9,8 @@ Implements an FFmpeg-first post pipeline:
   2) Jump-cut smoothing via alternating ±2% digital zoom on keep segments.
   3) Optional face-centered reframe (OpenCV Haar if available; else center crop).
   4) Keyword-triggered B-roll PiP / opacity overlays from an asset folder.
-  5) Color grade (contrast ~+5%) + speech loudnorm (-14 LUFS) + music duck.
+  5) Color grade (contrast ~+5%) + speech acompressor + loudnorm (-14 LUFS)
+     + music sidechain duck.
 
 Does NOT generate synthetic visuals — only edits / composites real media.
 
@@ -75,6 +76,13 @@ def which_or_die(name: str) -> str:
     if not p:
         die(f"{name} not found on PATH")
     return p
+
+
+# Light peak tame before loudnorm — evening dialogue without squash-pump.
+SPEECH_DYN = (
+    "acompressor=threshold=-18dB:ratio=3:attack=5:release=80:makeup=2,"
+    "loudnorm=I=-14:TP=-1.5:LRA=7"
+)
 
 
 def ffprobe_json(path: Path) -> dict:
@@ -660,21 +668,18 @@ def build_and_encode(
         vlabel = next_v
 
     # Audio graph
-    # Speech from rough or external audio → loudnorm
-    # Music → volume + sidechain duck approx via volume enable on speech presence
-    # Practical duck: use sidechaincompress if music present; else just loudnorm speech.
+    # Speech from rough or external audio → acompressor + loudnorm
+    # Music → sidechaincompress duck keyed by speech, then amix
     alabel = None
     if audio_idx is not None:
         fc.append(
             f"[{audio_idx}:a]atrim=0:{cut_dur:.3f},asetpts=PTS-STARTPTS,"
-            f"loudnorm=I=-14:TP=-1.5:LRA=7[speech]"
+            f"{SPEECH_DYN}[speech]"
         )
         alabel = "[speech]"
     else:
         # From rough
-        fc.append(
-            f"[0:a]loudnorm=I=-14:TP=-1.5:LRA=7[speech]"
-        )
+        fc.append(f"[0:a]{SPEECH_DYN}[speech]")
         alabel = "[speech]"
 
     if music_idx is not None:
@@ -705,8 +710,8 @@ def build_and_encode(
     # If music ducking graph got messy, do a cleaner two-step encode.
     polished = work / "polished.mp4"
     if music_idx is not None:
-        # Step A: video (+ speech loudnorm only)
-        fc_v = [x for x in fc if ":a]" not in x and "loudnorm" not in x and "amix" not in x and "sidechain" not in x and "atrim" not in x]
+        # Step A: video (+ speech compressor/loudnorm)
+        fc_v = [x for x in fc if ":a]" not in x and "loudnorm" not in x and "acompressor" not in x and "amix" not in x and "sidechain" not in x and "atrim" not in x]
         # Rebuild video-only chain
         fc_v = []
         vlabel = "[0:v]"
@@ -727,14 +732,14 @@ def build_and_encode(
             next_v = f"[v{n}o]"
             fc_v.append(f"{vlabel}[ov{n}]overlay=x={x}:y={y}:enable='{enable}'{next_v}")
             vlabel = next_v
-        # speech loudnorm from rough/external
+        # speech compress + loudnorm from rough/external
         if audio_idx is not None:
             fc_v.append(
                 f"[{audio_idx}:a]atrim=0:{cut_dur:.3f},asetpts=PTS-STARTPTS,"
-                f"loudnorm=I=-14:TP=-1.5:LRA=7[speech]"
+                f"{SPEECH_DYN}[speech]"
             )
         else:
-            fc_v.append("[0:a]loudnorm=I=-14:TP=-1.5:LRA=7[speech]")
+            fc_v.append(f"[0:a]{SPEECH_DYN}[speech]")
         # music ducked with sidechaincompress keyed by speech, then amix
         fc_v.append(
             f"[{music_idx}:a]atrim=0:{cut_dur:.3f},asetpts=PTS-STARTPTS,volume=0.7[musicraw]"
@@ -756,7 +761,7 @@ def build_and_encode(
                str(polished)]
         run(cmd)
     else:
-        # Video overlays + speech loudnorm only
+        # Video overlays + speech compressor/loudnorm only
         fc_v = []
         vlabel = "[0:v]"
         for n, (idx, ct, h) in enumerate(broll_inputs):
@@ -779,11 +784,11 @@ def build_and_encode(
         if audio_idx is not None:
             fc_v.append(
                 f"[{audio_idx}:a]atrim=0:{cut_dur:.3f},asetpts=PTS-STARTPTS,"
-                f"loudnorm=I=-14:TP=-1.5:LRA=7[aout]"
+                f"{SPEECH_DYN}[aout]"
             )
             map_a = "[aout]"
         elif has_audio_stream(rough):
-            fc_v.append("[0:a]loudnorm=I=-14:TP=-1.5:LRA=7[aout]")
+            fc_v.append(f"[0:a]{SPEECH_DYN}[aout]")
             map_a = "[aout]"
         else:
             map_a = None

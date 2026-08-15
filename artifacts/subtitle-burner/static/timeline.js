@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-50-polish-cut";
+  const TL_BUILD = "studio-editor-build-51-polish-sheet";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4793,6 +4793,78 @@
     return !!(tl && tl.tracks && tl.tracks.main && tl.tracks.main.length);
   };
 
+  function overlayKeywordsCsv() {
+    if (!tl) return "";
+    const kws = [];
+    (tl.tracks.overlay || []).forEach((c) => {
+      const k = String(c.keyword || "").trim();
+      if (!k) return;
+      if (!kws.some((x) => x.toLowerCase() === k.toLowerCase())) kws.push(k);
+    });
+    return kws.join(", ");
+  }
+
+  function parsePolishRes(val) {
+    // "1920x1080@60" → { width, height, fps }
+    const m = String(val || "1920x1080@60").match(/^(\d+)x(\d+)@(\d+)$/);
+    if (!m) return { width: 1920, height: 1080, fps: 60 };
+    return { width: +m[1], height: +m[2], fps: +m[3] };
+  }
+
+  function collectPolishOptsFromForm() {
+    const res = parsePolishRes(($("tlPolishRes") && $("tlPolishRes").value) || "1920x1080@60");
+    const kwRaw = ($("tlPolishKeywords") && $("tlPolishKeywords").value || "").trim();
+    const keywords = kwRaw
+      ? kwRaw.split(/[,;]+/).map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    return {
+      pacing: ($("tlPolishPacing") && $("tlPolishPacing").value) || "informative",
+      broll_mode: ($("tlPolishBrollMode") && $("tlPolishBrollMode").value) || "pip",
+      face_reframe: !($("tlPolishFace") && !$("tlPolishFace").checked),
+      keywords,
+      width: res.width,
+      height: res.height,
+      fps: res.fps,
+    };
+  }
+
+  function openPolishSheet(prefill) {
+    const modal = $("tlPolishModal");
+    if (!modal) {
+      // Fallback if DOM missing — run with defaults / prefill
+      return runTimelinePolish(prefill || {});
+    }
+    if ($("tlPolishKeywords") && !$("tlPolishKeywords").value) {
+      $("tlPolishKeywords").value = overlayKeywordsCsv();
+    }
+    if (prefill && typeof prefill === "object") {
+      if (prefill.pacing && $("tlPolishPacing")) $("tlPolishPacing").value = prefill.pacing;
+      if (prefill.broll_mode && $("tlPolishBrollMode")) $("tlPolishBrollMode").value = prefill.broll_mode;
+      if (prefill.face_reframe != null && $("tlPolishFace")) {
+        $("tlPolishFace").checked = !!prefill.face_reframe;
+      }
+      if (prefill.keywords && $("tlPolishKeywords")) {
+        $("tlPolishKeywords").value = Array.isArray(prefill.keywords)
+          ? prefill.keywords.join(", ")
+          : String(prefill.keywords);
+      }
+      if (prefill.width && prefill.height && prefill.fps && $("tlPolishRes")) {
+        const key = `${prefill.width}x${prefill.height}@${prefill.fps}`;
+        const opt = $("tlPolishRes").querySelector(`option[value="${key}"]`);
+        if (opt) $("tlPolishRes").value = key;
+      }
+    }
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function closePolishSheet() {
+    const modal = $("tlPolishModal");
+    if (!modal) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
   async function runTimelinePolish(opts) {
     opts = opts || {};
     if (!tl || !tl.tracks.main.length) {
@@ -4800,34 +4872,46 @@
       return null;
     }
     const btn = $("tlPolishBtn");
+    const runBtn = $("tlPolishRun");
     if (btn) btn.disabled = true;
+    if (runBtn) runBtn.disabled = true;
     setRenderStatus("Polish queued…");
     try {
       await saveNow();
+      const body = {
+        job_id: tl.job_id,
+        timeline: serialize(),
+        pacing: opts.pacing || "informative",
+        broll_mode: opts.broll_mode || "pip",
+        face_reframe: opts.face_reframe !== false,
+        width: opts.width || 1920,
+        height: opts.height || 1080,
+        fps: opts.fps || 60,
+      };
+      if (opts.keywords && opts.keywords.length) body.keywords = opts.keywords;
       const res = await api("/timeline/polish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          job_id: tl.job_id,
-          timeline: serialize(),
-          pacing: opts.pacing || "informative",
-          broll_mode: opts.broll_mode || "pip",
-          keywords: opts.keywords || undefined,
-        }),
+        body: JSON.stringify(body),
       });
+      closePolishSheet();
       const polishId = res.polish_id;
       setRenderStatus(
-        `Polish running (${res.pacing || "informative"})…`
+        `Polish running (${res.pacing || body.pacing})…`
         + (res.keywords && res.keywords.length ? ` · ${res.keywords.length} B-roll keys` : "")
+        + (res.has_music ? " · music duck" : "")
       );
       return await pollPolish(polishId);
     } catch (e) {
       setRenderStatus("Polish error: " + e.message);
       if (btn) btn.disabled = false;
+      if (runBtn) runBtn.disabled = false;
       throw e;
     }
   }
   window.runTimelinePolish = runTimelinePolish;
+  window.openPolishSheet = openPolishSheet;
+  window.closePolishSheet = closePolishSheet;
 
   function pollPolish(polishId) {
     return new Promise((resolve, reject) => {
@@ -4841,6 +4925,7 @@
             clearInterval(pollTimer);
             setRenderStatus("Polish done ✓ — " + s.output);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             const v = $("tlPreviewVideo");
             if (v) {
               v.src = "/preview/" + s.output + "?t=" + Date.now();
@@ -4858,6 +4943,7 @@
             clearInterval(pollTimer);
             setRenderStatus("Polish error: " + (s.error || "failed"));
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             reject(new Error(s.error || "polish failed"));
           } else {
             setRenderStatus(`Polish ${s.status || "working"}… ${s.progress || 0}%`);
@@ -4869,6 +4955,7 @@
             clearInterval(pollTimer);
             setRenderStatus("Polish error: " + e.message);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+            if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             reject(e);
           }
         }
@@ -5166,7 +5253,18 @@
         on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
-        on("tlPolishBtn", "onclick", () => runTimelinePolish());
+        on("tlPolishBtn", "onclick", () => openPolishSheet());
+        on("tlPolishClose", "onclick", () => closePolishSheet());
+        on("tlPolishCancel", "onclick", () => closePolishSheet());
+        on("tlPolishRun", "onclick", () => {
+          runTimelinePolish(collectPolishOptsFromForm()).catch(() => {});
+        });
+        const polishModal = $("tlPolishModal");
+        if (polishModal) {
+          polishModal.addEventListener("click", (e) => {
+            if (e.target === polishModal) closePolishSheet();
+          });
+        }
         on("tlAddTitleBtn", "onclick", () => addTitle());
         ensureEffectsChrome();
         on("tlAddEffectBtn", "onclick", () => addEffectClip("punch_zoom"));
@@ -6509,7 +6607,7 @@
     { label: "Cinematic look", prompt: "Apply the cinematic clip style to this shot" },
     { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
     { label: "Accept all B-roll", prompt: "Accept all pending B-roll suggestions onto Overlay" },
-    { label: "Polish cut", prompt: "What does Polish cut do, and should I run it before Render?" },
+    { label: "Run Polish", prompt: "Run polish cut on the Main source with informative pacing and PiP B-roll" },
     { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
   ];
 
@@ -6880,6 +6978,26 @@
         } else if (name === "split_at_playhead") {
           splitAtPlayhead();
           notes.push("split at playhead");
+          applied++;
+        } else if (name === "run_polish") {
+          const polishOpts = {
+            pacing: op.pacing || "informative",
+            broll_mode: op.broll_mode || op.broll || "pip",
+            face_reframe: op.face_reframe !== false,
+          };
+          if (op.keywords) {
+            polishOpts.keywords = Array.isArray(op.keywords)
+              ? op.keywords
+              : String(op.keywords).split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+          }
+          if (op.width) polishOpts.width = Number(op.width) || 1920;
+          if (op.height) polishOpts.height = Number(op.height) || 1080;
+          if (op.fps) polishOpts.fps = Number(op.fps) || 60;
+          // Fire-and-poll; don't block the rest of ops on encode finish.
+          runTimelinePolish(polishOpts).catch((e) => {
+            console.warn("[co-editor] polish failed", e);
+          });
+          notes.push("Polish started (" + polishOpts.pacing + ")");
           applied++;
         }
       } catch (e) {

@@ -1271,17 +1271,19 @@
           <button id="tlCaptionLookBtn" class="btn btn-secondary hidden" type="button" title="Open Look" aria-hidden="true" tabindex="-1">Open Look</button>
           <button id="tlPolishBtn" class="btn btn-secondary tl-tipbtn" type="button"
             aria-describedby="tlPolishTip"
-            title="Silence cut + jump-cut zoom + B-roll polish on the Main source">
+            title="Open Polish options — silence cut, jump-cut, B-roll, audio master">
             ✨ Polish
             <span id="tlPolishTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
-              <strong>Polish cut</strong> — FFmpeg rough cut on the primary Main source
+              <strong>Polish cut</strong> — FFmpeg toolkit on the primary Main source
               <ul>
-                <li>✓ Silence removal (tight pacing)</li>
-                <li>✓ Alternating jump-cut zoom</li>
-                <li>✓ Keyword B-roll PiP from assets</li>
-                <li>✓ −14 LUFS + music duck if Music lane set</li>
+                <li>✓ Silence removal (pacing: fast / informative / cinematic)</li>
+                <li>✓ Alternating ±2% jump-cut zoom</li>
+                <li>✓ Face-bias reframe (optional)</li>
+                <li>✓ Keyword B-roll PiP or center plate</li>
+                <li>✓ Contrast grade + speech compress + −14 LUFS</li>
+                <li>✓ Music sidechain duck if Music lane set</li>
               </ul>
-              <em>Does not replace Timeline Render (captions/effects bake).</em>
+              <em>Opens options first. Does not replace Timeline Render (captions/effects bake).</em>
             </span>
           </button>
           <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
@@ -1496,6 +1498,69 @@
     </div>
   </div>
   <!-- /Tab: Editor -->
+
+  <!-- Polish cut options (full toolkit — not silent defaults) -->
+  <div id="tlPolishModal" class="ai-edit-modal hidden" aria-hidden="true">
+    <div class="ai-edit-modal-card" style="max-width:520px">
+      <div class="ai-edit-modal-head">
+        <strong>✨ Polish cut</strong>
+        <span class="muted" style="font-size:.78rem">Silence · jump-cut · B-roll · audio master on Main source</span>
+        <button type="button" id="tlPolishClose" class="tl-chip-btn" style="margin-left:auto" aria-label="Close">✕</button>
+      </div>
+      <div class="ai-edit-modal-body">
+        <p class="muted" style="font-size:.78rem;line-height:1.4;margin:0 0 12px">
+          Runs on the primary Main clip’s source video + transcript words.
+          Music lane beds are ducked under speech. This is <em>not</em> Timeline Render (no caption burn).
+        </p>
+        <div class="row">
+          <label style="min-width:110px" for="tlPolishPacing">Pacing</label>
+          <select id="tlPolishPacing" style="flex:1">
+            <option value="fast">Fast — tight silence cuts, punchy social</option>
+            <option value="informative" selected>Informative — balanced talk cut</option>
+            <option value="cinematic">Cinematic — looser pads, softer grade</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:110px" for="tlPolishBrollMode">B-roll</label>
+          <select id="tlPolishBrollMode" style="flex:1">
+            <option value="pip" selected>PiP — corner overlay</option>
+            <option value="center">Center — full-ish plate</option>
+          </select>
+        </div>
+        <div class="row" style="align-items:flex-start">
+          <label style="min-width:110px;padding-top:6px" for="tlPolishKeywords">Keywords</label>
+          <div style="flex:1;min-width:200px">
+            <input type="text" id="tlPolishKeywords" maxlength="400"
+              placeholder="wellness, focus, price — leave blank to use Overlay keywords"
+              style="width:100%;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font:inherit">
+            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Comma-separated. Matches assets in Media / assets folder at those words in the transcript.</p>
+          </div>
+        </div>
+        <div class="row">
+          <label style="min-width:110px" for="tlPolishRes">Output</label>
+          <select id="tlPolishRes" style="flex:1">
+            <option value="1920x1080@60" selected>1080p60 · 16:9</option>
+            <option value="1920x1080@30">1080p30 · 16:9</option>
+            <option value="1280x720@60">720p60 · 16:9</option>
+            <option value="1080x1920@60">1080×1920 · 9:16</option>
+            <option value="1080x1920@30">1080×1920@30 · 9:16</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="min-width:110px">Face reframe</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
+            <input type="checkbox" id="tlPolishFace" checked>
+            Bias crop toward talking-head / face when detected
+          </label>
+        </div>
+      </div>
+      <div class="ai-edit-modal-foot">
+        <button type="button" class="btn btn-secondary" id="tlPolishCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="tlPolishRun"
+          style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Run Polish</button>
+      </div>
+    </div>
+  </div>
 
   <!-- AI Edit plan modal (full video OR Shorts window → timeline seed) -->
   <div id="aiEditModal" class="ai-edit-modal hidden" aria-hidden="true">

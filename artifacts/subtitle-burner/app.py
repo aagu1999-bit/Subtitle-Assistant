@@ -10317,6 +10317,7 @@ HARD LIMITS (say no in message, ops: [])
 - Cannot rewrite individual transcript words, approve pending B-roll one-by-one, or download files.
 - Cannot change secrets/API keys or run arbitrary code.
 - suggest_broll queues suggestions for review. Only use accept_all_broll when pending_broll_count > 0 and the user explicitly asks to accept/place them.
+- run_polish starts an async FFmpeg polish job on the Main source (not Timeline Render). Say so in message; do not claim captions were burned.
 
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
@@ -10349,7 +10350,8 @@ Return ONLY JSON:
     {{"op": "accept_all_broll", "as_main": false}},
     {{"op": "skip_all_broll"}},
     {{"op": "split_at_playhead"}},
-    {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}}
+    {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}},
+    {{"op": "run_polish", "pacing": "informative", "broll_mode": "pip", "face_reframe": true}}
   ],
   "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
@@ -10366,6 +10368,7 @@ Rules:
 - "accept all B-roll / place suggestions" → accept_all_broll (only if pending_broll_count > 0). as_main:true for Main cutaways.
 - "skip all suggestions" → skip_all_broll.
 - "split here" → split_at_playhead (uses current playhead).
+- "polish / polish cut / run polish" → run_polish. pacing: fast|informative|cinematic. broll_mode: pip|center. Optional keywords array. Not the same as ▶ Render.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -10386,7 +10389,7 @@ Rules:
         "set_canvas", "set_fit", "set_color_grade", "add_title", "set_text",
         "apply_recommended_cuts", "merge_shots", "reorder_shot",
         "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
-        "accept_all_broll", "skip_all_broll", "split_at_playhead",
+        "accept_all_broll", "skip_all_broll", "split_at_playhead", "run_polish",
     }
     ops = []
     for op in raw_ops:
