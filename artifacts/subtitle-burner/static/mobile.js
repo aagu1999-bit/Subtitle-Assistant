@@ -321,6 +321,38 @@
       .replace(/'/g, "&#39;");
   }
 
+  function effectsPickerSheetHtml() {
+    const types = Array.isArray(window.EFFECT_TYPES) ? window.EFFECT_TYPES : [
+      { id: "punch_zoom", label: "Punch zoom", icon: "⚡" },
+      { id: "zoom_1_5", label: "1.5× Zoom hold", icon: "🔎" },
+      { id: "zoom_2x", label: "2× Zoom hold", icon: "🔍" },
+      { id: "ken_burns", label: "Ken Burns", icon: "🎞" },
+      { id: "color", label: "Color grade", icon: "🎨" },
+      { id: "split_screen", label: "Split-screen", icon: "⬓" },
+    ];
+    let html = `<div class="tl-sound-list">`;
+    types.forEach((t) => {
+      html += `<button type="button" class="tl-chip-btn" data-effect-pick="${escHtml(t.id)}" `
+        + `style="width:100%;text-align:left;justify-content:flex-start;margin-bottom:8px;font-size:14px;padding:10px 12px">`
+        + `${escHtml(t.icon)}  ${escHtml(t.label)}</button>`;
+    });
+    html += `</div>`;
+    return html;
+  }
+
+  function wireEffectsPickerSheet() {
+    document.querySelectorAll("[data-effect-pick]").forEach((btn) => {
+      btn.onclick = async () => {
+        const type = btn.dataset.effectPick;
+        closeToolSheet();
+        if (typeof window.addEffectClip !== "function") return;
+        const ec = await window.addEffectClip(type);
+        refreshContextTools();
+        if (ec) openPropsInSheet("Effect", "edit");
+      };
+    });
+  }
+
   function soundSheetHtml() {
     const audioAssets = (typeof window.listTimelineAudioAssets === "function")
       ? window.listTimelineAudioAssets()
@@ -466,9 +498,8 @@
       return;
     }
     if (toolId === "effects") {
-      if (typeof window.addEffectClip === "function") window.addEffectClip("punch_zoom");
-      refreshContextTools();
-      openPropsInSheet("Effect", "edit");
+      openToolSheet("Add effect", effectsPickerSheetHtml(), "effects");
+      wireEffectsPickerSheet();
       return;
     }
     if (toolId === "layout" || toolId === "size" || toolId === "kenburns"

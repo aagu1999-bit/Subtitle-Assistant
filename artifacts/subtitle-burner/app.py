@@ -3273,7 +3273,9 @@ def enhance_with_auphonic(video_path: Path, output_path: Path, settings: dict, s
     src_dur = _ffprobe_duration(video_path)
 
     if brand_trim > 0 and out_dur > 2 * brand_trim + 0.5 and src_dur > 2 * brand_trim + 0.5:
-        rebuilt = output_path.with_suffix(".rebuilt.aac")
+        # Match output_path's container (.m4a for the Timeline Render caller)
+        # so the rename below doesn't leave a raw-ADTS/MP4 mismatch on disk.
+        rebuilt = output_path.with_suffix(f".rebuilt{output_path.suffix or '.m4a'}")
         afmt = "aformat=sample_rates=44100:channel_layouts=stereo:sample_fmts=fltp"
 
         if splice_boundaries:
@@ -3648,7 +3650,10 @@ def _apply_isolation_postprocess(
         extras.append(f"volume={gain_db}dB")
     extras.append("alimiter=limit=0.97:level=disabled")
 
-    out_tmp = enhanced_path.with_suffix(".post.aac")
+    # Match enhanced_path's container so the final rename doesn't leave a
+    # raw-ADTS/MP4 mismatch on disk (matters for the .m4a path used by
+    # Timeline Render's _tl_apply_project_audio).
+    out_tmp = enhanced_path.with_suffix(f".post{enhanced_path.suffix or '.m4a'}")
     cmd: list[str] = [FFMPEG, "-y"]
 
     if has_blend:
@@ -4240,11 +4245,24 @@ cinematic pacing, prefer ken_burns and fewer punch_zooms. If it asks for viral /
 hooks / energy, prefer punch_zoom on strongest lines.
 """
     long_note = ""
-    if total >= 240:
+    if total >= 60:
+        third = total / 3.0
         long_note = f"""
-This is a LONGER cut (~{total / 60:.0f} min). Spread accents across the timeline —
-do not cluster everything in the first minute. Still prefer fewer, stronger moments
-(max {max_effects}).
+SPREAD REQUIREMENT — this edit is {total:.0f}s long, split it into thirds for
+planning purposes: hook [0s-{third:.0f}s], mid [{third:.0f}s-{2 * third:.0f}s],
+late [{2 * third:.0f}s-{total:.0f}s]. Place AT LEAST ONE accent in each third —
+energy has to last the whole runtime, not just the opening.
+Do NOT cluster all moves in the first 45-60 seconds; that is the single most
+common mistake and it makes the back half of the edit feel dead.
+For videos longer than 2 minutes, target roughly one accent every 20-35s of
+kept runtime (not source runtime) all the way to the end, not just the start.
+"""
+    if total >= 240:
+        long_note += f"""
+This is a LONGER cut (~{total / 60:.0f} min). Still prefer fewer, stronger
+moments than accents everywhere (max {max_effects}), but they must be spread
+the full length — a hook-heavy first minute followed by 3+ silent minutes is
+a failed edit even if the moves themselves are good.
 """
     hook_block = ""
     hook_shape = ""
@@ -4404,7 +4422,122 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
                for k in kept):
             continue
         kept.append(c)
+
+    # Gemini has a habit of front-loading energy into the first minute and
+    # going quiet for the rest of a long edit. Flag it loudly so it's easy to
+    # spot in logs — the caller (ai_edit_seed) runs _ensure_effects_span_timeline
+    # afterward to backfill sparse late regions.
+    if total > 90 and kept:
+        early_cutoff = total * 0.4
+        early_count = sum(1 for c in kept if c["start_time"] < early_cutoff)
+        if early_count / len(kept) > 0.7:
+            ai_logger.warning(
+                f"[ai-edit] effect suggestions are front-loaded: "
+                f"{early_count}/{len(kept)} start before {early_cutoff:.0f}s "
+                f"of a {total:.0f}s timeline"
+            )
     return kept
+
+
+def _ensure_effects_span_timeline(effects: list, t_in: float, t_out: float,
+                                   words: list | None, max_fx: int) -> list[dict]:
+    """Backfill sparse later regions of a long edit with light punch_zoom accents.
+
+    Gemini's effect suggestions tend to cluster in the first minute of a long
+    edit and go quiet after that, which reads as the energy dying halfway
+    through. This scans for gaps wider than ~30s with no effect coverage and
+    drops a short, low-intensity punch_zoom near the gap's midpoint —
+    snapped to the nearest transcript word so it lands on speech instead of
+    dead air. Never exceeds max_fx and never overlaps an existing effect.
+    """
+    span = t_out - t_in
+    if span < 90:
+        return effects
+
+    max_fx = max(1, int(max_fx or 4))
+    effects = list(effects or [])
+
+    # If the budget is already full but everything is stuck in the first ~40%,
+    # drop the weakest/latest-of-early accents to free slots for the back half.
+    if effects and span >= 90:
+        cutoff = t_in + span * 0.4
+        early = [e for e in effects if e["start_time"] < cutoff]
+        late = [e for e in effects if e["start_time"] >= cutoff]
+        if len(early) >= max(2, int(0.7 * len(effects))) and len(late) < 2:
+            keep_early = max(1, max_fx // 3)
+            early_sorted = sorted(early, key=lambda e: e["start_time"])
+            effects = early_sorted[:keep_early] + late
+            print(
+                f"[ai-edit] Front-loaded effects trimmed "
+                f"({len(early)} early → {keep_early}) to free budget for later accents",
+                flush=True,
+            )
+
+    if len(effects) >= max_fx:
+        return effects
+
+    target_gap = 30.0
+    sorted_fx = sorted(effects, key=lambda e: e["start_time"])
+
+    gaps: list[tuple[float, float]] = []
+    cursor = t_in
+    for e in sorted_fx:
+        if e["start_time"] - cursor > target_gap:
+            gaps.append((cursor, e["start_time"]))
+        cursor = max(cursor, e["end_time"])
+    if t_out - cursor > target_gap:
+        gaps.append((cursor, t_out))
+    if not gaps:
+        return effects
+
+    word_starts = sorted({
+        round(float(w.get("start", 0) or 0), 2)
+        for w in (words or [])
+        if t_in <= float(w.get("start", 0) or 0) <= t_out
+    })
+
+    lo, hi = _EFFECT_LIMITS["punch_zoom"]
+    dur = max(lo, min(hi, 1.0))
+    added: list[dict] = []
+    for gs, ge in gaps:
+        if len(effects) + len(added) >= max_fx:
+            break
+        if ge - gs < dur + 1.0:
+            continue  # gap too tight to fit an accent with breathing room
+        mid = (gs + ge) / 2.0
+        # Prefer gaps in the back half of the cut
+        if mid < t_in + span * 0.35 and any(g[0] >= t_in + span * 0.4 for g in gaps):
+            continue
+        anchor_t = min(word_starts, key=lambda w: abs(w - mid)) if word_starts else mid
+        start = min(max(anchor_t, gs + 0.5), ge - dur - 0.5)
+        end = start + dur
+        overlaps = any(start < e["end_time"] and e["start_time"] < end for e in effects + added)
+        if overlaps:
+            continue
+        quote = ""
+        for w in (words or []):
+            try:
+                ws = float(w.get("start", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(ws - start) < 1.5:
+                quote = str(w.get("word") or w.get("text") or "").strip()
+                if quote:
+                    break
+        added.append({
+            "type": "punch_zoom",
+            "start_time": round(start, 2),
+            "end_time": round(end, 2),
+            "intensity": "low",
+            "direction": "in",
+            "quote": quote[:120],
+            "reason": "auto energy accent — keep pacing alive past the first minute",
+            "auto_spread": True,
+        })
+    if added:
+        print(f"[ai-edit] Added {len(added)} late-timeline energy accent(s)", flush=True)
+        effects = sorted(effects + added, key=lambda e: e["start_time"])
+    return effects
 
 
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
@@ -5989,6 +6122,7 @@ def suggest_effects():
         gemini_error = str(exc)
 
     cleaned = _sanitize_effect_suggestions(suggestions, total)[:max_effects]
+    cleaned = _ensure_effects_span_timeline(cleaned, 0.0, total, words, max_effects)
     # Aim each push at the speaker rather than the centre of the frame, when
     # the reframe analysis has face data to aim with.
     for fx in cleaned:
@@ -7767,73 +7901,132 @@ def _tl_audio_wants_enhance(audio: dict | None) -> bool:
     return bool(build_audio_filter_chain(audio))
 
 
-def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: str) -> None:
-    """Apply Caption-look audio enhancement onto a finished timeline video."""
-    provider = str((audio or {}).get("provider") or "ffmpeg").lower()
-    enhanced = UPLOAD_DIR / f"{job_id}_tlaudio.aac"
+def _tl_passthrough_copy(video: Path, out_path: Path) -> bool:
+    """Best-effort copy of `video` to `out_path` so a render can still finish.
+
+    Tries a plain filesystem copy first (fastest, preserves container as-is),
+    then falls back to an ffmpeg stream copy if the destination needs a
+    different filename/container to satisfy downstream expectations.
+    """
     try:
-        if provider == "auphonic":
-            if not os.environ.get("AUPHONIC_API_KEY"):
-                raise RuntimeError("Auphonic is not configured (AUPHONIC_API_KEY not set).")
-            enhance_with_auphonic(video, enhanced, audio)
-        elif provider == "elevenlabs":
-            if not os.environ.get("ELEVENLABS_API_KEY"):
-                raise RuntimeError("ElevenLabs is not configured (ELEVENLABS_API_KEY not set).")
-            enhance_with_elevenlabs(video, enhanced, audio)
-        elif provider == "dolby":
-            if not os.environ.get("DOLBY_API_KEY"):
-                raise RuntimeError("Dolby is not configured (DOLBY_API_KEY not set).")
-            enhance_with_dolby(video, enhanced, audio)
-        else:
-            af = build_audio_filter_chain(audio)
-            if af:
-                apply_audio_enhancements(video, enhanced, af)
-            else:
-                # Offset-only: extract clean AAC then shift below.
-                proc = subprocess.run(
-                    [FFMPEG, "-y", "-i", str(video), "-vn", "-c:a", "aac", "-b:a", "192k",
-                     str(enhanced)],
-                    capture_output=True, text=True,
-                )
-                if proc.returncode != 0 or not enhanced.exists():
-                    raise RuntimeError(f"Audio extract failed: {(proc.stderr or '')[-400:]}")
-
-        if provider in ("auphonic", "elevenlabs"):
-            _apply_isolation_postprocess(enhanced, video, audio)
-
-        try:
-            offset_sec = float(audio.get("offset_seconds", 0) or 0)
-        except (TypeError, ValueError):
-            offset_sec = 0.0
-        if abs(offset_sec) >= 0.01 and enhanced.exists():
-            adjusted = enhanced.with_suffix(".offset.aac")
-            if offset_sec > 0:
-                cmd = [FFMPEG, "-y", "-i", str(enhanced), "-ss", f"{offset_sec:.3f}",
-                       "-c:a", "aac", "-b:a", "192k", str(adjusted)]
-            else:
-                delay_ms = int(round(abs(offset_sec) * 1000))
-                cmd = [FFMPEG, "-y", "-i", str(enhanced),
-                       "-af", f"adelay={delay_ms}|{delay_ms}",
-                       "-c:a", "aac", "-b:a", "192k", str(adjusted)]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode == 0 and adjusted.exists() and adjusted.stat().st_size > 0:
-                _safe_unlink(enhanced)
-                adjusted.rename(enhanced)
-            else:
-                _safe_unlink(adjusted)
-
-        if not enhanced.exists() or enhanced.stat().st_size < 64:
-            raise RuntimeError("Audio enhancement produced no usable audio.")
-        _tl_run(
-            [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
-             "-map", "0:v:0", "-map", "1:a:0",
-             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-             "-shortest", "-movflags", "+faststart", str(out_path)],
-            "Mux enhanced audio",
+        if out_path.resolve() == video.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        shutil.copyfile(video, out_path)
+        return out_path.exists() and out_path.stat().st_size > 0
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            [FFMPEG, "-y", "-i", str(video), "-c", "copy", "-movflags", "+faststart", str(out_path)],
+            capture_output=True, text=True,
         )
+        return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: str) -> None:
+    """Apply Caption-look audio enhancement onto a finished timeline video.
+
+    This must never blow up Timeline Render: any failure along the way is
+    logged and the function falls back to passing the original (pre-audio)
+    video straight through to `out_path` so the render can still complete.
+    """
+    provider = str((audio or {}).get("provider") or "ffmpeg").lower()
+    enhanced = UPLOAD_DIR / f"{job_id}_tlaudio.m4a"
+    try:
+        try:
+            if provider == "auphonic":
+                if not os.environ.get("AUPHONIC_API_KEY"):
+                    raise RuntimeError("Auphonic is not configured (AUPHONIC_API_KEY not set).")
+                enhance_with_auphonic(video, enhanced, audio)
+            elif provider == "elevenlabs":
+                if not os.environ.get("ELEVENLABS_API_KEY"):
+                    raise RuntimeError("ElevenLabs is not configured (ELEVENLABS_API_KEY not set).")
+                enhance_with_elevenlabs(video, enhanced, audio)
+            elif provider == "dolby":
+                if not os.environ.get("DOLBY_API_KEY"):
+                    raise RuntimeError("Dolby is not configured (DOLBY_API_KEY not set).")
+                enhance_with_dolby(video, enhanced, audio)
+            else:
+                af = build_audio_filter_chain(audio)
+                if af:
+                    apply_audio_enhancements(video, enhanced, af)
+                else:
+                    # Offset-only: extract clean AAC (in an mp4/m4a container) then shift below.
+                    proc = subprocess.run(
+                        [FFMPEG, "-y", "-i", str(video), "-vn", "-c:a", "aac", "-b:a", "192k",
+                         str(enhanced)],
+                        capture_output=True, text=True,
+                    )
+                    if proc.returncode != 0 or not enhanced.exists():
+                        raise RuntimeError(f"Audio extract failed: {(proc.stderr or '')[-400:]}")
+
+            if provider in ("auphonic", "elevenlabs"):
+                _apply_isolation_postprocess(enhanced, video, audio)
+
+            try:
+                offset_sec = float(audio.get("offset_seconds", 0) or 0)
+            except (TypeError, ValueError):
+                offset_sec = 0.0
+            if abs(offset_sec) >= 0.01 and enhanced.exists():
+                adjusted = enhanced.with_suffix(".offset.m4a")
+                if offset_sec > 0:
+                    cmd = [FFMPEG, "-y", "-i", str(enhanced), "-ss", f"{offset_sec:.3f}",
+                           "-c:a", "aac", "-b:a", "192k", str(adjusted)]
+                else:
+                    delay_ms = int(round(abs(offset_sec) * 1000))
+                    cmd = [FFMPEG, "-y", "-i", str(enhanced),
+                           "-af", f"adelay={delay_ms}|{delay_ms}",
+                           "-c:a", "aac", "-b:a", "192k", str(adjusted)]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0 and adjusted.exists() and adjusted.stat().st_size > 0:
+                    _safe_unlink(enhanced)
+                    adjusted.rename(enhanced)
+                else:
+                    _safe_unlink(adjusted)
+
+            if not enhanced.exists() or enhanced.stat().st_size < 64:
+                raise RuntimeError("Audio enhancement produced no usable audio.")
+
+            mux_attempts = [
+                [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
+                 "-map", "0:v:0", "-map", "1:a:0?",
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                 "-shortest", "-movflags", "+faststart", str(out_path)],
+                [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
+                 "-map", "0:v:0", "-map", "1:a:0?",
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                 "-movflags", "+faststart", str(out_path)],
+                [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
+                 "-map", "0:v:0", "-map", "1:a:0?",
+                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+                 "-shortest", "-movflags", "+faststart", str(out_path)],
+            ]
+            mux_err = ""
+            muxed = False
+            for cmd in mux_attempts:
+                if out_path.exists():
+                    _safe_unlink(out_path)
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1024:
+                    muxed = True
+                    break
+                mux_err = (proc.stderr or "")[-800:]
+            if not muxed:
+                raise RuntimeError(f"Mux enhanced audio failed: {mux_err}")
+        except Exception as err:
+            print(f"[timeline] Audio enhance skipped: {err}")
+            if out_path.exists():
+                _safe_unlink(out_path)
+            if not _tl_passthrough_copy(video, out_path):
+                raise
     finally:
         _safe_unlink(enhanced)
-        _safe_unlink(enhanced.with_suffix(".offset.aac"))
+        _safe_unlink(enhanced.with_suffix(".offset.m4a"))
 
 
 def _tl_run(cmd: list, what: str, job_id: str | None = None,
@@ -7917,8 +8110,17 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
     )
 
 
-_PUNCH_PEAK = {"low": 1.15, "med": 1.25, "high": 1.40, "strong": 1.40}
+_PUNCH_PEAK = {
+    "low": 1.15, "med": 1.25, "high": 1.40, "strong": 1.40,
+    # "Hold" zooms: snap to the target scale and stay there for the whole
+    # clip/effect duration instead of decaying back to 1.0 (see
+    # _PUNCH_HOLD_INTENSITIES below).
+    "1.5x": 1.5, "2x": 2.0, "hold_1_5": 1.5, "hold_2": 2.0,
+}
 PUNCH_DECAY_SECONDS = 0.45
+# Intensities that hold at their target scale for the whole duration rather
+# than easing back down to 1.0 — used by the 1.5x / 2x "Zoom hold" effects.
+_PUNCH_HOLD_INTENSITIES = {"1.5x", "2x", "hold_1_5", "hold_2"}
 
 
 def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
@@ -7964,13 +8166,18 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
         ax = ay = 0.5
 
     f0 = hit * max(1, fps)
-    fd = max(1.0, decay * max(1, fps))
-    # Progress through the decay, clamped so the frames before the hit read 0
-    # and everything after the settle reads 1.
-    u = f"min(1,max(0,(in-{f0:.3f})/{fd:.3f}))"
-    # gte() holds the zoom at 1.0 until the hit; without it the clamp above
-    # would park the frame at full zoom for the whole run-up.
-    z = f"1+{amp:.4f}*pow(1-{u},3)*gte(in,{f0:.3f})"
+    if punch_cfg.get("intensity") in _PUNCH_HOLD_INTENSITIES:
+        # Hold zoom: snap to the target scale at the hit and stay there for
+        # the rest of the clip — no ease-back-to-1.0 decay.
+        z = f"if(gte(in,{f0:.3f}),{peak:.4f},1)"
+    else:
+        fd = max(1.0, decay * max(1, fps))
+        # Progress through the decay, clamped so the frames before the hit read 0
+        # and everything after the settle reads 1.
+        u = f"min(1,max(0,(in-{f0:.3f})/{fd:.3f}))"
+        # gte() holds the zoom at 1.0 until the hit; without it the clamp above
+        # would park the frame at full zoom for the whole run-up.
+        z = f"1+{amp:.4f}*pow(1-{u},3)*gte(in,{f0:.3f})"
     return (
         f"zoompan=z='{z}':"
         f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
@@ -8802,7 +9009,7 @@ def _normalize_timeline(timeline: dict) -> dict:
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
     # Effect-lane clips: type + start + out(duration). Coerce common shapes.
-    _fx_types = {"split_screen", "punch_zoom", "ken_burns", "color"}
+    _fx_types = {"split_screen", "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color"}
     cleaned_fx = []
     for fx in tracks["effects"]:
         if not isinstance(fx, dict):
@@ -8888,10 +9095,18 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "intensity": fx.get("intensity") or "med",
                 "direction": fx.get("direction") or "in",
             }
-        elif ftype == "punch_zoom":
+        elif ftype in ("punch_zoom", "zoom_1_5", "zoom_2x"):
+            # zoom_1_5 / zoom_2x are "hold" punch zooms: constant scale for
+            # the whole effect window rather than the punch-and-decay curve.
+            if ftype == "zoom_1_5":
+                intensity = "1.5x"
+            elif ftype == "zoom_2x":
+                intensity = "2x"
+            else:
+                intensity = fx.get("intensity") or "med"
             punch = {
                 "enabled": True,
-                "intensity": fx.get("intensity") or "med",
+                "intensity": intensity,
                 "hit": float(fx.get("hit") or 0),
                 "decay": float(fx.get("decay") or 0.45),
             }
@@ -9201,7 +9416,18 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             output_path.replace(pre_audio)
             work.append(pre_audio)
             jobs[job_id]["audio"] = audio
-            _tl_apply_project_audio(pre_audio, audio, output_path, job_id)
+            try:
+                _tl_apply_project_audio(pre_audio, audio, output_path, job_id)
+            except Exception as audio_err:
+                # Never fail the whole Timeline Render over an audio-enhance
+                # hiccup — fall back to the pre-enhancement video untouched.
+                print(f"[timeline] Audio enhance skipped: {audio_err}")
+                if output_path.exists():
+                    _safe_unlink(output_path)
+                if not _tl_passthrough_copy(pre_audio, output_path):
+                    shutil.copyfile(pre_audio, output_path)
+                jobs[job_id]["status"] = "finalizing (audio enhance skipped)"
+                _db_save_job(job_id)
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError("Render produced an empty or missing output file.")
@@ -9300,6 +9526,24 @@ def delete_asset(asset_id: str):
         # Idempotent cleanup (Skip / Replace) — not a hard client error.
         return jsonify({"ok": True, "asset_id": asset_id, "removed": 0, "missing": True})
     return jsonify({"ok": True, "asset_id": asset_id, "removed": removed})
+
+
+@app.route("/rename-asset/<asset_id>", methods=["POST"])
+def rename_asset(asset_id: str):
+    """Set a human-friendly filename label for an uploaded asset.
+
+    Body: {filename}
+    """
+    if not asset_id or not re.fullmatch(r"[a-f0-9]{32}", asset_id):
+        return jsonify({"error": "Invalid asset id"}), 400
+    if not _find_asset_path(asset_id):
+        return jsonify({"error": "Unknown asset"}), 404
+    data = request.get_json(force=True) or {}
+    new_name = (data.get("filename") or "").strip()[:200]
+    if not new_name:
+        return jsonify({"error": "Filename cannot be empty"}), 400
+    _write_asset_meta(asset_id, filename=new_name)
+    return jsonify({"asset_id": asset_id, "filename": new_name})
 
 
 @app.route("/asset/<asset_id>")
@@ -9737,17 +9981,18 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
 
 def _intensity_effect_budget(intensity: str, duration_sec: float | None = None) -> int:
     base = {"low": 2, "med": 4, "high": 8}.get((intensity or "med").lower(), 4)
-    # Full-video / long-form edits need a few more accents without going wild.
+    # Full-video / long-form edits need a few more accents without going wild —
+    # otherwise energy dies off a cliff past the first minute. Cap at 24.
     try:
         dur = float(duration_sec or 0)
     except (TypeError, ValueError):
         dur = 0.0
-    if dur >= 600:
-        return min(16, base + 6)
     if dur >= 240:
-        return min(12, base + 4)
+        return min(24, base + 10)
     if dur >= 120:
-        return min(10, base + 2)
+        return min(18, base + 6)
+    if dur >= 60:
+        return min(14, base + 3)
     return base
 
 
@@ -10339,6 +10584,10 @@ def ai_edit_seed():
             )
         )
         effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
+        # Long edits from Gemini tend to front-load all the energy into the
+        # first minute — backfill quiet late stretches with light accents so
+        # the back half of the video isn't dead.
+        effects = _ensure_effects_span_timeline(effects, 0.0, total, win_words, max_fx)
         for fx in effects:
             if fx.get("type") == "punch_zoom":
                 anchor = _face_anchor_at(work_job_id, fx["start_time"])

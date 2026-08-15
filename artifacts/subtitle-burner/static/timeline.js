@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-60-workspace-focus-playback-fix";
+  const TL_BUILD = "studio-editor-build-61-effect-picker-zoom-hold-rename-no-titles";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -18,10 +18,12 @@
   const SNAP_PX = 10;      // magnetic snap threshold in screen pixels
   const TRACK_KEYS = ["main", "overlay", "effects", "text", "music"];
   const EFFECT_TYPES = [
-    { id: "split_screen", label: "Split-screen", icon: "⬓" },
     { id: "punch_zoom", label: "Punch zoom", icon: "⚡" },
-    { id: "ken_burns", label: "Ken Burns", icon: "🔍" },
+    { id: "zoom_1_5", label: "1.5× Zoom hold", icon: "🔎" },
+    { id: "zoom_2x", label: "2× Zoom hold", icon: "🔍" },
+    { id: "ken_burns", label: "Ken Burns", icon: "🎞" },
     { id: "color", label: "Color grade", icon: "🎨" },
+    { id: "split_screen", label: "Split-screen", icon: "⬓" },
   ];
 
   // ---- State ----
@@ -916,6 +918,14 @@
         e.stopPropagation();
         addEffectClip("split_screen", { source_job_id: s.job_id, placement: "second_bottom" });
       };
+      const ren = document.createElement("button");
+      ren.className = "tl-chip-btn";
+      ren.textContent = "✎";
+      ren.title = "Rename this video";
+      ren.onclick = (e) => {
+        e.stopPropagation();
+        renameSourceJob(s);
+      };
       const del = document.createElement("button");
       del.className = "tl-chip-btn tl-chip-danger";
       del.textContent = "✕";
@@ -927,11 +937,60 @@
       actions.appendChild(add);
       actions.appendChild(ov);
       actions.appendChild(fx);
+      actions.appendChild(ren);
       actions.appendChild(del);
       div.appendChild(actions);
       _bindLibraryDrag(div, { kind: "source", job_id: s.job_id });
       wrap.appendChild(div);
     });
+  }
+
+  async function renameSourceJob(s) {
+    if (!s || !s.job_id) return;
+    const current = s.filename || "";
+    const next = prompt("Rename this video:", current);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === current) return;
+    try {
+      const res = await fetch("/rename-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: s.job_id, filename: trimmed }),
+      });
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+      s.filename = trimmed;
+      renderSourceList();
+      renderTimeline(); // refreshes clip labels / logo dropdown that show source filenames
+      if (typeof window.renderJobsList === "function") window.renderJobsList();
+      setSaveState("Renamed ✓");
+    } catch (e) {
+      alert("Rename failed: " + e.message);
+    }
+  }
+
+  async function renameAsset(a) {
+    if (!a || !a.asset_id) return;
+    const current = a.filename || a.keyword || "";
+    const next = prompt("Rename this asset:", current);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === current) return;
+    try {
+      const j = await api("/rename-asset/" + a.asset_id, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: trimmed }),
+      });
+      if (j.error) throw new Error(j.error);
+      a.filename = trimmed;
+      renderAssetList();
+      renderTimeline(); // logo dropdown + overlay/music labels use asset filenames
+      setSaveState("Renamed ✓");
+    } catch (e) {
+      alert("Rename failed: " + e.message);
+    }
   }
 
   function removeSourceFromMedia(s) {
@@ -1142,6 +1201,17 @@
           }, a);
         };
         actions.appendChild(asMain);
+      }
+      if (!replacing) {
+        const ren = document.createElement("button");
+        ren.className = "tl-chip-btn";
+        ren.textContent = "✎";
+        ren.title = "Rename this asset";
+        ren.onclick = (e) => {
+          e.stopPropagation();
+          renameAsset(a);
+        };
+        actions.appendChild(ren);
       }
       const del = document.createElement("button");
       del.className = "tl-chip-btn tl-chip-danger";
@@ -2198,7 +2268,9 @@
     // preview is showing a trimmed/reordered Main clip.
     const start = opts.start != null ? Number(opts.start) : (playheadOutputTime() ?? (v ? (v.currentTime || 0) : 0));
     const dur = opts.out != null ? Number(opts.out) : (
-      ftype === "punch_zoom" ? 1.2 : ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4 : 3
+      ftype === "punch_zoom" ? 1.2 :
+      (ftype === "zoom_1_5" || ftype === "zoom_2x") ? 2.5 :
+      ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4 : 3
     );
     const ec = {
       id: uid(),
@@ -2229,10 +2301,89 @@
     return ec;
   }
 
+  // Small modal listing EFFECT_TYPES as buttons. Reuses #tlWorkspaceModal so
+  // it works on both desktop and mobile without any extra markup.
+  function openEffectPicker() {
+    openWorkspacePanel("✨ Add effect", {
+      fillFn: (body) => {
+        const wrap = document.createElement("div");
+        wrap.className = "tl-effect-picker";
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:4px 2px";
+        EFFECT_TYPES.forEach((t) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "tl-chip-btn";
+          btn.style.cssText = "text-align:left;justify-content:flex-start;font-size:14px;padding:10px 12px";
+          btn.textContent = `${t.icon}  ${t.label}`;
+          btn.onclick = async () => {
+            closeWorkspacePanel();
+            const ec = await addEffectClip(t.id);
+            if (ec && t.id === "split_screen") {
+              // Split-screen needs a second source + timeframe picked right away.
+              openWorkspacePanel("✎ Clip properties", { mode: "props" });
+            }
+          };
+          wrap.appendChild(btn);
+        });
+        body.innerHTML = "";
+        body.appendChild(wrap);
+      },
+    });
+  }
+
+  // Mini dialog for picking the split-screen second video's IN point by
+  // scrubbing the actual footage instead of guessing a number.
+  function openSplitScrubDialog(c) {
+    if (!c || !c.source_job_id) {
+      alert("Pick a second video first.");
+      return;
+    }
+    const overlay = document.createElement("div");
+    overlay.className = "tl-split-scrub-overlay";
+    overlay.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px";
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:#161a24;border:1px solid #333c4d;border-radius:12px;padding:16px;max-width:480px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.5)";
+    box.innerHTML =
+      `<h3 style="margin:0 0 10px;font-size:15px;color:#fff">Scrub 2nd video</h3>` +
+      `<video id="tlSplitScrubVideo" src="/raw-upload/${encodeURIComponent(c.source_job_id)}" controls playsinline ` +
+      `style="width:100%;max-height:60vh;border-radius:8px;background:#000;display:block"></video>` +
+      `<div style="display:flex;align-items:center;gap:8px;margin-top:12px">` +
+      `<span class="muted" id="tlSplitScrubTime" style="font-size:.78rem;margin-right:auto">0.0s</span>` +
+      `<button type="button" class="tl-chip-btn" id="tlSplitScrubCancel">Cancel</button>` +
+      `<button type="button" class="btn btn-primary" id="tlSplitScrubUse">Use current time as 2nd IN</button>` +
+      `</div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const video = box.querySelector("#tlSplitScrubVideo");
+    const timeEl = box.querySelector("#tlSplitScrubTime");
+    const updTime = () => { timeEl.textContent = `${(video.currentTime || 0).toFixed(1)}s`; };
+    video.addEventListener("timeupdate", updTime);
+    video.addEventListener("loadedmetadata", () => {
+      if (c.in) { try { video.currentTime = Math.min(c.in, video.duration || c.in); } catch (e) { /* ignore */ } }
+      updTime();
+    }, { once: true });
+
+    const close = () => overlay.remove();
+    box.querySelector("#tlSplitScrubCancel").onclick = close;
+    box.querySelector("#tlSplitScrubUse").onclick = () => {
+      pushHistory();
+      c.in = Math.max(0, video.currentTime || 0);
+      close();
+      renderProps();
+      scheduleSave();
+    };
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  }
+
   // Inject Effects lane + toolbar button if the HTML template is stale
   // (common when JS cache-busts ahead of a Flask restart / old index.html).
   function ensureEffectsChrome() {
     const tracks = $("tlTracks");
+    // Titles lane is intentionally removed from the UI — don't re-inject it,
+    // and don't use it as an insertion anchor for the Effects lane anymore.
     if (tracks && !document.querySelector('.tl-track[data-track="effects"]')) {
       const row = document.createElement("div");
       row.className = "tl-track";
@@ -2241,28 +2392,28 @@
         '<div class="tl-track-label">✨ Effects</div>' +
         '<div class="tl-track-lane" data-lane="effects"></div>';
       const overlay = tracks.querySelector('.tl-track[data-track="overlay"]');
-      const text = tracks.querySelector('.tl-track[data-track="text"]');
+      const music = tracks.querySelector('.tl-track[data-track="music"]');
       if (overlay && overlay.nextSibling) tracks.insertBefore(row, overlay.nextSibling);
-      else if (text) tracks.insertBefore(row, text);
+      else if (music) tracks.insertBefore(row, music);
       else tracks.appendChild(row);
       console.log("[timeline] injected missing Effects track into DOM");
     }
     if (!$("tlAddEffectBtn")) {
-      const titleBtn = $("tlAddTitleBtn");
-      if (titleBtn && titleBtn.parentNode) {
+      const anchorBtn = $("tlDupBtn") || $("tlPasteBtn") || $("tlCopyBtn") || $("tlDeleteBtn");
+      if (anchorBtn && anchorBtn.parentNode) {
         const btn = document.createElement("button");
         btn.id = "tlAddEffectBtn";
         btn.className = "tl-chip-btn";
         btn.title = "Add a timed effect on the Effects lane (split-screen, punch, Ken Burns, color)";
         btn.textContent = "+ Effect";
-        titleBtn.parentNode.insertBefore(btn, titleBtn.nextSibling);
+        anchorBtn.parentNode.insertBefore(btn, anchorBtn.nextSibling);
         console.log("[timeline] injected missing + Effect button into DOM");
       }
     }
     const fxBtn = $("tlAddEffectBtn");
     if (fxBtn && !fxBtn.dataset.wired) {
       fxBtn.dataset.wired = "1";
-      fxBtn.onclick = () => addEffectClip("punch_zoom");
+      fxBtn.onclick = () => openEffectPicker();
     }
   }
 
@@ -3206,8 +3357,18 @@
   // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
   // The renderer snaps to the peak on the hit and eases out on a cubic, so the
   // preview has to use the same numbers or the move previews wrong.
-  const PUNCH_PEAK = { low: 1.15, med: 1.25, high: 1.40, strong: 1.40 };
+  const PUNCH_PEAK = {
+    low: 1.15, med: 1.25, high: 1.40, strong: 1.40,
+    "1.5x": 1.5, "2x": 2.0, hold_1_5: 1.5, hold_2: 2.0,
+  };
   const PUNCH_DECAY = 0.45;
+  // "Hold" intensities snap to their target scale at the hit and stay there
+  // for the whole duration instead of easing back to 1.0 — see
+  // _PUNCH_HOLD_INTENSITIES in app.py.
+  const PUNCH_HOLD_INTENSITIES = new Set(["1.5x", "2x", "hold_1_5", "hold_2"]);
+  // Effects-lane fx types that behave like punch_zoom for preview purposes,
+  // mapped to the intensity they should render at.
+  const ZOOM_HOLD_LANE_TYPES = { zoom_1_5: "1.5x", zoom_2x: "2x" };
 
   function punchScaleAt(cfg, tRel) {
     const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
@@ -3215,9 +3376,24 @@
     if (amp <= 0) return 1;
     const hit = Math.max(0, Number(cfg.hit) || 0);
     if (tRel < hit) return 1;
+    if (PUNCH_HOLD_INTENSITIES.has(cfg.intensity)) return peak;
     const decay = Math.max(0.05, Number(cfg.decay) || PUNCH_DECAY);
     const u = Math.min(1, Math.max(0, (tRel - hit) / decay));
     return 1 + amp * Math.pow(1 - u, 3);
+  }
+
+  // Effects-lane lookup that also matches zoom_1_5 / zoom_2x "hold" clips,
+  // returning a punch_zoom-shaped object (with `.intensity` normalised) so
+  // callers can treat them exactly like a punch_zoom lane effect.
+  function activePunchLikeEffect(ot) {
+    const list = activeEffectsAt(ot);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const fx = list[i];
+      if (fx.type === "punch_zoom") return fx;
+      const heldIntensity = ZOOM_HOLD_LANE_TYPES[fx.type];
+      if (heldIntensity) return Object.assign({}, fx, { intensity: heldIntensity });
+    }
+    return null;
   }
 
   // Mirrors _KENBURNS_INTENSITY in app.py — slow zoom ramp over the clip.
@@ -3235,7 +3411,7 @@
   // Effects-lane clips override Main-clip props when active at the playhead.
   function applyPunchZoom(v, ot) {
     if (!v || !tl) return;
-    const lanePunch = activeEffectOfType(ot, "punch_zoom");
+    const lanePunch = activePunchLikeEffect(ot);
     const laneKen = activeEffectOfType(ot, "ken_burns");
     for (let i = 0; i < tl.tracks.main.length; i++) {
       const c = tl.tracks.main[i];
@@ -4009,7 +4185,9 @@
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start || 0, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", clipDuration(c), 0.2, 120, 0.1)}</div>`;
       html += `<p class="muted" style="font-size:.72rem">Drag the clip on the Effects lane to change when it runs. Main-clip effects still work; lane effects win while they overlap.</p>`;
       if (c.type === "punch_zoom") {
-        html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Low"], ["med", "Medium"], ["high", "Strong"], ["strong", "Strong"]])}</div>`;
+        html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["1.5x", "1.5× hold"], ["2x", "2× hold"], ["low", "Low punch"], ["med", "Medium punch"], ["high", "Strong punch"], ["strong", "Strong punch"]])}</div>`;
+      } else if (c.type === "zoom_1_5" || c.type === "zoom_2x") {
+        html += `<p class="muted" style="font-size:.72rem">Constant ${c.type === "zoom_1_5" ? "1.5×" : "2×"} zoom held for the whole effect window — no ease-out.</p>`;
       } else if (c.type === "ken_burns") {
         html += `<div class="tl-prop-grid">${propSelect("direction", "Direction", c.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       } else if (c.type === "split_screen") {
@@ -4017,6 +4195,7 @@
           sources.map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
         html += propSelect("source_job_id", "Second video", c.source_job_id || "", splitOpts);
         html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1)}</div>`;
+        html += `<button type="button" class="btn btn-secondary btn-block" data-act="split-scrub" ${c.source_job_id ? "" : "disabled"} style="margin:2px 0 8px">🎬 Scrub 2nd video…</button>`;
         const lay = c.layout || "stack";
         const place = c.placement || (lay === "side" ? "second_right" : "second_bottom");
         if (lay === "side") {
@@ -4153,7 +4332,7 @@
       fxBody += `<div class="tl-fx-block"><strong>⚡ Punch zoom</strong>`;
       fxBody += propCheck("punch_zoom.enabled", "Enable", pz.enabled);
       if (pz.enabled) {
-        fxBody += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
+        fxBody += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["1.5x", "1.5× hold"], ["2x", "2× hold"], ["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
       }
       fxBody += `</div>`;
 
@@ -4230,7 +4409,8 @@
     }
     const imgVid = assets.filter((a) => a.kind === "image" || a.kind === "video");
     const lg = tl.logo || {};
-    const opts = [["", "— no logo —"]].concat(imgVid.map((a) => [a.asset_id, `${a.kind} · ${a.ext}`]));
+    const opts = [["", "— no logo —"]].concat(imgVid.map((a) =>
+      [a.asset_id, a.filename || a.keyword || `${a.kind} · ${a.ext}`]));
     let html = `<h3>⚙ Project</h3>`;
     html += `<p class="muted" style="font-size:.74rem;line-height:1.4">No clip selected. Drag media onto lanes, or open Captions / Audio below.</p>`;
     html += `<p class="muted" style="font-size:.72rem;line-height:1.4">Project name is the field in the top toolbar; it auto-saves while typing, or press <strong>Save name</strong> to commit it right away.</p>`;
@@ -4485,6 +4665,8 @@
       c.out = Math.min(c._max || 1e9, Math.max(t, (c.in || 0) + 0.2));
       renderTimeline(); scheduleSave();
     };
+    const scrub2 = wrap.querySelector('[data-act="split-scrub"]');
+    if (scrub2) scrub2.onclick = () => openSplitScrubDialog(c);
     const sfx = wrap.querySelector('[data-act="suggestfx"]');
     if (sfx) sfx.onclick = () => suggestEffectsFor(c, sfx);
     const restyle = wrap.querySelector('[data-act="restyle"]');
@@ -5718,9 +5900,11 @@
         on("tlPropsBtn", "onclick", () => {
           openWorkspacePanel(selected ? "✎ Clip properties" : "⚙ Project properties", { mode: "props" });
         });
-        on("tlAddTitleBtn", "onclick", () => addTitle());
+        // Titles lane removed from the UI — + Title button no longer exists;
+        // addTitle() is kept unwired so existing projects with text clips
+        // still render correctly (see _tl_build_titles_ass).
         ensureEffectsChrome();
-        on("tlAddEffectBtn", "onclick", () => addEffectClip("punch_zoom"));
+        on("tlAddEffectBtn", "onclick", () => openEffectPicker());
         on("tlPlaySeqBtn", "onclick", () => playSequencePreview());
         on("tlSplitBtn", "onclick", () => splitAtPlayhead());
         on("tlCopyBtn", "onclick", () => copySelectedClip());
@@ -5850,6 +6034,8 @@
   window.ensureTimelineInit = ensureInit;
   window.addOverlayClip = addOverlayClip;
   window.addEffectClip = addEffectClip;
+  window.openEffectPicker = openEffectPicker;
+  window.EFFECT_TYPES = EFFECT_TYPES;
   window.getTimelineSelection = function () {
     return selected ? { track: selected.track, id: selected.id } : null;
   };
