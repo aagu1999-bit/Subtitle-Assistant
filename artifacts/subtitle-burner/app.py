@@ -336,7 +336,9 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
         },
         "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
-        "add_title": True,
+        # AI Edit no longer seeds text overlays (see _build_ai_edit_timeline) —
+        # kept False rather than removed in case older saved projects read it.
+        "add_title": False,
     },
     "velocity": {
         "label": "Velocity",
@@ -852,7 +854,8 @@ threading.Thread(target=_get_whisper_model, daemon=True).start()
 
 # Phone MOVs / large MP4s often put the moov atom at the end. Default ffprobe
 # probesize can miss streams and look like "no audio" even when sound exists.
-_FFPROBE_DEEP = ["-analyzeduration", "100M", "-probesize", "100M"]
+# 200M covers a full 10-minute 4K iPhone MOV without truncating the probe.
+_FFPROBE_DEEP = ["-analyzeduration", "200M", "-probesize", "200M"]
 
 
 def _probe_media_streams(path: Path) -> dict:
@@ -964,6 +967,63 @@ def _validate_uploaded_media(path: Path, expected_bytes: int | None = None) -> d
             "or not a real media export. Re-upload and try again."
         )
     return probe
+
+
+def _repair_uploaded_media(path: Path) -> Path | None:
+    """Best-effort container repair for uploads ffprobe can't read at all.
+
+    Some phone exports (long MOVs especially) land with a container flavor
+    or moov-atom layout that FFmpeg's demuxer chokes on even at a deep probe.
+    A plain stream copy into a fresh MP4 fixes most of these without
+    touching a single frame; only re-encode if the copy itself fails (rare,
+    usually a genuinely damaged stream).
+
+    On success, replaces *path* on disk with the fixed file — same job_id
+    stem, `.mp4` extension — and returns the new Path. Returns None (leaving
+    the original file untouched) if nothing could be salvaged.
+    """
+    tmp = path.with_name(f".{path.stem}.repair.mp4")
+    _safe_unlink(tmp)
+    base = [FFMPEG, "-y", "-analyzeduration", "200M", "-probesize", "200M", "-i", str(path)]
+    attempts = [
+        ("remux copy", base + ["-c", "copy", "-movflags", "+faststart", str(tmp)]),
+        ("re-encode", base + [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp),
+        ]),
+    ]
+    for label, cmd in attempts:
+        _safe_unlink(tmp)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"[repair] {path.name} {label} attempt errored: {e}", flush=True)
+            continue
+        if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 8_192:
+            _safe_unlink(tmp)
+            continue
+        probe = _probe_media_streams(tmp)
+        if probe.get("error") or (not probe.get("has_video") and not probe.get("has_audio")):
+            _safe_unlink(tmp)
+            continue
+        final = path if path.suffix.lower() == ".mp4" else path.with_suffix(".mp4")
+        try:
+            if final != path:
+                _safe_unlink(path)
+            elif final.exists():
+                _safe_unlink(final)
+            try:
+                tmp.replace(final)
+            except OSError:
+                shutil.move(str(tmp), str(final))
+        except OSError as e:
+            print(f"[repair] {path.name} could not swap in fixed file: {e}", flush=True)
+            _safe_unlink(tmp)
+            return None
+        print(f"[repair] {path.name} -> {final.name} via {label}", flush=True)
+        return final
+    _safe_unlink(tmp)
+    return None
 
 
 def _extract_whisper_wav(video_path: Path, pre_clean: bool = False) -> Path:
@@ -4224,7 +4284,9 @@ def _snap_clip_to_target_durations(clips: list, words: list,
 # editor already supports by hand.
 _EFFECT_LIMITS = {
     # type: (min duration, max duration)
-    "punch_zoom": (0.6, 3.0),    # quick emphasis push-in
+    "punch_zoom": (0.6, 3.0),    # fast push-in — structural beats only
+    "zoom_1_5": (1.2, 4.0),      # 1.5x hold — light mid-video emphasis
+    "zoom_2x": (1.0, 3.5),       # 2x hold — strong mid-video emphasis
     "ken_burns": (3.0, 12.0),    # slow drift over a longer stretch
     "split_screen": (1.0, 15.0),  # both speakers framed together
 }
@@ -4284,14 +4346,18 @@ Report it in "structure" below — this is separate from the camera-move effects
 {purpose_block}{long_note}{hook_block}
 Choose at most {max_effects} moments. Fewer is better — a move that isn't motivated is worse than no move at all. Never cover the whole video; these are accents.
 
-Effects you may place:
-- "punch_zoom": a fast push-in for emphasis. Use on a punchline, a strong claim, a reaction, a name drop, or an emotional beat. Duration {_EFFECT_LIMITS['punch_zoom'][0]}-{_EFFECT_LIMITS['punch_zoom'][1]}s, tight around the line itself.
-- "ken_burns": a slow drift that keeps a static shot alive. Use on longer explanation or storytelling stretches where nothing else is moving. Duration {_EFFECT_LIMITS['ken_burns'][0]}-{_EFFECT_LIMITS['ken_burns'][1]}s.
+Effects you may place (pick the RIGHT tool — do not overuse punch_zoom):
+- "punch_zoom": FAST push-in for a STRUCTURAL beat only — scene/scenery change, hook→intro pivot, major topic shift, section boundary. Use sparingly (typically 1–3 in a full video). Duration {_EFFECT_LIMITS['punch_zoom'][0]}-{_EFFECT_LIMITS['punch_zoom'][1]}s.
+- "zoom_1_5": HOLD at 1.5x while someone says something interesting, answers a question, or lightly emphasizes a phrase. Duration {_EFFECT_LIMITS['zoom_1_5'][0]}-{_EFFECT_LIMITS['zoom_1_5'][1]}s. This should be the MOST COMMON mid-video accent.
+- "zoom_2x": HOLD at 2x for stronger emphasis — funny line, blunt take, hot take, big claim. Duration {_EFFECT_LIMITS['zoom_2x'][0]}-{_EFFECT_LIMITS['zoom_2x'][1]}s. Less common than zoom_1_5.
+- "ken_burns": slow drift on longer explanation stretches. Duration {_EFFECT_LIMITS['ken_burns'][0]}-{_EFFECT_LIMITS['ken_burns'][1]}s.
 
 Rules:
 - Effects must not overlap each other.
 - Anchor each one to what is actually said at that timestamp; quote it.
 - Keep every time within 0 and {total:.1f} seconds.
+- Prefer zoom_1_5 / zoom_2x for mid-sentence emphasis. Do NOT use punch_zoom for those — save punch_zoom for real structural beats (scenery/topic/section changes).
+- At most ~20% of accents should be punch_zoom on videos longer than 90s.
 - intensity is "low", "med" or "strong". Reserve "strong" for the single biggest beat.
 - For ken_burns, direction is "in" (push in) or "out" (pull back).
 
@@ -4300,12 +4366,30 @@ Return JSON in exactly this shape:
   "effects": [
     {{
       "type": "punch_zoom",
+      "start_time": 4.0,
+      "end_time": 5.4,
+      "intensity": "strong",
+      "direction": "in",
+      "quote": "the exact words at the section/topic change",
+      "reason": "hook pivots into the introduction — structural beat"
+    }},
+    {{
+      "type": "zoom_1_5",
       "start_time": 12.4,
-      "end_time": 13.9,
+      "end_time": 14.9,
       "intensity": "med",
       "direction": "in",
-      "quote": "the exact words being emphasised",
-      "reason": "why this moment earns a camera move"
+      "quote": "the exact words being lightly emphasised",
+      "reason": "interesting claim worth leaning into"
+    }},
+    {{
+      "type": "zoom_2x",
+      "start_time": 38.1,
+      "end_time": 40.0,
+      "intensity": "strong",
+      "direction": "in",
+      "quote": "the exact words of the hot take",
+      "reason": "blunt hot take — the strongest line in this stretch"
     }}
   ]{hook_shape}
 }}
@@ -4378,7 +4462,14 @@ def _face_anchor_at(job_id: str, t: float) -> dict | None:
 
 
 def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
-    """Clamp to the video, enforce per-type durations, drop overlaps."""
+    """Clamp to the video, enforce per-type durations, drop overlaps.
+
+    Accepts punch_zoom, zoom_1_5, zoom_2x, ken_burns, split_screen (anything
+    else is dropped) — the membership check is just "is it in
+    _EFFECT_LIMITS". intensity stays a free "low"/"med"/"strong" label here
+    even for the zoom holds; the effects-lane renderer maps zoom_1_5/zoom_2x
+    to their fixed scale factor later (intensity is cosmetic for those two).
+    """
     cleaned: list[dict] = []
     for e in raw or []:
         kind = str(e.get("type", "")).strip()
@@ -4441,14 +4532,16 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
 
 def _ensure_effects_span_timeline(effects: list, t_in: float, t_out: float,
                                    words: list | None, max_fx: int) -> list[dict]:
-    """Backfill sparse later regions of a long edit with light punch_zoom accents.
+    """Backfill sparse later regions of a long edit with light zoom_1_5 accents.
 
     Gemini's effect suggestions tend to cluster in the first minute of a long
     edit and go quiet after that, which reads as the energy dying halfway
     through. This scans for gaps wider than ~30s with no effect coverage and
-    drops a short, low-intensity punch_zoom near the gap's midpoint —
+    drops a short, low-intensity zoom_1_5 hold near the gap's midpoint —
     snapped to the nearest transcript word so it lands on speech instead of
-    dead air. Never exceeds max_fx and never overlaps an existing effect.
+    dead air. Uses zoom_1_5 (not punch_zoom) because these are mid-video
+    emphasis fills, not structural beats. Never exceeds max_fx and never
+    overlaps an existing effect.
     """
     span = t_out - t_in
     if span < 90:
@@ -4496,8 +4589,8 @@ def _ensure_effects_span_timeline(effects: list, t_in: float, t_out: float,
         if t_in <= float(w.get("start", 0) or 0) <= t_out
     })
 
-    lo, hi = _EFFECT_LIMITS["punch_zoom"]
-    dur = max(lo, min(hi, 1.0))
+    lo, hi = _EFFECT_LIMITS["zoom_1_5"]
+    dur = max(lo, min(hi, 1.8))
     added: list[dict] = []
     for gs, ge in gaps:
         if len(effects) + len(added) >= max_fx:
@@ -4525,13 +4618,13 @@ def _ensure_effects_span_timeline(effects: list, t_in: float, t_out: float,
                 if quote:
                     break
         added.append({
-            "type": "punch_zoom",
+            "type": "zoom_1_5",
             "start_time": round(start, 2),
             "end_time": round(end, 2),
             "intensity": "low",
             "direction": "in",
             "quote": quote[:120],
-            "reason": "auto energy accent — keep pacing alive past the first minute",
+            "reason": "auto energy accent — mid-video emphasis hold",
             "auto_spread": True,
         })
     if added:
@@ -6126,7 +6219,7 @@ def suggest_effects():
     # Aim each push at the speaker rather than the centre of the frame, when
     # the reframe analysis has face data to aim with.
     for fx in cleaned:
-        if fx["type"] == "punch_zoom":
+        if fx["type"] in ("punch_zoom", "zoom_1_5", "zoom_2x"):
             anchor = _face_anchor_at(job_id, fx["start_time"])
             if anchor:
                 fx["anchor"] = anchor
@@ -6685,6 +6778,19 @@ def transcribe_only():
         expected_bytes = None
     f.save(str(video_path))
     try:
+        # Deep probe first; some phone MOVs (long recordings especially) come
+        # back completely unreadable to ffprobe even at 200M probesize. Try a
+        # remux/re-encode repair before giving up — that recovers most of
+        # them without ever bothering the user.
+        pre_probe = _probe_media_streams(video_path)
+        if pre_probe.get("error") and not pre_probe.get("has_video") and not pre_probe.get("has_audio"):
+            repaired = _repair_uploaded_media(video_path)
+            if repaired:
+                video_path = repaired
+                ext = video_path.suffix.lstrip(".").lower()
+                # Container changed size (remux/re-encode) — the original
+                # browser byte count no longer applies to this file.
+                expected_bytes = None
         probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
         print(
             f"[upload] {job_id} ok size={video_path.stat().st_size} "
@@ -7357,6 +7463,15 @@ def replace_and_transcribe():
         expected_bytes = None
     f.save(str(staging))
     try:
+        # Same repair-before-reject path as /transcribe-only — a container
+        # ffprobe can't read at all is often salvageable with a remux.
+        pre_probe = _probe_media_streams(staging)
+        if pre_probe.get("error") and not pre_probe.get("has_video") and not pre_probe.get("has_audio"):
+            repaired = _repair_uploaded_media(staging)
+            if repaired:
+                staging = repaired
+                ext = staging.suffix.lstrip(".").lower()
+                expected_bytes = None
         probe = _validate_uploaded_media(staging, expected_bytes=expected_bytes)
         print(
             f"[replace] {job_id} ok size={staging.stat().st_size} "
@@ -10034,9 +10149,13 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "color": grade,
         "color_grade": grade,
     }
-    # Apply up to budget punch/Ken Burns by splitting the main clip.
+    # Camera moves live on the Effects lane now, not as Main splits — splitting
+    # Main into a micro-clip per punch/zoom used to make every mid-video accent
+    # read as a hard cut into a punch zoom, which is the opposite of "hold a
+    # zoom while someone talks". Main stays one continuous piece (plus cuts)
+    # except for split_screen, which really does need its own Main segment
+    # since it changes how that stretch is framed/composited.
     budget = _intensity_effect_budget(intensity)
-    pieces = [main_clip]
     usable = []
     for fx in effects or []:
         try:
@@ -10049,13 +10168,16 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         usable.append(fx)
         if len(usable) >= budget:
             break
+    usable.sort(key=lambda e: float(e["start_time"]))
 
-    if usable:
-        # Split chronologically into effect mid-segments.
-        usable.sort(key=lambda e: float(e["start_time"]))
+    split_fx = [fx for fx in usable if fx.get("type") == "split_screen"]
+    lane_fx = [fx for fx in usable if fx.get("type") != "split_screen"]
+
+    pieces = [main_clip]
+    if split_fx:
         pieces = []
         cursor = t_in
-        for fx in usable:
+        for fx in split_fx:
             fs = max(t_in, float(fx["start_time"]))
             fe = min(t_out, float(fx["end_time"]))
             if fs - cursor > 0.08:
@@ -10065,29 +10187,13 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     "burn_captions": True, "cuts": [],
                     "color": grade, "color_grade": grade,
                 })
-            mid = {
+            pieces.append({
                 "id": _uid_short(), "source_job_id": job_id,
                 "in": fs, "out": fe, "transition": None,
                 "burn_captions": True, "cuts": [],
                 "color": grade, "color_grade": grade,
-            }
-            ftype = fx.get("type")
-            if ftype == "punch_zoom":
-                mid["punch_zoom"] = {
-                    "enabled": True,
-                    "intensity": fx.get("intensity") or ("high" if intensity == "high" else "med"),
-                }
-                if fx.get("anchor"):
-                    mid["punch_zoom"]["anchor"] = fx["anchor"]
-            elif ftype == "ken_burns":
-                mid["ken_burns"] = {
-                    "enabled": True,
-                    "intensity": fx.get("intensity") or "med",
-                    "direction": fx.get("direction") or "in",
-                }
-            elif ftype == "split_screen":
-                mid["split"] = {"enabled": True}
-            pieces.append(mid)
+                "split": {"enabled": True},
+            })
             cursor = fe
         if t_out - cursor > 0.08:
             pieces.append({
@@ -10109,6 +10215,31 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         if tr:
             for i, p in enumerate(pieces[:-1]):
                 p["transition"] = {"type": tr, "duration": 0.25 if intensity != "high" else 0.15}
+
+    # punch_zoom / zoom_1_5 / zoom_2x / ken_burns → Effects lane, in output
+    # time. Main is one continuous source window [t_in, t_out] (plus the
+    # split_screen pieces above), so output time is just source time offset
+    # from t_in — a good seed the editor can nudge by hand once cuts compress
+    # the timeline.
+    effects_track: list[dict] = []
+    for fx in lane_fx:
+        fs = max(t_in, float(fx["start_time"]))
+        fe = min(t_out, float(fx["end_time"]))
+        entry = {
+            "id": _uid_short(),
+            "type": fx.get("type"),
+            "start": round(fs - t_in, 3),
+            "out": round(max(0.2, fe - fs), 3),
+            "intensity": fx.get("intensity") or "med",
+            "direction": fx.get("direction") or "in",
+        }
+        if isinstance(fx.get("anchor"), dict):
+            entry["anchor"] = fx["anchor"]
+        if fx.get("quote"):
+            entry["quote"] = fx["quote"]
+        if fx.get("reason"):
+            entry["reason"] = fx["reason"]
+        effects_track.append(entry)
 
     # Hook-pull: for full-video edits, reorder so the strongest moment opens
     # the edit even though it happens mid-transcript (classic hook-first cut).
@@ -10149,10 +10280,9 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             if c[1] > p["in"] and c[0] < p["out"]
                             and min(p["out"], c[1]) - max(p["in"], c[0]) > 0.05
                         ]
-                # Re-apply usable effects by time intersection (best-effort —
-                # effects that fall inside the hook window land on the hook
-                # piece since it's now first).
-                for fx in usable:
+                # Re-apply split_screen onto whichever new piece it now falls
+                # inside (best-effort, by midpoint).
+                for fx in split_fx:
                     try:
                         fmid = (float(fx["start_time"]) + float(fx["end_time"])) / 2
                     except (TypeError, ValueError):
@@ -10161,44 +10291,46 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                         (p for p in new_pieces if p["in"] - 0.05 <= fmid <= p["out"] + 0.05),
                         None,
                     )
-                    if target is None:
-                        continue
-                    ftype = fx.get("type")
-                    if ftype == "punch_zoom":
-                        target["punch_zoom"] = {
-                            "enabled": True,
-                            "intensity": fx.get("intensity") or ("high" if intensity == "high" else "med"),
-                        }
-                        if fx.get("anchor"):
-                            target["punch_zoom"]["anchor"] = fx["anchor"]
-                    elif ftype == "ken_burns":
-                        target["ken_burns"] = {
-                            "enabled": True,
-                            "intensity": fx.get("intensity") or "med",
-                            "direction": fx.get("direction") or "in",
-                        }
-                    elif ftype == "split_screen":
+                    if target is not None:
                         target["split"] = {"enabled": True}
                 pieces = new_pieces
                 hook_pulled = True
                 hook_quote = str(hook.get("hook_quote") or hook.get("quote") or "")[:200] or None
 
-    text_track = []
-    if pack.get("add_title") and label:
-        text_track.append({
-            "id": _uid_short(),
-            "text": label[:80],
-            "start": 0,
-            "out": 2.5,
-            "x": 0.5, "y": 0.12, "size": 64,
-            "color": "#FFFFFF", "font": pack.get("style", {}).get("font") or "Anton",
-            "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.45,
-            "outline_color": "#000000", "outline_width": 0, "shadow": 0,
-            "bold": True, "align": 2, "anim": "fade",
-            "anchor": pieces[0]["id"] if pieces else None,
-        })
+                # Effects-lane entries were seeded in *pre-pull* output time
+                # (offset from the old t_in). Remap each one's start through
+                # the same three-window reorder so it still lands on the beat
+                # it was anchored to instead of drifting into whatever now
+                # plays at that raw offset.
+                def _map_through_ranges(t: float, rngs: list[tuple[float, float]]) -> float | None:
+                    cursor = 0.0
+                    for rs, re__ in rngs:
+                        span = re__ - rs
+                        if span < 0.1:
+                            continue
+                        if rs - 0.05 <= t <= re__ + 0.05:
+                            return cursor + max(0.0, min(t, re__) - rs)
+                        cursor += span
+                    return None
 
-    # Keyword callouts → text track + photo-match / badge overlays (Phase 5/3).
+                remapped = []
+                for entry in effects_track:
+                    fs = entry["start"] + t_in
+                    new_start = _map_through_ranges(fs, ranges)
+                    if new_start is None:
+                        continue  # fell in a range too short to keep (<0.1s)
+                    entry["start"] = round(new_start, 3)
+                    remapped.append(entry)
+                effects_track = remapped
+
+    # AI Edit never seeds text overlays — captions already carry the words,
+    # and auto-placed titles/keyword callouts read as clutter more often than
+    # they help. Pack "add_title" and keyword text callouts are ignored here;
+    # the editor's manual "Add title" button still works for hand-placed text.
+    text_track: list[dict] = []
+
+    # Keyword callouts still drive photo-match / badge overlays (Phase 5/3) —
+    # just without the on-screen text label that used to ride along with them.
     overlay_track = []
     if insert_media and words:
         photo_match = bool(pack.get("photo_match"))
@@ -10207,7 +10339,6 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "low": 1, "med": 3, "high": 5
         }.get((intensity or "med").lower(), 3)
         callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
-        style = pack.get("style") or {}
         ken_default = pack.get("ken_burns") if isinstance(pack.get("ken_burns"), dict) else None
         for i, co in enumerate(callouts):
             # Map source time into output time roughly as offset from t_in
@@ -10216,19 +10347,6 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             dur = min(2.8, max(1.4, float(co.get("duration") or 1.8))) if photo_match else min(
                 2.2, max(1.2, float(co.get("duration") or 1.8))
             )
-            text_track.append({
-                "id": _uid_short(),
-                "text": str(co["text"])[:40],
-                "start": start,
-                "out": start + dur,  # absolute end (ASS builder expects end, not duration)
-                "x": 0.72, "y": 0.18, "size": int(style.get("size") or style.get("font_size") or 56) - 8,
-                "color": style.get("highlight") or style.get("highlight_color") or "#FFD60A",
-                "font": style.get("font") or style.get("font_name") or "Anton",
-                "bg_enabled": True, "bg_color": "#000000", "bg_opacity": 0.55,
-                "outline_color": "#000000", "outline_width": 0, "shadow": 0,
-                "bold": True, "align": 2, "anim": "slideup",
-                "anchor": pieces[0]["id"] if pieces else None,
-            })
             # Photo-match: prefer real stills (Gemini / stock); else keyword badge.
             try:
                 asset_id = uuid.uuid4().hex
@@ -10348,12 +10466,13 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         "tracks": {
             "main": pieces,
             "overlay": overlay_track,
+            "effects": effects_track,
             "text": text_track,
             "music": music_track,
         },
         "media_hints": {
             "bg_music_available": bool(bg_music_files),
-            "callout_count": max(0, len(text_track) - (1 if pack.get("add_title") and label else 0)),
+            "callout_count": 0,
             "overlay_count": len(overlay_track),
             "photo_count": photo_n,
             "badge_count": badge_n,
@@ -10589,7 +10708,7 @@ def ai_edit_seed():
         # the back half of the video isn't dead.
         effects = _ensure_effects_span_timeline(effects, 0.0, total, win_words, max_fx)
         for fx in effects:
-            if fx.get("type") == "punch_zoom":
+            if fx.get("type") in ("punch_zoom", "zoom_1_5", "zoom_2x"):
                 anchor = _face_anchor_at(work_job_id, fx["start_time"])
                 if anchor:
                     fx["anchor"] = anchor
@@ -10977,7 +11096,7 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
             fps=int(opts.get("fps") or 60),
             face_reframe=bool(opts.get("face_reframe", True)),
             cut_stumbles=bool(opts.get("cut_stumbles", True)),
-            lower_thirds=bool(opts.get("lower_thirds", True)),
+            lower_thirds=bool(opts.get("lower_thirds", False)),
             export_edl=bool(opts.get("export_edl", True)),
             silence_engine=str(opts.get("silence_engine") or "auto"),
             composite_engine=str(opts.get("composite_engine") or "ffmpeg"),
@@ -11090,7 +11209,7 @@ def timeline_polish():
         "fps": int(data.get("fps") or 60),
         "face_reframe": data.get("face_reframe", True) is not False,
         "cut_stumbles": data.get("cut_stumbles", True) is not False,
-        "lower_thirds": data.get("lower_thirds", True) is not False,
+        "lower_thirds": data.get("lower_thirds", False) is not False,
         "export_edl": data.get("export_edl", True) is not False,
         "silence_engine": str(data.get("silence_engine") or "auto"),
         "composite_engine": str(data.get("composite_engine") or "ffmpeg"),

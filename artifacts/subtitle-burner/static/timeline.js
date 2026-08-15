@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-61-effect-picker-zoom-hold-rename-no-titles";
+  const TL_BUILD = "studio-editor-build-62-zoom-taxonomy-effects-lane-hover-details";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -2529,6 +2529,7 @@
         label.className = "tl-clip-label";
         label.textContent = clipLabel(track, c, idx);
         el.appendChild(label);
+        el.title = clipHoverDetail(track, c, idx);
 
         // Resize handles
         ["left", "right"].forEach((side) => {
@@ -2642,7 +2643,11 @@
     if (track === "effects") {
       const meta = EFFECT_TYPES.find((t) => t.id === c.type);
       const icon = meta ? meta.icon : "✨";
-      const name = meta ? meta.label : (c.type || "Effect");
+      // Zoom holds: lead with the multiplier so it reads at a glance even on
+      // a narrow clip — "1.5×" / "2×" matters more here than the full label.
+      let name = meta ? meta.label : (c.type || "Effect");
+      if (c.type === "zoom_1_5") name = "1.5× hold";
+      else if (c.type === "zoom_2x") name = "2× hold";
       return `${icon} ${name} ${fmtTime(clipDuration(c))}`;
     }
     if (track === "text") return (c.text || "Title").split("\n")[0];
@@ -2666,6 +2671,78 @@
       if (s && s.filename) return `${icon} ${String(s.filename).replace(/\.[^.]+$/, "")}${ovBadge}`;
     }
     return `${icon} overlay ${fmtTime(clipDuration(c))}${ovBadge}`;
+  }
+
+  /** Multi-line tooltip (native title="") with the details clipLabel has no
+   * room to show — trim points, which FX are on, quote/reason, etc. */
+  function clipHoverDetail(track, c, idx) {
+    const lines = [];
+    if (track === "main") {
+      const s = sources.find((x) => x.job_id === c.source_job_id);
+      lines.push(`Main clip ${idx + 1}: ${s && s.filename ? s.filename : (c.source_job_id ? "clip" : "no source")}`);
+      const cin = c.in || 0, cout = c.out != null ? c.out : cin;
+      lines.push(`Trim: ${fmtTime(cin)} – ${fmtTime(cout)} (source) · ${fmtTime(clipDuration(c))} on timeline`);
+      const fx = [];
+      if (c.punch_zoom && c.punch_zoom.enabled) fx.push(`Punch zoom (${c.punch_zoom.intensity || "med"})`);
+      if (c.ken_burns && c.ken_burns.enabled) fx.push(`Ken Burns (${c.ken_burns.direction || "in"}, ${c.ken_burns.intensity || "med"})`);
+      if (c.split && c.split.enabled) fx.push("Split-screen");
+      if (c.cuts && c.cuts.length) fx.push(`${c.cuts.length} cut${c.cuts.length === 1 ? "" : "s"} removed`);
+      const grade = ((c.color || c.color_grade || {}).preset) || "none";
+      if (grade !== "none") fx.push(`Color grade: ${grade}`);
+      lines.push(fx.length ? fx.join(" · ") : "No camera FX / color grade on this clip");
+      lines.push(c.burn_captions === false ? "Captions: off" : "Captions: burned in");
+      if (c.transition && c.transition.type) lines.push(`Transition out: ${c.transition.type}`);
+      return lines.join("\n");
+    }
+    if (track === "effects") {
+      const meta = EFFECT_TYPES.find((t) => t.id === c.type);
+      lines.push(meta ? meta.label : (c.type || "Effect"));
+      const bits = [];
+      if (c.type === "zoom_1_5") bits.push("constant 1.5× hold");
+      else if (c.type === "zoom_2x") bits.push("constant 2× hold");
+      else if (c.intensity) bits.push(`intensity: ${c.intensity}`);
+      if (c.type === "ken_burns" && c.direction) bits.push(`direction: ${c.direction}`);
+      if (c.type === "split_screen" && c.layout) bits.push(`layout: ${c.layout}`);
+      if (bits.length) lines.push(bits.join(" · "));
+      lines.push(`Start ${fmtTime(c.start || 0)} · Duration ${fmtTime(clipDuration(c))}`);
+      if (c.quote) lines.push(`“${c.quote}”`);
+      if (c.reason) lines.push(c.reason);
+      return lines.join("\n");
+    }
+    if (track === "overlay") {
+      if (c.keyword) lines.push(`Keyword: ${c.keyword}`);
+      else if (c.asset_id) {
+        const a = assets.find((x) => x.asset_id === c.asset_id);
+        lines.push(a && a.filename ? a.filename : "Overlay asset");
+      } else if (c.source_job_id) {
+        const s = sources.find((x) => x.job_id === c.source_job_id);
+        lines.push(s && s.filename ? s.filename : "Overlay clip");
+      } else {
+        lines.push("Overlay");
+      }
+      lines.push(`Layout: ${c.layout || "auto"}`);
+      lines.push(c.ken_burns && c.ken_burns.enabled
+        ? `Ken Burns: ${c.ken_burns.direction || "in"} (${c.ken_burns.intensity || "med"})`
+        : "Ken Burns: off");
+      lines.push(`Opacity: ${c.opacity != null ? Math.round(Number(c.opacity) * 100) + "%" : "100%"}`);
+      lines.push(`Start ${fmtTime(c.start || 0)} · Duration ${fmtTime(clipDuration(c))}`);
+      return lines.join("\n");
+    }
+    if (track === "text") {
+      lines.push((c.text || "Title").split("\n")[0]);
+      lines.push(`Start ${fmtTime(c.start || 0)} · Duration ${fmtTime(clipDuration(c))}`);
+      if (c.font || c.color) lines.push(`Font: ${c.font || "default"} · Color: ${c.color || "default"}`);
+      return lines.join("\n");
+    }
+    if (track === "music") {
+      const a = assets.find((x) => x.asset_id === c.asset_id);
+      lines.push(`Music: ${a ? (a.filename || a.ext || "track") : "track"}`);
+      lines.push(`Gain: ${c.gain_db != null ? Number(c.gain_db).toFixed(1) + " dB" : "0 dB"}`);
+      lines.push(`Ducking under speech: ${c.duck === false ? "off" : "on"}`);
+      lines.push(`Start ${fmtTime(c.start || 0)} · Duration ${fmtTime(clipDuration(c))}`);
+      return lines.join("\n");
+    }
+    return "";
   }
 
   // ---- Selection + properties ----
@@ -4739,7 +4816,9 @@
 
   // ---- AI camera moves -------------------------------------------------
   const FX_LABEL = {
-    punch_zoom: "🔍 Punch zoom",
+    punch_zoom: "⚡ Punch zoom",
+    zoom_1_5: "🔎 1.5× zoom hold",
+    zoom_2x: "🔍 2× zoom hold",
     ken_burns: "🎞 Ken Burns",
     split_screen: "⬓ Split screen",
   };
@@ -5220,7 +5299,7 @@
       export_nle: !($("tlPolishNle") && !$("tlPolishNle").checked),
       face_reframe: !($("tlPolishFace") && !$("tlPolishFace").checked),
       cut_stumbles: !($("tlPolishStumbles") && !$("tlPolishStumbles").checked),
-      lower_thirds: !($("tlPolishLowerThirds") && !$("tlPolishLowerThirds").checked),
+      lower_thirds: !!($("tlPolishLowerThirds") && $("tlPolishLowerThirds").checked),
       export_edl: !($("tlPolishEdl") && !$("tlPolishEdl").checked),
       keywords,
       width: res.width,
@@ -5295,7 +5374,7 @@
         broll_mode: opts.broll_mode || "pip",
         face_reframe: opts.face_reframe !== false,
         cut_stumbles: opts.cut_stumbles !== false,
-        lower_thirds: opts.lower_thirds !== false,
+        lower_thirds: opts.lower_thirds === true,
         export_edl: opts.export_edl !== false,
         silence_engine: opts.silence_engine || "auto",
         composite_engine: opts.composite_engine || "ffmpeg",
@@ -5624,7 +5703,7 @@
               <label><input type="checkbox" id="tlPolishNle" checked> Kdenlive + Shotcut projects</label>
               <label><input type="checkbox" id="tlPolishFace" checked> Face reframe</label>
               <label><input type="checkbox" id="tlPolishStumbles" checked> Cut stumbles / retakes</label>
-              <label><input type="checkbox" id="tlPolishLowerThirds" checked> Lower-thirds</label>
+              <label><input type="checkbox" id="tlPolishLowerThirds"> Lower-thirds</label>
               <label><input type="checkbox" id="tlPolishEdl" checked> EDL export</label>
             </div></div>
         </div>
@@ -7624,7 +7703,7 @@
             broll_mode: op.broll_mode || op.broll || "pip",
             face_reframe: op.face_reframe !== false,
             cut_stumbles: op.cut_stumbles !== false,
-            lower_thirds: op.lower_thirds !== false,
+            lower_thirds: op.lower_thirds === true,
             export_edl: op.export_edl !== false,
           };
           if (op.keywords) {
