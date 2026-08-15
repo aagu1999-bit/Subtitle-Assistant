@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-57-polish-no-ping-gate";
+  const TL_BUILD = "studio-editor-build-58-polish-honest-preview";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4980,7 +4980,13 @@
           failStreak = 0;
           if (s.status === "done" && s.output) {
             clearInterval(pollTimer);
-            setRenderStatus("Polish done ✓ — " + s.output);
+            const stats = s.stats || {};
+            const srcDur = stats.source_duration_s;
+            const cutDur = stats.cut_duration_s;
+            const durNote = (srcDur != null && cutDur != null)
+              ? ` · ${Number(srcDur).toFixed(1)}s → ${Number(cutDur).toFixed(1)}s`
+              : "";
+            setRenderStatus("Polish done ✓ — playing polished output (not timeline source)" + durNote);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
             if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             const v = $("tlPreviewVideo");
@@ -4992,9 +4998,16 @@
               v.load();
               v.play().catch(() => {});
             }
-            if (typeof window.showExportDone === "function") {
-              window.showExportDone(s.output, { jobId: tl && tl.job_id, polish: true });
-            }
+            // Do NOT call showExportDone() — that jumps to Ingest and makes
+            // Timeline play the unmodified Main source again ("nothing changed").
+            alert(
+              "Polish finished.\n\n" +
+              "The Timeline preview is now the polished MP4 (not your Main source).\n" +
+              (durNote ? ("Length change:" + durNote + "\n") : "") +
+              "Download: /download/" + s.output + "\n\n" +
+              "Note: scrubbing the timeline or Preview cut switches back to the original source. " +
+              "Captions still need ▶ Render."
+            );
             resolve(s);
           } else if (s.status === "error") {
             clearInterval(pollTimer);
