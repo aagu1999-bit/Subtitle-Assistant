@@ -446,12 +446,29 @@ def assign_jumpcut_zooms(keeps: list[KeepRange], amount: float = 0.02) -> None:
 # ---------------------------------------------------------------------------
 
 def detect_face_center_norm(video: Path, t: float) -> tuple[float, float] | None:
-    """Return (cx, cy) in 0..1 if OpenCV Haar finds a face at time t."""
+    """Return (cx, cy) in 0..1 if a face is found at time t.
+
+    OpenCV headless wheels often ship *without* Haar XML files, so we look in:
+      1) scripts/data/haarcascade_frontalface_default.xml (bundled)
+      2) cv2.data.haarcascades (full OpenCV installs)
+    Falls back to None → caller uses talking-head bias crop (not true tracking).
+    """
     try:
         import cv2  # type: ignore
     except Exception:
         return None
     which_or_die("ffmpeg")
+    bundled = Path(__file__).resolve().parent / "data" / "haarcascade_frontalface_default.xml"
+    candidates = [bundled]
+    try:
+        candidates.append(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
+    except Exception:
+        pass
+    cascade_path = next((p for p in candidates if p.exists()), None)
+    if not cascade_path:
+        print("[polish_cut] face cascade XML missing — face reframe disabled this run")
+        return None
+
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         frame = Path(tmp.name)
     try:
@@ -470,10 +487,7 @@ def detect_face_center_norm(video: Path, t: float) -> tuple[float, float] | None
             return None
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        if not Path(cascade_path).exists():
-            return None
-        cascade = cv2.CascadeClassifier(cascade_path)
+        cascade = cv2.CascadeClassifier(str(cascade_path))
         if cascade.empty():
             return None
         faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
@@ -706,10 +720,11 @@ class Pacing:
 
 
 PACINGS = {
-    "fast": Pacing("fast", -30, 0.35, 0.15, 0.02, 1.05, 0.40, -18),
-    "fast-paced": Pacing("fast", -30, 0.35, 0.15, 0.02, 1.05, 0.40, -18),
-    "cinematic": Pacing("cinematic", -32, 0.55, 0.25, 0.015, 1.04, 0.55, -16),
-    "informative": Pacing("informative", -30, 0.45, 0.20, 0.02, 1.05, 0.40, -18),
+    # jump_zoom bumped so the effect is actually visible (was ±2%, easy to miss)
+    "fast": Pacing("fast", -30, 0.35, 0.15, 0.05, 1.05, 0.40, -18),
+    "fast-paced": Pacing("fast", -30, 0.35, 0.15, 0.05, 1.05, 0.40, -18),
+    "cinematic": Pacing("cinematic", -32, 0.55, 0.25, 0.03, 1.04, 0.55, -16),
+    "informative": Pacing("informative", -30, 0.45, 0.20, 0.04, 1.05, 0.40, -18),
 }
 
 
