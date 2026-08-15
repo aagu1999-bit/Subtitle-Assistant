@@ -10693,5 +10693,7 @@ if __name__ == "__main__":
     # ffmpeg builds filmstrips/waveforms on demand. Single-threaded, those long
     # requests block seeking, saving, and status polling — making the editor
     # feel frozen. Concurrent workers keep the UI responsive.
+    polish_rules = sorted({str(r) for r in app.url_map.iter_rules() if "polish" in str(r)})
+    print(f"[polish] registered routes: {polish_rules}", flush=True)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8081)),
             debug=False, threaded=True)

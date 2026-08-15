@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-56-polish-run-path";
+  const TL_BUILD = "studio-editor-build-57-polish-no-ping-gate";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -4899,22 +4899,6 @@
     if (runBtn) runBtn.disabled = true;
     setRenderStatus("Polish queued…");
     try {
-      // Probe so a stale Flask process fails with a clear message before POST.
-      try {
-        const ping = await fetch("/polish/ping");
-        if (!ping.ok) {
-          throw new Error(
-            "Polish API not on this server yet (GET /polish/ping failed). " +
-            "Stop+Start the Replit workflow after git pull, then hard-refresh."
-          );
-        }
-      } catch (pe) {
-        if (pe && pe.message && pe.message.includes("Polish API not")) throw pe;
-        throw new Error(
-          "Cannot reach /polish/ping — Flask needs a restart after pull. " +
-          "Stop+Start the Replit Project workflow."
-        );
-      }
       await saveNow();
       const body = {
         job_id: tl.job_id,
@@ -4933,12 +4917,40 @@
         fps: opts.fps || 60,
       };
       if (opts.keywords && opts.keywords.length) body.keywords = opts.keywords;
-      // /polish/run avoids clashing with GET /timeline/<job_id>
-      const res = await api("/polish/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+
+      const endpoints = ["/polish/run", "/timeline/polish"];
+      let res = null;
+      let lastErr = null;
+      for (const ep of endpoints) {
+        try {
+          res = await api(ep, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (ep !== endpoints[0]) {
+            console.warn("[timeline] Polish started via legacy", ep);
+          }
+          break;
+        } catch (err) {
+          lastErr = err;
+          const m = String((err && err.message) || err || "");
+          // Try next endpoint only on routing failures.
+          if (!/\b(404|405)\b/.test(m) && !/Method Not Allowed/i.test(m) && !/route missing/i.test(m)) {
+            throw err;
+          }
+          console.warn("[timeline] Polish POST failed at", ep, m);
+        }
+      }
+      if (!res) {
+        throw new Error(
+          (lastErr && lastErr.message ? lastErr.message + " — " : "") +
+          "Polish backend routes are missing on the running Flask process. " +
+          "In Replit: open Shell and run:  pkill -f 'python app.py'; pkill -f gunicorn; " +
+          "then Stop+Start the Project workflow, hard-refresh, confirm console shows build-56+."
+        );
+      }
+
       closePolishSheet();
       const polishId = res.polish_id;
       setRenderStatus(
