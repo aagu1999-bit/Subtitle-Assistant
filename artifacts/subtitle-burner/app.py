@@ -305,7 +305,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Pulse",
         "blurb": "Fast social pacing — punch zooms, hard cuts, bold captions",
         "canvas": "9x16",
-        "transition": "crossfade",
+        "transition": None,
         "caption_preset": "mrbeast",
         "style": {
             "font": "Integral CF", "size": 68, "primary": "#FFFFFF",
@@ -317,7 +317,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Clarity",
         "blurb": "Clean talking-head — light trim, subtle zoom, readable captions",
         "canvas": "9x16",
-        "transition": "dissolve",
+        "transition": None,
         "caption_preset": "hormozi",
         "style": {
             "font": "Montserrat Black", "size": 64, "primary": "#FFFFFF",
@@ -329,7 +329,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Magazine",
         "blurb": "Editorial polish — soft Ken Burns, warm grade, lower-third titles",
         "canvas": "9x16",
-        "transition": "fade_black",
+        "transition": None,
         "caption_preset": "karaoke",
         "style": {
             "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
@@ -342,7 +342,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Velocity",
         "blurb": "High intensity — dense zooms, silence cuts, energetic captions",
         "canvas": "9x16",
-        "transition": "slide",
+        "transition": None,
         "caption_preset": "neon",
         "style": {
             "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
@@ -354,7 +354,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Film",
         "blurb": "Cinematic slow push — muted grade, sparse cuts, elegant type",
         "canvas": "16x9",
-        "transition": "dissolve",
+        "transition": None,
         "caption_preset": "karaoke",
         "style": {
             "font": "DM Sans", "size": 52, "primary": "#F5F0E8",
@@ -366,7 +366,7 @@ AI_EDIT_STYLE_PACKS = {
         "label": "Always",
         "blurb": "Photo-match B-roll — keyword stills (stock/AI) with soft Ken Burns",
         "canvas": "9x16",
-        "transition": "crossfade",
+        "transition": None,
         "caption_preset": "hormozi",
         "photo_match": True,
         "use_ai_photos": True,
@@ -4246,8 +4246,24 @@ This is a LONGER cut (~{total / 60:.0f} min). Spread accents across the timeline
 do not cluster everything in the first minute. Still prefer fewer, stronger moments
 (max {max_effects}).
 """
+    hook_block = ""
+    hook_shape = ""
+    if total >= 45:
+        hook_block = """
+This edit covers a FULL VIDEO (not just a short clip). Also identify the strongest
+HOOK moment (3-8s) that should OPEN the finished edit even if it occurs mid-transcript.
+Prefer surprising claims, open loops, or quotable lines over polite introductions.
+Report it in "structure" below — this is separate from the camera-move effects.
+"""
+        hook_shape = """,
+  "structure": {
+    "hook_start_time": 42.1,
+    "hook_end_time": 47.8,
+    "hook_quote": "the exact words that make this the hook",
+    "hook_reason": "why this should open the edit"
+  }"""
     return f"""You are an expert video editor deciding where camera moves belong in a talking-head edit. The transcript below has [mm:ss] timestamps. The video is {total:.1f} seconds long.
-{purpose_block}{long_note}
+{purpose_block}{long_note}{hook_block}
 Choose at most {max_effects} moments. Fewer is better — a move that isn't motivated is worse than no move at all. Never cover the whole video; these are accents.
 
 Effects you may place:
@@ -4273,7 +4289,7 @@ Return JSON in exactly this shape:
       "quote": "the exact words being emphasised",
       "reason": "why this moment earns a camera move"
     }}
-  ]
+  ]{hook_shape}
 }}
 
 TRANSCRIPT:
@@ -8229,28 +8245,50 @@ def _tl_build_main_track(segments: list, transitions: list,
             nxt_path, nxt_dur = segments[i]
             tname = transitions[i - 1] if i - 1 < len(transitions) else 0
             step_out = UPLOAD_DIR / f"{job_id}_tlmix{i:03d}.mp4"
-            if tname:
+            max_tdur = min(0.8, cur_dur * 0.45, nxt_dur * 0.45)
+            is_hard_cut = not tname
+            if tname and (max_tdur < 0.12 or cur_dur < 0.28 or nxt_dur < 0.28):
+                # Segments too short for a real crossfade — fall back to a
+                # hard cut instead of forcing a degenerate xfade duration.
+                print(f"[timeline] Transition {i}: segments too short — hard cut", flush=True)
+                is_hard_cut = True
+            if not is_hard_cut:
                 xfade = TIMELINE_TRANSITIONS.get(str(tname), "fade")
-                tdur = min(0.8, cur_dur * 0.45, nxt_dur * 0.45)
-                tdur = max(0.2, tdur)
+                tdur = max(0.12, max_tdur)
                 offset = max(0.0, cur_dur - tdur)
                 fc = (
                     f"[0:v][1:v]xfade=transition={xfade}:duration={tdur:.3f}:"
                     f"offset={offset:.3f},format=yuv420p[v];"
                     f"[0:a][1:a]acrossfade=d={tdur:.3f}[a]"
                 )
-                seg_starts.append(offset)
-                cur_dur = cur_dur + nxt_dur - tdur
+                new_seg_start = offset
+                new_cur_dur = cur_dur + nxt_dur - tdur
             else:
                 fc = "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
-                seg_starts.append(cur_dur)
-                cur_dur = cur_dur + nxt_dur
-            _tl_run(
-                [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
-                 "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
-                f"Transition {i}",
-            )
+                new_seg_start = cur_dur
+                new_cur_dur = cur_dur + nxt_dur
+            try:
+                _tl_run(
+                    [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
+                     "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                     *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
+                    f"Transition {i}",
+                )
+            except RuntimeError:
+                if is_hard_cut:
+                    raise
+                print(f"[timeline] Transition {i} failed — retrying hard cut", flush=True)
+                fc = "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
+                new_seg_start = cur_dur
+                new_cur_dur = cur_dur + nxt_dur
+                _tl_run(
+                    [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
+                     "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                     *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
+                    f"Transition {i} (hard cut retry)",
+                )
+            seg_starts.append(new_seg_start)
+            cur_dur = new_cur_dur
             intermediates.append(step_out)
             cur_path = step_out
         _tl_run([FFMPEG, "-y", "-i", str(cur_path), "-c", "copy",
@@ -8350,8 +8388,25 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
     Honors: start, in/out, x, y, w, h, opacity, fit (cover|contain|fill),
     fade_in / fade_out, border_px, ken_burns (slow zoom on the PiP box).
     """
+    # Best-effort duration probe — used to drop/clamp overlays that would
+    # otherwise land past the end of the base clip (which needs a huge tpad
+    # and can make ffmpeg choke on some inputs).
+    try:
+        base_dur = _ffprobe_duration(base)
+    except Exception:
+        base_dur = 0.0
+
     resolved = []
     for ov in overlay_clips:
+        if base_dur > 0:
+            try:
+                ov_start = max(0.0, float(ov.get("start", 0)))
+            except (TypeError, ValueError):
+                ov_start = 0.0
+            if ov_start >= base_dur - 0.05:
+                print(f"[overlay] skip: start {ov_start:.2f}s is past base duration "
+                      f"{base_dur:.2f}s", flush=True)
+                continue
         path = _timeline_clip_source(ov, prefer_proxy=True)
         if not path:
             continue
@@ -8375,108 +8430,164 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
                 "Overlay passthrough")
         return
 
-    inputs = ["-i", str(base)]
-    filt = []
-    cur = "[0:v:0]"
-    in_idx = 1
+    def _build_graph(items: list) -> tuple[list, str, str]:
+        inputs = ["-i", str(base)]
+        filt = []
+        cur = "[0:v:0]"
+        in_idx = 1
+        for n, (ov, path, kind) in enumerate(items, start=1):
+            start = max(0.0, float(ov.get("start", 0)))
+            o_in = max(0.0, float(ov.get("in", 0)))
+            o_out = float(ov.get("out", o_in + 4))
+            length = max(0.2, o_out - o_in)
+            if base_dur > 0:
+                # Clamp so the overlay never needs to extend past the base
+                # clip's end — an absurdly long tpad/overlay window is both
+                # wasteful and a common source of filtergraph failures.
+                length = min(length, max(0.2, base_dur - start + 0.5))
+            length = min(length, 60.0)
+            inputs, filt, cur, in_idx = _tl_composite_overlay_step(
+                ov, path, kind, n, inputs, filt, cur, in_idx, start, o_in,
+                length, W, H, fps,
+            )
+        return inputs, filt, cur
+
     fps = max(15, min(60, int(fps or 30)))
-    for n, (ov, path, kind) in enumerate(resolved, start=1):
-        start = max(0.0, float(ov.get("start", 0)))
-        o_in = max(0.0, float(ov.get("in", 0)))
-        o_out = float(ov.get("out", o_in + 4))
-        length = max(0.2, o_out - o_in)
-        wfrac = min(1.0, max(0.05, float(ov.get("w", 0.4))))
-        if ov.get("h") is not None:
-            try:
-                hfrac = min(1.0, max(0.05, float(ov.get("h"))))
-            except (TypeError, ValueError):
-                hfrac = wfrac * 9 / 16
-        else:
-            # Default PiP box ≈ 16:9 relative to canvas width.
-            hfrac = min(1.0, max(0.05, (wfrac * W * 9 / 16) / max(1, H)))
-        ow = max(2, int(W * wfrac) // 2 * 2)
-        oh = max(2, int(H * hfrac) // 2 * 2)
-        x = int(W * float(ov.get("x", 0.5)))
-        y = int(H * float(ov.get("y", 0.5)))
-        # Keep overlay on-canvas
-        x = max(0, min(W - ow, x))
-        y = max(0, min(H - oh, y))
-        opacity = min(1.0, max(0.0, float(ov.get("opacity", 1.0))))
-        fit = str(ov.get("fit") or "cover")
-        try:
-            fade_in = max(0.0, min(length / 2, float(ov.get("fade_in") or 0)))
-        except (TypeError, ValueError):
-            fade_in = 0.0
-        try:
-            fade_out = max(0.0, min(length / 2, float(ov.get("fade_out") or 0)))
-        except (TypeError, ValueError):
-            fade_out = 0.0
-        try:
-            border = max(0, min(24, int(ov.get("border_px") or 0)))
-        except (TypeError, ValueError):
-            border = 0
-
-        scale = _tl_overlay_scale_filter(ow, oh, fit)
-        if kind == "gif":
-            # Animated GIF: decode frames (ignore_loop 0 = honor file loop;
-            # stream_loop -1 keeps it playing for the overlay window).
-            inputs += [
-                "-ignore_loop", "0", "-stream_loop", "-1",
-                "-i", str(path),
-            ]
-            prep = (
-                f"[{in_idx}:v:0]trim=duration={length:.3f},"
-                f"setpts=PTS-STARTPTS,fps={fps},{scale}"
-            )
-        elif kind == "image":
-            inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
-            # Explicit :0 — phone containers often mix mebx data streams.
-            prep = f"[{in_idx}:v:0]{scale}"
-        else:
-            # Open full file, trim in-graph (avoids -ss-before--i dropping :v on MOV/mebx).
-            inputs += ["-i", str(path)]
-            prep = (
-                f"[{in_idx}:v:0]trim=start={o_in:.3f}:duration={length:.3f},"
-                f"setpts=PTS-STARTPTS,{scale}"
-            )
-        # Ken Burns on the PiP box (photo / short B-roll moments) — skip for GIFs.
-        kb = None if kind == "gif" else _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
-        if kb:
-            prep += "," + kb
-        if border > 0:
-            prep += (
-                f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
-            )
-            # Re-clamp position for padded size
-            x = max(0, min(W - (ow + border * 2), x - border))
-            y = max(0, min(H - (oh + border * 2), y - border))
-        need_alpha = opacity < 1.0 or fade_in > 0 or fade_out > 0
-        if need_alpha:
-            prep += ",format=yuva420p"
-            if opacity < 1.0:
-                prep += f",colorchannelmixer=aa={opacity:.3f}"
-            if fade_in > 0:
-                prep += f",fade=t=in:st=0:d={fade_in:.3f}:alpha=1"
-            if fade_out > 0:
-                st = max(0.0, length - fade_out)
-                prep += f",fade=t=out:st={st:.3f}:d={fade_out:.3f}:alpha=1"
-        # Delay the overlay so it lands at `start` on the timeline.
-        prep += f",tpad=start_duration={start:.3f}"
-        prep += f"[ov{n}]"
-        filt.append(prep)
-        filt.append(
-            f"{cur}[ov{n}]overlay=x={x}:y={y}:"
-            f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
+    try:
+        inputs, filt, cur = _build_graph(resolved)
+        _tl_run(
+            [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
+             "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
+             "-c:a", "aac", "-b:a", "192k", str(out_path)],
+            "Overlay composite",
         )
-        cur = f"[bg{n}]"
-        in_idx += 1
+        return
+    except RuntimeError as exc:
+        first_err = str(exc)
+        print(f"[overlay] Overlay composite failed: {first_err}", flush=True)
 
-    _tl_run(
-        [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
-         "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
-         "-c:a", "copy", str(out_path)],
-        "Overlay composite",
+    # Retry once, dropping overlays that start in the back half of the clip —
+    # those are the ones most likely to be driving a bad tpad/duration edge
+    # case, and losing them still keeps the earlier overlays on screen.
+    if base_dur > 0:
+        early = [r for r in resolved if float(r[0].get("start", 0) or 0) <= 0.5 * base_dur]
+    else:
+        early = []
+    if early and len(early) < len(resolved):
+        try:
+            inputs, filt, cur = _build_graph(early)
+            _tl_run(
+                [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
+                 "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
+                 "-c:a", "aac", "-b:a", "192k", str(out_path)],
+                "Overlay composite retry",
+            )
+            print(f"[overlay] retry without late overlays succeeded "
+                  f"(dropped {len(resolved) - len(early)} overlay(s))", flush=True)
+            return
+        except RuntimeError as exc:
+            print(f"[overlay] retry also failed: {exc}", flush=True)
+
+    print(f"[overlay] Overlays skipped due to ffmpeg error — passing base "
+          f"through unchanged. Original error: {first_err}", flush=True)
+    _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
+            "Overlay passthrough")
+
+
+def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
+                                inputs: list, filt: list, cur: str, in_idx: int,
+                                start: float, o_in: float, length: float,
+                                W: int, H: int, fps: int) -> tuple:
+    """Append one overlay's input(s) + filter chain onto an in-progress graph.
+
+    Returns the updated (inputs, filt, cur, in_idx).
+    """
+    wfrac = min(1.0, max(0.05, float(ov.get("w", 0.4))))
+    if ov.get("h") is not None:
+        try:
+            hfrac = min(1.0, max(0.05, float(ov.get("h"))))
+        except (TypeError, ValueError):
+            hfrac = wfrac * 9 / 16
+    else:
+        # Default PiP box ≈ 16:9 relative to canvas width.
+        hfrac = min(1.0, max(0.05, (wfrac * W * 9 / 16) / max(1, H)))
+    ow = max(2, int(W * wfrac) // 2 * 2)
+    oh = max(2, int(H * hfrac) // 2 * 2)
+    x = int(W * float(ov.get("x", 0.5)))
+    y = int(H * float(ov.get("y", 0.5)))
+    # Keep overlay on-canvas
+    x = max(0, min(W - ow, x))
+    y = max(0, min(H - oh, y))
+    opacity = min(1.0, max(0.0, float(ov.get("opacity", 1.0))))
+    fit = str(ov.get("fit") or "cover")
+    try:
+        fade_in = max(0.0, min(length / 2, float(ov.get("fade_in") or 0)))
+    except (TypeError, ValueError):
+        fade_in = 0.0
+    try:
+        fade_out = max(0.0, min(length / 2, float(ov.get("fade_out") or 0)))
+    except (TypeError, ValueError):
+        fade_out = 0.0
+    try:
+        border = max(0, min(24, int(ov.get("border_px") or 0)))
+    except (TypeError, ValueError):
+        border = 0
+
+    scale = _tl_overlay_scale_filter(ow, oh, fit)
+    if kind == "gif":
+        # Animated GIF: decode frames (ignore_loop 0 = honor file loop;
+        # stream_loop -1 keeps it playing for the overlay window).
+        inputs += [
+            "-ignore_loop", "0", "-stream_loop", "-1",
+            "-i", str(path),
+        ]
+        prep = (
+            f"[{in_idx}:v:0]trim=duration={length:.3f},"
+            f"setpts=PTS-STARTPTS,fps={fps},{scale}"
+        )
+    elif kind == "image":
+        inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
+        # Explicit :0 — phone containers often mix mebx data streams.
+        prep = f"[{in_idx}:v:0]{scale}"
+    else:
+        # Open full file, trim in-graph (avoids -ss-before--i dropping :v on MOV/mebx).
+        inputs += ["-i", str(path)]
+        prep = (
+            f"[{in_idx}:v:0]trim=start={o_in:.3f}:duration={length:.3f},"
+            f"setpts=PTS-STARTPTS,{scale}"
+        )
+    # Ken Burns on the PiP box (photo / short B-roll moments) — skip for GIFs.
+    kb = None if kind == "gif" else _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
+    if kb:
+        prep += "," + kb
+    if border > 0:
+        prep += (
+            f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
+        )
+        # Re-clamp position for padded size
+        x = max(0, min(W - (ow + border * 2), x - border))
+        y = max(0, min(H - (oh + border * 2), y - border))
+    need_alpha = opacity < 1.0 or fade_in > 0 or fade_out > 0
+    if need_alpha:
+        prep += ",format=yuva420p"
+        if opacity < 1.0:
+            prep += f",colorchannelmixer=aa={opacity:.3f}"
+        if fade_in > 0:
+            prep += f",fade=t=in:st=0:d={fade_in:.3f}:alpha=1"
+        if fade_out > 0:
+            st = max(0.0, length - fade_out)
+            prep += f",fade=t=out:st={st:.3f}:d={fade_out:.3f}:alpha=1"
+    # Delay the overlay so it lands at `start` on the timeline.
+    prep += f",tpad=start_duration={start:.3f}"
+    prep += f"[ov{n}]"
+    filt.append(prep)
+    filt.append(
+        f"{cur}[ov{n}]overlay=x={x}:y={y}:"
+        f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
     )
+    cur = f"[bg{n}]"
+    in_idx += 1
+    return inputs, filt, cur, in_idx
 
 
 def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
@@ -9662,7 +9773,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             cuts: list, effects: list,
                             label: str = "",
                             words: list | None = None,
-                            insert_media: bool = True) -> dict:
+                            insert_media: bool = True,
+                            hook: dict | None = None) -> dict:
     """Assemble a Captions-style seeded timeline project from a style pack."""
     main_id = _uid_short()
     grade = _clip_color_from_pack(pack)
@@ -9747,10 +9859,84 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     for c in cuts
                     if c[1] > p["in"] and c[0] < p["out"] and min(p["out"], c[1]) - max(p["in"], c[0]) > 0.05
                 ]
-        # Transitions between pieces
-        tr = pack.get("transition") or "crossfade"
-        for i, p in enumerate(pieces[:-1]):
-            p["transition"] = {"type": tr, "duration": 0.25 if intensity != "high" else 0.15}
+        # Transitions between pieces — hard cuts unless the pack opts in.
+        tr = pack.get("transition")
+        if tr:
+            for i, p in enumerate(pieces[:-1]):
+                p["transition"] = {"type": tr, "duration": 0.25 if intensity != "high" else 0.15}
+
+    # Hook-pull: for full-video edits, reorder so the strongest moment opens
+    # the edit even though it happens mid-transcript (classic hook-first cut).
+    hook_pulled = False
+    hook_quote = None
+    if hook:
+        try:
+            hook_s = max(t_in, float(hook.get("start_time")))
+            hook_e = min(t_out, float(hook.get("end_time")))
+        except (TypeError, ValueError):
+            hook_s = hook_e = None
+        if (
+            hook_s is not None and hook_e is not None
+            and hook_e > hook_s
+            and 2.5 <= (hook_e - hook_s) <= 12.0
+            and hook_s > t_in + 2.0
+        ):
+            # Reorder as three source ranges: the hook itself, then whatever
+            # came before it, then whatever came after — all hard cuts.
+            ranges = [(hook_s, hook_e), (t_in, hook_s), (hook_e, t_out)]
+            new_pieces = []
+            for rs, re_ in ranges:
+                if re_ - rs < 0.1:
+                    continue
+                new_pieces.append({
+                    "id": _uid_short(), "source_job_id": job_id,
+                    "in": rs, "out": re_, "transition": None,
+                    "burn_captions": True, "cuts": [],
+                    "color": grade, "color_grade": grade,
+                })
+            if new_pieces:
+                # Redistribute original cuts onto the new ranges by intersection.
+                if cuts:
+                    for p in new_pieces:
+                        p["cuts"] = [
+                            [max(p["in"], c[0]), min(p["out"], c[1])]
+                            for c in cuts
+                            if c[1] > p["in"] and c[0] < p["out"]
+                            and min(p["out"], c[1]) - max(p["in"], c[0]) > 0.05
+                        ]
+                # Re-apply usable effects by time intersection (best-effort —
+                # effects that fall inside the hook window land on the hook
+                # piece since it's now first).
+                for fx in usable:
+                    try:
+                        fmid = (float(fx["start_time"]) + float(fx["end_time"])) / 2
+                    except (TypeError, ValueError):
+                        continue
+                    target = next(
+                        (p for p in new_pieces if p["in"] - 0.05 <= fmid <= p["out"] + 0.05),
+                        None,
+                    )
+                    if target is None:
+                        continue
+                    ftype = fx.get("type")
+                    if ftype == "punch_zoom":
+                        target["punch_zoom"] = {
+                            "enabled": True,
+                            "intensity": fx.get("intensity") or ("high" if intensity == "high" else "med"),
+                        }
+                        if fx.get("anchor"):
+                            target["punch_zoom"]["anchor"] = fx["anchor"]
+                    elif ftype == "ken_burns":
+                        target["ken_burns"] = {
+                            "enabled": True,
+                            "intensity": fx.get("intensity") or "med",
+                            "direction": fx.get("direction") or "in",
+                        }
+                    elif ftype == "split_screen":
+                        target["split"] = {"enabled": True}
+                pieces = new_pieces
+                hook_pulled = True
+                hook_quote = str(hook.get("hook_quote") or hook.get("quote") or "")[:200] or None
 
     text_track = []
     if pack.get("add_title") and label:
@@ -9911,6 +10097,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "broll_placement": "center" if pack.get("photo_match") else "pip",
             "broll_scope": "full",
             "ken_burns_on_accept": bool(pack.get("photo_match")),
+            "hook_pulled": hook_pulled,
+            "hook_quote": hook_quote,
         },
         "tracks": {
             "main": pieces,
@@ -10129,6 +10317,7 @@ def ai_edit_seed():
 
     # Effect suggestions (Gemini when available; empty otherwise).
     effects = []
+    hook = None
     gemini_warning = None
     try:
         max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity, window_dur))
@@ -10155,6 +10344,18 @@ def ai_edit_seed():
                 anchor = _face_anchor_at(work_job_id, fx["start_time"])
                 if anchor:
                     fx["anchor"] = anchor
+        structure = result.get("structure") or {}
+        if isinstance(structure, dict) and structure.get("hook_start_time") is not None \
+                and structure.get("hook_end_time") is not None:
+            try:
+                hook = {
+                    "start_time": float(structure["hook_start_time"]),
+                    "end_time": float(structure["hook_end_time"]),
+                    "hook_quote": str(structure.get("hook_quote") or "")[:200],
+                    "hook_reason": str(structure.get("hook_reason") or "")[:300],
+                }
+            except (TypeError, ValueError):
+                hook = None
     except RuntimeError as exc:
         gemini_warning = str(exc)
     except Exception as exc:
@@ -10162,7 +10363,7 @@ def ai_edit_seed():
 
     timeline = _build_ai_edit_timeline(
         work_job_id, work_in, work_out, pack, intensity, cuts, effects,
-        label=label, words=words, insert_media=insert_media,
+        label=label, words=words, insert_media=insert_media, hook=hook,
     )
     if purpose:
         timeline["ai_edit"] = dict(timeline.get("ai_edit") or {})
@@ -10187,6 +10388,7 @@ def ai_edit_seed():
         "recommended_cuts": rec,
         "applied_cuts": cuts,
         "effects": effects,
+        "hook": hook,
         "timeline": timeline,
         "media_hints": (timeline or {}).get("media_hints") or {},
         "warning": gemini_warning,

@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-59-polish-visual-beats";
+  const TL_BUILD = "studio-editor-build-60-workspace-focus-playback-fix";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -32,6 +32,7 @@
   let _overlayReplaceTargetId = null; // sticky Overlay id during Replace media flow
   let sources = [];        // [{job_id, filename, ...}]
   let assets = [];         // [{asset_id, kind, duration, ext}]
+  const selectedAssetIds = new Set(); // multi-select checkboxes in the Library panel
   const srcDur = {};       // job_id -> duration cache
   let saveTimer = null;
   let pollTimer = null;
@@ -45,6 +46,7 @@
   let seqPreview = null;         // { running, cancel } for Preview cut
   let magnetic = true;           // snap clip edges to nearby cuts / playhead
   let musicPlayers = [];         // music bed during Preview cut
+  let clipAdvanceLock = false;   // guards against re-entrant clip-to-clip advance
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -997,6 +999,36 @@
     setSaveState("Asset deleted");
   }
 
+  /** Bulk-delete every asset checked in the Library panel (uses /delete-asset). */
+  async function deleteSelectedAssets() {
+    const ids = Array.from(selectedAssetIds).filter((id) => assets.some((a) => a.asset_id === id));
+    if (!ids.length) return;
+    const plural = ids.length > 1 ? "s" : "";
+    if (!confirm(`Delete ${ids.length} selected asset${plural}? This also removes any timeline clips that use them.`)) return;
+
+    const usedAny = tl && ids.some((id) =>
+      ["overlay", "music"].some((k) => (tl.tracks[k] || []).some((c) => c.asset_id === id)));
+    if (usedAny) pushHistory();
+
+    for (const id of ids) {
+      try { await api("/delete-asset/" + id, { method: "POST" }); } catch (e) { /* keep going */ }
+      if (tl) {
+        ["overlay", "music"].forEach((k) => {
+          tl.tracks[k] = (tl.tracks[k] || []).filter((c) => c.asset_id !== id);
+        });
+        if (tl.logo && tl.logo.asset_id === id) tl.logo = null;
+      }
+    }
+    selectedAssetIds.clear();
+    if (tl) {
+      if (selected && findClip(selected.track, selected.id) == null) selected = null;
+      renderTimeline();
+      scheduleSave();
+    }
+    await loadAssets();
+    setSaveState(`Deleted ${ids.length} asset${plural}`);
+  }
+
   function renderAssetList() {
     const wrap = $("tlAssetList");
     if (!wrap) return;
@@ -1020,6 +1052,30 @@
       wrap.innerHTML = '<p class="muted tl-hint">No assets yet. Upload a file or Suggest B-roll overlays.</p>';
       return;
     }
+    // Drop selections for assets that no longer exist.
+    const liveIds = new Set(assets.map((a) => a.asset_id));
+    Array.from(selectedAssetIds).forEach((id) => { if (!liveIds.has(id)) selectedAssetIds.delete(id); });
+
+    if (!replacing) {
+      const bulk = document.createElement("div");
+      bulk.className = "tl-asset-bulkbar";
+      const allChecked = assets.length > 0 && assets.every((a) => selectedAssetIds.has(a.asset_id));
+      bulk.innerHTML =
+        `<label class="tl-asset-bulk-all"><input type="checkbox" id="tlAssetSelectAll"${allChecked ? " checked" : ""}> Select all</label>` +
+        `<button type="button" id="tlAssetDeleteSelected" class="tl-chip-btn tl-chip-danger" ${selectedAssetIds.size ? "" : "disabled"}>🗑 Delete selected (${selectedAssetIds.size})</button>`;
+      wrap.appendChild(bulk);
+      const allBox = bulk.querySelector("#tlAssetSelectAll");
+      if (allBox) {
+        allBox.onchange = () => {
+          if (allBox.checked) assets.forEach((a) => selectedAssetIds.add(a.asset_id));
+          else selectedAssetIds.clear();
+          renderAssetList();
+        };
+      }
+      const delBtn = bulk.querySelector("#tlAssetDeleteSelected");
+      if (delBtn) delBtn.onclick = () => deleteSelectedAssets();
+    }
+
     assets.forEach((a) => {
       const div = document.createElement("div");
       div.className = "tl-source-item" + (replacing ? " tl-replace-candidate" : "");
@@ -1028,8 +1084,19 @@
       const thumb = (a.kind === "image" || a.kind === "video")
         ? `<img class="tl-asset-thumb" src="/asset/${a.asset_id}" alt="" loading="lazy">`
         : `<span class="tl-asset-thumb tl-asset-thumb-ph" aria-hidden="true">${icon}</span>`;
+      const checkbox = replacing ? "" :
+        `<input type="checkbox" class="tl-asset-check" data-asset-id="${esc(a.asset_id)}"${selectedAssetIds.has(a.asset_id) ? " checked" : ""} title="Select for bulk delete">`;
       div.innerHTML =
-        `${thumb}<span class="tl-source-name" title="${esc(label)}">${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
+        `${checkbox}${thumb}<span class="tl-source-name" title="${esc(label)}">${esc(label)}${a.duration ? " · " + fmtTime(a.duration) : ""}</span>`;
+      const check = div.querySelector(".tl-asset-check");
+      if (check) {
+        check.onclick = (e) => e.stopPropagation();
+        check.onchange = () => {
+          if (check.checked) selectedAssetIds.add(a.asset_id);
+          else selectedAssetIds.delete(a.asset_id);
+          renderAssetList();
+        };
+      }
       const actions = document.createElement("div");
       actions.className = "tl-source-actions";
       if (a.kind === "audio") {
@@ -1163,6 +1230,11 @@
     if (caps && typeof caps.open === "boolean") caps.open = (which !== "audio");
     if (audio && typeof audio.open === "boolean") audio.open = (which === "audio");
     if (bg && typeof bg.open === "boolean" && which === "audio") bg.open = false;
+    // Desktop workspace-focus hides the side columns permanently — pop the
+    // Look panel into the workspace modal instead so Captions/Audio are reachable.
+    if (isWorkspaceFocusDesktop()) {
+      openWorkspacePanel(which === "audio" ? "🔊 Audio" : "🎨 Captions", { mode: "left" });
+    }
     const id = which === "audio" ? "captionLookAudioSection" : "captionLookCaptionsSection";
     const el = document.getElementById(id);
     if (el) {
@@ -1177,6 +1249,75 @@
     document.querySelectorAll("[data-look-jump]").forEach((b) => {
       b.onclick = () => jumpLookSection(b.dataset.lookJump);
     });
+  }
+
+  // ---- Workspace-focus modal (desktop): Library / Captions / Audio / Clip
+  // props open here instead of living in permanent side columns, so preview +
+  // toolbar + timeline stay visible at all times. ----
+  function isWorkspaceFocusDesktop() {
+    return document.body.classList.contains("tl-workspace-focus") &&
+      !document.body.classList.contains("is-phone");
+  }
+
+  let _workspaceModalReturn = null; // { node, parent, next } — where to put a moved panel back
+
+  function restoreWorkspaceNode() {
+    if (!_workspaceModalReturn) return;
+    const { node, parent, next } = _workspaceModalReturn;
+    if (parent) {
+      if (next && next.parentElement === parent) parent.insertBefore(node, next);
+      else parent.appendChild(node);
+    }
+    _workspaceModalReturn = null;
+  }
+
+  /**
+   * Open the workspace modal. opts.mode "left" moves #tlLeftPanel (Library /
+   * Transcript / Look) into the modal body; "props" moves #tlProps (clip /
+   * project properties). opts.fillFn(bodyEl) can render arbitrary content
+   * instead. Moving actual DOM nodes (rather than cloning) keeps every
+   * existing event listener / render() target working unmodified.
+   */
+  function openWorkspacePanel(title, opts) {
+    opts = opts || {};
+    const modal = $("tlWorkspaceModal");
+    const body = $("tlWorkspaceModalBody");
+    const titleEl = $("tlWorkspaceModalTitle");
+    if (!modal || !body) return;
+    if (titleEl) titleEl.textContent = title || "Panel";
+
+    let node = null;
+    if (opts.mode === "left") node = $("tlLeftPanel");
+    else if (opts.mode === "props") node = $("tlProps");
+
+    // Never orphan whatever was previously parked in the modal.
+    if (_workspaceModalReturn && _workspaceModalReturn.node !== node) restoreWorkspaceNode();
+
+    if (node) {
+      if (node.parentElement !== body) {
+        _workspaceModalReturn = { node, parent: node.parentElement, next: node.nextSibling };
+        body.innerHTML = "";
+        body.appendChild(node);
+      }
+      node.classList.remove("hidden");
+    } else if (typeof opts.fillFn === "function") {
+      body.innerHTML = "";
+      opts.fillFn(body);
+    }
+
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    if (typeof opts.onOpen === "function") opts.onOpen(body);
+  }
+
+  function closeWorkspacePanel() {
+    const modal = $("tlWorkspaceModal");
+    const body = $("tlWorkspaceModalBody");
+    if (!modal) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    restoreWorkspaceNode();
+    if (body) body.innerHTML = "";
   }
 
   let _captionLookMounted = false;
@@ -2051,7 +2192,11 @@
     const meta = EFFECT_TYPES.find((t) => t.id === type) || EFFECT_TYPES[0];
     const ftype = meta.id;
     const v = $("tlPreviewVideo");
-    const start = opts.start != null ? Number(opts.start) : (v ? (v.currentTime || 0) : 0);
+    // Anchor new effect blocks to the *output* playhead (where the red
+    // playhead / grade currently applies) rather than raw source time —
+    // otherwise Effects lane blocks land in the wrong spot whenever the
+    // preview is showing a trimmed/reordered Main clip.
+    const start = opts.start != null ? Number(opts.start) : (playheadOutputTime() ?? (v ? (v.currentTime || 0) : 0));
     const dur = opts.out != null ? Number(opts.out) : (
       ftype === "punch_zoom" ? 1.2 : ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4 : 3
     );
@@ -2983,8 +3128,10 @@
         if (!cancelled && i < tl.tracks.main.length - 1) {
           const tr = (c.transition && c.transition.type) || c.transition || "";
           const soft = /fade|dissolve/i.test(String(tr));
-          const steps = soft ? 12 : 7;
-          const stepMs = soft ? 40 : 35;
+          // Hard cuts (transition null/"cut"): keep the preview dissolve
+          // near-instant so it reads as a cut, not a mystery fade.
+          const steps = soft ? 12 : 2;
+          const stepMs = soft ? 40 : 20;
           for (let s = 1; s <= steps; s++) {
             if (cancelled) break;
             v.style.opacity = String(1 - s / steps);
@@ -3001,7 +3148,7 @@
       }
       seqPreview = null;
       if (btn) btn.textContent = "▶ Preview cut";
-      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for exact xfade / captions burn");
+      setRenderStatus(cancelled ? "Preview stopped" : "Preview done — Render for exact transitions / captions");
       renderTimeline();
     }
   }
@@ -3224,8 +3371,65 @@
     syncOverlayKenBurns(ot);
     updatePlayhead();
     if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
+    if (!v.paused && !v.ended) maybeAdvancePastClipEnd();
 
     rafId = (!v.paused && !v.ended) ? requestAnimationFrame(previewFrame) : null;
+  }
+
+  /**
+   * Space/native play scrubs the raw <video> source, which has no concept of
+   * clip boundaries — left alone it keeps playing straight through clip.out
+   * into whatever footage follows in that same source file. Watch every
+   * frame while playing and, once we cross the current Main clip's out point,
+   * hop to the next Main clip (or stop) instead of leaking into raw source.
+   */
+  function maybeAdvancePastClipEnd() {
+    if (!tl || previewingOutput || (seqPreview && seqPreview.running) || clipAdvanceLock) return;
+    const v = $("tlPreviewVideo");
+    if (!v || v.paused || v.ended) return;
+
+    const src = v.getAttribute("src") || "";
+    const t = v.currentTime || 0;
+    let idx = -1;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      if (!c.source_job_id) continue;
+      if (src !== "/raw-upload/" + c.source_job_id) continue;
+      const cin = c.in || 0;
+      const cout = c.out != null ? c.out : cin + 1e9;
+      if (t >= cin - 0.15 && t <= cout + 0.15) { idx = i; break; }
+    }
+    if (idx < 0 && selected && selected.track === "main") {
+      idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
+    }
+    if (idx < 0) return;
+
+    const c = tl.tracks.main[idx];
+    if (!c || !c.source_job_id) return;
+    const ranges = keepRangesForClip(c, { allowEmpty: true });
+    const end = ranges.length ? ranges[ranges.length - 1][1] : (c.out != null ? c.out : t);
+    if (t < end - 0.04) return;
+
+    const nextIdx = idx + 1;
+    const nextClip = tl.tracks.main[nextIdx];
+    if (nextClip) {
+      clipAdvanceLock = true;
+      try { v.pause(); } catch (e) { /* ignore */ }
+      selectClip("main", nextClip.id);
+      seekToOutputTime(mainStart(nextIdx) + 0.01);
+      const resumePlay = () => {
+        v.play().catch(() => {});
+        startPreviewLoop();
+        clipAdvanceLock = false;
+      };
+      // Same-source clips seek synchronously (readyState unchanged); a
+      // different source just called v.load(), which resets readyState to 0
+      // — wait for it so play() doesn't briefly start from t=0.
+      if (v.readyState >= 1) requestAnimationFrame(resumePlay);
+      else v.addEventListener("loadedmetadata", resumePlay, { once: true });
+    } else {
+      try { v.pause(); } catch (e) { /* ignore */ }
+    }
   }
 
   function startPreviewLoop() {
@@ -4029,6 +4233,7 @@
     const opts = [["", "— no logo —"]].concat(imgVid.map((a) => [a.asset_id, `${a.kind} · ${a.ext}`]));
     let html = `<h3>⚙ Project</h3>`;
     html += `<p class="muted" style="font-size:.74rem;line-height:1.4">No clip selected. Drag media onto lanes, or open Captions / Audio below.</p>`;
+    html += `<p class="muted" style="font-size:.72rem;line-height:1.4">Project name is the field in the top toolbar; it auto-saves while typing, or press <strong>Save name</strong> to commit it right away.</p>`;
     if (!(tl.tracks.main || []).length) {
       html += `<p class="muted" style="font-size:.74rem;padding:8px 10px;background:#181c28;border:1px solid #2a2f3a;border-radius:8px;line-height:1.45">This project has <strong>0 Main clips</strong>. Drag a video from <strong>Media</strong> onto the Main lane to start.</p>`;
     }
@@ -4792,7 +4997,8 @@
     } catch (e) {
       setRenderStatus("Error: " + e.message);
       if (btn) btn.disabled = false;
-      throw e;
+      alert("Render failed: " + (e.message || e));
+      return null;
     }
   }
   window.renderTimelineVideo = renderTimelineVideo;
@@ -5084,9 +5290,58 @@
     });
   }
 
+  let progressHideTimer = null;
+  function updateProgressBar(s) {
+    const bar = $("tlProgressBar");
+    const fill = $("tlProgressFill");
+    const label = $("tlProgressLabel");
+    if (!bar || !fill || !label) return;
+    if (progressHideTimer) { clearTimeout(progressHideTimer); progressHideTimer = null; }
+
+    const msg = String(s || "");
+    label.textContent = msg;
+
+    const pctMatch = msg.match(/(\d+)\s*%/);
+    if (pctMatch) {
+      fill.style.width = Math.max(0, Math.min(100, Number(pctMatch[1]))) + "%";
+    }
+
+    if (!msg) {
+      bar.classList.add("hidden");
+      fill.style.width = "0%";
+      fill.classList.remove("is-error");
+      return;
+    }
+
+    const isDone = /done|✓/i.test(msg);
+    const isError = /error|fail/i.test(msg);
+    if (isDone || isError) {
+      bar.classList.remove("hidden");
+      fill.classList.toggle("is-error", isError && !isDone);
+      if (isDone && !pctMatch) fill.style.width = "100%";
+      progressHideTimer = setTimeout(() => {
+        bar.classList.add("hidden");
+        fill.style.width = "0%";
+        fill.classList.remove("is-error");
+        progressHideTimer = null;
+      }, 2200);
+      return;
+    }
+
+    if (/%|queued|working|polish|render|encoding|stitch/i.test(msg)) {
+      bar.classList.remove("hidden");
+      fill.classList.remove("is-error");
+      if (!pctMatch) fill.style.width = fill.style.width && fill.style.width !== "0%" ? fill.style.width : "6%";
+      return;
+    }
+
+    bar.classList.add("hidden");
+  }
+
   function setRenderStatus(s) {
     const el = $("tlRenderStatus");
     if (el) el.textContent = s;
+    updateProgressBar(s);
   }
 
   // ---- Asset upload ----
@@ -5348,8 +5603,12 @@
       e.preventDefault();
       const v = $("tlPreviewVideo");
       if (!v) return;
-      if (v.paused) v.play().catch(() => {});
-      else v.pause();
+      if (v.paused) {
+        v.play().catch(() => {});
+        startPreviewLoop();
+      } else {
+        v.pause();
+      }
       return;
     }
     if (key === "Delete" || key === "Backspace") {
@@ -5413,6 +5672,14 @@
         on("tlDeleteProjectBtn", "onclick", () => deleteCurrentProject());
         on("tlProjectSelect", "onchange", (e) => { if (e.target.value) openProject(e.target.value); });
         on("tlLabel", "oninput", (e) => { if (tl) { tl.label = e.target.value; scheduleSave(); } });
+        on("tlRenameSaveBtn", "onclick", async () => {
+          if (!tl) return;
+          const input = $("tlLabel");
+          if (input) tl.label = input.value;
+          clearTimeout(saveTimer);
+          await saveNow();
+          setSaveState("Name saved ✓");
+        });
         on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
         on("tlRenderBtn", "onclick", renderTimelineVideo);
@@ -5429,6 +5696,28 @@
             if (e.target === polishModal) closePolishSheet();
           });
         }
+        on("tlWorkspaceModalClose", "onclick", () => closeWorkspacePanel());
+        const workspaceModal = $("tlWorkspaceModal");
+        if (workspaceModal) {
+          workspaceModal.addEventListener("click", (e) => {
+            if (e.target === workspaceModal) closeWorkspacePanel();
+          });
+        }
+        // Desktop default: keep preview + toolbar + timeline always visible;
+        // Library / Captions / Audio / Clip props open as workspace-modal windows.
+        if (!document.body.classList.contains("is-phone")) {
+          document.body.classList.add("tl-workspace-focus");
+        }
+        on("tlMobilePanelBtn", "onclick", () => {
+          // Phone tap is already handled by mobile.js's own listener (bottom
+          // sheet); this covers the desktop workspace-focus case only.
+          if (document.body.classList.contains("is-phone")) return;
+          openWorkspacePanel("📚 Library", { mode: "left" });
+          setLeftTab("media", { pin: true, openSheet: false });
+        });
+        on("tlPropsBtn", "onclick", () => {
+          openWorkspacePanel(selected ? "✎ Clip properties" : "⚙ Project properties", { mode: "props" });
+        });
         on("tlAddTitleBtn", "onclick", () => addTitle());
         ensureEffectsChrome();
         on("tlAddEffectBtn", "onclick", () => addEffectClip("punch_zoom"));
@@ -6648,7 +6937,7 @@
           in: s.start,
           out: s.end,
           _max: clip._max,
-          transition: i < shots.length - 1 ? { type: "crossfade", duration: 0.25 } : null,
+          transition: null,
           burn_captions: clip.burn_captions !== false,
           cuts: (clip.cuts || []).filter(([cs, ce]) => ce > s.start && cs < s.end)
             .map(([cs, ce]) => [Math.max(cs, s.start), Math.min(ce, s.end)]),

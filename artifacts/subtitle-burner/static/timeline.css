@@ -128,6 +128,37 @@
   .tl-body { grid-template-columns: 1fr; }
 }
 
+/* ---- Workspace-focus mode (desktop): preview + toolbar + timeline stay put;
+   Library / Captions / Audio / Clip properties open as modal windows instead
+   of permanent side columns. Scoped to non-phone widths — phone keeps its own
+   bottom-sheet behavior from mobile.css untouched. ---- */
+@media (min-width: 769px) {
+  body.tl-workspace-focus .tl-body { grid-template-columns: 1fr; }
+  body.tl-workspace-focus .tl-body > .tl-left,
+  body.tl-workspace-focus .tl-body > .tl-props {
+    display: none;
+  }
+  /* #tlMobilePanelBtn ships with .tl-mobile-only (display:none !important in
+     mobile.css) — the id selector here still wins on specificity so it can
+     double as the desktop "Library" opener while workspace-focus is active. */
+  body.tl-workspace-focus #tlMobilePanelBtn {
+    display: inline-flex !important;
+  }
+}
+#tlPropsBtn { display: none; }
+body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
+/* Panels look native once relocated into the workspace modal — drop the
+   fixed max-height / chrome that only made sense as a permanent side column. */
+#tlWorkspaceModalBody .tl-left,
+#tlWorkspaceModalBody .tl-props {
+  max-height: none;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+#tlWorkspaceModalBody .tl-left-sheet-head { display: none !important; }
+
 /* ---- Left column: Transcript / Media tabs ---- */
 .tl-left {
   display: flex;
@@ -370,6 +401,21 @@
   white-space: nowrap;
 }
 .tl-source-item .tl-source-meta { color: #8b91a0; font-size: .72rem; }
+.tl-asset-check { flex-shrink: 0; cursor: pointer; }
+.tl-asset-bulkbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: #181c28;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  font-size: .78rem;
+}
+.tl-asset-bulk-all { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.tl-asset-bulkbar .tl-chip-btn:disabled { opacity: .45; cursor: not-allowed; }
 .tl-look-mount {
   max-height: calc(100vh - 220px);
   overflow: auto;
@@ -452,10 +498,10 @@
   pointer-events: none;
 }
 .tl-keys-hint {
-  font-size: .72rem;
-  white-space: nowrap;
-  opacity: 0.75;
-  padding: 0 4px;
+  /* Hint text now lives in the toolbar's title="" tooltip instead of an
+     always-visible strip that overlapped the buttons — keep this rule as
+     belt-and-suspenders in case the markup still renders it somewhere. */
+  display: none;
 }
 .tl-asset-upload { margin: 6px 0 10px; }
 .btn-block { width: 100%; }
@@ -619,6 +665,41 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Render progress, docked under the preview */
+.tl-progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px;
+}
+.tl-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: #1c202b;
+  border: 1px solid #2a2f3a;
+  overflow: hidden;
+}
+.tl-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #5aa0f0, #6c5cff);
+  transition: width .25s ease;
+}
+.tl-progress-fill.is-error {
+  background: #e05a5a;
+}
+.tl-progress-label {
+  font-size: .72rem;
+  color: #aab2c0;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tl-timeline {
   position: relative;

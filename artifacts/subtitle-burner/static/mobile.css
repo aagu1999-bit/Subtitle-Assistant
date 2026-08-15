@@ -266,8 +266,8 @@
     width: 14px;
   }
   .tl-tltoolbar {
-    flex-wrap: nowrap;
-    overflow-x: auto;
+    flex-wrap: wrap;
+    overflow-x: visible;
     -webkit-overflow-scrolling: touch;
     gap: 6px;
     padding-bottom: 4px;

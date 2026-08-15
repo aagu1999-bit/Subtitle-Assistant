@@ -1224,9 +1224,11 @@
           <button id="tlNewBtn" class="btn btn-secondary">+ New project</button>
           <button id="tlDeleteProjectBtn" class="btn btn-secondary" type="button" title="Delete the open timeline project" style="border-color:#bf616a88;color:#ffb4b4">🗑 Delete project</button>
           <input type="text" id="tlLabel" class="tl-text" placeholder="Project name" maxlength="80">
+          <button id="tlRenameSaveBtn" class="btn btn-secondary" type="button" title="Save project name now">Save name</button>
         </div>
         <div class="tl-toolbar-right">
-          <button id="tlMobilePanelBtn" class="btn btn-secondary tl-mobile-only" type="button" title="Open Transcript / Media / Look">📚 Library</button>
+          <button id="tlMobilePanelBtn" class="btn btn-secondary" type="button" title="Open Transcript / Media / Look">📚 Library</button>
+          <button id="tlPropsBtn" class="btn btn-secondary" type="button" title="Open clip / project properties">✎ Properties</button>
           <button id="tlUndoBtn" class="tl-chip-btn" title="Undo (Ctrl/⌘Z)" disabled>↶ Undo</button>
           <button id="tlRedoBtn" class="tl-chip-btn" title="Redo (Ctrl/⌘⇧Z)" disabled>↷ Redo</button>
           <button id="tlMagneticBtn" class="tl-chip-btn active" title="Magnetic snap on — clip edges snap to nearby cuts / playhead">🧲 Snap on</button>
@@ -1428,8 +1430,14 @@
             </div>
           </div>
 
+          <!-- Render progress, mirrored near the preview so it's visible without scrolling to the status line -->
+          <div id="tlProgressBar" class="tl-progress-bar hidden" aria-live="polite">
+            <div class="tl-progress-track"><div id="tlProgressFill" class="tl-progress-fill"></div></div>
+            <span id="tlProgressLabel" class="tl-progress-label"></span>
+          </div>
+
           <!-- Timeline toolbar: Split + Copy/Paste + zoom + time readout -->
-          <div class="tl-tltoolbar">
+          <div class="tl-tltoolbar" title="Shortcuts: Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/duplicate">
             <button id="tlSplitBtn" class="tl-chip-btn" title="Split the selected Main clip at the playhead (S)">✂ Split</button>
             <button id="tlMergeBtn" class="tl-chip-btn" title="Join selected Main shot with the next. Same source: rejoin / skip gap as cut. Different sources: stitch into a new combined clip.">⛓ Merge</button>
             <button id="tlDetectShotsBtn" class="tl-chip-btn" title="Detect scene changes in the selected Main clip and split it into separate shots">🎞 Detect shots</button>
@@ -1443,7 +1451,6 @@
             <button id="tlCoEditorBtn" class="tl-chip-btn" title="Chat-based co-editor — describe edits in plain language">💬 Co-editor</button>
             <button id="tlPolishChip" class="tl-chip-btn tl-chip-polish" type="button"
               title="Polish cut — silence, jump-cut, B-roll, audio master (opens options)">✨ Polish</button>
-            <span class="muted tl-keys-hint" title="Space play/pause · S split · Del delete · ←/→ nudge · ⌘Z undo · Snap edges · ⌘C/V/D copy/paste/dup">⌨ Space · S · Del · ←→ · ⌘Z · Snap · ⌘C/V/D</span>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
             <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
@@ -1499,6 +1506,18 @@
         <button type="button" id="tlToolSheetClose" class="tl-chip-btn" aria-label="Close">✕</button>
       </div>
       <div id="tlToolSheetBody" class="tl-tool-sheet-body"></div>
+    </div>
+
+    <!-- Workspace-focus modal: Library / Captions / Audio / Clip props open here on desktop
+         instead of living in permanent side columns (keeps preview + toolbar + timeline in view). -->
+    <div id="tlWorkspaceModal" class="ai-edit-modal hidden" aria-hidden="true">
+      <div class="ai-edit-modal-card tl-workspace-card" style="max-width:560px;max-height:85vh;display:flex;flex-direction:column">
+        <div class="ai-edit-modal-head">
+          <strong id="tlWorkspaceModalTitle">Panel</strong>
+          <button type="button" id="tlWorkspaceModalClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+        </div>
+        <div id="tlWorkspaceModalBody" class="ai-edit-modal-body" style="overflow:auto;flex:1"></div>
+      </div>
     </div>
   </div>
   <!-- /Tab: Editor -->
