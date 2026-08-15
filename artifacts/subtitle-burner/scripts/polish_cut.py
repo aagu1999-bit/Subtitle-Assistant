@@ -92,13 +92,19 @@ def die(msg: str, code: int = 1) -> None:
 
 def run(cmd: list[str], *, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
     print("[polish_cut] $", " ".join(cmd))
-    return subprocess.run(
+    cp = subprocess.run(
         cmd,
-        check=check,
+        check=False,
         text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
+        stdout=subprocess.PIPE if capture else subprocess.PIPE,
+        stderr=subprocess.STDOUT if capture else subprocess.STDOUT,
     )
+    if check and cp.returncode != 0:
+        tail = (cp.stdout or cp.stderr or "")[-2200:]
+        raise RuntimeError(
+            f"ffmpeg/command failed (exit {cp.returncode})\n{tail or '(no stderr captured)'}"
+        )
+    return cp
 
 
 def which_or_die(name: str) -> str:
@@ -117,6 +123,15 @@ SPEECH_DYN = (
     "acompressor=threshold=-18dB:ratio=3:attack=5:release=80:makeup=2,"
     "loudnorm=I=-14:TP=-1.5:LRA=7"
 )
+# Safer/faster fallback if loudnorm chokes on a take.
+SPEECH_DYN_SAFE = "acompressor=threshold=-18dB:ratio=3:attack=5:release=80:makeup=2,dynaudnorm=f=75:g=15"
+
+
+def video_map_selector(vlabel: str) -> str:
+    """`-map` target: raw input is `0:v`; filtergraph pads stay `[label]`."""
+    if not vlabel or vlabel == "[0:v]":
+        return "0:v"
+    return vlabel
 
 
 def ffprobe_json(path: Path) -> dict:
@@ -1041,16 +1056,48 @@ def build_and_encode(
         )
         fc_v.append("[speech][musicduck]amix=inputs=2:duration=first:dropout_transition=2[aout]")
 
+        vmap = video_map_selector(vlabel)
         cmd = ["ffmpeg", "-hide_banner", "-y", "-loglevel", "error", *inputs,
                "-filter_complex", ";".join(fc_v),
-               "-map", vlabel, "-map", "[aout]",
-               "-c:v", "libx264", "-preset", "medium", "-crf", "17",
-               "-pix_fmt", "yuv420p", "-r", str(fps),
-               "-c:a", "aac", "-b:a", "192k",
-               "-movflags", "+faststart",
-               "-t", f"{cut_dur:.3f}",
-               str(polished)]
-        run(cmd)
+               "-map", vmap, "-map", "[aout]"]
+        if vmap == "0:v":
+            cmd += ["-c:v", "copy"]
+        else:
+            cmd += [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-r", str(fps),
+            ]
+        cmd += [
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            "-t", f"{cut_dur:.3f}",
+            str(polished),
+        ]
+        try:
+            run(cmd)
+        except RuntimeError:
+            # Retry without loudnorm (common failure on odd audio)
+            print("[polish_cut] music+loudnorm encode failed — retrying with dynaudnorm")
+            fc_retry = [x.replace(SPEECH_DYN, SPEECH_DYN_SAFE) for x in fc_v]
+            cmd[cmd.index(";".join(fc_v))] = ";".join(fc_retry)
+            # rebuild cmd cleanly
+            cmd = ["ffmpeg", "-hide_banner", "-y", "-loglevel", "error", *inputs,
+                   "-filter_complex", ";".join(fc_retry),
+                   "-map", vmap, "-map", "[aout]"]
+            if vmap == "0:v":
+                cmd += ["-c:v", "copy"]
+            else:
+                cmd += [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-r", str(fps),
+                ]
+            cmd += [
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-t", f"{cut_dur:.3f}",
+                str(polished),
+            ]
+            run(cmd)
     else:
         # Video overlays + speech compressor/loudnorm only
         fc_v = []
@@ -1086,23 +1133,49 @@ def build_and_encode(
         else:
             map_a = None
 
+        vmap = video_map_selector(vlabel)
         cmd = ["ffmpeg", "-hide_banner", "-y", "-loglevel", "error", *inputs]
         if fc_v:
-            cmd += ["-filter_complex", ";".join(fc_v), "-map", vlabel]
+            cmd += ["-filter_complex", ";".join(fc_v), "-map", vmap]
         else:
             cmd += ["-map", "0:v"]
         if map_a:
             cmd += ["-map", map_a, "-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-an"]
-        cmd += [
-            "-c:v", "libx264", "-preset", "medium", "-crf", "17",
-            "-pix_fmt", "yuv420p", "-r", str(fps),
-            "-movflags", "+faststart",
-            "-t", f"{cut_dur:.3f}",
-            str(polished),
-        ]
-        run(cmd)
+        if vmap == "0:v":
+            # Audio-only filtergraph — do not re-encode video (fixes bad -map '[0:v]'
+            # and avoids a multi-minute libx264 remux of an already-cut rough).
+            cmd += ["-c:v", "copy", "-movflags", "+faststart", "-t", f"{cut_dur:.3f}", str(polished)]
+        else:
+            cmd += [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-r", str(fps),
+                "-movflags", "+faststart",
+                "-t", f"{cut_dur:.3f}",
+                str(polished),
+            ]
+        try:
+            run(cmd)
+        except RuntimeError:
+            if not map_a or SPEECH_DYN not in ";".join(fc_v):
+                raise
+            print("[polish_cut] loudnorm encode failed — retrying with dynaudnorm")
+            fc_retry = [x.replace(SPEECH_DYN, SPEECH_DYN_SAFE) for x in fc_v]
+            cmd = ["ffmpeg", "-hide_banner", "-y", "-loglevel", "error", *inputs,
+                   "-filter_complex", ";".join(fc_retry), "-map", vmap, "-map", map_a,
+                   "-c:a", "aac", "-b:a", "192k"]
+            if vmap == "0:v":
+                cmd += ["-c:v", "copy", "-movflags", "+faststart", "-t", f"{cut_dur:.3f}", str(polished)]
+            else:
+                cmd += [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-r", str(fps),
+                    "-movflags", "+faststart",
+                    "-t", f"{cut_dur:.3f}",
+                    str(polished),
+                ]
+            run(cmd)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(polished), str(out))

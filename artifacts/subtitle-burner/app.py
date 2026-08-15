@@ -10487,13 +10487,30 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
     job = _polish_jobs.get(polish_id)
     if not job:
         return
+    stop_heartbeat = threading.Event()
+
+    def _heartbeat():
+        # UI was stuck at 25% for minutes during long FFmpeg — nudge while working.
+        p = 25
+        while not stop_heartbeat.wait(8.0):
+            j = _polish_jobs.get(polish_id)
+            if not j or j.get("status") != "running":
+                return
+            p = min(90, p + 5)
+            j["progress"] = p
+
     try:
         job["status"] = "running"
         job["progress"] = 10
         # Prefer Studio's FFmpeg binary for polish_cut subprocesses.
         os.environ["FFMPEG"] = FFMPEG
+        # Drop cached module so script fixes apply after pull without full mental model of importlib cache.
+        import sys as _sys
+        _sys.modules.pop("studio_polish_cut", None)
         mod = _load_polish_cut_module()
         job["progress"] = 25
+        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb.start()
         result = mod.run_polish(
             video=Path(opts["video"]),
             out=Path(opts["out"]),
@@ -10517,6 +10534,7 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
             dry_run=False,
             report_path=Path(opts["report"]) if opts.get("report") else None,
         )
+        stop_heartbeat.set()
         out_name = Path(result["output"]).name if result.get("output") else None
         job["status"] = "done"
         job["progress"] = 100
@@ -10524,6 +10542,7 @@ def _run_polish_job(polish_id: str, opts: dict) -> None:
         job["stats"] = (result.get("eval") or {}).get("stats") or {}
         job["warnings"] = (result.get("eval") or {}).get("warnings") or []
     except Exception as e:
+        stop_heartbeat.set()
         job["status"] = "error"
         job["error"] = str(e)
         job["progress"] = 100
