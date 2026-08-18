@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-77-midform-ab-versions";
+  const TL_BUILD = "studio-editor-build-78-midform-arc-regen";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);

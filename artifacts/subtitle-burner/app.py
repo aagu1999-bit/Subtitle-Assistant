@@ -7493,15 +7493,18 @@ def _normalize_highlight_clip(c: dict) -> dict | None:
 
 
 def _pack_midform_segments(ordered: list, target_sec: float,
-                            tolerance: float = 15.0) -> tuple[list, float]:
-    """Greedy pack story-ordered beats toward target (±tolerance).
+                            tolerance: float = 15.0,
+                            hook_max_sec: float = 35.0) -> tuple[list, float]:
+    """Greedy pack arc-ordered beats toward target (±tolerance).
 
-    Always keeps the first beat (hook). Soft-trims the last beat if needed.
+    Arc roles (preferred): hook → grand_intro → body* → closer.
+    Hook is always first and soft-capped to ``hook_max_sec`` (default 35s).
     """
     if not ordered:
         return [], 0.0
     lo = max(20.0, float(target_sec) - float(tolerance))
     hi = float(target_sec) + float(tolerance)
+    hook_max_sec = max(8.0, min(45.0, float(hook_max_sec)))
     packed: list[dict] = []
     total = 0.0
     for i, raw in enumerate(ordered):
@@ -7512,6 +7515,7 @@ def _pack_midform_segments(ordered: list, target_sec: float,
             continue
         if dur < 2.5:
             continue
+        role = str(seg.get("role") or ("hook" if not packed else "body")).lower()
         # Skip heavy overlap with already-packed material (same source timeline).
         overlap_bad = False
         for p in packed:
@@ -7525,21 +7529,32 @@ def _pack_midform_segments(ordered: list, target_sec: float,
         if overlap_bad and packed:
             continue
         if not packed:
-            # Hook always included (trim only if absurdly longer than hi).
-            if dur > hi and dur > target_sec * 1.35:
+            # Hook always included; cap to top-of-funnel length (≤ ~35s).
+            if dur > hook_max_sec:
+                seg["end_time"] = round(float(seg["start_time"]) + hook_max_sec, 3)
+                seg["trimmed"] = True
+                dur = hook_max_sec
+            elif dur > hi and dur > target_sec * 1.35:
                 seg["end_time"] = round(float(seg["start_time"]) + hi, 3)
                 seg["trimmed"] = True
                 dur = hi
+            seg["role"] = "hook"
             packed.append(seg)
             total = dur
             continue
         if total >= lo and total >= target_sec - 5 and len(packed) >= 2:
-            break
+            # Still allow a closer if we don't have one yet and it fits small.
+            if role == "closer" and total + min(dur, 20) <= hi + 5:
+                pass
+            else:
+                break
         if total + dur <= hi:
             packed.append(seg)
             total += dur
-            if total >= target_sec and len(packed) >= 2:
-                break
+            if total >= target_sec and len(packed) >= 2 and role != "grand_intro":
+                # Prefer stopping once we have hook + content; keep going for closer only if under.
+                if any(str(p.get("role")) == "closer" for p in packed) or total >= target_sec + 5:
+                    break
             continue
         remain = hi - total
         if remain >= 10:
@@ -7549,28 +7564,99 @@ def _pack_midform_segments(ordered: list, target_sec: float,
             packed.append(seg)
             total += remain
         break
-    # If still short and we skipped candidates, that's ok — report under-goal.
     for i, seg in enumerate(packed):
         seg["duration"] = round(float(seg["end_time"]) - float(seg["start_time"]), 3)
         if not seg.get("role"):
-            seg["role"] = "hook" if i == 0 else "body"
+            if i == 0:
+                seg["role"] = "hook"
+            elif i == len(packed) - 1 and len(packed) >= 3:
+                seg["role"] = "closer"
+            else:
+                seg["role"] = "body"
     return packed, round(total, 2)
 
 
-def _heuristic_midform_order(clips: list, target_sec: float) -> list:
-    """No-Gemini fallback: strongest hook first, then chronological non-overlapping body."""
+def _midform_fingerprint(segs: list) -> list:
+    """Stable fingerprint of a mid-form pack for regeneration avoid lists."""
+    out = []
+    for s in segs or []:
+        try:
+            out.append([
+                round(float(s.get("start_time", s.get("start", 0))), 1),
+                round(float(s.get("end_time", s.get("end", 0))), 1),
+            ])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _looks_like_intro_clip(c: dict) -> bool:
+    """Cheap transcript cue that a beat is a name/role introduction."""
+    blob = " ".join([
+        str(c.get("title") or ""),
+        str(c.get("hook_quote") or ""),
+        str(c.get("reason") or ""),
+    ]).lower()
+    cues = (
+        "my name", "i'm ", "i am ", "this is ", "introduce", "introduction",
+        "welcome", "thanks for having", "founder of", "ceo of", "host of",
+        "here with", "joined by",
+    )
+    return any(x in blob for x in cues)
+
+
+def _heuristic_midform_order(clips: list, target_sec: float,
+                              avoid_fps: list | None = None) -> list:
+    """Fallback arc: hook → optional grand_intro → body → closer."""
     if not clips:
         return []
+    avoid = {
+        (round(float(a[0]), 1), round(float(a[1]), 1))
+        for a in (avoid_fps or [])
+        if isinstance(a, (list, tuple)) and len(a) >= 2
+    }
     ranked = sorted(clips, key=lambda c: (-int(c.get("viral_score") or 0), c["start_time"]))
-    hook = ranked[0]
-    rest = sorted(
-        [c for c in clips if c is not hook],
+    hook = None
+    for c in ranked:
+        sig = (round(c["start_time"], 1), round(c["end_time"], 1))
+        if sig in avoid:
+            continue
+        hook = c
+        break
+    if hook is None:
+        hook = ranked[0]
+    rest = [
+        c for c in clips
+        if not (
+            abs(c["start_time"] - hook["start_time"]) < 0.05
+            and abs(c["end_time"] - hook["end_time"]) < 0.05
+        )
+    ]
+    intros = [c for c in rest if _looks_like_intro_clip(c)]
+    non_intro = [c for c in rest if c not in intros]
+    after = sorted(
+        [c for c in non_intro if c["start_time"] >= hook["end_time"] - 1.0],
         key=lambda c: c["start_time"],
     )
-    # Prefer body that continues after the hook in source time when possible.
-    after = [c for c in rest if c["start_time"] >= hook["end_time"] - 1.0]
-    before = [c for c in rest if c not in after]
-    ordered = [dict(hook, role="hook")] + [dict(c, role="body") for c in (after + before)]
+    before = sorted(
+        [c for c in non_intro if c not in after],
+        key=lambda c: c["start_time"],
+    )
+    body_pool = after + before
+    ordered = [dict(hook, role="hook")]
+    if intros:
+        # Prefer an intro that isn't the hook itself.
+        gi = sorted(intros, key=lambda c: c["start_time"])[0]
+        ordered.append(dict(gi, role="grand_intro"))
+        body_pool = [c for c in body_pool if c is not gi and c not in intros]
+    # Body then closer (last remaining high-score / late beat)
+    if len(body_pool) >= 2:
+        closer = body_pool[-1]
+        body = body_pool[:-1]
+        ordered.extend(dict(c, role="body") for c in body[:4])
+        ordered.append(dict(closer, role="closer"))
+    else:
+        ordered.extend(dict(c, role="body") for c in body_pool[:4])
     packed, _ = _pack_midform_segments(ordered, target_sec)
     return packed
 
@@ -7578,8 +7664,22 @@ def _heuristic_midform_order(clips: list, target_sec: float) -> list:
 def _gemini_midform_plan(words: list, clips: list, target_sec: float,
                           format_type: str = "interview",
                           variant: str = "story",
-                          avoid_hook_indices: list | None = None) -> dict:
-    """Ask Gemini to pick + order Shorts into one mini-episode toward target_sec."""
+                          avoid_hook_indices: list | None = None,
+                          avoid_fingerprints: list | None = None) -> dict:
+    """Ask Gemini to assemble a mid-form arc toward target_sec.
+
+    Canonical formula (Studio mid-form strategy):
+      1) HOOK (required, top priority) — most outlandish / shocking / emotional /
+         tonal-reaction beat. Top-of-funnel; ideally 10–35s (never a long chapter).
+      2) GRAND INTRO (optional) — host or guest name/role introduce themselves
+         *after* the hook when the transcript supports it.
+      3) BODY — substance that advances the same through-line.
+      4) CLOSER (preferred) — conclusive, thought-provoking, or emotional payoff;
+         guest self-intro can live here only if it wasn't used as grand_intro.
+
+    Regeneration: ``avoid_fingerprints`` lists prior packs so a re-click swaps
+    beats while keeping the same arc roles.
+    """
     pool = []
     for i, c in enumerate(clips):
         pool.append({
@@ -7593,46 +7693,58 @@ def _gemini_midform_plan(words: list, clips: list, target_sec: float,
             "viral_score": c.get("viral_score") or 0,
         })
     transcript = _format_transcript_for_llm(words)
-    # Keep prompt bounded
     if len(transcript) > 12000:
         transcript = transcript[:12000] + "\n…"
     variant = (variant or "story").lower().strip()
     if variant not in ("punchy", "story", "deep"):
         variant = "story"
     avoid_hook_indices = list(avoid_hook_indices or [])
+    avoid_fingerprints = list(avoid_fingerprints or [])
     variant_rules = {
         "punchy": (
-            "VARIANT=punchy: shortest cut. Prefer 2–3 clips, sharpest alternate hook, "
-            "cut filler proof. Lean toward the low end of the duration range."
+            "VARIANT=punchy: shortest cut. Prefer hook + 1 body (+ optional closer). "
+            "Alternate hook. Lean low on duration."
         ),
         "story": (
-            "VARIANT=story: most coherent mini-episode. Best narrative flow, classic hook→body→payoff."
+            "VARIANT=story: fullest coherent arc — hook → grand_intro(if any) → body → closer."
         ),
         "deep": (
-            "VARIANT=deep: richer version of the SAME through-line. Prefer 3–5 clips, include "
-            "extra proof/context beats, lean toward the high end of the duration range."
+            "VARIANT=deep: same through-line with richer body proof; still open with a "
+            "shocking/emotional hook ≤35s."
         ),
     }[variant]
     avoid_block = ""
     if avoid_hook_indices:
-        avoid_block = (
-            f"Prefer a DIFFERENT hook than candidate index(es) {avoid_hook_indices} "
-            f"(those hooks are used by sibling A/B versions). Body overlap with siblings is OK "
-            f"when it serves the same through-line.\n"
+        avoid_block += (
+            f"Prefer a DIFFERENT hook than candidate index(es) {avoid_hook_indices}.\n"
         )
-    prompt = f"""You are a YouTube editor building ONE mid-form mini-episode from highlight clips of a single interview/talking-head source.
+    if avoid_fingerprints:
+        avoid_block += (
+            "REGENERATION — do NOT rebuild these prior packs (same start/end pairs). "
+            f"Swap in different candidates while keeping the arc roles: {json.dumps(avoid_fingerprints[:6])}\n"
+        )
+    prompt = f"""You are a YouTube mid-form editor. Build ONE mini-episode from highlight candidates.
 
-Goal runtime: ~{target_sec:.0f} seconds (soft range {max(20, target_sec - 15):.0f}–{target_sec + 15:.0f}s).
+Goal runtime: ~{target_sec:.0f}s (soft {max(20, target_sec - 15):.0f}–{target_sec + 15:.0f}s).
 Format hint: {format_type}.
 {variant_rules}
 {avoid_block}
+CANONICAL ARC (stick to this script — only skip optional beats if absent in the source):
+1) HOOK (required, TOP PRIORITY): the most outlandish, shocking, emotional, or intense tonal
+   reaction line. Top-of-funnel. Prefer 10–35 seconds total for this beat — never open with a
+   polite intro. Facial-reaction moments are nice-to-have, not required.
+2) GRAND INTRO (optional): AFTER the hook, if someone introduces their name/role or the host
+   brings the guest on — place that next so viewers know who is speaking.
+3) BODY: the substance that continues the same through-line (proof, story, explanation).
+4) CLOSER (preferred when available): conclusive / thought-provoking / emotional payoff.
+   If a guest self-intro was not used as grand_intro, it may close instead.
+
 Rules:
-- This is NOT a random compilation. Pick clips that share ONE through-line (same claim, story, or question).
-- Order: HOOK first (strongest open for THIS variant), then body beats that continue that story, optional soft closer.
-- Prefer seamless topical flow over raw viral_score. Drop high-score clips that belong to a different chapter.
-- Do not invent times — only use the candidate clip indices below (you may use a clip once).
-- Aim for 2–5 clips total so packed duration lands near {target_sec:.0f}s.
-- Reject joins that jump topics or speakers mid-thought.
+- One through-line only. Drop high-score clips from a different chapter.
+- Use only candidate indices below (each once). Do not invent times.
+- roles MUST use: hook | grand_intro | body | closer
+- First role MUST be hook. Prefer ending on closer when material exists.
+- Aim for 2–5 clips so packed duration lands near {target_sec:.0f}s.
 
 Candidates:
 {json.dumps(pool, ensure_ascii=False)}
@@ -7644,9 +7756,9 @@ Return STRICT JSON:
 {{
   "throughline": "one sentence describing the mini-episode story",
   "title": "3-8 word episode title",
-  "ordered_indices": [2, 0, 5],
-  "roles": ["hook", "body", "body"],
-  "why": "why this order tells a complete mini-story"
+  "ordered_indices": [2, 0, 5, 1],
+  "roles": ["hook", "grand_intro", "body", "closer"],
+  "why": "why this order follows the arc"
 }}
 """
     result = _gemini_generate_clip_suggestions(prompt)
@@ -7656,6 +7768,7 @@ Return STRICT JSON:
     if not isinstance(idxs, list) or not idxs:
         raise RuntimeError("Gemini mid-form returned no ordered_indices")
     roles = result.get("roles") if isinstance(result.get("roles"), list) else []
+    allowed_roles = ("hook", "grand_intro", "body", "closer", "button")
     ordered = []
     seen = set()
     for n, raw_i in enumerate(idxs):
@@ -7668,14 +7781,19 @@ Return STRICT JSON:
         seen.add(i)
         seg = dict(clips[i])
         role = str(roles[n] if n < len(roles) else ("hook" if not ordered else "body")).lower()
-        if role not in ("hook", "body", "closer", "button"):
+        if role not in allowed_roles:
             role = "hook" if not ordered else "body"
+        if role == "button":
+            role = "closer"
         seg["role"] = role
         ordered.append(seg)
     if not ordered:
         raise RuntimeError("Gemini mid-form indices invalid")
-    # Ensure first role is hook
     ordered[0]["role"] = "hook"
+    # If a closer wasn't labeled but we have 3+ beats, mark the last as closer.
+    if len(ordered) >= 3 and ordered[-1].get("role") in ("body", "button"):
+        if not any(s.get("role") == "closer" for s in ordered):
+            ordered[-1]["role"] = "closer"
     packed, total = _pack_midform_segments(ordered, target_sec)
     return {
         "segments": packed,
@@ -7685,12 +7803,13 @@ Return STRICT JSON:
         "why": str(result.get("why") or "")[:400],
         "engine": "gemini",
         "variant": variant,
+        "formula": "hook>grand_intro?>body*>closer?",
         "hook_index": next(
             (i for i, c in enumerate(clips)
-             if abs(float(c["start_time"]) - float(packed[0]["start_time"])) < 0.05
+             if packed and abs(float(c["start_time"]) - float(packed[0]["start_time"])) < 0.05
              and abs(float(c["end_time"]) - float(packed[0]["end_time"])) < 0.05),
             None,
-        ) if packed else None,
+        ),
     }
 
 
@@ -7838,8 +7957,15 @@ def _segments_payload(job_id: str, segs: list) -> list:
 def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
                             format_type: str = "interview",
                             refresh_shorts: bool = False,
-                            num_pool: int = 8) -> dict:
-    """Plan a ~target_sec mini-episode from AI Shorts for one source job."""
+                            num_pool: int = 8,
+                            avoid_fingerprints: list | None = None,
+                            regenerate: bool = False) -> dict:
+    """Plan a ~target_sec mini-episode from AI Shorts for one source job.
+
+    Formula: hook (shock/emotion ≤35s) → grand_intro? → body* → closer?
+    When ``regenerate`` is true, prior packs on the job are avoided so a
+    re-click swaps beats while keeping the same arc roles.
+    """
     if job_id not in jobs:
         raise ValueError("Unknown job")
     job = jobs[job_id]
@@ -7850,6 +7976,22 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
     format_type = (format_type or "interview").lower()
     if format_type not in _FORMAT_RUBRICS:
         format_type = "interview"
+
+    # Prior packs for regeneration (client may also send avoid_fingerprints).
+    history = list(job.get("midform_history") or [])
+    avoid_fps = list(avoid_fingerprints or [])
+    if regenerate and not avoid_fps:
+        for prev in history[-6:]:
+            if isinstance(prev, list):
+                avoid_fps.append(prev)
+            elif isinstance(prev, dict) and prev.get("fingerprint"):
+                avoid_fps.append(prev["fingerprint"])
+    # Also avoid the latest saved plan if regenerating.
+    if regenerate:
+        last = job.get("midform_plan") or {}
+        fp = _midform_fingerprint(last.get("segments") or [])
+        if fp and fp not in avoid_fps:
+            avoid_fps.append(fp)
 
     pool_raw = list(job.get("clip_suggestions") or [])
     if refresh_shorts or len(pool_raw) < 3:
@@ -7906,18 +8048,23 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
     plan = None
     gemini_err = None
     try:
-        plan = _gemini_midform_plan(words, clips, target_sec, format_type=format_type)
+        plan = _gemini_midform_plan(
+            words, clips, target_sec,
+            format_type=format_type,
+            avoid_fingerprints=avoid_fps or None,
+        )
     except Exception as exc:
         gemini_err = str(exc)
         ai_logger.warning(f"[midform] Gemini plan failed ({exc}); heuristic fallback")
-        packed = _heuristic_midform_order(clips, target_sec)
+        packed = _heuristic_midform_order(clips, target_sec, avoid_fps=avoid_fps)
         plan = {
             "segments": packed,
             "packed_duration": round(sum(s["duration"] for s in packed), 2),
-            "throughline": "Heuristic pack: strongest hook + chronological body beats",
+            "throughline": "Heuristic arc: shock hook → intro? → body → closer",
             "title": (packed[0]["title"] if packed else "Mini-episode")[:120],
-            "why": "Gemini unavailable or failed — used viral hook + story-order packing",
+            "why": "Gemini unavailable or failed — used viral hook + arc packing",
             "engine": "heuristic",
+            "formula": "hook>grand_intro?>body*>closer?",
         }
 
     segs = plan.get("segments") or []
@@ -7926,6 +8073,7 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
 
     packed_dur = float(plan.get("packed_duration") or sum(s["duration"] for s in segs))
     delta = packed_dur - target_sec
+    fp = _midform_fingerprint(segs)
     payload = {
         "ok": True,
         "job_id": job_id,
@@ -7937,6 +8085,8 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
         "throughline": plan.get("throughline") or "",
         "why": plan.get("why") or "",
         "engine": plan.get("engine") or "unknown",
+        "formula": plan.get("formula") or "hook>grand_intro?>body*>closer?",
+        "regenerated": bool(regenerate or avoid_fps),
         "segment_count": len(segs),
         "segments": [
             {
@@ -7951,19 +8101,23 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
             }
             for s in segs
         ],
+        "fingerprint": fp,
         "pool_size": len(clips),
         "gemini_warning": gemini_err,
         "shorts_refreshed": bool(refresh_shorts or len(pool_raw) >= 3),
     }
+    # Remember packs so the next click can regenerate differently.
+    history = list(job.get("midform_history") or [])
+    history.append(fp)
+    job["midform_history"] = history[-12:]
     job["midform_plan"] = payload
     _db_save_job(job_id)
     print(
         f"[midform] {job_id} goal={target_sec:.0f}s packed={packed_dur:.1f}s "
-        f"segs={len(segs)} engine={payload['engine']}",
+        f"segs={len(segs)} engine={payload['engine']} regen={payload['regenerated']}",
         flush=True,
     )
     return payload
-
 
 
 def _build_midform_versions(job_id: str, *, base_goal: float = 90.0,
@@ -8038,6 +8192,7 @@ def _build_midform_versions(job_id: str, *, base_goal: float = 90.0,
             "why": str(plan.get("why") or blurb)[:400],
             "engine": plan.get("engine") or "gemini",
             "variant": key,
+            "formula": plan.get("formula") or "hook>grand_intro?>body*>closer?",
             "segment_count": len(segs),
             "segments": _segments_payload(job_id, segs),
         })
@@ -8108,8 +8263,12 @@ def midform_episode():
       target_duration?: 60|90|120 (default 90),
       format?: shorts format,
       refresh_shorts?: bool,
-      versions?: bool | int  # true/3 → A/B pack; false/omit → single Story cut
+      versions?: bool | int,
+      regenerate?: bool,  # avoid prior packs; keep hook→intro→body→closer arc
+      avoid_fingerprints?: [[[start,end], ...], ...]
     }
+
+    Arc formula: HOOK (shock/emotion ≤35s) → GRAND INTRO? → BODY* → CLOSER?
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
@@ -8121,6 +8280,8 @@ def midform_episode():
         target = 90.0
     format_type = (data.get("format") or jobs[job_id].get("clip_format") or "interview")
     refresh = bool(data.get("refresh_shorts"))
+    regenerate = bool(data.get("regenerate"))
+    avoid_fps = data.get("avoid_fingerprints") if isinstance(data.get("avoid_fingerprints"), list) else None
     want_versions = data.get("versions")
     multi = False
     if want_versions is True or str(want_versions).lower() in ("1", "true", "yes", "ab", "all"):
@@ -8144,6 +8305,8 @@ def midform_episode():
                 target_sec=target,
                 format_type=str(format_type),
                 refresh_shorts=refresh,
+                regenerate=regenerate,
+                avoid_fingerprints=avoid_fps,
             )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

@@ -4041,8 +4041,12 @@ async function runMakeMidform() {
   if (btn) btn.disabled = true;
   if (verBtn) verBtn.disabled = true;
   if (hlFindBtn) hlFindBtn.disabled = true;
+  // Re-clicks regenerate: keep hook→intro→body→closer, swap beats.
+  const regenerating = !!window._lastMidformFingerprint;
   if (hlStatus) {
-    hlStatus.textContent = `Building mid-form mini-episode (goal ~${goal}s)…`;
+    hlStatus.textContent = regenerating
+      ? `Regenerating mid-form (same arc, new beats · goal ~${goal}s)…`
+      : `Building mid-form (hook → intro? → body → closer · goal ~${goal}s)…`;
   }
   const host = $("hlMidformVersions");
   if (host) { host.style.display = "none"; host.classList.add("hidden"); host.innerHTML = ""; }
@@ -4054,6 +4058,8 @@ async function runMakeMidform() {
         job_id: currentJobId,
         target_duration: goal,
         format: (hlFormatEl && hlFormatEl.value) || "interview",
+        regenerate: regenerating,
+        avoid_fingerprints: window._midformAvoidFingerprints || undefined,
         // Refresh pool when we have few/no Shorts yet
         refresh_shorts: !(_hlAvoidRanges && _hlAvoidRanges.length) && !(
           hlResults && hlResults.querySelectorAll(".hl-card").length >= 3
@@ -4066,6 +4072,13 @@ async function runMakeMidform() {
     }
     const segs = data.segments || [];
     if (!segs.length) throw new Error("No segments returned");
+
+    if (data.fingerprint) {
+      window._lastMidformFingerprint = data.fingerprint;
+      window._midformAvoidFingerprints = (window._midformAvoidFingerprints || [])
+        .concat([data.fingerprint])
+        .slice(-8);
+    }
 
     // Mirror plan into the compilation queue for optional Compile bake.
     try {
@@ -4089,24 +4102,28 @@ async function runMakeMidform() {
     const packed = Number(data.packed_duration) || 0;
     const delta = Number(data.delta_sec) || (packed - goal);
     const deltaLabel = (delta >= 0 ? "+" : "") + delta.toFixed(0) + "s vs goal";
+    const arc = (segs.map((s) => s.role || "body").filter(Boolean)).join(" → ");
     if (hlStatus) {
       hlStatus.innerHTML =
         `<strong>${_fmtMidformClock(packed)}</strong> packed` +
         ` · goal ${_fmtMidformClock(goal)} (${deltaLabel})` +
         ` · ${segs.length} beat${segs.length === 1 ? "" : "s"}` +
+        (data.regenerated ? ` · <em>regenerated</em>` : "") +
+        (arc ? `<br><span class="muted">Arc: ${arc}</span>` : "") +
         (data.throughline ? `<br><span class="muted">${String(data.throughline).replace(/</g, "&lt;")}</span>` : "") +
         (data.engine === "heuristic" ? `<br><span class="muted">Heuristic pack (${data.gemini_warning ? "Gemini unavailable" : "fallback"})</span>` : "");
     }
 
     // Show the chosen beats in the Shorts gallery when possible.
     try {
+      const rolePrefix = { hook: "Hook · ", grand_intro: "Intro · ", closer: "Closer · ", body: "" };
       renderHighlights(segs.map((s) => ({
         start_time: s.start_time,
         end_time: s.end_time,
-        title: (s.role === "hook" ? "Hook · " : "") + (s.title || "Beat"),
+        title: (rolePrefix[s.role] || "") + (s.title || "Beat"),
         hook_quote: s.hook_quote || "",
         reason: data.throughline || data.why || "Mid-form beat",
-        viral_score: s.role === "hook" ? 95 : 70,
+        viral_score: s.role === "hook" ? 95 : (s.role === "closer" ? 80 : 70),
         category: "midform",
       })), (hlFormatEl && hlFormatEl.value) || "interview");
     } catch (e) { /* non-fatal */ }
