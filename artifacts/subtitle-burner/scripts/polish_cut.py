@@ -725,14 +725,26 @@ def find_keyword_hits(
             t = 0.0
         joined.append((tok_clean, t))
 
+    # Allow the same keyword multiple times when mentions are spaced — first-only
+    # matching used to cluster every lower-third / accent in the opening minute.
+    min_gap = 2.5
+    max_hits = 14
+    used_times: list[float] = []
     for kw in keywords:
         k = re.sub(r"[^a-z0-9]+", "", kw.lower())
         if not k:
             continue
         for tok, t in joined:
-            if tok == k or (len(k) >= 4 and k in tok) or (len(tok) >= 4 and tok in k):
-                hits.append(BrollHit(keyword=kw, time=t, asset=asset_for(kw)))
-                break  # first mention per keyword
+            if not (tok == k or (len(k) >= 4 and k in tok) or (len(tok) >= 4 and tok in k)):
+                continue
+            if any(abs(t - ut) < min_gap for ut in used_times):
+                continue
+            hits.append(BrollHit(keyword=kw, time=t, asset=asset_for(kw)))
+            used_times.append(t)
+            if len(hits) >= max_hits:
+                break
+        if len(hits) >= max_hits:
+            break
     hits.sort(key=lambda h: h.time)
     return hits
 
@@ -972,13 +984,23 @@ def build_and_encode(
     which_or_die("ffmpeg")
     seg_paths: list[Path] = []
 
-    # Multi-sample face centers per segment ( visibly punches toward subject on zooms )
+    # Multi-sample face centers across the full keep list (not just the first
+    # dozen) so late segments still reframe toward the subject.
     face_cache: dict[int, tuple[float, float] | None] = {}
     if face_reframe and keeps:
-        print(f"[polish_cut] face reframe: sampling up to {min(12, len(keeps))} segment(s)")
-        for i, kr in enumerate(keeps[:12]):
+        n_sample = min(24, len(keeps))
+        if len(keeps) <= n_sample:
+            sample_idxs = list(range(len(keeps)))
+        else:
+            sample_idxs = sorted({
+                int(round(i * (len(keeps) - 1) / (n_sample - 1)))
+                for i in range(n_sample)
+            })
+        print(f"[polish_cut] face reframe: sampling {len(sample_idxs)}/{len(keeps)} segment(s)")
+        for i in sample_idxs:
+            kr = keeps[i]
             face_cache[i] = detect_face_center_multisample(video, kr.start, kr.end, samples=4)
-        # Propagate last good face to later segments (talking-head continuity)
+        # Propagate nearest good face to unsampled / miss segments
         last_good: tuple[float, float] | None = None
         for i in range(len(keeps)):
             if i in face_cache and face_cache[i]:

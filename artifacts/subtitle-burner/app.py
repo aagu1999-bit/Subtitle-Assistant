@@ -4360,6 +4360,7 @@ Rules:
 - At most ~20% of accents should be punch_zoom on videos longer than 90s.
 - intensity is "low", "med" or "strong". Reserve "strong" for the single biggest beat.
 - For ken_burns, direction is "in" (push in) or "out" (pull back).
+- Semantic stress cues (Captions-style): list markers ("first", "number one", "second"), secrets/reveals ("secret", "the truth is"), contrasts ("but", "however"), punchlines, and new-sentence pivots are strong candidates for zoom_1_5 / zoom_2x — place the hold ON the emphasized word when the transcript makes that clear.
 
 Return JSON in exactly this shape:
 {{
@@ -8422,8 +8423,9 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
       side:  'second_left' | 'second_right' (default right)
     Legacy: placement 'swap' flips A/B panels.
 
-    Audio is taken from source A. Each half is center-cropped to fill its panel.
-    An optional *color* grade is applied to the combined frame.
+    srcB may be a still image or GIF — stills are looped for *dur*; GIFs are
+    stream-looped. Audio is taken from source A. Each half is center-cropped
+    to fill its panel. An optional *color* grade is applied to the combined frame.
     """
     if layout == "auto":
         layout = "stack" if H >= W else "side"
@@ -8444,6 +8446,10 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     pw -= pw % 2
     ph -= ph % 2
 
+    ext_b = srcB.suffix.lower().lstrip(".")
+    is_still = ext_b in ASSET_EXT_STILL
+    is_gif = ext_b in ASSET_EXT_GIF
+
     def panel(idx):
         return (f"[{idx}:v:0]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
                 f"crop={pw}:{ph},setsar=1,fps={fps}[p{idx}]")
@@ -8458,8 +8464,14 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     fc = (f"{panel(0)};{panel(1)};"
           f"{order}{stack}=inputs=2{post},format=yuv420p[v]")
     cmd = [FFMPEG, "-y",
-           "-ss", f"{inA:.3f}", "-i", str(srcA),
-           "-ss", f"{inB:.3f}", "-i", str(srcB)]
+           "-ss", f"{inA:.3f}", "-i", str(srcA)]
+    if is_still:
+        # Loop the still for the full segment — seeking into a photo is a no-op.
+        cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", str(srcB)]
+    elif is_gif:
+        cmd += ["-ignore_loop", "0", "-stream_loop", "-1", "-i", str(srcB)]
+    else:
+        cmd += ["-ss", f"{inB:.3f}", "-i", str(srcB)]
     if not hasA:
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
@@ -9357,9 +9369,14 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
                     seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
                     if split_src:
-                        # Second-source in-point advances with source time on A.
+                        # Second-source in-point advances with source time on A
+                        # for video; stills/GIFs stay pinned at 0 (looped).
                         base_in = max(0.0, float((split or {}).get("in", 0)))
-                        s_in = base_in + (sub_ks - t_in)
+                        ext_b = split_src.suffix.lower().lstrip(".")
+                        if ext_b in ASSET_EXT_STILL or ext_b in ASSET_EXT_GIF:
+                            s_in = 0.0
+                        else:
+                            s_in = base_in + (sub_ks - t_in)
                         dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
                                                 (split or {}).get("layout", "auto"),
                                                 W, H, fps, seg_path, color=color,
@@ -10155,7 +10172,10 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
     # zoom while someone talks". Main stays one continuous piece (plus cuts)
     # except for split_screen, which really does need its own Main segment
     # since it changes how that stretch is framed/composited.
-    budget = _intensity_effect_budget(intensity)
+    #
+    # Pass the window duration so long edits keep a full accent budget — without
+    # it we used to keep only the base ~4 earliest moves and the back half died.
+    budget = _intensity_effect_budget(intensity, t_out - t_in)
     usable = []
     for fx in effects or []:
         try:
@@ -10166,9 +10186,18 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         if fe <= fs or fs < t_in - 0.05 or fe > t_out + 0.05:
             continue
         usable.append(fx)
-        if len(usable) >= budget:
-            break
     usable.sort(key=lambda e: float(e["start_time"]))
+    if len(usable) > budget:
+        # Prefer a spread across the timeline over earliest-N (Gemini + backfill
+        # already tried to span; don't throw away the late half here).
+        if budget <= 1:
+            usable = usable[:1]
+        else:
+            idxs = sorted({
+                int(round(i * (len(usable) - 1) / (budget - 1)))
+                for i in range(budget)
+            })
+            usable = [usable[i] for i in idxs]
 
     split_fx = [fx for fx in usable if fx.get("type") == "split_screen"]
     lane_fx = [fx for fx in usable if fx.get("type") != "split_screen"]
@@ -10839,6 +10868,8 @@ def co_editor():
         "main_clips": [
             {
                 "index": i,
+                "seq": f"S{i + 1}",
+                "shot_index": c.get("shot_index"),
                 "id": c.get("id"),
                 "in": c.get("in"),
                 "out": c.get("out"),
@@ -10940,6 +10971,8 @@ Return ONLY JSON:
     {{"op": "apply_recommended_cuts", "index": 0}},
     {{"op": "merge_shots", "index": 0}},
     {{"op": "reorder_shot", "from": 2, "to": 0}},
+    {{"op": "reorder_shot", "from": "S3", "to": "S1"}},
+    {{"op": "swap_shot", "a": "S1", "b": "S2"}},
     {{"op": "set_overlay_layout", "index": 0, "layout": "pip_tr"}},
     {{"op": "set_music", "index": 0, "gain_db": -20, "duck": true}},
     {{"op": "apply_clip_style", "style": "cinematic"}},
@@ -10955,7 +10988,8 @@ Return ONLY JSON:
 
 Rules:
 - Use only the ops listed above (examples show shapes; emit only what the user asked for).
-- Indexes are 0-based. For "this / selected / current clip", set "target":"selected" (and track if needed).
+- Indexes are 0-based. Main shots also carry seq like "S1", "S2" (timeline order, matching the S# badge on clips). For "put S2 first / swap S1 and S3", prefer reorder_shot or swap_shot with "S2"-style labels (or 0-based from/to).
+- For "this / selected / current clip", set "target":"selected" (and track if needed).
 - Prefer 1-8 ops. If unclear or out of scope, ops: [] + honest message.
 - Colors #RRGGBB. Canvas: 9x16, 16x9, 1x1, 4x5. Fit: cover|contain. Color presets: none,neutral,warm,cool,vivid,bw.
 - Caption color requests → set_caption_style. Host/Guest → set_speaker_colors.
@@ -10984,7 +11018,7 @@ Rules:
         "set_caption_style", "set_speaker_colors", "delete_shot", "delete_clip",
         "set_transition", "enable_punch_zoom", "enable_ken_burns", "clear_effects",
         "set_canvas", "set_fit", "set_color_grade", "add_title", "set_text",
-        "apply_recommended_cuts", "merge_shots", "reorder_shot",
+        "apply_recommended_cuts", "merge_shots", "reorder_shot", "swap_shot",
         "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
         "accept_all_broll", "skip_all_broll", "split_at_playhead", "run_polish",
     }

@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-62-zoom-taxonomy-effects-lane-hover-details";
+  const TL_BUILD = "studio-editor-build-63-split-images-stitch-coedit-seq-ai-budget";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -300,7 +300,13 @@
   // and how far into it (anchor_offset), so reordering/retrimming Main carries
   // them along instead of leaving them stranded at an absolute second.
   function reanchor(c) {
-    if (!tl.tracks.main.length) { c.anchor = null; return; }
+    if (!tl.tracks.main.length) {
+      if (typeof c.anchor === "string") c.anchor = null;
+      return;
+    }
+    // Preserve face-coordinate anchors (objects from AI zoom) — those are not
+    // Main clip ids and must not be overwritten by timeline reanchor.
+    if (c.anchor && typeof c.anchor === "object") return;
     let idx = 0;
     for (let i = 0; i < tl.tracks.main.length; i++) {
       if ((c.start || 0) >= mainStart(i) - 0.001) idx = i;
@@ -312,7 +318,8 @@
   function applyAnchors() {
     ["overlay", "effects", "text", "music"].forEach((k) => {
       (tl.tracks[k] || []).forEach((c) => {
-        if (!c.anchor) return;
+        // Face-coord anchors are objects; only Main-clip id strings retime.
+        if (typeof c.anchor !== "string" || !c.anchor) return;
         const idx = tl.tracks.main.findIndex((m) => m.id === c.anchor);
         if (idx >= 0) c.start = Math.max(0, mainStart(idx) + (c.anchor_offset || 0));
       });
@@ -1201,6 +1208,20 @@
           }, a);
         };
         actions.appendChild(asMain);
+        if (a.kind === "image" || a.kind === "gif" || a.kind === "video") {
+          const fx = document.createElement("button");
+          fx.className = "tl-chip-btn";
+          fx.textContent = "✨";
+          fx.title = "Add as Effects split-screen second panel (image/video OK)";
+          fx.onclick = (e) => {
+            e.stopPropagation();
+            addEffectClip("split_screen", {
+              asset_id: a.asset_id,
+              placement: "second_bottom",
+            });
+          };
+          actions.appendChild(fx);
+        }
       }
       if (!replacing) {
         const ren = document.createElement("button");
@@ -1485,9 +1506,14 @@
       }
       if (lane === "overlay") return addOverlayClip({ asset_id: asset.asset_id }, asset);
       if (lane === "effects") {
-        // Effects lane is timed FX on Main (punch / Ken Burns / split) — not a place
-        // to drop media. Put images/GIFs on Overlay or Main instead.
-        alert("Drop images/GIFs on Overlay (PiP) or Main (cutaway). Use + Effect for Ken Burns / punch zoom.");
+        // Split-screen second panel can be a still, GIF, or video asset.
+        if (asset.kind === "image" || asset.kind === "gif" || asset.kind === "video") {
+          return addEffectClip("split_screen", {
+            asset_id: asset.asset_id,
+            placement: "second_bottom",
+          });
+        }
+        alert("Drop images / GIFs / videos on Effects for split-screen. Use + Effect for Ken Burns / punch zoom.");
         return;
       }
     }
@@ -2281,6 +2307,7 @@
       direction: opts.direction || "in",
       layout: opts.layout || "auto",
       source_job_id: opts.source_job_id || null,
+      asset_id: opts.asset_id || null,
       in: opts.in != null ? Number(opts.in) : 0,
       preset: opts.preset || "none",
       brightness: opts.brightness != null ? Number(opts.brightness) : 0,
@@ -2335,7 +2362,7 @@
   // scrubbing the actual footage instead of guessing a number.
   function openSplitScrubDialog(c) {
     if (!c || !c.source_job_id) {
-      alert("Pick a second video first.");
+      alert("Scrub works on a second *video* source. Stills don't need an IN point.");
       return;
     }
     const overlay = document.createElement("div");
@@ -2633,7 +2660,9 @@
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const name = s ? (s.filename || "clip") : "clip";
       let badges = "";
-      if (c.shot_index != null) badges += ` S${Number(c.shot_index) + 1}`;
+      // S# matches co-editor seq (timeline order). Detect-shots shot_index is
+      // separate metadata and must not override what the editor sees on the lane.
+      badges += ` S${idx + 1}`;
       if (c.ken_burns && c.ken_burns.enabled) badges += " 🔍";
       if (c.punch_zoom && c.punch_zoom.enabled) badges += " ⚡";
       if (c.split && c.split.enabled) badges += " ⬓";
@@ -4268,21 +4297,47 @@
       } else if (c.type === "ken_burns") {
         html += `<div class="tl-prop-grid">${propSelect("direction", "Direction", c.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       } else if (c.type === "split_screen") {
-        const splitOpts = [["", "— pick second video —"]].concat(
-          sources.map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
-        html += propSelect("source_job_id", "Second video", c.source_job_id || "", splitOpts);
-        html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1)}</div>`;
-        html += `<button type="button" class="btn btn-secondary btn-block" data-act="split-scrub" ${c.source_job_id ? "" : "disabled"} style="margin:2px 0 8px">🎬 Scrub 2nd video…</button>`;
+        const splitOpts = [["", "— pick second media —"]].concat(
+          sources.map((s) => [
+            `job:${s.job_id}`,
+            `🎬 ${(s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")}`,
+          ]),
+          assets
+            .filter((a) => a.kind === "image" || a.kind === "gif" || a.kind === "video")
+            .map((a) => {
+              const icon = a.kind === "image" ? "🖼" : (a.kind === "gif" ? "🎞" : "🎬");
+              const label = (a.filename || a.keyword || a.asset_id.slice(0, 8)).replace(/\.[^.]+$/, "");
+              return [`asset:${a.asset_id}`, `${icon} ${label}`];
+            })
+        );
+        const curMedia = c.source_job_id
+          ? `job:${c.source_job_id}`
+          : (c.asset_id ? `asset:${c.asset_id}` : "");
+        html += propSelect("__split_media", "Second media", curMedia, splitOpts);
+        const splitAsset = c.asset_id
+          ? assets.find((a) => a.asset_id === c.asset_id)
+          : null;
+        const isStill = !!(splitAsset && (splitAsset.kind === "image" || splitAsset.kind === "gif"));
+        html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "stack", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}`;
+        if (!isStill) {
+          html += propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1);
+        }
+        html += `</div>`;
+        if (!isStill) {
+          html += `<button type="button" class="btn btn-secondary btn-block" data-act="split-scrub" ${c.source_job_id ? "" : "disabled"} style="margin:2px 0 8px">🎬 Scrub 2nd video…</button>`;
+        } else {
+          html += `<p class="muted" style="font-size:.72rem;margin:2px 0 8px">Still / GIF is looped for the effect duration — no IN scrub needed.</p>`;
+        }
         const lay = c.layout || "stack";
         const place = c.placement || (lay === "side" ? "second_right" : "second_bottom");
         if (lay === "side") {
-          html += propSelect("placement", "Second video goes…", place,
+          html += propSelect("placement", "Second media goes…", place,
             [["second_left", "Left"], ["second_right", "Right (default)"]]);
         } else {
-          html += propSelect("placement", "Second video goes…", place,
+          html += propSelect("placement", "Second media goes…", place,
             [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
         }
-        html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. This is two sources side-by-side — different from Timeline <strong>Analyze speakers</strong> (same video, speaker crops / 9:16 reframe).</p>`;
+        html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. Videos, stills, and GIFs from Media all work as the second panel.</p>`;
       } else if (c.type === "color") {
         html += `<div class="tl-swatches" id="tlFxSwatches">` +
           COLOR_PRESETS.map(([v, t2]) =>
@@ -4679,6 +4734,23 @@
           } else {
             c.out = (c.in || 0) + Math.max(0.2, v);
           }
+        } else if (key === "__split_media") {
+          if (typeof v === "string" && v.startsWith("job:")) {
+            c.source_job_id = v.slice(4);
+            c.asset_id = null;
+          } else if (typeof v === "string" && v.startsWith("asset:")) {
+            c.asset_id = v.slice(6);
+            c.source_job_id = null;
+            c.in = 0;
+          } else {
+            c.source_job_id = null;
+            c.asset_id = null;
+          }
+          renderProps();
+          renderTimeline();
+          updateStageCompositor();
+          scheduleSave();
+          return;
         } else if (key === "__transition") {
           c.transition = v ? { type: v } : null;
         } else if (key === "__style_font" || key === "__style_size" || key === "__style_primary" || key === "__style_highlight") {
@@ -7072,6 +7144,7 @@
       reanchorFromClip(a.id, merged.id);
       reanchorFromClip(b.id, merged.id);
       tl.tracks.main.splice(idx, 2, merged);
+      applyAnchors();
       if (typeof window.addJobToList === "function") window.addJobToList(newId);
       await loadSources();
       selectClip("main", merged.id);
@@ -7109,7 +7182,9 @@
       `Stitch Main into one combined clip?\n\n` +
       `• ${nClips} Main shot${nClips === 1 ? "" : "s"} → ${segs.length} segment${segs.length === 1 ? "" : "s"}\n` +
       `• Word cuts are baked out (skipped)\n` +
-      `• Overlays / titles keep their timing on the new clip\n\n` +
+      `• Transitions between Main shots are baked away (become hard joins in the new file)\n` +
+      `• Effects / overlays / titles keep absolute timing and re-anchor to the new clip\n` +
+      `• Per-clip punch / Ken Burns on Main copies from the first shot that has them\n\n` +
       `Then Preview cut / Render as usual.`
     )) return;
 
@@ -7137,14 +7212,19 @@
         burn_captions: true,
         cuts: [],
       };
-      // Prefer grade from first main clip if any.
+      // Prefer grade / camera FX from the first Main clip that has them.
       const firstFx = tl.tracks.main.find((c) => c.color || c.color_grade);
       if (firstFx) {
         merged.color = firstFx.color || firstFx.color_grade;
         merged.color_grade = merged.color;
       }
+      const firstPunch = tl.tracks.main.find((c) => c.punch_zoom && c.punch_zoom.enabled);
+      if (firstPunch) merged.punch_zoom = JSON.parse(JSON.stringify(firstPunch.punch_zoom));
+      const firstKen = tl.tracks.main.find((c) => c.ken_burns && c.ken_burns.enabled);
+      if (firstKen) merged.ken_burns = JSON.parse(JSON.stringify(firstKen.ken_burns));
       oldIds.forEach((oid) => reanchorFromClip(oid, merged.id));
       tl.tracks.main = [merged];
+      applyAnchors();
       if (typeof window.addJobToList === "function") window.addJobToList(newId);
       await loadSources();
       selectClip("main", merged.id);
@@ -7404,6 +7484,16 @@
     };
   }
 
+  function resolveShotIndex(val) {
+    if (val == null || val === "") return -1;
+    if (typeof val === "number" && Number.isFinite(val)) return Math.trunc(val);
+    const s = String(val).trim();
+    const m = /^s(\d+)$/i.exec(s);
+    if (m) return Math.max(0, Number(m[1]) - 1); // S1 → 0
+    const n = Number(s);
+    return Number.isFinite(n) ? Math.trunc(n) : -1;
+  }
+
   function resolveOpTrackIndex(op, defaultTrack) {
     let track = op.track || defaultTrack || "main";
     const wantsSelected = op.target === "selected"
@@ -7493,6 +7583,7 @@
           if (i >= 0 && i < tl.tracks.main.length) {
             const id = tl.tracks.main[i].id;
             deleteClip("main", id);
+            applyAnchors();
             notes.push(`deleted shot ${i}`);
             applied++;
           }
@@ -7620,14 +7711,28 @@
           if (i >= 0 && i < tl.tracks.main.length - 1) {
             selectClip("main", tl.tracks.main[i].id);
             mergeSelectedWithNext();
+            applyAnchors();
             applied++;
           }
         } else if (name === "reorder_shot") {
-          const from = Number(op.from);
-          const to = Number(op.to);
+          const from = resolveShotIndex(op.from != null ? op.from : op.from_index);
+          const to = resolveShotIndex(op.to != null ? op.to : op.to_index);
           if (from >= 0 && from < tl.tracks.main.length && to >= 0 && to < tl.tracks.main.length && from !== to) {
             const [item] = tl.tracks.main.splice(from, 1);
             tl.tracks.main.splice(to, 0, item);
+            applyAnchors();
+            notes.push(`reordered S${from + 1} → pos ${to + 1}`);
+            applied++;
+          }
+        } else if (name === "swap_shot") {
+          const a = resolveShotIndex(op.a != null ? op.a : op.from);
+          const b = resolveShotIndex(op.b != null ? op.b : op.to);
+          if (a >= 0 && b >= 0 && a < tl.tracks.main.length && b < tl.tracks.main.length && a !== b) {
+            const tmp = tl.tracks.main[a];
+            tl.tracks.main[a] = tl.tracks.main[b];
+            tl.tracks.main[b] = tmp;
+            applyAnchors();
+            notes.push(`swapped S${a + 1} ↔ S${b + 1}`);
             applied++;
           }
         } else if (name === "set_overlay_layout") {
@@ -7728,6 +7833,7 @@
     } finally {
       historySuspended = false;
     }
+    applyAnchors();
     renderTimeline();
     updateStageCompositor();
     try {
