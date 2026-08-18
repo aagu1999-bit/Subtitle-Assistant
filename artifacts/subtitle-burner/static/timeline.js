@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-66-semantic-broll-sfx-multi-interview";
+  const TL_BUILD = "studio-editor-build-67-cse-prefer-probe";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -611,8 +611,12 @@
     const hintEl = $("tlBrollHint");
     const modeEl = $("tlBrollMode");
     const aiEl = $("tlBrollAiPhotos");
+    const preferEl = $("tlBrollPrefer");
     try {
-      const q = opts.probe ? "?probe=1" : "";
+      let q = "";
+      if (opts.probe === "cse" || opts.probe === "google_cse") q = "?probe=cse";
+      else if (opts.probe === "all") q = "?probe=all";
+      else if (opts.probe) q = "?probe=1";
       const data = await api("/broll/status" + q);
       const st = data.providers || {};
       const photoReady = !!data.photo_ready;
@@ -625,7 +629,6 @@
       if (st.google_cse) bits.push("CSE ✓");
       else bits.push("CSE ✗");
       bits.push(geminiReady ? "Gemini ✓" : "Gemini ✗");
-      bits.push("badges ✓");
       if (statusEl) {
         statusEl.textContent = bits.join(" · ") + (data.build ? " · " + data.build : "");
         statusEl.style.color = (photoReady || geminiReady) ? "#7ddea0" : "#f0c674";
@@ -634,11 +637,28 @@
         aiEl.disabled = !geminiReady;
         if (!geminiReady) aiEl.checked = false;
       }
+      if (preferEl) {
+        try {
+          const saved = localStorage.getItem("tl_broll_prefer");
+          if (saved && preferEl.querySelector('option[value="' + saved + '"]') && !preferEl.dataset.userSet) {
+            preferEl.value = saved;
+          }
+        } catch (e) { /* ignore */ }
+        // Disable unavailable prefer targets (still allow Auto).
+        const cseOpt = preferEl.querySelector('option[value="google_cse"]');
+        const pexOpt = preferEl.querySelector('option[value="pexels"]');
+        const unsOpt = preferEl.querySelector('option[value="unsplash"]');
+        if (cseOpt) cseOpt.disabled = !st.google_cse;
+        if (pexOpt) pexOpt.disabled = !st.pexels;
+        if (unsOpt) unsOpt.disabled = !st.unsplash;
+        if (preferEl.value === "google_cse" && !st.google_cse) preferEl.value = "auto";
+        if (preferEl.value === "pexels" && !st.pexels) preferEl.value = "auto";
+        if (preferEl.value === "unsplash" && !st.unsplash) preferEl.value = "auto";
+      }
       if (modeEl) {
         const photoOpt = modeEl.querySelector('option[value="photo"]');
         const gifOpt = modeEl.querySelector('option[value="gif"]');
         const autoOpt = modeEl.querySelector('option[value="auto"]');
-        const badgeOpt = modeEl.querySelector('option[value="badge"]');
         if (photoOpt) photoOpt.disabled = !(photoReady || geminiReady);
         if (gifOpt) gifOpt.disabled = !st.google_cse;
         // If photos just became available and UI was stuck on badges, flip to Auto.
@@ -666,7 +686,7 @@
         } else if (photoReady || geminiReady) {
           hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
             + "Each Suggest returns up to ~4–5 clips (max 12)."
-            + (st.google_cse ? " GIF mode uses Google CSE." : "")
+            + (st.google_cse ? " Use <em>Prefer source</em> to put CSE first. GIF mode uses Google CSE." : "")
             + (geminiReady ? " Check <em>Generate AI photos</em> to prefer Gemini stills." : "");
         } else {
           const aliases = (data.pexels_env && data.pexels_env.alias_names) || [];
@@ -679,6 +699,17 @@
             + "(Cursor secrets do not sync)." + aliasNote
             + " Optional: <code>GEMINI_API_KEY</code> + check Generate AI photos.";
         }
+      }
+      if (opts.probe === "cse" || opts.probe === "google_cse") {
+        const p = data.cse_probe;
+        if (statusEl && p) {
+          const ok = !!(p.ok && (p.ok_strict !== false || p.hits > 0 || p.message));
+          const softOk = !!p.ok;
+          statusEl.textContent = (softOk ? "CSE OK" : "CSE fail") + ": " + (p.message || "")
+            + (p.http_status != null ? " (HTTP " + p.http_status + ")" : "");
+          statusEl.style.color = softOk ? "#7ddea0" : "#e07070";
+        }
+        return p || null;
       }
       if (opts.probe && data.pexels_probe) {
         const p = data.pexels_probe;
@@ -699,6 +730,12 @@
     }
   }
 
+  function currentBrollPrefer() {
+    const el = $("tlBrollPrefer");
+    const v = el ? el.value : "auto";
+    return v || "auto";
+  }
+
   async function testPexelsKey() {
     const btn = $("tlBrollTestBtn");
     if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
@@ -711,6 +748,29 @@
       }
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = "Test Pexels"; }
+    }
+  }
+
+  async function testCseKey() {
+    const btn = $("tlBrollTestCseBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
+    try {
+      const p = await refreshBrollStatus({ probe: "cse" });
+      if (!p) {
+        alert("Could not reach /broll/status?probe=cse");
+      } else if (!p.ok) {
+        alert((p.message || "CSE check failed")
+          + "\n\nNeed GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX, Custom Search API enabled, "
+          + "and Image search ON for the Programmable Search Engine. Replit: Secrets → Stop + Run.");
+      } else if (p.hits === 0) {
+        alert((p.message || "CSE responded but returned 0 images.")
+          + "\n\nTurn on Image search, and for GIFs include giphy.com / tenor.com / imgur.com.");
+      } else {
+        alert("Google CSE is good to go (Image search works). "
+          + "Set Prefer source → Google CSE first, then Suggest B-roll.");
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Test CSE"; }
     }
   }
 
@@ -6148,6 +6208,14 @@
           }
         });
         on("tlBrollTestBtn", "onclick", () => testPexelsKey());
+        on("tlBrollTestCseBtn", "onclick", () => testCseKey());
+        on("tlBrollPrefer", "onchange", (e) => {
+          const el = e && e.target;
+          if (el) {
+            el.dataset.userSet = "1";
+            try { localStorage.setItem("tl_broll_prefer", el.value || "auto"); } catch (err) { /* ignore */ }
+          }
+        });
         on("tlAssetBtn", "onclick", () => $("tlAssetFile")?.click());
         on("tlAssetFile", "onchange", async (e) => {
           const f = e.target.files && e.target.files[0];
@@ -6445,6 +6513,8 @@
       if (jobId) body.job_id = jobId;
       if (winStart != null) body.start = winStart;
       if (winEnd != null) body.end = winEnd;
+      const prefer = currentBrollPrefer();
+      if (prefer && prefer !== "auto") body.prefer_provider = prefer;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -6483,11 +6553,18 @@
       if (st.gemini) bits.push(`${st.gemini} AI`);
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.gif) bits.push(`${st.gif} gif`);
+      const by = st.by_provider || {};
+      const provBits = [];
+      if (by.google_cse) provBits.push(`CSE ${by.google_cse}`);
+      if (by.pexels) provBits.push(`Pexels ${by.pexels}`);
+      if (by.unsplash) provBits.push(`Unsplash ${by.unsplash}`);
+      if (by.gemini) provBits.push(`Gemini ${by.gemini}`);
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
       setSaveState(
         (always ? "Always · " : "")
         + `${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip`
         + (bits.length ? ` · ${bits.join(", ")}` : "")
+        + (provBits.length ? ` · ${provBits.join(", ")}` : "")
       );
       if (!data.photo_ready && !data.gemini_image_ready && !st.photo && !st.gemini && !st.gif) {
         const hint = data.hint || "No photo API key in this Studio process. On Replit set PEXELS_API_KEY then Stop+Run.";
@@ -6718,6 +6795,8 @@
         }],
       };
       if (jobId) body.job_id = jobId;
+      const prefer = currentBrollPrefer();
+      if (prefer && prefer !== "auto") body.prefer_provider = prefer;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

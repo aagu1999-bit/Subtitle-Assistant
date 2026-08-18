@@ -1388,6 +1388,14 @@
                     <option value="playhead">Near playhead (±30–45s)</option>
                   </select>
                 </label>
+                <label class="muted" style="font-size:.74rem">Prefer source
+                  <select id="tlBrollPrefer" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px" title="Tried first for Photos/Auto; others remain fallbacks. GIF mode always uses CSE.">
+                    <option value="auto" selected>Auto (CSE → Pexels → Unsplash)</option>
+                    <option value="google_cse">Google CSE first</option>
+                    <option value="pexels">Pexels first</option>
+                    <option value="unsplash">Unsplash first</option>
+                  </select>
+                </label>
                 <label class="muted" style="font-size:.74rem">Placement
                   <select id="tlBrollPlacement" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
                     <option value="pip" selected>Corner PiP</option>
@@ -1402,6 +1410,7 @@
                 <button id="tlAlwaysPackBtn" class="tl-chip-btn" type="button" title="CapCut Always · Photo Match — keyword stills + Ken Burns on Accept">🖼️ Always pack</button>
                 <div class="tl-broll-status-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                   <button id="tlBrollTestBtn" class="tl-chip-btn" type="button" title="Live-check PEXELS_API_KEY on this host (never shows the full key)">Test Pexels</button>
+                  <button id="tlBrollTestCseBtn" class="tl-chip-btn" type="button" title="Live-check GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX (Image search)">Test CSE</button>
                   <span id="tlBrollStatus" class="muted" style="font-size:.72rem" aria-live="polite">Checking B-roll providers…</span>
                 </div>
                 <div id="tlBrollPending" class="tl-broll-pending hidden" aria-live="polite"></div>
