@@ -2750,7 +2750,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if headline_banner:
         banner_y = int(video_h * 0.05)
         last_end = float(words[-1].get("end", 0)) if words else 0
-        banner_end_ts = _ts_to_ass(last_end)
+        banner_end_ts = ass_timestamp(last_end)
         lines.append(
             f"Dialogue: 0,0:00:00.00,{banner_end_ts},Banner,,0,0,0,,"
             f"{{\\pos({pos_x},{banner_y})\\bord0\\shad0\\3c&H000000&\\3a&H80&}}{fmt(headline_banner)}"
@@ -3571,6 +3571,16 @@ def _detect_video_encoder() -> tuple[list[str], str]:
 
 _VIDEO_ENC_ARGS, VIDEO_ENC_NAME = _detect_video_encoder()
 
+# QuickTime / iOS / Safari-friendly H.264 MP4 trailer args. Append on *final*
+# outputs (not every intermediate). Non-yuv420p, missing faststart, or odd
+# profiles are the usual reason macOS QuickTime says "media isn't compatible".
+_QT_SAFE_MP4_ARGS = [
+    "-pix_fmt", "yuv420p",
+    "-profile:v", "high",
+    "-level", "4.1",
+    "-movflags", "+faststart",
+]
+
 
 def enhance_with_elevenlabs(video_path: Path, output_path: Path, settings: dict, status_callback=None) -> None:
     """Run ElevenLabs Voice Isolator on the audio of *video_path*.
@@ -3830,10 +3840,15 @@ def burn_subtitles(
     else:
         if audio_path:
             cmd += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"]
-        cmd += ["-vf", vf, *_VIDEO_ENC_ARGS, "-c:a", "copy"]
+        # Re-encode audio to AAC-LC (not stream-copy) so QuickTime / iOS
+        # don't reject exotic source codecs after caption burn.
+        cmd += [
+            "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        ]
         if audio_path:
             cmd += ["-shortest"]
-    cmd += [str(output_path)]
+    cmd += [*_QT_SAFE_MP4_ARGS, str(output_path)]
 
     duration_hint = _media_duration(video_path) or None
     ok = _run_ffmpeg_encode(
@@ -3855,10 +3870,12 @@ def burn_subtitles(
         if silent:
             fallback += ["-an"]
         else:
-            fallback += ["-c:a", "copy"]
+            fallback += [
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            ]
             if audio_path:
                 fallback += ["-shortest"]
-        fallback += [str(output_path)]
+        fallback += [*_QT_SAFE_MP4_ARGS, str(output_path)]
         ok = _run_ffmpeg_encode(
             fallback,
             what="caption burn (libx264 fallback)",
@@ -6426,6 +6443,67 @@ def batch_render_clips():
         ffmpeg_logger.error(f"Batch render failed: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+def _compile_target_canvas(src_paths: list[Path]) -> tuple[int, int]:
+    """Fixed even canvas for stitching AI Shorts — majority portrait → 9:16."""
+    dims: list[tuple[int, int]] = []
+    for p in src_paths:
+        try:
+            dims.append(get_video_dimensions(p))
+        except Exception:
+            continue
+    if not dims:
+        return 1080, 1920
+    portrait = sum(1 for w, h in dims if h >= w)
+    if portrait >= (len(dims) + 1) // 2:
+        return 1080, 1920
+    return 1920, 1080
+
+
+def _compile_trim_segment(
+    src: Path, start: float, end: float, out_path: Path, W: int, H: int
+) -> None:
+    """Trim one highlight into a uniform H.264/AAC segment for concat demuxer.
+
+    All segments must share identical size/fps/pix_fmt/audio layout or
+    ``-c copy`` concat silently produces broken A/V (the classic "compile
+    doesn't stitch properly" symptom when mixing 9:16 + 16:9 sources).
+    """
+    dur = max(0.05, float(end) - float(start))
+    vf = (
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"fps=30,format=yuv420p,setsar=1"
+    )
+    has_a = _has_audio_stream(src)
+    # Accurate seek (-ss after -i) so highlight IN/OUT match the AI Shorts card.
+    cmd = [FFMPEG, "-y", "-i", str(src), "-ss", f"{start:.3f}", "-t", f"{dur:.3f}"]
+    if has_a:
+        cmd += [
+            "-vf", vf,
+            "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-shortest", str(out_path),
+        ]
+    else:
+        cmd += [
+            "-f", "lavfi", "-t", f"{dur:.3f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf", vf,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-shortest", str(out_path),
+        ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 512:
+        raise RuntimeError((proc.stderr or proc.stdout or "trim failed")[-500:])
+
+
 @app.route("/compile-clips", methods=["POST"])
 def compile_clips():
     """Stitch multiple clip ranges into one composite job.
@@ -6433,8 +6511,8 @@ def compile_clips():
     Body: {clips: [{source_job_id, start_time, end_time}], label}
     Returns: {job_id, filename}
 
-    Each segment is trimmed and re-encoded (libx264 / aac) at 1080p / 30fps
-    so the concat demuxer can copy-stream them into one mp4 without re-encode.
+    Each segment is trimmed and re-encoded (libx264 / aac) onto a *shared*
+    canvas so the concat demuxer can copy-stream them into one mp4.
     The merged transcript is built by filtering each source's words to the
     requested range and offsetting them by cumulative segment duration.
     """
@@ -6471,6 +6549,7 @@ def compile_clips():
 
     new_job_id = uuid.uuid4().hex
     composite_path = UPLOAD_DIR / f"{new_job_id}.mp4"
+    W, H = _compile_target_canvas([v["src_video"] for v in validated])
 
     # 1. Trim + normalize each segment to a uniform format so concat is clean.
     seg_paths: list[Path] = []
@@ -6478,21 +6557,12 @@ def compile_clips():
     try:
         for i, v in enumerate(validated):
             seg_path = UPLOAD_DIR / f"{new_job_id}_seg{i:03d}.mp4"
-            duration = v["end"] - v["start"]
-            cmd = [
-                FFMPEG, "-y",
-                "-ss", f"{v['start']:.3f}",
-                "-i", str(v["src_video"]),
-                "-t", f"{duration:.3f}",
-                "-vf", "scale=1080:-2:flags=lanczos,fps=30",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-                str(seg_path),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode != 0:
-                return jsonify({"error": f"Trim failed on clip {i + 1}: {proc.stderr[-400:]}"}), 500
+            try:
+                _compile_trim_segment(
+                    v["src_video"], v["start"], v["end"], seg_path, W, H
+                )
+            except RuntimeError as exc:
+                return jsonify({"error": f"Trim failed on clip {i + 1}: {exc}"}), 500
             seg_paths.append(seg_path)
 
         # 2. Concat with the demuxer (cheap stream copy now that all segs match).
@@ -6509,12 +6579,28 @@ def compile_clips():
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
-            return jsonify({"error": f"Concat failed: {proc.stderr[-500:]}"}), 500
+            # Remux-reencode fallback if copy concat chokes on edge cases.
+            cmd_fb = [
+                FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_path),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                *_QT_SAFE_MP4_ARGS,
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                str(composite_path),
+            ]
+            proc2 = subprocess.run(cmd_fb, capture_output=True, text=True)
+            if proc2.returncode != 0:
+                return jsonify({
+                    "error": f"Concat failed: {(proc2.stderr or proc.stderr or '')[-500:]}"
+                }), 500
     finally:
         for p in seg_paths:
             _safe_unlink(p)
         if list_path:
             _safe_unlink(list_path)
+
+    if not composite_path.exists() or composite_path.stat().st_size < 1024:
+        return jsonify({"error": "Compile produced an empty file"}), 500
 
     # 3. Stitch the merged transcript with cumulative offsets.
     merged_words: list[dict] = []
@@ -6546,6 +6632,7 @@ def compile_clips():
     recipe = {
         "label": label,
         "created_at": time.time(),
+        "canvas": f"{W}x{H}",
         "clips": [
             {
                 "source_job_id": v["source_job_id"],
@@ -6570,9 +6657,16 @@ def compile_clips():
         "created_at": time.time(),
         "filename": new_filename,
         "compile_recipe": recipe,
+        "duration": cumulative,
     }
     _db_save_job(new_job_id)
-    return jsonify({"job_id": new_job_id, "filename": new_filename, "segments": len(validated)})
+    return jsonify({
+        "job_id": new_job_id,
+        "filename": new_filename,
+        "segments": len(validated),
+        "duration": cumulative,
+        "canvas": f"{W}x{H}",
+    })
 
 
 @app.route("/list-compilations", methods=["GET"])
@@ -7609,7 +7703,13 @@ def export_captions(job_id: str, ext: str):
 
 @app.route("/download/<path:filename>")
 def download(filename):
-    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+    """Force an attachment download (helps mobile browsers that otherwise
+    inline-play and never offer Save)."""
+    safe = Path(filename).name
+    resp = send_from_directory(OUTPUT_DIR, safe, as_attachment=True, download_name=safe)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{safe}"'
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/preview/<path:filename>")
@@ -9530,8 +9630,11 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         else:
             # Nothing to burn — just finalize (stream copy is enough).
             _stage("finalizing", 90)
-            _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy",
-                     "-movflags", "+faststart", str(output_path)], "Finalize")
+            _tl_run([FFMPEG, "-y", "-i", str(base),
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                     *_QT_SAFE_MP4_ARGS,
+                     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                     str(output_path)], "Finalize")
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError("Render produced an empty or missing output file.")

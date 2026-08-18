@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-63-split-images-stitch-coedit-seq-ai-budget";
+  const TL_BUILD = "studio-editor-build-64-compile-stitch-qt-download-ts-ass";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -5597,7 +5597,9 @@
               v.play().catch(() => {});
             }
             if (typeof window.showExportDone === "function") {
-              window.showExportDone(s.output, { jobId: tl.job_id });
+              window.showExportDone(s.output, { jobId: tl.job_id, stayOnTab: true });
+            } else if (typeof window.triggerVideoDownload === "function") {
+              window.triggerVideoDownload(s.output);
             }
             resolve(s);
           } else if (s.status === "error") {

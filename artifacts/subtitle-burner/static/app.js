@@ -4573,7 +4573,9 @@ if (compileGoBtn) {
       });
       const j = await res.json();
       if (j.error) throw new Error(j.error);
-      compileStatus.textContent = `✓ Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"} into a new job.`;
+      compileStatus.textContent = `✓ Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"} into one MP4` +
+        (j.duration ? ` (${Number(j.duration).toFixed(1)}s)` : "") +
+        (j.canvas ? ` · ${j.canvas}` : "") + ".";
       // Clear the queue and switch to the new compilation job.
       saveCompileQueue([]);
       renderCompileQueue();
@@ -4585,8 +4587,9 @@ if (compileGoBtn) {
       // Close the Captions-style loop: offer Timeline as the edit surface.
       if (typeof window.openTimelineEditor === "function") {
         const goTl = confirm(
-          `Compiled ${j.segments} clip${j.segments === 1 ? "" : "s"}.\n\n` +
-          `Open in Timeline to edit captions, B-roll, and Render?`
+          `Compiled ${j.segments} highlight${j.segments === 1 ? "" : "s"} into ONE video.\n\n` +
+          `Open in Timeline to edit captions / effects / Render?\n\n` +
+          `Tip: leave Detect shots alone unless you want to split the compilation back into scenes.`
         );
         if (goTl) {
           window.openTimelineEditor(j.job_id, { replace: true, newProject: true });
@@ -5847,10 +5850,58 @@ function _renderAssemblyBar() {
     }
   }
 
+  function showDownloadReadyBanner(output) {
+    if (!output) return;
+    const id = "studioDownloadBanner";
+    let ban = document.getElementById(id);
+    if (!ban) {
+      ban = document.createElement("div");
+      ban.id = id;
+      ban.style.cssText =
+        "position:fixed;left:12px;right:12px;bottom:72px;z-index:10050;" +
+        "background:#161a24;border:1px solid #3b82f6;border-radius:12px;" +
+        "padding:12px 14px;box-shadow:0 12px 40px rgba(0,0,0,.45);" +
+        "display:flex;flex-wrap:wrap;gap:10px;align-items:center;" +
+        "font-size:14px;color:#fff";
+      document.body.appendChild(ban);
+    }
+    const url = "/download/" + encodeURIComponent(String(output).replace(/^\/+/, ""));
+    ban.innerHTML =
+      `<span style="flex:1;min-width:140px;line-height:1.35">Export ready — tap Download to save the MP4.</span>` +
+      `<a class="btn btn-primary" href="${url}" download style="text-decoration:none;white-space:nowrap">⬇ Download MP4</a>` +
+      `<button type="button" class="btn btn-secondary" data-dismiss style="white-space:nowrap">Dismiss</button>`;
+    const dismiss = ban.querySelector("[data-dismiss]");
+    if (dismiss) dismiss.onclick = () => ban.remove();
+  }
+
+  function triggerVideoDownload(output) {
+    if (!output) return;
+    const name = String(output).split("/").pop() || "export.mp4";
+    const url = "/download/" + encodeURIComponent(name) + "?t=" + Date.now();
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => a.remove(), 500);
+    } catch (e) { /* iOS may block programmatic click after async */ }
+    showDownloadReadyBanner(output);
+  }
+  window.triggerVideoDownload = triggerVideoDownload;
+  window.showDownloadReadyBanner = showDownloadReadyBanner;
+
   function showExportDone(output, opts) {
     opts = opts || {};
     if (!output) return;
-    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    const isMobile = !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
+    // Desktop Instant Export lands on Ingest where the classic download link lives.
+    // On mobile / Timeline stay-put so the user can tap the download banner.
+    if (!opts.stayOnTab && !isMobile && typeof setActiveTab === "function") {
+      setActiveTab("ingest");
+    }
     if (barFill) barFill.style.width = "100%";
     if (progress) progress.classList.add("hidden");
     if (result) result.classList.remove("hidden");
@@ -5858,12 +5909,16 @@ function _renderAssemblyBar() {
       player.src = "/preview/" + output + "?t=" + Date.now();
       try { player.load(); } catch (e) { /* ignore */ }
     }
-    if (dl) dl.href = "/download/" + output;
+    if (dl) {
+      dl.href = "/download/" + output;
+      dl.setAttribute("download", String(output).split("/").pop() || "export.mp4");
+    }
     if (renderBtn) renderBtn.disabled = false;
     if (statusText) statusText.textContent = "Done — download ready";
     try {
       result?.scrollIntoView?.({ behavior: "smooth", block: "start" });
     } catch (e) { /* ignore */ }
+    triggerVideoDownload(output);
   }
 
   window.showExportProgressUpdate = showExportProgressUpdate;
