@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-68-ai-photos-opt-in";
+  const TL_BUILD = "studio-editor-build-69-talker-stills-likeness";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -686,7 +686,8 @@
         } else if (photoReady || geminiReady) {
           hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
             + "Each Suggest returns up to ~4–5 clips (max 12)."
-            + (st.google_cse ? " Use <em>Prefer source</em> to put CSE first. GIF mode uses Google CSE." : "")
+            + " <em>Prefer talker screenshots</em> uses Analyze speakers faces when available; stock/AI people get likeness bias."
+            + (st.google_cse ? " Use <em>Prefer source</em> to put CSE first." : "")
             + (geminiReady ? " Check <em>Generate AI photos</em> to prefer Gemini stills." : "");
         } else {
           const aliases = (data.pexels_env && data.pexels_env.alias_names) || [];
@@ -6523,6 +6524,9 @@
       if (winEnd != null) body.end = winEnd;
       const prefer = currentBrollPrefer();
       if (prefer && prefer !== "auto") body.prefer_provider = prefer;
+      const spkEl = $("tlBrollSpeakerStills");
+      body.prefer_speaker_stills = !(spkEl && !spkEl.checked);
+      body.appearance_bias = true;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -6561,8 +6565,10 @@
       if (st.gemini) bits.push(`${st.gemini} AI`);
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.gif) bits.push(`${st.gif} gif`);
+      if (st.speaker_still) bits.push(`${st.speaker_still} talker`);
       const by = st.by_provider || {};
       const provBits = [];
+      if (by.speaker_still) provBits.push(`Talker ${by.speaker_still}`);
       if (by.google_cse) provBits.push(`CSE ${by.google_cse}`);
       if (by.pexels) provBits.push(`Pexels ${by.pexels}`);
       if (by.unsplash) provBits.push(`Unsplash ${by.unsplash}`);
@@ -6805,6 +6811,9 @@
       if (jobId) body.job_id = jobId;
       const prefer = currentBrollPrefer();
       if (prefer && prefer !== "auto") body.prefer_provider = prefer;
+      const spkEl = $("tlBrollSpeakerStills");
+      body.prefer_speaker_stills = !(spkEl && !spkEl.checked);
+      body.appearance_bias = true;
       const data = await api("/fetch-auto-overlays", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

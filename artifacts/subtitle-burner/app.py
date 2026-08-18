@@ -5469,7 +5469,338 @@ def _gemini_image_ready() -> bool:
     return bool((os.environ.get("GEMINI_API_KEY") or "").strip())
 
 
-def _generate_broll_gemini_image(query: str, dest_stem: Path) -> Path | None:
+_PERSON_QUERY_RE = re.compile(
+    r"\b("
+    r"person|people|man|woman|men|women|guy|girl|boy|human|face|portrait|"
+    r"speaker|host|guest|interviewer|interviewee|talent|couple|crowd|audience|"
+    r"friend|family|coworker|colleague|doctor|teacher|athlete|ceo|founder|"
+    r"talking|speaking|interview|reaction|selfie|headshot"
+    r")\b",
+    re.I,
+)
+
+
+def _load_reframe_cache(job_id: str | None) -> dict | None:
+    if not job_id:
+        return None
+    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _reframe_faces_ready(job_id: str | None) -> bool:
+    rd = _load_reframe_cache(job_id)
+    if not rd:
+        return False
+    faces = rd.get("faces") or []
+    if not faces:
+        return False
+    stats = rd.get("stats") or {}
+    if stats.get("faces_skipped"):
+        return False
+    return True
+
+
+def _query_implies_person(query: str) -> bool:
+    q = (query or "").strip()
+    if not q:
+        return False
+    if _PERSON_QUERY_RE.search(q):
+        return True
+    # Short name-like tokens often mean people in interview B-roll.
+    tokens = [t for t in re.split(r"\W+", q) if t]
+    if 1 <= len(tokens) <= 3 and all(t[:1].isupper() for t in tokens if t.isalpha()):
+        return True
+    return False
+
+
+def _active_speaker_for_time(
+    reframe_data: dict | None,
+    t: float,
+    words: list | None = None,
+) -> str | None:
+    if words:
+        best = None
+        best_d = 1e9
+        for w in words:
+            try:
+                ws = float(w.get("start", 0))
+                we = float(w.get("end", ws))
+            except (TypeError, ValueError):
+                continue
+            if ws - 0.15 <= t <= we + 0.15 and w.get("speaker"):
+                d = abs(((ws + we) / 2.0) - t)
+                if d < best_d:
+                    best_d = d
+                    best = str(w.get("speaker"))
+        if best:
+            return best
+    if not reframe_data:
+        return None
+    return _active_speaker_at(reframe_data.get("diarization") or [], t)
+
+
+def _extract_frame_crop_jpg(
+    video_path: Path,
+    t: float,
+    bbox: tuple[float, float, float, float],
+    dest: Path,
+    *,
+    pad: float = 1.65,
+    max_side: int = 960,
+) -> Path | None:
+    """Grab a frame at *t* and crop around normalized face bbox → JPEG."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0, int(float(t) * 1000)))
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            return None
+        fh, fw = frame.shape[:2]
+        cx, cy, w, h = bbox
+        # Prefer upper-body / headroom: expand downward slightly.
+        x1 = max(0, min(fw - 1, int((cx - w * pad) * fw)))
+        x2 = max(x1 + 1, min(fw, int((cx + w * pad) * fw)))
+        y1 = max(0, min(fh - 1, int((cy - h * pad * 0.95) * fh)))
+        y2 = max(y1 + 1, min(fh, int((cy + h * pad * 1.35) * fh)))
+        cropped = frame[y1:y2, x1:x2]
+        if cropped.size == 0:
+            return None
+        ch, cw = cropped.shape[:2]
+        scale = min(1.0, float(max_side) / float(max(ch, cw, 1)))
+        if scale < 0.999:
+            cropped = cv2.resize(
+                cropped,
+                (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        dest = dest.with_suffix(".jpg")
+        ok, buf = cv2.imencode(".jpg", cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            return None
+        dest.write_bytes(buf.tobytes())
+        if dest.exists() and dest.stat().st_size > 800:
+            return dest
+        _safe_unlink(dest)
+        return None
+    except Exception as e:
+        ai_logger.warning(f"Speaker still extract failed: {e}")
+        return None
+
+
+def _speaker_still_for_time(
+    job_id: str | None,
+    t: float,
+    dest_stem: Path,
+    *,
+    speaker: str | None = None,
+    words: list | None = None,
+) -> Path | None:
+    """Screenshot / face-crop of who is talking near *t* (needs Analyze speakers)."""
+    if not job_id:
+        return None
+    rd = _load_reframe_cache(job_id)
+    if not rd:
+        return None
+    faces = rd.get("faces") or []
+    if not faces:
+        return None
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return None
+    diar = rd.get("diarization") or []
+    spk = speaker or _active_speaker_for_time(rd, t, words=words)
+    positions, bboxes = _assign_speakers_to_faces(diar, faces)
+    bbox = None
+    if spk and spk in bboxes:
+        bbox = bboxes[spk]
+    else:
+        found = _face_samples_at(faces, t)
+        if found:
+            face = max(found, key=lambda f: float(f.get("w", 0)) * float(f.get("h", 0)))
+            try:
+                bbox = (
+                    float(face["cx"]), float(face["cy"]),
+                    float(face.get("w", 0.2)), float(face.get("h", 0.25)),
+                )
+            except (KeyError, TypeError, ValueError):
+                bbox = None
+        if bbox is None and positions:
+            # Fall back to any known speaker position.
+            spk0 = next(iter(bboxes), None) or next(iter(positions), None)
+            if spk0 and spk0 in bboxes:
+                bbox = bboxes[spk0]
+            elif spk0 and spk0 in positions:
+                cx, cy = positions[spk0]
+                bbox = (cx, cy, 0.22, 0.28)
+    if not bbox:
+        return None
+    return _extract_frame_crop_jpg(video_path, t, bbox, dest_stem)
+
+
+def _describe_face_appearance(face_jpg: Path) -> str | None:
+    """Short appearance line from a face crop via Gemini vision (for stock/AI bias)."""
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key or not face_jpg or not face_jpg.exists():
+        return None
+    try:
+        blob = face_jpg.read_bytes()
+        if len(blob) < 400:
+            return None
+        b64 = base64.b64encode(blob).decode("ascii")
+        model = (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL or "gemini-2.0-flash").strip()
+        # Prefer a cheap text model for description.
+        for cand in (model, "gemini-2.0-flash", "gemini-2.5-flash"):
+            if not cand:
+                continue
+            url = f"{_GEMINI_BASE_URL}/{cand}:generateContent?key={api_key}"
+            body = {
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                        {"text": (
+                            "Describe this person's appearance for stock-photo search in one short phrase "
+                            "(age range, gender presentation, hair, skin tone, clothing style). "
+                            "No name. No speculation about identity. Max 16 words."
+                        )},
+                    ],
+                }],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 60},
+            }
+            import requests as _req
+            resp = _req.post(url, json=body, timeout=40)
+            if resp.status_code >= 400:
+                continue
+            data = resp.json() or {}
+            parts = (
+                ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")
+                or []
+            )
+            text = " ".join(
+                str(p.get("text") or "").strip()
+                for p in parts if isinstance(p, dict)
+            ).strip()
+            text = re.sub(r"\s+", " ", text).strip(" .")
+            if 8 <= len(text) <= 160:
+                return text
+        return None
+    except Exception as e:
+        ai_logger.warning(f"Speaker appearance describe failed: {e}")
+        return None
+
+
+def _ensure_speaker_looks(job_id: str | None) -> dict:
+    """Cache SPEAKER_id → appearance phrase on reframe JSON."""
+    if not job_id:
+        return {}
+    rd = _load_reframe_cache(job_id)
+    if not rd:
+        return {}
+    cached = rd.get("speaker_looks")
+    if isinstance(cached, dict) and cached:
+        return {str(k): str(v) for k, v in cached.items() if v}
+    if not _gemini_image_ready():
+        return {}
+    diar = rd.get("diarization") or []
+    faces = rd.get("faces") or []
+    if not diar or not faces:
+        return {}
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return {}
+    _, bboxes = _assign_speakers_to_faces(diar, faces)
+    looks: dict[str, str] = {}
+    tmp_dir = UPLOAD_DIR / f"{job_id}_looks_tmp"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        for spk, bbox in list(bboxes.items())[:4]:
+            segs = [s for s in diar if s.get("speaker") == spk]
+            if not segs:
+                continue
+            sample_t = (float(segs[0]["start"]) + float(segs[0]["end"])) / 2.0
+            crop = _extract_frame_crop_jpg(
+                video_path, sample_t, bbox, tmp_dir / f"{spk}.jpg", pad=1.25, max_side=512,
+            )
+            if not crop:
+                continue
+            desc = _describe_face_appearance(crop)
+            if desc:
+                looks[spk] = desc
+    finally:
+        try:
+            for p in tmp_dir.glob("*"):
+                _safe_unlink(p)
+            tmp_dir.rmdir()
+        except OSError:
+            pass
+    if looks:
+        rd["speaker_looks"] = looks
+        try:
+            (UPLOAD_DIR / f"{job_id}_reframe.json").write_text(
+                json.dumps(rd, ensure_ascii=False), encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return looks
+
+
+def _appearance_hint_for_time(
+    job_id: str | None,
+    t: float,
+    words: list | None = None,
+) -> str:
+    looks = _ensure_speaker_looks(job_id)
+    if not looks:
+        return ""
+    rd = _load_reframe_cache(job_id)
+    spk = _active_speaker_for_time(rd, t, words=words)
+    if spk and looks.get(spk):
+        return looks[spk]
+    # Blend all known looks (multi-person interview).
+    return " / ".join(looks.values())
+
+
+def _speaker_reference_face(
+    job_id: str | None,
+    t: float,
+    dest_stem: Path,
+    words: list | None = None,
+) -> Path | None:
+    """Small face crop used as Gemini likeness reference."""
+    return _speaker_still_for_time(
+        job_id, t, dest_stem, words=words,
+    )
+
+
+def _with_appearance_bias(query: str, appearance_hint: str) -> str:
+    q = (query or "").strip()
+    hint = (appearance_hint or "").strip()
+    if not q or not hint:
+        return q
+    if not _query_implies_person(q):
+        # Soft: still nudge people-ish compositions when we have on-screen talent.
+        return f"{q}, person who looks like: {hint}"
+    return f"{q}, person resembling: {hint}"
+
+
+def _generate_broll_gemini_image(
+    query: str,
+    dest_stem: Path,
+    *,
+    appearance_hint: str = "",
+    reference_face: Path | None = None,
+) -> Path | None:
     """Generate a B-roll still via Gemini image model. Returns saved Path or None."""
     api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
@@ -5477,15 +5808,47 @@ def _generate_broll_gemini_image(query: str, dest_stem: Path) -> Path | None:
     q = (query or "").strip()
     if not q:
         return None
+    hint = (appearance_hint or "").strip()
+    likeness = ""
+    if hint:
+        likeness = (
+            f" If people appear, they should resemble: {hint}. "
+            "Match age range, hair, skin tone, and clothing vibe — do not copy a real identity."
+        )
     prompt = (
         "Generate a single realistic photo suitable as video B-roll (no text, "
         "no logos, no watermarks, no UI chrome). Landscape-friendly composition. "
-        f"Subject: {q}"
+        f"Subject: {q}.{likeness}"
     )
+    if reference_face and reference_face.exists():
+        prompt += (
+            " Use the attached reference face only for likeness of any people in the new photo. "
+            "Create a NEW scene (not a copy of the reference frame)."
+        )
     model = (GEMINI_IMAGE_MODEL or "gemini-2.5-flash-image").strip()
     url = f"{_GEMINI_BASE_URL}/{model}:generateContent?key={api_key}"
+    parts: list[dict] = []
+    if reference_face and reference_face.exists():
+        try:
+            raw = reference_face.read_bytes()
+            if len(raw) > 400:
+                mime = "image/jpeg"
+                suf = reference_face.suffix.lower()
+                if suf == ".png":
+                    mime = "image/png"
+                elif suf == ".webp":
+                    mime = "image/webp"
+                parts.append({
+                    "inline_data": {
+                        "mime_type": mime,
+                        "data": base64.b64encode(raw).decode("ascii"),
+                    }
+                })
+        except OSError:
+            pass
+    parts.append({"text": prompt})
     body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "responseModalities": ["TEXT", "IMAGE"],
         },
@@ -5499,11 +5862,11 @@ def _generate_broll_gemini_image(query: str, dest_stem: Path) -> Path | None:
             )
             return None
         data = resp.json() or {}
-        parts = (
+        parts_out = (
             ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")
             or []
         )
-        for part in parts:
+        for part in parts_out:
             if not isinstance(part, dict):
                 continue
             inline = part.get("inlineData") or part.get("inline_data") or {}
@@ -5685,11 +6048,14 @@ def _fetch_broll_image_for_keyword(
     prefer_gif: bool = False,
     use_ai: bool = False,
     prefer_provider: str = "auto",
+    appearance_hint: str = "",
+    reference_face: Path | None = None,
 ) -> Path | None:
     """Search providers and download the first hit. Prefer Gemini when use_ai."""
     path, _src = _fetch_broll_image_for_keyword_ex(
         query, dest_stem,
         prefer_gif=prefer_gif, use_ai=use_ai, prefer_provider=prefer_provider,
+        appearance_hint=appearance_hint, reference_face=reference_face,
     )
     return path
 
@@ -5700,16 +6066,16 @@ def _fetch_broll_image_for_keyword_ex(
     prefer_gif: bool = False,
     use_ai: bool = False,
     prefer_provider: str = "auto",
+    appearance_hint: str = "",
+    reference_face: Path | None = None,
 ) -> tuple:
     """Returns (Path|None, source) where source is
-    'gemini'|'gif'|'photo'|None. Stock provider is encoded in Path meta via
-    a third optional convention: we return source tags 'photo' for stills and
-    attach provider on the overlay separately via the caller using
-    `_fetch_broll_image_for_keyword_detail`.
+    'gemini'|'gif'|'photo'|None.
     """
     path, src, _prov = _fetch_broll_image_for_keyword_detail(
         query, dest_stem,
         prefer_gif=prefer_gif, use_ai=use_ai, prefer_provider=prefer_provider,
+        appearance_hint=appearance_hint, reference_face=reference_face,
     )
     return path, src
 
@@ -5720,6 +6086,8 @@ def _fetch_broll_image_for_keyword_detail(
     prefer_gif: bool = False,
     use_ai: bool = False,
     prefer_provider: str = "auto",
+    appearance_hint: str = "",
+    reference_face: Path | None = None,
 ) -> tuple:
     """Returns (Path|None, source, provider) with provider in
     gemini|google_cse|pexels|unsplash|None and source gemini|gif|photo|None.
@@ -5728,8 +6096,15 @@ def _fetch_broll_image_for_keyword_detail(
     if not q:
         return None, None, None
 
+    hint = (appearance_hint or "").strip()
+    stock_q = _with_appearance_bias(q, hint) if hint else q
+
     if use_ai and not prefer_gif and _gemini_image_ready():
-        ai_path = _generate_broll_gemini_image(q, dest_stem)
+        ai_path = _generate_broll_gemini_image(
+            q, dest_stem,
+            appearance_hint=hint,
+            reference_face=reference_face,
+        )
         if ai_path:
             return ai_path, "gemini", "gemini"
 
@@ -5739,7 +6114,9 @@ def _fetch_broll_image_for_keyword_detail(
         order = ["google_cse"]
 
     for prov in order:
-        url = _search_broll_stock_url(q, prov, prefer_gif=prefer_gif)
+        url = _search_broll_stock_url(stock_q, prov, prefer_gif=prefer_gif)
+        if not url and stock_q != q:
+            url = _search_broll_stock_url(q, prov, prefer_gif=prefer_gif)
         if not url:
             continue
         path = _download_url_to_asset(url, dest_stem)
@@ -5823,23 +6200,33 @@ def _caption_aware_overlay_layout(
 
 def _face_hint_for_job(job_id: str | None) -> tuple[float | None, float | None]:
     """Best-effort face center from reframe cache (normalized 0–1)."""
-    if not job_id or job_id not in jobs:
+    if not job_id:
         return None, None
-    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
-    if not cache_path.exists():
+    rd = _load_reframe_cache(job_id)
+    if not rd:
         return None, None
-    try:
-        rd = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None, None
-    faces = rd.get("faces") or rd.get("face_track") or []
-    if isinstance(faces, list) and faces:
-        f0 = faces[0] if isinstance(faces[0], dict) else None
-        if f0:
-            try:
-                return float(f0.get("cx", f0.get("x", 0.5))), float(f0.get("cy", f0.get("y", 0.4)))
-            except (TypeError, ValueError):
-                pass
+    faces = rd.get("faces") or []
+    # Samples are {t, faces:[{cx,cy,...}]} — pick the largest face from the
+    # earliest non-empty sample (good enough for overlay placement).
+    if isinstance(faces, list):
+        for sample in faces:
+            if not isinstance(sample, dict):
+                continue
+            fl = sample.get("faces") if "faces" in sample else None
+            if isinstance(fl, list) and fl:
+                face = max(fl, key=lambda f: float(f.get("w", 0)) * float(f.get("h", 0)))
+                try:
+                    return float(face["cx"]), float(face.get("cy", 0.4))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            # Legacy flat face dict
+            if "cx" in sample or "x" in sample:
+                try:
+                    return float(sample.get("cx", sample.get("x", 0.5))), float(
+                        sample.get("cy", sample.get("y", 0.4))
+                    )
+                except (TypeError, ValueError):
+                    pass
     for key in ("face_cx", "cx", "center_x"):
         if key in rd:
             try:
@@ -5870,6 +6257,8 @@ def fetch_auto_overlays():
       start?: float, end?: float,   # optional source-time window (long-form)
       use_ai_photos?: bool,         # opt-in Gemini stills before stock
       prefer_provider?: "auto"|"google_cse"|"pexels"|"unsplash",
+      prefer_speaker_stills?: bool,  # default true — screenshot who is talking
+      appearance_bias?: bool,       # default true — likeness-match stock/AI people
       semantic?: bool
     }
     """
@@ -5888,16 +6277,22 @@ def fetch_auto_overlays():
     prefer_provider = _normalize_broll_prefer_provider(
         data.get("prefer_provider") or data.get("provider") or "auto"
     )
+    jid = job_id if isinstance(job_id, str) else None
+    speaker_ready = _reframe_faces_ready(jid)
+    prefer_speaker_stills = data.get("prefer_speaker_stills", True) is not False
+    appearance_bias = data.get("appearance_bias", True) is not False
     # Keyword text badges are retired — map legacy "badge" → photo when possible.
     if mode == "badge":
-        mode = "photo" if (_broll_any_photo_provider() or use_ai_photos) else "auto"
+        mode = "photo" if (
+            _broll_any_photo_provider() or use_ai_photos or speaker_ready
+        ) else "auto"
     if mode not in ("auto", "photo", "gif"):
         mode = "auto"
 
-    face_cx, face_cy = _face_hint_for_job(job_id if isinstance(job_id, str) else None)
+    face_cx, face_cy = _face_hint_for_job(jid)
     caption_y = 82.0
-    if isinstance(job_id, str) and job_id in jobs:
-        st = (jobs[job_id].get("style") or {})
+    if jid and jid in jobs:
+        st = (jobs[jid].get("style") or {})
         try:
             caption_y = float(st.get("position_y") or caption_y)
         except (TypeError, ValueError):
@@ -5950,8 +6345,16 @@ def fetch_auto_overlays():
     used_badge = 0
     used_gif = 0
     used_gemini = 0
+    used_speaker = 0
     used_by_provider: dict[str, int] = {}
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Warm appearance cache once per Suggest (Gemini vision) when biasing stock/AI.
+    if appearance_bias and speaker_ready and jid:
+        try:
+            _ensure_speaker_looks(jid)
+        except Exception as e:
+            ai_logger.warning(f"speaker looks warm failed: {e}")
 
     for co in callouts:
         label = str(co.get("text") or "B-roll").strip() or "B-roll"
@@ -5965,11 +6368,14 @@ def fetch_auto_overlays():
         want_gif = mode == "gif" and bool(providers.get("google_cse"))
         want_photo = mode in ("photo", "auto") and (
             _broll_any_photo_provider() or use_ai_photos
+            or (prefer_speaker_stills and speaker_ready)
         )
         if want_gif:
+            hint = _appearance_hint_for_time(jid, start, words=words) if appearance_bias else ""
             asset_path, src_tag, stock_provider = _fetch_broll_image_for_keyword_detail(
                 label, ASSET_DIR / asset_id, prefer_gif=True,
                 prefer_provider=prefer_provider,
+                appearance_hint=hint,
             )
             if asset_path:
                 source = "gif"
@@ -5987,27 +6393,60 @@ def fetch_auto_overlays():
                     except OSError:
                         pass
         elif want_photo:
-            asset_path, src_tag, stock_provider = _fetch_broll_image_for_keyword_detail(
-                label, ASSET_DIR / asset_id,
-                use_ai=use_ai_photos,
-                prefer_provider=prefer_provider,
-            )
-            if asset_path:
-                if src_tag == "gemini":
-                    source = "gemini"
-                    used_gemini += 1
-                    used_by_provider["gemini"] = used_by_provider.get("gemini", 0) + 1
-                else:
-                    is_gif = _is_gif_path(asset_path)
-                    source = "gif" if is_gif else "photo"
-                    if is_gif:
-                        used_gif += 1
-                    else:
-                        used_photo += 1
-                    if stock_provider:
-                        used_by_provider[stock_provider] = (
-                            used_by_provider.get(stock_provider, 0) + 1
+            # 1) Prefer a screenshot of who is talking (Analyze speakers + faces).
+            if prefer_speaker_stills and speaker_ready and jid:
+                still = _speaker_still_for_time(
+                    jid, start, ASSET_DIR / asset_id, words=words,
+                )
+                if still:
+                    asset_path = still
+                    source = "speaker_still"
+                    stock_provider = "speaker_still"
+                    used_speaker += 1
+                    used_by_provider["speaker_still"] = (
+                        used_by_provider.get("speaker_still", 0) + 1
+                    )
+            # 2) Else stock / AI — bias people toward on-screen likeness.
+            if asset_path is None:
+                hint = ""
+                ref_face = None
+                if appearance_bias and speaker_ready and jid:
+                    hint = _appearance_hint_for_time(jid, start, words=words)
+                    if use_ai_photos or _query_implies_person(label):
+                        ref_face = _speaker_still_for_time(
+                            jid, start,
+                            ASSET_DIR / f"{asset_id}_ref",
+                            words=words,
                         )
+                asset_path, src_tag, stock_provider = _fetch_broll_image_for_keyword_detail(
+                    label, ASSET_DIR / asset_id,
+                    use_ai=use_ai_photos,
+                    prefer_provider=prefer_provider,
+                    appearance_hint=hint,
+                    reference_face=ref_face,
+                )
+                if ref_face is not None:
+                    try:
+                        _safe_unlink(ref_face)
+                    except OSError:
+                        pass
+                if asset_path:
+                    if src_tag == "gemini":
+                        source = "gemini"
+                        used_gemini += 1
+                        used_by_provider["gemini"] = used_by_provider.get("gemini", 0) + 1
+                    else:
+                        is_gif = _is_gif_path(asset_path)
+                        source = "gif" if is_gif else "photo"
+                        if is_gif:
+                            used_gif += 1
+                        else:
+                            used_photo += 1
+                        if stock_provider:
+                            used_by_provider[stock_provider] = (
+                                used_by_provider.get(stock_provider, 0) + 1
+                            )
+            if asset_path is not None:
                 final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
                 if asset_path.resolve() != final.resolve():
                     try:
@@ -6039,7 +6478,6 @@ def fetch_auto_overlays():
             len(overlays), placement,
             face_cx=face_cx, face_cy=face_cy, caption_y_pct=caption_y,
         )
-        is_gif_asset = source == "gif" or _is_gif_path(asset_path)
         overlays.append({
             "asset_id": asset_id,
             "keyword": label,
@@ -6056,7 +6494,7 @@ def fetch_auto_overlays():
             "fit": pos["fit"],
             "fade_in": 0.15,
             "fade_out": 0.25,
-            "border_px": 2 if source in ("photo", "gif", "gemini") else 0,
+            "border_px": 2 if source in ("photo", "gif", "gemini", "speaker_still") else 0,
             "layout": pos["layout"],
             # Ken Burns is opt-in in the Timeline inspector / Effects lane.
             "ken_burns": None,
@@ -6069,24 +6507,28 @@ def fetch_auto_overlays():
         "mode": mode,
         "placement": placement,
         "prefer_provider": prefer_provider,
+        "prefer_speaker_stills": prefer_speaker_stills,
+        "appearance_bias": appearance_bias,
+        "speaker_faces_ready": speaker_ready,
         "use_ai_photos": use_ai_photos,
         "semantic": semantic,
         "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
-        "photo_ready": _broll_any_photo_provider(),
+        "photo_ready": _broll_any_photo_provider() or speaker_ready,
         "gemini_image_ready": _gemini_image_ready(),
         "stats": {
             "photo": used_photo,
             "badge": used_badge,
             "gif": used_gif,
             "gemini": used_gemini,
+            "speaker_still": used_speaker,
             "by_provider": used_by_provider,
         },
         "hint": (
-            None if _broll_any_photo_provider() or use_ai_photos
-            else "No photo API key in this Studio process — keyword text badges are disabled. "
-                 "On Replit: Tools → Secrets → PEXELS_API_KEY (and/or GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX), "
-                 "then Stop + Run. Or enable Generate AI photos (GEMINI_API_KEY)."
+            None if _broll_any_photo_provider() or use_ai_photos or speaker_ready
+            else "No photo API key and no speaker faces yet. "
+                 "Analyze speakers (faces) for talker screenshots, or set "
+                 "PEXELS_API_KEY / GOOGLE_CSE_* / GEMINI_API_KEY."
         ),
     })
 
@@ -11073,21 +11515,49 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                 dest_stem = ASSET_DIR / asset_id
                 asset_path = None
                 source = "photo"
-                if photo_match and (_broll_any_photo_provider() or use_ai):
+                stock_provider = None
+                # Prefer talker screenshot when Analyze speakers+faces is ready.
+                if photo_match and _reframe_faces_ready(job_id):
+                    still = _speaker_still_for_time(
+                        job_id, float(co["start"]), dest_stem, words=words,
+                    )
+                    if still:
+                        asset_path = still
+                        source = "speaker_still"
+                        stock_provider = "speaker_still"
+                if asset_path is None and photo_match and (
+                    _broll_any_photo_provider() or use_ai
+                ):
+                    hint = _appearance_hint_for_time(
+                        job_id, float(co["start"]), words=words,
+                    )
+                    ref = None
+                    if use_ai or _query_implies_person(str(co["text"])):
+                        ref = _speaker_still_for_time(
+                            job_id, float(co["start"]),
+                            ASSET_DIR / f"{asset_id}_ref", words=words,
+                        )
                     asset_path, src_tag = _fetch_broll_image_for_keyword_ex(
                         str(co["text"]), dest_stem, use_ai=use_ai,
+                        appearance_hint=hint, reference_face=ref,
                     )
+                    if ref is not None:
+                        try:
+                            _safe_unlink(ref)
+                        except OSError:
+                            pass
                     if asset_path:
                         source = src_tag or "photo"
-                        final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
-                        if asset_path.resolve() != final.resolve():
-                            try:
-                                if final.exists():
-                                    _safe_unlink(final)
-                                asset_path.replace(final)
-                                asset_path = final
-                            except OSError:
-                                pass
+                if asset_path:
+                    final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
+                    if asset_path.resolve() != final.resolve():
+                        try:
+                            if final.exists():
+                                _safe_unlink(final)
+                            asset_path.replace(final)
+                            asset_path = final
+                        except OSError:
+                            pass
                 if asset_path is None:
                     continue
                 _write_asset_meta(
@@ -11095,6 +11565,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     filename=f"{co['text']}{asset_path.suffix.lower()}",
                     keyword=str(co["text"]),
                     source=source,
+                    provider=stock_provider,
                 )
                 face_cx, face_cy = _face_hint_for_job(job_id)
                 cap_y = 82.0
@@ -11290,6 +11761,9 @@ Window: {t_in:.1f}s → {t_out:.1f}s ({span:.0f}s). Transcript has [mm:ss] stamp
 Rules:
 - Read each sentence's MEANING. Do NOT search single ambiguous tokens (names, "Jersey", brand handles).
 - Prefer concrete visual concepts: "local nightlife events flyer collage", "urban park meetup", "phone calendar app", "crowd at outdoor market".
+- When the beat is about people / reactions / the speakers themselves, use a people-oriented query
+  (e.g. "two people talking over coffee", "confident founder portrait") — our pipeline will match
+  likeness to who is on camera or use a talker screenshot.
 - Never invent moments that aren't in the transcript.
 - Place at most {budget} overlays, spread across the window (not all in the first 15s).
 - start_time must fall on the emphasized words; duration 1.6–2.8s.
