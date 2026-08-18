@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-69-talker-stills-likeness";
+  const TL_BUILD = "studio-editor-build-70-cse-403-diagnose";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -760,9 +760,14 @@
       if (!p) {
         alert("Could not reach /broll/status?probe=cse");
       } else if (!p.ok) {
-        alert((p.message || "CSE check failed")
-          + "\n\nNeed GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX, Custom Search API enabled, "
-          + "and Image search ON for the Programmable Search Engine. Replit: Secrets → Stop + Run.");
+        const msg = p.message || "CSE check failed";
+        const locked = /does not have the access|permission_denied|closed to \*new\*/i.test(msg);
+        alert(msg
+          + (locked
+            ? "\n\nYour keys are loaded — Google is rejecting the *project*. "
+              + "Use PEXELS_API_KEY (photos) or Generate AI photos instead. GIF mode needs CSE."
+            : "\n\nAlso check: API key Application restrictions = None (Replit is not a browser referrer), "
+              + "secrets have no quotes, Stop+Run after editing Secrets."));
       } else if (p.hits === 0) {
         alert((p.message || "CSE responded but returned 0 images.")
           + "\n\nTurn on Image search, and for GIFs include giphy.com / tenor.com / imgur.com.");
@@ -6622,8 +6627,9 @@
       const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
       const srcLabel = p.source === "gif" ? "GIF"
         : (p.source === "gemini" ? "AI photo"
+        : (p.source === "speaker_still" ? "Talker still"
         : (p.source === "photo" ? "Photo"
-        : (p.source === "badge" ? "Badge" : (p.source || "Asset"))));
+        : (p.source === "badge" ? "Badge" : (p.source || "Asset")))));
       html += `<div class="tl-broll-card" data-pending-id="${p.id}">
         <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
         <div class="tl-broll-meta">

@@ -5235,11 +5235,9 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 # scrape Google (ToS/fragile) or MoviePy (duplicates the FFmpeg render path).
 
 def _broll_provider_status() -> dict:
+    key, cx = _google_cse_creds()
     return {
-        "google_cse": bool(
-            (os.environ.get("GOOGLE_CSE_API_KEY") or "").strip()
-            and (os.environ.get("GOOGLE_CSE_CX") or "").strip()
-        ),
+        "google_cse": bool(key and cx),
         "pexels": bool(_pexels_api_key()),
         "unsplash": bool((os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()),
         "gemini_image": bool((os.environ.get("GEMINI_API_KEY") or "").strip()),
@@ -5328,9 +5326,83 @@ def _probe_pexels_key() -> dict:
 
 
 def _google_cse_creds() -> tuple[str, str]:
-    key = (os.environ.get("GOOGLE_CSE_API_KEY") or "").strip()
-    cx = (os.environ.get("GOOGLE_CSE_CX") or "").strip()
+    """Return (api_key, cx). Strips whitespace/quotes; accepts common secret aliases."""
+    key = ""
+    for name in (
+        "GOOGLE_CSE_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_CUSTOM_SEARCH_API_KEY",
+        "CSE_API_KEY",
+    ):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        val = raw.strip().strip('"').strip("'")
+        if val:
+            key = val
+            break
+    cx = ""
+    for name in (
+        "GOOGLE_CSE_CX",
+        "GOOGLE_CX",
+        "GOOGLE_SEARCH_ENGINE_ID",
+        "CSE_CX",
+        "CX",
+    ):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        val = raw.strip().strip('"').strip("'")
+        if val:
+            cx = val
+            break
     return key, cx
+
+
+def _cse_error_tip(status_code: int, err: dict | None, err_msg: str) -> str:
+    """Actionable tip from Google CSE JSON error (no secrets)."""
+    reason = ""
+    status = ""
+    if isinstance(err, dict):
+        status = str(err.get("status") or "")
+        errors = err.get("errors") or []
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            reason = str(errors[0].get("reason") or "")
+    blob = f"{err_msg} {status} {reason}".lower()
+
+    # Most common 2026 failure: API closed to new Cloud projects.
+    if (
+        "does not have the access" in blob
+        or "permission_denied" in blob
+        or (status_code == 403 and reason in ("forbidden", "accessNotConfigured"))
+    ):
+        return (
+            " Google closed Custom Search JSON API to *new* Cloud projects "
+            "(even if the API toggle is ON). Existing customers only until Jan 2027. "
+            "Fix for Studio: use PEXELS_API_KEY and/or Unsplash / Generate AI photos — "
+            "those work without CSE. Or try an older GCP project that already had CSE quota."
+        )
+    if "referer" in blob or "referrer" in blob or "ip" in blob and "block" in blob:
+        return (
+            " API key restrictions are blocking Replit servers. "
+            "Google Cloud → Credentials → your key → Application restrictions → "
+            "set to None (or allow server IPs), and API restrictions → Custom Search API."
+        )
+    if "billing" in blob:
+        return " Link a billing account on the same GCP project as the API key."
+    if "image" in blob or "searchtype" in blob:
+        return " Enable Image search on the Programmable Search Engine (cx)."
+    if "api key" in blob or "keyinvalid" in blob.replace(" ", "") or "keyexpired" in blob:
+        return " Check GOOGLE_CSE_API_KEY (no quotes/spaces) and that it belongs to this project."
+    if "cx" in blob or "invalid argument" in blob:
+        return " Check GOOGLE_CSE_CX is the Search engine ID (not the API key)."
+    if status_code == 403:
+        return (
+            " Typical 403 causes: (1) CSE JSON API not entitled for this project "
+            "(closed to new customers), (2) API key HTTP-referrer/IP restrictions, "
+            "(3) wrong project. Prefer Pexels for photos on Replit."
+        )
+    return ""
 
 
 def _probe_google_cse() -> dict:
@@ -5373,8 +5445,14 @@ def _probe_google_cse() -> dict:
             body = {}
         err = body.get("error") if isinstance(body, dict) else None
         err_msg = ""
+        err_status = ""
+        err_reason = ""
         if isinstance(err, dict):
-            err_msg = str(err.get("message") or "")[:240]
+            err_msg = str(err.get("message") or "")[:280]
+            err_status = str(err.get("status") or "")
+            errors = err.get("errors") or []
+            if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+                err_reason = str(errors[0].get("reason") or "")
         if r.status_code == 200:
             items = body.get("items") or []
             return {
@@ -5394,35 +5472,23 @@ def _probe_google_cse() -> dict:
                 ),
                 "ok_strict": bool(items),
             }
-        if r.status_code in (400, 403):
-            hint = err_msg or f"HTTP {r.status_code}"
-            lower = hint.lower()
-            tip = ""
-            if "image" in lower or "searchtype" in lower:
-                tip = " Enable Image search on the Programmable Search Engine."
-            elif "api key" in lower or "keyinvalid" in lower.replace(" ", ""):
-                tip = " Check GOOGLE_CSE_API_KEY and that Custom Search API is enabled."
-            elif "cx" in lower or "invalid" in lower:
-                tip = " Check GOOGLE_CSE_CX (Search engine ID)."
-            return {
-                "configured": True,
-                "ok": False,
-                "http_status": r.status_code,
-                "key_len": len(key),
-                "key_prefix": key[:4] + "…",
-                "cx_len": len(cx),
-                "cx_prefix": cx[:6] + "…",
-                "message": f"Google CSE rejected the request: {hint}.{tip}",
-            }
+        tip = _cse_error_tip(r.status_code, err if isinstance(err, dict) else None, err_msg)
         return {
             "configured": True,
             "ok": False,
             "http_status": r.status_code,
+            "error_status": err_status or None,
+            "error_reason": err_reason or None,
             "key_len": len(key),
             "key_prefix": key[:4] + "…",
             "cx_len": len(cx),
             "cx_prefix": cx[:6] + "…",
-            "message": f"Google CSE returned HTTP {r.status_code}. {err_msg}".strip(),
+            "message": (
+                f"Google CSE HTTP {r.status_code}"
+                + (f" ({err_status})" if err_status else "")
+                + (f": {err_msg}" if err_msg else ".")
+                + tip
+            ).strip(),
         }
     except Exception as e:
         return {
