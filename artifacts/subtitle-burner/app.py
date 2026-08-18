@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response, make_response
+from werkzeug.exceptions import RequestEntityTooLarge
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -451,8 +452,23 @@ def _find_ffmpeg() -> str:
 
 FFMPEG = _find_ffmpeg()
 
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
+# Default 2 GB — a "500 MB" phone export is often 480–560 MB, and multipart
+# framing pushes Content-Length over a hard 500 MB cap. Override with MAX_UPLOAD_MB.
+try:
+    _max_upload_mb = max(100, int(os.environ.get("MAX_UPLOAD_MB", "2048")))
+except (ValueError, TypeError):
+    _max_upload_mb = 2048
+app.config["MAX_CONTENT_LENGTH"] = _max_upload_mb * 1024 * 1024
 ALLOWED_EXT = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
+
+# Chunked / resumable ingest — each HTTP request stays small so Replit / CDN
+# proxies don't kill a multi-minute single POST with a generic "network error".
+try:
+    UPLOAD_CHUNK_SIZE = max(1_048_576, int(os.environ.get("UPLOAD_CHUNK_SIZE", str(8 * 1024 * 1024))))
+except (ValueError, TypeError):
+    UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+_pending_uploads: dict[str, dict] = {}
+_pending_uploads_lock = threading.Lock()
 
 # How long (seconds) to keep finished output MP4s before deleting them.
 # Override via the OUTPUT_TTL_SECONDS environment variable.
@@ -673,6 +689,93 @@ except Exception:
 
 def allowed_file(name: str) -> bool:
     return "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _handle_too_large(_exc):
+    limit_mb = int(app.config.get("MAX_CONTENT_LENGTH", 0) / (1024 * 1024))
+    return jsonify({
+        "error": (
+            f"File too large for a single upload (limit ~{limit_mb} MB). "
+            "Compress to H.264 MP4, or use the chunked uploader (auto for large files)."
+        ),
+    }), 413
+
+
+def _pending_upload_dir(upload_id: str) -> Path:
+    return UPLOAD_DIR / f".chunked_{upload_id}"
+
+
+def _prune_stale_pending_uploads(max_age_sec: float = 6 * 3600) -> None:
+    """Drop abandoned chunked sessions so disk doesn't fill with part files."""
+    now = time.time()
+    dead: list[str] = []
+    with _pending_uploads_lock:
+        for uid, meta in list(_pending_uploads.items()):
+            if now - float(meta.get("created_at", now)) > max_age_sec:
+                dead.append(uid)
+        for uid in dead:
+            _pending_uploads.pop(uid, None)
+    for uid in dead:
+        d = _pending_upload_dir(uid)
+        try:
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def _start_transcribe_job(
+    video_path: Path,
+    filename: str,
+    pre_clean: bool = False,
+    expected_bytes: int | None = None,
+    job_id: str | None = None,
+) -> tuple[str, dict]:
+    """Validate media, register job, start Whisper thread. Shared by single + chunked upload."""
+    job_id = job_id or uuid.uuid4().hex
+    pre_probe = _probe_media_streams(video_path)
+    if pre_probe.get("error") and not pre_probe.get("has_video") and not pre_probe.get("has_audio"):
+        repaired = _repair_uploaded_media(video_path)
+        if repaired:
+            video_path = repaired
+            expected_bytes = None
+    probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
+    print(
+        f"[upload] {job_id} ok size={video_path.stat().st_size} "
+        f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
+        f"dur={probe.get('duration'):.1f}s name={filename!r}",
+        flush=True,
+    )
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "output": None,
+        "error": None,
+        "words": None,
+        "style": None,
+        "audio": None,
+        "emoji_rules": None,
+        "created_at": time.time(),
+        "filename": filename,
+        "media_info": probe,
+    }
+    _db_save_job(job_id)
+    t = threading.Thread(target=transcribe_job, args=(job_id, video_path, pre_clean))
+    t.daemon = True
+    t.start()
+    return job_id, {
+        "job_id": job_id,
+        "media_info": {
+            "size": probe.get("size"),
+            "duration": probe.get("duration"),
+            "has_audio": probe.get("has_audio"),
+            "has_video": probe.get("has_video"),
+            "video_codec": probe.get("video_codec"),
+            "audio_codec": probe.get("audio_codec"),
+            "is_hevc": probe.get("is_hevc"),
+        },
+    }
 
 
 # ---- File / job cleanup helpers ----
@@ -7982,6 +8085,247 @@ def favicon():
     return Response(svg, mimetype="image/svg+xml")
 
 
+@app.route("/upload/init", methods=["POST"])
+def upload_init():
+    """Start a chunked ingest session (resumable; survives proxy timeouts).
+
+    JSON body: {filename, size, pre_clean?}
+    Returns: {upload_id, chunk_size, received[]}
+    """
+    _prune_stale_pending_uploads()
+    data = request.get_json(silent=True) or {}
+    filename = str(data.get("filename") or "").strip()
+    if not filename or not allowed_file(filename):
+        return jsonify({
+            "error": f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXT))}",
+        }), 400
+    try:
+        size = int(data.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size < 1:
+        return jsonify({"error": "Missing or invalid file size"}), 400
+    limit = int(app.config.get("MAX_CONTENT_LENGTH") or 0)
+    if limit and size > limit:
+        limit_mb = limit // (1024 * 1024)
+        return jsonify({
+            "error": (
+                f"File is {size // (1024 * 1024)} MB; max is ~{limit_mb} MB. "
+                "Export a smaller H.264 MP4 (1080p is usually enough)."
+            ),
+        }), 413
+
+    ext = filename.rsplit(".", 1)[1].lower()
+    upload_id = uuid.uuid4().hex
+    dest = _pending_upload_dir(upload_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    pre_clean = str(data.get("pre_clean") or "").lower() in ("1", "true", "yes")
+    meta = {
+        "upload_id": upload_id,
+        "filename": filename,
+        "ext": ext,
+        "size": size,
+        "pre_clean": pre_clean,
+        "chunk_size": UPLOAD_CHUNK_SIZE,
+        "created_at": time.time(),
+        "received": {},  # index -> bytes written
+    }
+    with _pending_uploads_lock:
+        _pending_uploads[upload_id] = meta
+    (dest / "meta.json").write_text(json.dumps({
+        k: v for k, v in meta.items() if k != "received"
+    }), encoding="utf-8")
+    print(
+        f"[upload] init {upload_id} size={size} name={filename!r} chunk={UPLOAD_CHUNK_SIZE}",
+        flush=True,
+    )
+    return jsonify({
+        "upload_id": upload_id,
+        "chunk_size": UPLOAD_CHUNK_SIZE,
+        "received": [],
+    })
+
+
+@app.route("/upload/chunk/<upload_id>", methods=["PUT", "POST"])
+def upload_chunk(upload_id: str):
+    """Accept one binary chunk. Headers: X-Chunk-Index, X-Chunk-Bytes (optional)."""
+    with _pending_uploads_lock:
+        meta = _pending_uploads.get(upload_id)
+    if not meta:
+        # Recover from process restart via meta.json on disk
+        dest = _pending_upload_dir(upload_id)
+        meta_path = dest / "meta.json"
+        if not meta_path.exists():
+            return jsonify({"error": "Unknown or expired upload session — start again"}), 404
+        try:
+            disk = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return jsonify({"error": "Corrupt upload session — start again"}), 400
+        meta = {
+            **disk,
+            "received": {},
+            "created_at": float(disk.get("created_at") or time.time()),
+        }
+        for part in dest.glob("part_*"):
+            try:
+                idx = int(part.name.split("_", 1)[1])
+                meta["received"][idx] = part.stat().st_size
+            except (ValueError, OSError):
+                continue
+        with _pending_uploads_lock:
+            _pending_uploads[upload_id] = meta
+
+    try:
+        index = int(request.headers.get("X-Chunk-Index", request.args.get("index", -1)))
+    except (TypeError, ValueError):
+        index = -1
+    if index < 0:
+        return jsonify({"error": "Missing X-Chunk-Index"}), 400
+
+    body = request.get_data(cache=False)
+    if not body:
+        return jsonify({"error": "Empty chunk body"}), 400
+
+    expected = request.headers.get("X-Chunk-Bytes") or request.args.get("bytes")
+    if expected is not None:
+        try:
+            if len(body) != int(expected):
+                return jsonify({
+                    "error": f"Chunk size mismatch: got {len(body)} expected {expected}",
+                }), 400
+        except (TypeError, ValueError):
+            pass
+
+    dest = _pending_upload_dir(upload_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    part_path = dest / f"part_{index:05d}"
+    part_path.write_bytes(body)
+    with _pending_uploads_lock:
+        meta = _pending_uploads.get(upload_id) or meta
+        meta.setdefault("received", {})[index] = len(body)
+        _pending_uploads[upload_id] = meta
+        received_bytes = sum(meta["received"].values())
+        total = int(meta.get("size") or 0)
+    return jsonify({
+        "ok": True,
+        "index": index,
+        "received_bytes": received_bytes,
+        "total_bytes": total,
+        "pct": round(100.0 * received_bytes / total, 1) if total else None,
+    })
+
+
+@app.route("/upload/finish/<upload_id>", methods=["POST"])
+def upload_finish(upload_id: str):
+    """Assemble chunks → validate → start transcription (same payload as /transcribe-only)."""
+    with _pending_uploads_lock:
+        meta = _pending_uploads.get(upload_id)
+    dest = _pending_upload_dir(upload_id)
+    if not meta:
+        meta_path = dest / "meta.json"
+        if meta_path.exists():
+            try:
+                disk = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta = {**disk, "received": {}}
+                for part in dest.glob("part_*"):
+                    try:
+                        idx = int(part.name.split("_", 1)[1])
+                        meta["received"][idx] = part.stat().st_size
+                    except (ValueError, OSError):
+                        continue
+            except Exception:
+                meta = None
+    if not meta:
+        return jsonify({"error": "Unknown or expired upload session — start again"}), 404
+
+    size = int(meta.get("size") or 0)
+    chunk_size = int(meta.get("chunk_size") or UPLOAD_CHUNK_SIZE)
+    n_chunks = max(1, (size + chunk_size - 1) // chunk_size)
+    received = dict(meta.get("received") or {})
+    for part in dest.glob("part_*"):
+        try:
+            idx = int(part.name.split("_", 1)[1])
+            received[idx] = part.stat().st_size
+        except (ValueError, OSError):
+            continue
+
+    missing = [i for i in range(n_chunks) if i not in received]
+    if missing:
+        return jsonify({
+            "error": f"Missing {len(missing)} chunk(s) — resume upload",
+            "missing": missing[:40],
+            "received": sorted(received.keys()),
+        }), 400
+
+    got = sum(received.values())
+    if size and got != size:
+        return jsonify({
+            "error": f"Assembled size {got} != declared {size}. Re-upload.",
+        }), 400
+
+    ext = str(meta.get("ext") or "mp4").lower()
+    if ext not in ALLOWED_EXT:
+        return jsonify({"error": "Unsupported extension"}), 400
+    job_id = uuid.uuid4().hex
+    video_path = UPLOAD_DIR / f"{job_id}.{ext}"
+    try:
+        with open(video_path, "wb") as out:
+            for i in range(n_chunks):
+                part = dest / f"part_{i:05d}"
+                out.write(part.read_bytes())
+    except OSError as e:
+        _safe_unlink(video_path)
+        return jsonify({"error": f"Could not assemble upload: {e}"}), 500
+
+    try:
+        shutil.rmtree(dest, ignore_errors=True)
+    except OSError:
+        pass
+    with _pending_uploads_lock:
+        _pending_uploads.pop(upload_id, None)
+
+    filename = str(meta.get("filename") or f"upload.{ext}")
+    pre_clean = bool(meta.get("pre_clean"))
+    try:
+        job_id, payload = _start_transcribe_job(
+            video_path, filename, pre_clean=pre_clean,
+            expected_bytes=size, job_id=job_id,
+        )
+    except Exception as e:
+        _safe_unlink(video_path)
+        print(f"[upload] finish {upload_id} rejected: {e}", flush=True)
+        return jsonify({"error": str(e)}), 400
+    payload["chunked"] = True
+    return jsonify(payload)
+
+
+@app.route("/upload/status/<upload_id>", methods=["GET"])
+def upload_status(upload_id: str):
+    """Which chunks are already on the server (for resume after network blip)."""
+    with _pending_uploads_lock:
+        meta = _pending_uploads.get(upload_id)
+    dest = _pending_upload_dir(upload_id)
+    if not meta and not dest.exists():
+        return jsonify({"error": "Unknown upload"}), 404
+    received = dict((meta or {}).get("received") or {})
+    for part in dest.glob("part_*"):
+        try:
+            idx = int(part.name.split("_", 1)[1])
+            received[idx] = part.stat().st_size
+        except (ValueError, OSError):
+            continue
+    size = int((meta or {}).get("size") or 0)
+    got = sum(received.values())
+    return jsonify({
+        "upload_id": upload_id,
+        "received": sorted(int(k) for k in received.keys()),
+        "received_bytes": got,
+        "total_bytes": size,
+        "chunk_size": int((meta or {}).get("chunk_size") or UPLOAD_CHUNK_SIZE),
+        "filename": (meta or {}).get("filename"),
+    })
+
+
 @app.route("/transcribe-only", methods=["POST"])
 def transcribe_only():
     """Phase 1: upload video and transcribe. Returns job_id; poll /status for words."""
@@ -8016,65 +8360,17 @@ def transcribe_only():
     except (TypeError, ValueError):
         expected_bytes = None
     f.save(str(video_path))
+    pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
     try:
-        # Deep probe first; some phone MOVs (long recordings especially) come
-        # back completely unreadable to ffprobe even at 200M probesize. Try a
-        # remux/re-encode repair before giving up — that recovers most of
-        # them without ever bothering the user.
-        pre_probe = _probe_media_streams(video_path)
-        if pre_probe.get("error") and not pre_probe.get("has_video") and not pre_probe.get("has_audio"):
-            repaired = _repair_uploaded_media(video_path)
-            if repaired:
-                video_path = repaired
-                ext = video_path.suffix.lstrip(".").lower()
-                # Container changed size (remux/re-encode) — the original
-                # browser byte count no longer applies to this file.
-                expected_bytes = None
-        probe = _validate_uploaded_media(video_path, expected_bytes=expected_bytes)
-        print(
-            f"[upload] {job_id} ok size={video_path.stat().st_size} "
-            f"audio={probe.get('has_audio')} video={probe.get('has_video')} "
-            f"dur={probe.get('duration'):.1f}s name={f.filename!r}",
-            flush=True,
+        job_id, payload = _start_transcribe_job(
+            video_path, f.filename, pre_clean=pre_clean,
+            expected_bytes=expected_bytes, job_id=job_id,
         )
-        # Do NOT reject on !has_audio here — shallow/odd probes false-negative on
-        # phone MOVs. Whisper extract is the ground truth (with a clear error).
     except Exception as e:
         _safe_unlink(video_path)
         print(f"[upload] {job_id} rejected after save: {e}", flush=True)
         return jsonify({"error": str(e)}), 400
-
-    jobs[job_id] = {
-        "status": "queued",
-        "progress": 0,
-        "output": None,
-        "error": None,
-        "words": None,
-        "style": None,
-        "audio": None,
-        "emoji_rules": None,
-        "created_at": time.time(),
-        "filename": f.filename,
-        "media_info": probe,
-    }
-    _db_save_job(job_id)
-    pre_clean = request.form.get("pre_clean", "").lower() in ("1", "true", "yes")
-    t = threading.Thread(target=transcribe_job, args=(job_id, video_path, pre_clean))
-    t.daemon = True
-    t.start()
-
-    return jsonify({
-        "job_id": job_id,
-        "media_info": {
-            "size": probe.get("size"),
-            "duration": probe.get("duration"),
-            "has_audio": probe.get("has_audio"),
-            "has_video": probe.get("has_video"),
-            "video_codec": probe.get("video_codec"),
-            "audio_codec": probe.get("audio_codec"),
-            "is_hevc": probe.get("is_hevc"),
-        },
-    })
+    return jsonify(payload)
 
 
 @app.route("/analyze-reframe", methods=["POST"])

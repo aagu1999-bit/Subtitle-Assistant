@@ -877,17 +877,21 @@ function handleFiles(files) {
     alert(`Skipping ${skipped.map(f => f.name).join(", ")} — supported formats are ${ACCEPTED_VIDEO_EXT.join(", ")}.`);
   }
 
-  // Large iPhone MOVs often truncate mid-upload on slow links — warn up front.
-  const bigMov = videos.find((f) => {
-    const name = (f.name || "").toLowerCase();
-    return (name.endsWith(".mov") || name.endsWith(".m4v")) && f.size > 80 * 1024 * 1024;
-  });
-  if (bigMov) {
-    const mb = Math.round(bigMov.size / (1024 * 1024));
+  // Large files often fail on Replit as one long POST (proxy timeout → "network error").
+  // Warn for any big video, not only iPhone MOVs; chunked upload handles the rest.
+  const bigFile = videos.find((f) => f.size > 80 * 1024 * 1024);
+  if (bigFile) {
+    const mb = Math.round(bigFile.size / (1024 * 1024));
+    const name = (bigFile.name || "").toLowerCase();
+    const isPhoneMov = name.endsWith(".mov") || name.endsWith(".m4v");
     const ok = confirm(
-      `"${bigMov.name}" is ~${mb} MB (common for iPhone HEVC).\n\n` +
-      "Keep this tab open until upload shows 100%. If Windows can't play it, that's normal — Drive re-encodes for streaming.\n\n" +
-      "OK = upload now.\nCancel = export Most Compatible / H.264 MP4 on the phone first (smaller + more reliable)."
+      `"${bigFile.name}" is ~${mb} MB.\n\n` +
+      "Studio will upload in small chunks (more reliable than one long transfer). " +
+      "Keep this tab open until the bar hits 100%.\n\n" +
+      (isPhoneMov
+        ? "Tip: iPhone → export Most Compatible / H.264 MP4 is often much smaller.\n\n"
+        : "Tip: a 1080p H.264 MP4 of the same clip is usually far smaller and still sharp enough for captions.\n\n") +
+      "OK = upload now.\nCancel = compress first, then try again."
     );
     if (!ok) return;
   }
@@ -1544,23 +1548,93 @@ function _uploadWithProgress(fd, onProgress) {
         return;
       }
       if (xhr.status >= 400 || (data && data.error)) {
-        reject(new Error((data && data.error) || `Upload failed (${xhr.status}).`));
+        const msg = (data && data.error) || `Upload failed (${xhr.status}).`;
+        if (xhr.status === 413) {
+          reject(new Error(msg + " Try compressing to H.264 MP4, or refresh — large files now use chunked upload."));
+        } else {
+          reject(new Error(msg));
+        }
       } else {
         resolve(data);
       }
     };
-    xhr.onerror = () => reject(new Error("Network error during upload — check the connection."));
+    xhr.onerror = () => reject(new Error(
+      "Network error during upload — connection dropped or the host timed out a long transfer. " +
+      "Retry (large files auto-chunk), or export a smaller H.264 MP4 first."
+    ));
     xhr.onabort = () => reject(new Error("Upload cancelled."));
     xhr.send(fd);
   });
 }
 
+// Files above this size use chunked/resumable upload so Replit/CDN proxies
+// don't kill a multi-minute single POST with a vague "network error".
+const CHUNK_UPLOAD_THRESHOLD = 24 * 1024 * 1024;
+
+function _putChunk(uploadId, index, blob, attempt) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `/upload/chunk/${encodeURIComponent(uploadId)}`);
+    xhr.setRequestHeader("X-Chunk-Index", String(index));
+    xhr.setRequestHeader("X-Chunk-Bytes", String(blob.size));
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
+      if (xhr.status >= 400 || (data && data.error)) {
+        reject(new Error((data && data.error) || `Chunk ${index} failed (${xhr.status})`));
+      } else {
+        resolve(data || { ok: true });
+      }
+    };
+    xhr.onerror = () => reject(new Error(`Network error on chunk ${index}`));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(blob);
+  }).catch(async (err) => {
+    if ((attempt || 0) >= 3) throw err;
+    await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt || 0)));
+    return _putChunk(uploadId, index, blob, (attempt || 0) + 1);
+  });
+}
+
+async function _uploadChunked(file, preClean, onProgress) {
+  const initRes = await fetch("/upload/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name || "video.mp4",
+      size: file.size,
+      pre_clean: !!preClean,
+    }),
+  });
+  let initData = null;
+  try { initData = await initRes.json(); } catch (err) { initData = null; }
+  if (!initRes.ok || !initData || !initData.upload_id) {
+    throw new Error((initData && initData.error) || `Could not start upload (${initRes.status})`);
+  }
+  const uploadId = initData.upload_id;
+  const chunkSize = Math.max(1024 * 1024, Number(initData.chunk_size) || (8 * 1024 * 1024));
+  const total = file.size;
+  let uploaded = 0;
+  let index = 0;
+  for (let start = 0; start < total; start += chunkSize, index += 1) {
+    const end = Math.min(total, start + chunkSize);
+    const blob = file.slice(start, end);
+    await _putChunk(uploadId, index, blob, 0);
+    uploaded = end;
+    if (onProgress) onProgress(uploaded / total);
+  }
+  const fin = await fetch(`/upload/finish/${encodeURIComponent(uploadId)}`, { method: "POST" });
+  let data = null;
+  try { data = await fin.json(); } catch (err) { data = null; }
+  if (!fin.ok || !data || data.error) {
+    throw new Error((data && data.error) || `Could not finish upload (${fin.status})`);
+  }
+  return data;
+}
+
 // ---- Phase 1: Transcribe ----
 async function uploadAndTranscribe(file, preClean, makeActive = false) {
-  const fd = new FormData();
-  fd.append("video", file);
-  if (preClean) fd.append("pre_clean", "true");
-
   // Show the bar before the request starts. fetch() reports no upload
   // progress, so a phone video used to sit on a blank screen for the whole
   // transfer with nothing to show it was working.
@@ -1571,19 +1645,32 @@ async function uploadAndTranscribe(file, preClean, makeActive = false) {
     _progressPhase = "upload";
     // Upload phase uses 0–40% of the bar; transcription takes 40–100%.
     barFill.style.width = "3%";
-    statusText.textContent = "Uploading " + (file.name || "video") + "…";
+    const mb = file.size ? Math.round(file.size / (1024 * 1024)) : null;
+    statusText.textContent = mb && mb >= 24
+      ? `Uploading ${file.name || "video"} (~${mb} MB, chunked)…`
+      : "Uploading " + (file.name || "video") + "…";
     if (typeof setActiveTab === "function") setActiveTab("ingest");
   }
 
+  const onFrac = (frac) => {
+    if (!makeActive || _progressPhase !== "upload") return;
+    const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
+    barFill.style.width = pct + "%";
+    statusText.textContent = frac >= 1
+      ? "Upload complete — extracting audio & transcribing…"
+      : `Uploading… ${Math.round(frac * 100)}%`;
+  };
+
   try {
-    const job = await _uploadWithProgress(fd, (frac) => {
-      if (!makeActive || _progressPhase !== "upload") return;
-      const pct = 3 + Math.round(Math.max(0, Math.min(1, frac)) * 37); // 3→40
-      barFill.style.width = pct + "%";
-      statusText.textContent = frac >= 1
-        ? "Upload complete — extracting audio & transcribing…"
-        : `Uploading… ${Math.round(frac * 100)}%`;
-    });
+    let job;
+    if (file.size >= CHUNK_UPLOAD_THRESHOLD) {
+      job = await _uploadChunked(file, preClean, onFrac);
+    } else {
+      const fd = new FormData();
+      fd.append("video", file);
+      if (preClean) fd.append("pre_clean", "true");
+      job = await _uploadWithProgress(fd, onFrac);
+    }
 
     addJobToList(job.job_id);
     if (makeActive) {
