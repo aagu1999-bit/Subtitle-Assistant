@@ -1452,6 +1452,55 @@ def _resolve_diarization_device(torch_mod) -> str:
     return "cpu"
 
 
+def _hf_gated_repo_from_error(err_str: str) -> str | None:
+    """Pull the gated Hugging Face repo id out of a download error, if present."""
+    m = re.search(
+        r"huggingface\.co/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+        err_str or "",
+    )
+    return m.group(1) if m else None
+
+
+def _pyannote_gate_help(err_str: str = "", *, token: str | None = None) -> str:
+    """User-facing checklist when HF rejects a gated pyannote download."""
+    blocked = _hf_gated_repo_from_error(err_str)
+    # Newer pyannote.audio pulls community-1 (and its PLDA assets) in addition
+    # to the classic 3.1 / segmentation-3.0 pair — accept ALL of them.
+    must_accept = [
+        "https://hf.co/pyannote/speaker-diarization-3.1",
+        "https://hf.co/pyannote/segmentation-3.0",
+        "https://hf.co/pyannote/speaker-diarization-community-1",
+    ]
+    if blocked and f"https://hf.co/{blocked}" not in must_accept:
+        must_accept.append(f"https://hf.co/{blocked}")
+    numbered = " ".join(
+        f"({i}) Accept {url}" for i, url in enumerate(must_accept, start=1)
+    )
+    n = len(must_accept)
+    token_hint = (
+        f"HF_TOKEN is set in this process ({len(token)} chars)."
+        if token else
+        "HF_TOKEN is NOT set in the running Studio process."
+    )
+    blocked_note = (
+        f" Blocked download was from `{blocked}`."
+        if blocked else ""
+    )
+    return (
+        "Hugging Face rejected the token for pyannote models. "
+        f"{token_hint}{blocked_note} "
+        "Do ALL of these with the SAME HF account: "
+        f"{numbered} "
+        f"(you need every gated repo — accepting only diarization-3.1 is not enough) "
+        f"({n + 1}) Create a token at https://huggingface.co/settings/tokens "
+        "— classic Read token, OR fine-grained with "
+        "“Read access to contents of all public gated repos you can access” enabled — "
+        f"({n + 2}) Put it in .env.local / host Secrets as HF_TOKEN=hf_... and "
+        "RESTART the Studio server. "
+        f"Raw error: {(err_str or '')[:280]}"
+    )
+
+
 def _get_diarization_pipeline():
     """Load pyannote once and reuse across Analyze runs (model load is slow)."""
     global _diarization_pipeline, _diarization_device_resolved
@@ -1482,11 +1531,6 @@ def _get_diarization_pipeline():
                 )
         except Exception as err:
             err_str = str(err)
-            token_hint = (
-                f"HF_TOKEN is set in this process ({len(token)} chars)."
-                if token else
-                "HF_TOKEN is NOT set in the running Studio process."
-            )
             if (
                 "gated" in err_str.lower()
                 or "401" in err_str
@@ -1495,15 +1539,7 @@ def _get_diarization_pipeline():
                 or "unauthorized" in err_str.lower()
             ):
                 raise RuntimeError(
-                    "Hugging Face rejected the token for pyannote models. "
-                    f"{token_hint} "
-                    "Do all of these with the SAME HF account: "
-                    "(1) Accept https://hf.co/pyannote/speaker-diarization-3.1 "
-                    "(2) Accept https://hf.co/pyannote/segmentation-3.0 "
-                    "(you need BOTH — diarization alone is not enough) "
-                    "(3) Create a Read token at https://huggingface.co/settings/tokens "
-                    "(4) Put it in .env.local as HF_TOKEN=hf_... and RESTART the Studio server. "
-                    f"Raw error: {err_str[:240]}"
+                    _pyannote_gate_help(err_str, token=token)
                 ) from err
             raise
         if pipeline is None:
