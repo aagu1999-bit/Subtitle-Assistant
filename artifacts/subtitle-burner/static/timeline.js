@@ -7275,6 +7275,11 @@
         alert("No scene changes detected in this clip.");
         return;
       }
+      if (!confirm(
+        `Split this Main clip into ${shots.length} shots at scene changes?\n\n` +
+        `This is the opposite of Compile — it breaks one clip into S1…S${shots.length} on the timeline.\n` +
+        `To join AI Shorts highlights into one video, use Compilation → Compile instead.`
+      )) return;
       pushHistory();
       const idx = tl.tracks.main.findIndex((c) => c.id === clip.id);
       const pieces = shots.map((s, i) => {
