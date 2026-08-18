@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-70-cse-403-diagnose";
+  const TL_BUILD = "studio-editor-build-71-serpapi";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -615,14 +615,18 @@
     try {
       let q = "";
       if (opts.probe === "cse" || opts.probe === "google_cse") q = "?probe=cse";
+      else if (opts.probe === "serpapi" || opts.probe === "serp") q = "?probe=serpapi";
       else if (opts.probe === "all") q = "?probe=all";
       else if (opts.probe) q = "?probe=1";
       const data = await api("/broll/status" + q);
       const st = data.providers || {};
       const photoReady = !!data.photo_ready;
+      const gifReady = !!(data.gif_ready || st.serpapi || st.google_cse);
       const geminiReady = !!(data.gemini_image_ready || st.gemini_image);
       window._brollGeminiReady = geminiReady;
       const bits = [];
+      if (st.serpapi) bits.push("SerpAPI ✓");
+      else bits.push("SerpAPI ✗");
       if (st.pexels) bits.push("Pexels ✓");
       else bits.push("Pexels ✗");
       if (st.unsplash) bits.push("Unsplash ✓");
@@ -645,12 +649,15 @@
           }
         } catch (e) { /* ignore */ }
         // Disable unavailable prefer targets (still allow Auto).
+        const serpOpt = preferEl.querySelector('option[value="serpapi"]');
         const cseOpt = preferEl.querySelector('option[value="google_cse"]');
         const pexOpt = preferEl.querySelector('option[value="pexels"]');
         const unsOpt = preferEl.querySelector('option[value="unsplash"]');
+        if (serpOpt) serpOpt.disabled = !st.serpapi;
         if (cseOpt) cseOpt.disabled = !st.google_cse;
         if (pexOpt) pexOpt.disabled = !st.pexels;
         if (unsOpt) unsOpt.disabled = !st.unsplash;
+        if (preferEl.value === "serpapi" && !st.serpapi) preferEl.value = "auto";
         if (preferEl.value === "google_cse" && !st.google_cse) preferEl.value = "auto";
         if (preferEl.value === "pexels" && !st.pexels) preferEl.value = "auto";
         if (preferEl.value === "unsplash" && !st.unsplash) preferEl.value = "auto";
@@ -660,7 +667,7 @@
         const gifOpt = modeEl.querySelector('option[value="gif"]');
         const autoOpt = modeEl.querySelector('option[value="auto"]');
         if (photoOpt) photoOpt.disabled = !(photoReady || geminiReady);
-        if (gifOpt) gifOpt.disabled = !st.google_cse;
+        if (gifOpt) gifOpt.disabled = !gifReady;
         // If photos just became available and UI was stuck on badges, flip to Auto.
         if ((photoReady || geminiReady) && (modeEl.value === "badge" || !modeEl.value) && autoOpt) {
           modeEl.value = "auto";
@@ -668,8 +675,8 @@
         if (!(photoReady || geminiReady) && modeEl.value === "photo" && autoOpt) {
           modeEl.value = "auto";
         }
-        if (!st.google_cse && modeEl.value === "gif" && autoOpt) {
-          modeEl.value = (photoReady || geminiReady) ? "auto" : "auto";
+        if (!gifReady && modeEl.value === "gif" && autoOpt) {
+          modeEl.value = "auto";
         }
         // Legacy badge option removed from the DOM — clear if still selected.
         if (modeEl.value === "badge" && autoOpt) modeEl.value = "auto";
@@ -687,24 +694,32 @@
           hintEl.innerHTML = "Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. "
             + "Each Suggest returns up to ~4–5 clips (max 12)."
             + " <em>Prefer talker screenshots</em> uses Analyze speakers faces when available; stock/AI people get likeness bias."
-            + (st.google_cse ? " Use <em>Prefer source</em> to put CSE first." : "")
+            + (st.serpapi ? " SerpAPI covers photos + GIFs." : "")
             + (geminiReady ? " Check <em>Generate AI photos</em> to prefer Gemini stills." : "");
         } else {
           const aliases = (data.pexels_env && data.pexels_env.alias_names) || [];
           const aliasNote = aliases.length
             ? " Found env names: " + aliases.join(", ") + "."
-            : " No PEXELS_* env visible in this process.";
+            : "";
           hintEl.innerHTML = "No photo API key in <em>this</em> Studio process — keyword text badges are off. "
-            + "On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code> "
-            + "(or <code>GOOGLE_CSE_API_KEY</code> + <code>GOOGLE_CSE_CX</code>), then <strong>Stop + Run</strong> "
+            + "On Replit: Tools → Secrets → <code>SERPAPI_API_KEY</code> "
+            + "(or <code>PEXELS_API_KEY</code>), then <strong>Stop + Run</strong> "
             + "(Cursor secrets do not sync)." + aliasNote
             + " Optional: <code>GEMINI_API_KEY</code> + check Generate AI photos.";
         }
       }
+      if (opts.probe === "serpapi" || opts.probe === "serp") {
+        const p = data.serpapi_probe;
+        if (statusEl && p) {
+          statusEl.textContent = (p.ok ? "SerpAPI OK" : "SerpAPI fail") + ": " + (p.message || "")
+            + (p.http_status != null ? " (HTTP " + p.http_status + ")" : "");
+          statusEl.style.color = p.ok ? "#7ddea0" : "#e07070";
+        }
+        return p || null;
+      }
       if (opts.probe === "cse" || opts.probe === "google_cse") {
         const p = data.cse_probe;
         if (statusEl && p) {
-          const ok = !!(p.ok && (p.ok_strict !== false || p.hits > 0 || p.message));
           const softOk = !!p.ok;
           statusEl.textContent = (softOk ? "CSE OK" : "CSE fail") + ": " + (p.message || "")
             + (p.http_status != null ? " (HTTP " + p.http_status + ")" : "");
@@ -749,6 +764,27 @@
       }
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = "Test Pexels"; }
+    }
+  }
+
+  async function testSerpapiKey() {
+    const btn = $("tlBrollTestSerpBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
+    try {
+      const p = await refreshBrollStatus({ probe: "serpapi" });
+      if (!p) {
+        alert("Could not reach /broll/status?probe=serpapi");
+      } else if (!p.ok) {
+        alert((p.message || "SerpAPI check failed")
+          + "\n\nReplit Secrets → SERPAPI_API_KEY (exact name, no quotes) → Stop + Run."
+          + "\nGet a key at https://serpapi.com/manage-api-key");
+      } else if (p.hits === 0) {
+        alert((p.message || "SerpAPI OK but 0 images.") + "\n\nTry Suggest B-roll anyway.");
+      } else {
+        alert("SerpAPI is good to go. Prefer source → SerpAPI first (or Auto), then Suggest B-roll.");
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Test SerpAPI"; }
     }
   }
 
@@ -6213,6 +6249,7 @@
             });
           }
         });
+        on("tlBrollTestSerpBtn", "onclick", () => testSerpapiKey());
         on("tlBrollTestBtn", "onclick", () => testPexelsKey());
         on("tlBrollTestCseBtn", "onclick", () => testCseKey());
         on("tlBrollPrefer", "onchange", (e) => {
@@ -6540,12 +6577,12 @@
       const list = (data.overlays || []).filter((ov) => ov && ov.source !== "badge");
       if (!list.length) {
         alert(mode === "gif"
-          ? "No GIFs found. Needs Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) with Image search on, and sites like giphy.com / tenor.com / imgur.com."
+          ? "No GIFs found. Needs SERPAPI_API_KEY (or Google CSE with Image search)."
           : mode === "photo"
           ? (useAiPhotos
-            ? "No AI/stock photo B-roll found. Check GEMINI_API_KEY / PEXELS_API_KEY (or Unsplash / Google CSE)."
-            : "No photo B-roll found. Set PEXELS_API_KEY or GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX, or enable Generate AI photos.")
-          : (data.hint || "No photo B-roll moments found in this window. Configure a photo provider or enable AI photos."));
+            ? "No AI/stock photo B-roll found. Check GEMINI_API_KEY / SERPAPI_API_KEY / PEXELS_API_KEY."
+            : "No photo B-roll found. Set SERPAPI_API_KEY or PEXELS_API_KEY, or enable Generate AI photos.")
+          : (data.hint || "No photo B-roll moments found in this window. Configure SerpAPI / Pexels or enable AI photos."));
         return;
       }
       // Review queue — do NOT auto-place on Overlay until Accept.
@@ -6574,6 +6611,7 @@
       const by = st.by_provider || {};
       const provBits = [];
       if (by.speaker_still) provBits.push(`Talker ${by.speaker_still}`);
+      if (by.serpapi) provBits.push(`SerpAPI ${by.serpapi}`);
       if (by.google_cse) provBits.push(`CSE ${by.google_cse}`);
       if (by.pexels) provBits.push(`Pexels ${by.pexels}`);
       if (by.unsplash) provBits.push(`Unsplash ${by.unsplash}`);

@@ -1376,9 +1376,9 @@
               <div class="tl-broll-controls" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
                 <label class="muted" style="font-size:.74rem">Auto B-roll from transcript
                   <select id="tlBrollMode" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
-                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured)</option>
-                    <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (Pexels / Unsplash / Google CSE)</option>
-                    <option value="gif" {% if not broll_google_cse %}disabled{% endif %}>GIFs (Google CSE · giphy/tenor/imgur)</option>
+                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (SerpAPI → Pexels → Unsplash)</option>
+                    <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (SerpAPI / Pexels / Unsplash / CSE)</option>
+                    <option value="gif" {% if not broll_gif_ready %}disabled{% endif %}>GIFs (SerpAPI · or Google CSE)</option>
                   </select>
                 </label>
                 <label class="muted" style="font-size:.74rem">Scope
@@ -1389,11 +1389,12 @@
                   </select>
                 </label>
                 <label class="muted" style="font-size:.74rem">Prefer source
-                  <select id="tlBrollPrefer" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px" title="Tried first for Photos/Auto; others remain fallbacks. GIF mode always uses CSE.">
-                    <option value="auto" selected>Auto (CSE → Pexels → Unsplash)</option>
-                    <option value="google_cse">Google CSE first</option>
+                  <select id="tlBrollPrefer" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px" title="Tried first for Photos/Auto; others remain fallbacks. GIF mode uses SerpAPI or CSE.">
+                    <option value="auto" selected>Auto (SerpAPI → Pexels → Unsplash → CSE)</option>
+                    <option value="serpapi">SerpAPI first</option>
                     <option value="pexels">Pexels first</option>
                     <option value="unsplash">Unsplash first</option>
+                    <option value="google_cse">Google CSE first</option>
                   </select>
                 </label>
                 <label class="muted" style="font-size:.74rem">Placement
@@ -1413,6 +1414,7 @@
                 <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll</button>
                 <button id="tlAlwaysPackBtn" class="tl-chip-btn" type="button" title="CapCut Always · Photo Match — keyword stills + Ken Burns on Accept">🖼️ Always pack</button>
                 <div class="tl-broll-status-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <button id="tlBrollTestSerpBtn" class="tl-chip-btn" type="button" title="Live-check SERPAPI_API_KEY">Test SerpAPI</button>
                   <button id="tlBrollTestBtn" class="tl-chip-btn" type="button" title="Live-check PEXELS_API_KEY on this host (never shows the full key)">Test Pexels</button>
                   <button id="tlBrollTestCseBtn" class="tl-chip-btn" type="button" title="Live-check GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX (Image search)">Test CSE</button>
                   <span id="tlBrollStatus" class="muted" style="font-size:.72rem" aria-live="polite">Checking B-roll providers…</span>
@@ -1421,12 +1423,11 @@
                 <p id="tlBrollHint" class="muted tl-hint" style="margin:0">
                   {% if broll_photo_ready %}
                     Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. Each Suggest returns up to ~4–5 clips (max 12); run again / change Scope for more on long videos.
-                    {% if broll_google_cse %} GIF mode uses Google CSE.{% endif %}
+                    {% if broll_serpapi or broll_google_cse %} GIF mode uses SerpAPI (or CSE).{% endif %}
                   {% else %}
                     No photo API keys in <em>this</em> Studio process — keyword text badges are off.
-                    On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>
-                    (optional <code>UNSPLASH_ACCESS_KEY</code>, or
-                    <code>GOOGLE_CSE_API_KEY</code> + <code>GOOGLE_CSE_CX</code> for Google/GIF search),
+                    On Replit: Tools → Secrets → <code>SERPAPI_API_KEY</code>
+                    (or <code>PEXELS_API_KEY</code> / <code>UNSPLASH_ACCESS_KEY</code>),
                     then <strong>Stop + Run</strong>. Or check “Generate AI photos” with <code>GEMINI_API_KEY</code>.
                   {% endif %}
                 </p>

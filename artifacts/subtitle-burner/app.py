@@ -5237,12 +5237,25 @@ def process_job(job_id: str, video_path: Path, style: dict, audio: dict | None =
 def _broll_provider_status() -> dict:
     key, cx = _google_cse_creds()
     return {
+        "serpapi": bool(_serpapi_api_key()),
         "google_cse": bool(key and cx),
         "pexels": bool(_pexels_api_key()),
         "unsplash": bool((os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()),
         "gemini_image": bool((os.environ.get("GEMINI_API_KEY") or "").strip()),
         "badge": True,
     }
+
+
+def _serpapi_api_key() -> str:
+    """SerpAPI key — Replit secret name: SERPAPI_API_KEY."""
+    for name in ("SERPAPI_API_KEY", "SERP_API_KEY", "SERPAPI_KEY"):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        val = raw.strip().strip('"').strip("'")
+        if val:
+            return val
+    return ""
 
 
 def _pexels_api_key() -> str:
@@ -5506,6 +5519,9 @@ def _normalize_broll_prefer_provider(raw) -> str:
     aliases = {
         "auto": "auto",
         "default": "auto",
+        "serp": "serpapi",
+        "serpapi": "serpapi",
+        "serp_api": "serpapi",
         "cse": "google_cse",
         "google": "google_cse",
         "google_cse": "google_cse",
@@ -5518,7 +5534,8 @@ def _normalize_broll_prefer_provider(raw) -> str:
 
 def _broll_stock_provider_order(prefer: str = "auto") -> list[str]:
     """Ordered stock photo providers. Prefer moves that source to the front; others remain fallbacks."""
-    base = ["google_cse", "pexels", "unsplash"]
+    # SerpAPI first in auto — CSE is often blocked for new Google Cloud projects.
+    base = ["serpapi", "pexels", "unsplash", "google_cse"]
     pref = _normalize_broll_prefer_provider(prefer)
     if pref in base:
         return [pref] + [p for p in base if p != pref]
@@ -5528,7 +5545,81 @@ def _broll_stock_provider_order(prefer: str = "auto") -> list[str]:
 def _broll_any_photo_provider() -> bool:
     """Stock photo providers only — Gemini AI photos are opt-in separately."""
     st = _broll_provider_status()
-    return bool(st["google_cse"] or st["pexels"] or st["unsplash"])
+    return bool(
+        st.get("serpapi") or st["google_cse"] or st["pexels"] or st["unsplash"]
+    )
+
+
+def _broll_gif_provider_ready() -> bool:
+    st = _broll_provider_status()
+    return bool(st.get("serpapi") or st.get("google_cse"))
+
+
+def _probe_serpapi() -> dict:
+    """Live SerpAPI check — never returns the key value."""
+    key = _serpapi_api_key()
+    if not key:
+        return {
+            "configured": False,
+            "ok": False,
+            "http_status": None,
+            "message": "SERPAPI_API_KEY is missing in this process. "
+                       "Replit Secrets → name exactly SERPAPI_API_KEY → Stop + Run.",
+        }
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_images",
+                "q": "nature landscape",
+                "api_key": key,
+                "safe": "active",
+            },
+            timeout=25,
+        )
+        body = {}
+        try:
+            body = r.json() or {}
+        except Exception:
+            body = {}
+        if r.status_code == 200:
+            hits = body.get("images_results") or []
+            return {
+                "configured": True,
+                "ok": True,
+                "http_status": 200,
+                "key_len": len(key),
+                "key_prefix": key[:4] + "…",
+                "hits": len(hits),
+                "message": (
+                    "SerpAPI accepted the key (Google Images OK)."
+                    if hits
+                    else "SerpAPI OK but 0 image hits for the test query — try Suggest again."
+                ),
+                "ok_strict": bool(hits),
+            }
+        err = str(body.get("error") or "")[:240]
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": r.status_code,
+            "key_len": len(key),
+            "key_prefix": key[:4] + "…",
+            "message": (
+                f"SerpAPI HTTP {r.status_code}"
+                + (f": {err}" if err else ".")
+                + (" Check the key at https://serpapi.com/manage-api-key" if r.status_code in (401, 403) else "")
+            ),
+        }
+    except Exception as e:
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": None,
+            "key_len": len(key),
+            "message": f"Could not reach SerpAPI: {e}",
+        }
 
 
 def _gemini_image_ready() -> bool:
@@ -6034,6 +6125,62 @@ def _search_broll_google_cse(query: str, file_type: str | None = None) -> str | 
         return None
 
 
+def _search_broll_serpapi(query: str, prefer_gif: bool = False) -> str | None:
+    """Google Images via SerpAPI — CSE replacement for photos + GIFs."""
+    key = _serpapi_api_key()
+    if not key:
+        return None
+    q = (query or "").strip()
+    if not q:
+        return None
+    if prefer_gif:
+        # Bias toward animated GIFs / meme hosts without requiring CSE.
+        if "gif" not in q.lower():
+            q = f"{q} gif"
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_images",
+                "q": q,
+                "api_key": key,
+                "safe": "active",
+            },
+            timeout=25,
+        )
+        if r.status_code >= 400:
+            err = ""
+            try:
+                err = str((r.json() or {}).get("error") or "")[:160]
+            except Exception:
+                pass
+            ai_logger.warning(f"SerpAPI B-roll HTTP {r.status_code}: {err}")
+            return None
+        items = (r.json() or {}).get("images_results") or []
+        if not items:
+            return None
+        # Prefer a real .gif when requested; otherwise first original URL.
+        if prefer_gif:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                for field in ("original", "link", "thumbnail"):
+                    url = it.get(field)
+                    if url and ".gif" in str(url).lower().split("?")[0]:
+                        return str(url)
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            url = it.get("original") or it.get("link") or it.get("thumbnail")
+            if url:
+                return str(url)
+        return None
+    except Exception as e:
+        ai_logger.warning(f"SerpAPI B-roll search failed: {e}")
+        return None
+
+
 def _search_broll_stock_url(
     query: str,
     provider: str,
@@ -6042,6 +6189,8 @@ def _search_broll_stock_url(
 ) -> str | None:
     """Single-provider stock URL lookup."""
     p = (provider or "").lower().strip()
+    if p == "serpapi":
+        return _search_broll_serpapi(query, prefer_gif=prefer_gif)
     if p == "google_cse":
         if prefer_gif:
             url = _search_broll_google_cse(query, file_type="gif")
@@ -6176,8 +6325,11 @@ def _fetch_broll_image_for_keyword_detail(
 
     order = _broll_stock_provider_order(prefer_provider)
     if prefer_gif:
-        # GIF mode is CSE-only today.
-        order = ["google_cse"]
+        # GIF mode: SerpAPI (preferred) or legacy Google CSE.
+        order = [p for p in _broll_stock_provider_order(prefer_provider)
+                 if p in ("serpapi", "google_cse")]
+        if not order:
+            order = ["serpapi", "google_cse"]
 
     for prov in order:
         url = _search_broll_stock_url(stock_q, prov, prefer_gif=prefer_gif)
@@ -6322,7 +6474,7 @@ def fetch_auto_overlays():
       placement?: "pip"|"center",
       start?: float, end?: float,   # optional source-time window (long-form)
       use_ai_photos?: bool,         # opt-in Gemini stills before stock
-      prefer_provider?: "auto"|"google_cse"|"pexels"|"unsplash",
+      prefer_provider?: "auto"|"serpapi"|"google_cse"|"pexels"|"unsplash",
       prefer_speaker_stills?: bool,  # default true — screenshot who is talking
       appearance_bias?: bool,       # default true — likeness-match stock/AI people
       semantic?: bool
@@ -6431,7 +6583,7 @@ def fetch_auto_overlays():
         source = "badge"
         stock_provider = None
 
-        want_gif = mode == "gif" and bool(providers.get("google_cse"))
+        want_gif = mode == "gif" and _broll_gif_provider_ready()
         want_photo = mode in ("photo", "auto") and (
             _broll_any_photo_provider() or use_ai_photos
             or (prefer_speaker_stills and speaker_ready)
@@ -6446,8 +6598,8 @@ def fetch_auto_overlays():
             if asset_path:
                 source = "gif"
                 used_gif += 1
-                used_by_provider[stock_provider or "google_cse"] = (
-                    used_by_provider.get(stock_provider or "google_cse", 0) + 1
+                used_by_provider[stock_provider or "serpapi"] = (
+                    used_by_provider.get(stock_provider or "serpapi", 0) + 1
                 )
                 final = ASSET_DIR / f"{asset_id}{asset_path.suffix.lower()}"
                 if asset_path.resolve() != final.resolve():
@@ -6594,7 +6746,7 @@ def fetch_auto_overlays():
             None if _broll_any_photo_provider() or use_ai_photos or speaker_ready
             else "No photo API key and no speaker faces yet. "
                  "Analyze speakers (faces) for talker screenshots, or set "
-                 "PEXELS_API_KEY / GOOGLE_CSE_* / GEMINI_API_KEY."
+                 "SERPAPI_API_KEY / PEXELS_API_KEY / GEMINI_API_KEY."
         ),
     })
 
@@ -6603,19 +6755,22 @@ def fetch_auto_overlays():
 def broll_status():
     """Which B-roll image providers are configured.
 
-    Add ?probe=1 to live-test Pexels, or ?probe=cse for Google CSE
-    (does not return secrets).
+    Add ?probe=1 (Pexels), ?probe=cse, or ?probe=serpapi (does not return secrets).
     """
     st = _broll_provider_status()
     raw = os.environ.get("PEXELS_API_KEY")
     aliases = _pexels_env_aliases_present()
     cse_key, cse_cx = _google_cse_creds()
+    serp_key = _serpapi_api_key()
     out = {
         "providers": st,
         "photo_ready": _broll_any_photo_provider(),
+        "gif_ready": _broll_gif_provider_ready(),
         "gemini_image_ready": _gemini_image_ready(),
-        "build": "broll-status-v5-prefer-cse",
-        "prefer_provider_options": ["auto", "google_cse", "pexels", "unsplash"],
+        "build": "broll-status-v6-serpapi",
+        "prefer_provider_options": [
+            "auto", "serpapi", "pexels", "unsplash", "google_cse",
+        ],
         # Diagnostics only — never includes the key value.
         "pexels_env": {
             "present": bool(_pexels_api_key()) or (raw is not None),
@@ -6624,6 +6779,12 @@ def broll_status():
             "had_surrounding_whitespace": bool(raw is not None and raw != raw.strip()),
             "alias_names": aliases,
             "expected_name": "PEXELS_API_KEY",
+        },
+        "serpapi_env": {
+            "present": bool(serp_key),
+            "length": len(serp_key),
+            "ready": bool(serp_key),
+            "expected_name": "SERPAPI_API_KEY",
         },
         "cse_env": {
             "api_key_present": bool(cse_key),
@@ -6634,10 +6795,10 @@ def broll_status():
             "expected_names": ["GOOGLE_CSE_API_KEY", "GOOGLE_CSE_CX"],
         },
         "hint": (
-            "Set PEXELS_API_KEY and/or GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX on the same host "
-            "that runs Studio (Replit Tools→Secrets, then Stop+Run — Cursor secrets do not sync). "
+            "Preferred: SERPAPI_API_KEY (photos + GIFs). Also PEXELS_API_KEY / UNSPLASH_ACCESS_KEY. "
+            "Replit Tools→Secrets, then Stop+Run — Cursor secrets do not sync. "
             "Optional: GEMINI_API_KEY for Generate AI photos. "
-            "Call /broll/status?probe=1 (Pexels) or ?probe=cse (Google CSE) to validate."
+            "Probe: /broll/status?probe=serpapi | ?probe=1 | ?probe=cse"
         ),
     }
     probe = str(request.args.get("probe") or "").strip().lower()
@@ -6645,6 +6806,8 @@ def broll_status():
         out["pexels_probe"] = _probe_pexels_key()
     if probe in ("cse", "google", "google_cse", "all"):
         out["cse_probe"] = _probe_google_cse()
+    if probe in ("serp", "serpapi", "serp_api", "all"):
+        out["serpapi_probe"] = _probe_serpapi()
     if probe == "all":
         out["pexels_probe"] = _probe_pexels_key()
     return jsonify(out)
@@ -6709,6 +6872,12 @@ def broll_test_pexels():
 def broll_test_cse():
     """Live Google CSE key+cx check — never echoes secrets."""
     return jsonify(_probe_google_cse())
+
+
+@app.route("/broll/test-serpapi", methods=["GET"])
+def broll_test_serpapi():
+    """Live SerpAPI key check — never echoes the full key."""
+    return jsonify(_probe_serpapi())
 
 
 @app.route("/jobs")
@@ -7771,6 +7940,8 @@ def index():
         gemini_enabled=gemini_enabled,
         broll_photo_ready=broll_photo_ready,
         broll_google_cse=bool(broll_providers.get("google_cse")),
+        broll_serpapi=bool(broll_providers.get("serpapi")),
+        broll_gif_ready=_broll_gif_provider_ready(),
         broll_providers=broll_providers,
         capcut_templates=CAPCUT_TEMPLATES,
         asset_version=asset_version,
