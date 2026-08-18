@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-65-no-text-badges-caption-aware-overlays";
+  const TL_BUILD = "studio-editor-build-66-semantic-broll-sfx-multi-interview";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -750,6 +750,7 @@
       logo: tl.logo || null,
       style: tl.style || null,
       audio: tl.audio || null,
+      sfx_overlays: tl.sfx_overlays !== false,
       ai_edit: tl.ai_edit || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
@@ -4573,6 +4574,10 @@
     }
     html += propSection("🏷 Logo / watermark", logoBody, !!lg.asset_id);
 
+    let sfxBody = propCheck("__sfx_overlays", "Auto whoosh / click when overlays & zooms land", tl.sfx_overlays !== false);
+    sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Baked on ▶ Render — tiny accents under speech (Captions-style). Uncheck to silence.</p>`;
+    html += propSection("🔊 Overlay SFX", sfxBody, true);
+
     const sc = tl.speaker_colors || {};
     const hb = tl.headline_banner;
     const hbText = typeof hb === "string" ? hb : (hb && hb.text) || "";
@@ -4647,6 +4652,8 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
+        } else if (key === "__sfx_overlays") {
+          tl.sfx_overlays = !!inp.checked;
         } else if (key && key.startsWith("__sc:")) {
           const spk = key.slice(5);
           tl.speaker_colors = tl.speaker_colors || {};
@@ -5254,6 +5261,7 @@
       logo: d.logo || null,
       style: d.style ? normalizeTlStyle(d.style) : null,
       audio: d.audio || null,
+      sfx_overlays: d.sfx_overlays !== false,
       ai_edit: d.ai_edit || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};

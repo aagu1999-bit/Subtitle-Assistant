@@ -5734,7 +5734,10 @@ def fetch_auto_overlays():
     win_start = max(0.0, win_start)
     win_end = max(win_start + 0.5, win_end)
 
-    callouts = _keyword_callouts_for_window(words, win_start, win_end, budget)
+    semantic = data.get("semantic", True) is not False
+    callouts = _broll_callouts_for_window(
+        words, win_start, win_end, budget, semantic=semantic,
+    )
     # Optional: replace/refetch specific keywords (approval UI "Replace").
     raw_kw = data.get("keywords")
     if isinstance(raw_kw, list) and raw_kw:
@@ -5869,6 +5872,7 @@ def fetch_auto_overlays():
         "mode": mode,
         "placement": placement,
         "use_ai_photos": use_ai_photos,
+        "semantic": semantic,
         "window": {"start": win_start, "end": win_end if win_end < 1e8 else None},
         "providers": providers,
         "photo_ready": _broll_any_photo_provider(),
@@ -6803,6 +6807,155 @@ def load_compilation(job_id: str):
         "label": recipe.get("label"),
         "created_at": recipe.get("created_at"),
         "clips": annotated,
+    })
+
+
+@app.route("/multi-interview/plan", methods=["POST"])
+def multi_interview_plan():
+    """Plan a cross-interview reel from multiple uploaded / transcribed jobs.
+
+    Body: { job_ids: [...], format?: "interview", max_themes?: 6, clips_per_theme?: 4 }
+    Returns themes with matched clip ranges across sources for the compile queue.
+    """
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get("job_ids") or data.get("jobs") or []
+    if not isinstance(raw_ids, list) or len(raw_ids) < 2:
+        return jsonify({"error": "Pick at least 2 transcribed videos (job_ids)."}), 400
+    job_ids = []
+    for jid in raw_ids[:12]:
+        jid = str(jid or "").strip()
+        if jid and jid in jobs and jid not in job_ids:
+            job_ids.append(jid)
+    if len(job_ids) < 2:
+        return jsonify({"error": "Need at least 2 valid transcribed jobs."}), 400
+
+    try:
+        max_themes = max(2, min(10, int(data.get("max_themes") or 6)))
+    except (TypeError, ValueError):
+        max_themes = 6
+    try:
+        clips_per = max(2, min(8, int(data.get("clips_per_theme") or 4)))
+    except (TypeError, ValueError):
+        clips_per = 4
+    format_type = str(data.get("format") or "interview")
+
+    blocks = []
+    meta = []
+    for jid in job_ids:
+        j = jobs[jid]
+        words = j.get("words") or []
+        if not words:
+            continue
+        fname = j.get("filename") or jid[:8]
+        transcript = _format_transcript_for_llm(words)
+        if not transcript.strip():
+            continue
+        # Cap each transcript so multi-job prompts stay within context.
+        if len(transcript) > 6000:
+            transcript = transcript[:6000] + "\n…"
+        blocks.append(f"=== SOURCE {jid} | {fname} ===\n{transcript}")
+        meta.append({
+            "job_id": jid,
+            "filename": fname,
+            "word_count": len(words),
+            "duration": float(words[-1].get("end") or 0) if words else 0,
+        })
+    if len(blocks) < 2:
+        return jsonify({"error": "At least 2 jobs need transcripts (words)."}), 400
+
+    prompt = f"""You are editing a MULTI-INTERVIEW reel. Several different videos ask related questions.
+Find SHARED themes / questions answered across sources, then pick the best clip range from EACH relevant source.
+
+Format hint: {format_type}
+Return at most {max_themes} themes. Each theme should include up to {clips_per} clips from DIFFERENT source_job_ids when possible (same question, different interviewees).
+
+Rules:
+- Use ONLY the provided source_job_id values.
+- start_time / end_time must be inside that source's transcript timestamps.
+- Prefer answer-led hooks (lead with the quotable line, not the question).
+- Clip length 12–75 seconds when possible.
+- Skip themes that only appear in one source unless uniquely strong.
+
+Return STRICT JSON:
+{{
+  "themes": [
+    {{
+      "theme": "Finding local events",
+      "question": "How do you discover events in your city?",
+      "clips": [
+        {{
+          "source_job_id": "abc123",
+          "start_time": 40.2,
+          "end_time": 72.5,
+          "title": "App calendars + friends",
+          "hook_quote": "exact spoken line",
+          "reason": "why this answers the shared question"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Sources:
+{chr(10).join(blocks)}
+"""
+    try:
+        result = _gemini_generate_clip_suggestions(prompt)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    themes_raw = result.get("themes") if isinstance(result, dict) else None
+    if not isinstance(themes_raw, list):
+        return jsonify({"error": "Gemini returned no themes", "raw": result}), 500
+
+    allowed = set(job_ids)
+    themes = []
+    for th in themes_raw[:max_themes]:
+        if not isinstance(th, dict):
+            continue
+        clips_out = []
+        for c in (th.get("clips") or [])[:clips_per]:
+            if not isinstance(c, dict):
+                continue
+            sid = str(c.get("source_job_id") or "").strip()
+            if sid not in allowed:
+                continue
+            try:
+                st = float(c.get("start_time", c.get("start", 0)))
+                en = float(c.get("end_time", c.get("end", 0)))
+            except (TypeError, ValueError):
+                continue
+            if en - st < 3.0:
+                continue
+            # Clamp to transcript end when available.
+            words = jobs[sid].get("words") or []
+            if words:
+                tmax = float(words[-1].get("end") or en)
+                st = max(0.0, min(st, tmax - 3.0))
+                en = max(st + 3.0, min(en, tmax))
+            clips_out.append({
+                "source_job_id": sid,
+                "source_filename": jobs[sid].get("filename") or "",
+                "start_time": round(st, 3),
+                "end_time": round(en, 3),
+                "title": str(c.get("title") or th.get("theme") or "clip")[:120],
+                "hook_quote": str(c.get("hook_quote") or "")[:300],
+                "reason": str(c.get("reason") or "")[:300],
+                "theme": str(th.get("theme") or "")[:120],
+            })
+        if len(clips_out) >= 1:
+            themes.append({
+                "theme": str(th.get("theme") or "Theme")[:120],
+                "question": str(th.get("question") or "")[:240],
+                "clips": clips_out,
+            })
+
+    return jsonify({
+        "ok": True,
+        "sources": meta,
+        "themes": themes,
+        "theme_count": len(themes),
+        "clip_count": sum(len(t["clips"]) for t in themes),
     })
 
 
@@ -8810,6 +8963,123 @@ def _tl_build_main_track(segments: list, transitions: list,
             _safe_unlink(p)
 
 
+def _ensure_ui_sfx_assets() -> dict[str, Path]:
+    """Generate short click/whoosh WAVs once (no binary assets in git)."""
+    sfx_dir = CACHE_DIR / "sfx"
+    sfx_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Path] = {}
+    specs = {
+        # Soft high click — pairs with punch / badge-like pops
+        "click": (
+            ["-f", "lavfi", "-i", "sine=frequency=1650:duration=0.05"],
+            "afade=t=out:st=0.012:d=0.038,volume=0.42",
+        ),
+        # Pink-noise whoosh — pairs with B-roll / split / Ken Burns arrivals
+        "whoosh": (
+            ["-f", "lavfi", "-i", "anoisesrc=d=0.32:color=pink:sample_rate=44100"],
+            "afade=t=in:st=0:d=0.04,afade=t=out:st=0.20:d=0.12,"
+            "highpass=f=280,lowpass=f=6500,volume=0.28",
+        ),
+    }
+    for name, (src, af) in specs.items():
+        path = sfx_dir / f"{name}.wav"
+        if path.exists() and path.stat().st_size > 200:
+            out[name] = path
+            continue
+        cmd = [FFMPEG, "-y", *src, "-af", af, "-ar", "44100", "-ac", "2", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0 and path.exists():
+            out[name] = path
+        else:
+            print(f"[sfx] failed to build {name}: {(proc.stderr or '')[-200:]}", flush=True)
+    return out
+
+
+def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
+                        out_path: Path) -> None:
+    """Mix auto click/whoosh one-shots at overlay / effect onsets.
+
+    Captions-style sensory sync: every visual pop gets a tiny audio accent.
+    Voice stays primary; SFX are quiet and short.
+    """
+    assets = _ensure_ui_sfx_assets()
+    if not assets:
+        _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "SFX passthrough")
+        return
+
+    hits: list[tuple[float, str]] = []
+    for ov in overlay_clips or []:
+        if not isinstance(ov, dict):
+            continue
+        try:
+            st = float(ov.get("start", 0))
+        except (TypeError, ValueError):
+            continue
+        kind = "whoosh"
+        src = str(ov.get("source") or "").lower()
+        if src in ("badge",):
+            kind = "click"
+        hits.append((max(0.0, st), kind))
+    for fx in effect_clips or []:
+        if not isinstance(fx, dict):
+            continue
+        ftype = str(fx.get("type") or "")
+        try:
+            st = float(fx.get("start", 0))
+        except (TypeError, ValueError):
+            continue
+        if ftype in ("punch_zoom", "zoom_1_5", "zoom_2x", "split_screen"):
+            hits.append((max(0.0, st), "click" if ftype.startswith("zoom") or ftype == "punch_zoom" else "whoosh"))
+        elif ftype == "ken_burns":
+            hits.append((max(0.0, st), "whoosh"))
+
+    # Dedupe near-simultaneous hits (keep first)
+    hits.sort(key=lambda h: h[0])
+    cleaned: list[tuple[float, str]] = []
+    for t, k in hits:
+        if cleaned and abs(t - cleaned[-1][0]) < 0.12:
+            continue
+        cleaned.append((t, k))
+    cleaned = cleaned[:48]
+    if not cleaned:
+        _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "SFX passthrough")
+        return
+
+    inputs = ["-i", str(base)]
+    filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[voice]"]
+    labels = []
+    for i, (t, kind) in enumerate(cleaned, start=1):
+        path = assets.get(kind) or assets.get("whoosh") or assets.get("click")
+        if not path:
+            continue
+        inputs += ["-i", str(path)]
+        delay = int(t * 1000)
+        filt.append(
+            f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            f"volume=0.85,adelay={delay}|{delay}[s{i}]"
+        )
+        labels.append(f"[s{i}]")
+    if not labels:
+        _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
+                "SFX passthrough")
+        return
+    if len(labels) == 1:
+        filt.append(f"{labels[0]}anull[sfxall]")
+    else:
+        filt.append(
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0[sfxall]"
+        )
+    filt.append("[voice][sfxall]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+    _tl_run(
+        [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
+         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
+         "-c:a", "aac", "-b:a", "192k", "-shortest", str(out_path)],
+        "Overlay SFX mix",
+    )
+
+
 def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     """Mix background music tracks into *base*'s audio (video stream copied).
 
@@ -9304,6 +9574,8 @@ def _normalize_timeline(timeline: dict) -> dict:
         tl["style"] = {}
     audio = tl.get("audio")
     tl["audio"] = audio if isinstance(audio, dict) else None
+    # Auto whoosh/click on overlay & camera-effect onsets (Captions-style).
+    tl["sfx_overlays"] = tl.get("sfx_overlays", True) is not False
     ts = tl.get("track_states")
     tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
@@ -9649,6 +9921,23 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             work.append(comp)
             _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
             base = comp
+
+        # ---- Pass 3b: auto whoosh/click SFX synced to overlay / effect starts ----
+        sfx_on = tl.get("sfx_overlays", True) is not False
+        if sfx_on and (tracks.get("overlay") or tracks.get("effects")):
+            _stage("mixing overlay SFX", 74)
+            sfxed = UPLOAD_DIR / f"{job_id}_tlsfx.mp4"
+            work.append(sfxed)
+            try:
+                _tl_mix_overlay_sfx(
+                    base,
+                    tracks.get("overlay") or [],
+                    tracks.get("effects") or [],
+                    sfxed,
+                )
+                base = sfxed
+            except Exception as sfx_err:
+                print(f"[timeline] overlay SFX skipped: {sfx_err}", flush=True)
 
         # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
@@ -10547,7 +10836,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
         media_budget = {"low": 2, "med": 4, "high": 6}.get((intensity or "med").lower(), 4) if photo_match else {
             "low": 1, "med": 3, "high": 5
         }.get((intensity or "med").lower(), 3)
-        callouts = _keyword_callouts_for_window(words, t_in, t_out, media_budget)
+        callouts = _broll_callouts_for_window(words, t_in, t_out, media_budget, semantic=True)
         ken_default = pack.get("ken_burns") if isinstance(pack.get("ken_burns"), dict) else None
         for i, co in enumerate(callouts):
             # Map source time into output time roughly as offset from t_in
@@ -10737,8 +11026,125 @@ def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
             "text": clean,
             "start": ws,
             "duration": max(1.4, min(2.4, we - ws + 1.2)),
+            "source": "keyword",
         })
     return out
+
+
+def _semantic_broll_callouts(words: list, t_in: float, t_out: float,
+                             budget: int) -> list:
+    """Sentence-level LLM → stock-search queries (Captions-style semantic B-roll).
+
+    Reads full sentences in the window, extracts the *concept* (not a single
+    token), and returns timed search phrases bound to word-level start times.
+    Falls back to the allow-list keyword picker when Gemini is unavailable.
+    """
+    budget = max(1, min(12, int(budget or 4)))
+    win_words = []
+    for w in words or []:
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if we <= t_in or ws >= t_out:
+            continue
+        win_words.append(w)
+    if not win_words:
+        return []
+
+    # Prefer Gemini when configured.
+    if not (os.environ.get("GEMINI_API_KEY") or "").strip():
+        return _keyword_callouts_for_window(words, t_in, t_out, budget)
+
+    transcript = _format_transcript_for_llm(win_words)
+    if not transcript.strip():
+        return _keyword_callouts_for_window(words, t_in, t_out, budget)
+
+    span = max(1.0, float(t_out) - float(t_in))
+    prompt = f"""You are a video editor choosing B-roll search queries for a talking-head cut.
+
+Window: {t_in:.1f}s → {t_out:.1f}s ({span:.0f}s). Transcript has [mm:ss] stamps relative to the FULL video.
+
+Rules:
+- Read each sentence's MEANING. Do NOT search single ambiguous tokens (names, "Jersey", brand handles).
+- Prefer concrete visual concepts: "local nightlife events flyer collage", "urban park meetup", "phone calendar app", "crowd at outdoor market".
+- Never invent moments that aren't in the transcript.
+- Place at most {budget} overlays, spread across the window (not all in the first 15s).
+- start_time must fall on the emphasized words; duration 1.6–2.8s.
+- search_query is what we type into a stock photo API (3–8 words, no quotes).
+
+Return STRICT JSON:
+{{
+  "overlays": [
+    {{
+      "start_time": 12.4,
+      "duration": 2.0,
+      "search_query": "city nightlife event crowd evening",
+      "quote": "exact words near this beat",
+      "reason": "why this visual matches the sentence meaning"
+    }}
+  ]
+}}
+
+Transcript:
+{transcript}
+"""
+    try:
+        result = _gemini_generate_clip_suggestions(prompt)
+    except Exception as exc:
+        ai_logger.warning(f"[broll] semantic callouts fell back to keywords: {exc}")
+        return _keyword_callouts_for_window(words, t_in, t_out, budget)
+
+    raw = result.get("overlays") if isinstance(result, dict) else None
+    if not isinstance(raw, list):
+        return _keyword_callouts_for_window(words, t_in, t_out, budget)
+
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        q = str(item.get("search_query") or item.get("query") or item.get("text") or "").strip()
+        if len(q) < 3:
+            continue
+        # Reject obvious name-only / metadata-ish queries.
+        ql = re.sub(r"[^a-z0-9\s]+", " ", q.lower()).strip()
+        toks = [t for t in ql.split() if t]
+        if len(toks) == 1 and toks[0] not in _VISUAL_KEYWORDS:
+            continue
+        try:
+            st = float(item.get("start_time", item.get("start", t_in)))
+        except (TypeError, ValueError):
+            continue
+        try:
+            dur = float(item.get("duration") or 2.0)
+        except (TypeError, ValueError):
+            dur = 2.0
+        st = max(float(t_in), min(float(t_out) - 0.3, st))
+        dur = max(1.4, min(2.8, dur))
+        out.append({
+            "text": q[:80],
+            "start": round(st, 3),
+            "duration": round(dur, 3),
+            "quote": str(item.get("quote") or "")[:160],
+            "reason": str(item.get("reason") or "")[:200],
+            "source": "semantic",
+        })
+        if len(out) >= budget:
+            break
+
+    if not out:
+        return _keyword_callouts_for_window(words, t_in, t_out, budget)
+    out.sort(key=lambda c: c["start"])
+    return out
+
+
+def _broll_callouts_for_window(words: list, t_in: float, t_out: float,
+                               budget: int, *, semantic: bool = True) -> list:
+    """Public picker: semantic LLM when possible, else keyword allow-list."""
+    if semantic:
+        return _semantic_broll_callouts(words, t_in, t_out, budget)
+    return _keyword_callouts_for_window(words, t_in, t_out, budget)
 
 
 def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,

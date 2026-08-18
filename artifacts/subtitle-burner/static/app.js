@@ -4615,6 +4615,151 @@ if (compileClearBtn) {
 
 renderCompileQueue();
 
+// ---- Multi-interview: shared themes across uploaded jobs ----
+const multiJobListEl = $("multiInterviewJobList");
+const multiThemesEl = $("multiInterviewThemes");
+const multiStatusEl = $("multiInterviewStatus");
+
+function _jobReadyForMulti(j) {
+  if (!j || !j.job_id) return false;
+  const st = String(j.status || "");
+  return st === "awaiting_edit" || st === "done" || st === "ready" || !!j.has_words || (j.word_count || 0) > 0;
+}
+
+function renderMultiInterviewJobs() {
+  if (!multiJobListEl) return;
+  const list = Object.values(jobsById || {}).filter(_jobReadyForMulti);
+  multiJobListEl.innerHTML = "";
+  if (!list.length) {
+    multiJobListEl.innerHTML = `<p class="muted" style="font-size:.84rem;margin:0">No transcribed videos yet. Upload 2+ interviews on <strong>Ingest</strong>, wait until ready, then refresh.</p>`;
+    return;
+  }
+  list.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  list.forEach((j) => {
+    const row = document.createElement("label");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 8px;background:#12151f;border:1px solid #2a2f3a;border-radius:8px;font-size:.84rem;cursor:pointer";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "multi-interview-job";
+    cb.value = j.job_id;
+    const name = document.createElement("span");
+    name.style.flex = "1";
+    name.textContent = j.filename || j.job_id.slice(0, 8);
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.style.fontSize = ".72rem";
+    meta.textContent = j.status || "";
+    row.appendChild(cb);
+    row.appendChild(name);
+    row.appendChild(meta);
+    multiJobListEl.appendChild(row);
+  });
+}
+
+function renderMultiInterviewThemes(themes) {
+  if (!multiThemesEl) return;
+  multiThemesEl.innerHTML = "";
+  if (!themes || !themes.length) {
+    multiThemesEl.innerHTML = `<p class="muted" style="font-size:.84rem">No shared themes found. Try more interviews or a broader topic set.</p>`;
+    return;
+  }
+  themes.forEach((th, idx) => {
+    const card = document.createElement("div");
+    card.style.cssText = "padding:12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px";
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:flex-start";
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>${escHtml(th.theme || ("Theme " + (idx + 1)))}</strong>`
+      + (th.question ? `<div class="muted" style="font-size:.78rem;margin-top:4px">${escHtml(th.question)}</div>` : "");
+    const addBtn = document.createElement("button");
+    addBtn.className = "btn btn-secondary";
+    addBtn.type = "button";
+    addBtn.textContent = `＋ Add ${ (th.clips || []).length } clip(s) to queue`;
+    addBtn.onclick = () => {
+      (th.clips || []).forEach((c) => {
+        addToCompileQueue({
+          source_job_id: c.source_job_id,
+          source_filename: c.source_filename || "",
+          start_time: c.start_time,
+          end_time: c.end_time,
+          title: c.title || th.theme || "",
+          hook_quote: c.hook_quote || "",
+        });
+      });
+      addBtn.textContent = "✓ Added";
+      addBtn.disabled = true;
+      if (multiStatusEl) multiStatusEl.textContent = `Queued theme “${th.theme || ""}”.`;
+    };
+    head.appendChild(title);
+    head.appendChild(addBtn);
+    card.appendChild(head);
+    const list = document.createElement("ul");
+    list.style.cssText = "margin:10px 0 0;padding-left:18px;font-size:.8rem;color:#a8b0c0";
+    (th.clips || []).forEach((c) => {
+      const li = document.createElement("li");
+      const fname = c.source_filename || String(c.source_job_id || "").slice(0, 8);
+      li.textContent = `${fname}: ${Number(c.start_time).toFixed(1)}s–${Number(c.end_time).toFixed(1)}s`
+        + (c.hook_quote ? ` — “${c.hook_quote}”` : "");
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+    multiThemesEl.appendChild(card);
+  });
+}
+
+function escHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
+const multiRefreshBtn = $("multiInterviewRefreshBtn");
+if (multiRefreshBtn) {
+  multiRefreshBtn.onclick = async () => {
+    await refreshJobsList();
+    renderMultiInterviewJobs();
+  };
+}
+const multiPlanBtn = $("multiInterviewPlanBtn");
+if (multiPlanBtn) {
+  multiPlanBtn.onclick = async () => {
+    const ids = Array.from(document.querySelectorAll(".multi-interview-job:checked")).map((el) => el.value);
+    if (ids.length < 2) {
+      alert("Select at least 2 transcribed interviews.");
+      return;
+    }
+    multiPlanBtn.disabled = true;
+    if (multiStatusEl) multiStatusEl.textContent = "Planning with Gemini…";
+    try {
+      const res = await fetch("/multi-interview/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_ids: ids, format: "interview" }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      renderMultiInterviewThemes(data.themes || []);
+      if (multiStatusEl) {
+        multiStatusEl.textContent = `Found ${data.theme_count || 0} theme(s), ${data.clip_count || 0} clip(s).`;
+      }
+    } catch (e) {
+      if (multiStatusEl) multiStatusEl.textContent = "Error: " + e.message;
+      alert("Multi-interview plan failed: " + e.message);
+    } finally {
+      multiPlanBtn.disabled = false;
+    }
+  };
+}
+
+renderMultiInterviewJobs();
+// Keep the checklist fresh when the jobs list refreshes.
+const _origRefreshJobsList = refreshJobsList;
+refreshJobsList = async function () {
+  const r = await _origRefreshJobsList.apply(this, arguments);
+  try { renderMultiInterviewJobs(); } catch (e) { /* ignore */ }
+  return r;
+};
+
 // ---- Past compilations: list, load-back-into-queue ----
 const pastCompilesListEl = $("pastCompilesList");
 const pastCompilesCountEl = $("pastCompilesCount");
