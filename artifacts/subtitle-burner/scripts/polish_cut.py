@@ -773,30 +773,10 @@ def append_lower_thirds(
     width: int,
     hold: float = 2.2,
 ) -> str:
-    """Keyword lower-third text accents (drawtext) — no synthetic imagery."""
-    fontsize = max(28, int(width * 0.028))
-    seen: set[str] = set()
-    n = 0
-    for ct, h in overlays:
-        key = f"{h.keyword.lower()}@{ct:.1f}"
-        if key in seen:
-            continue
-        seen.add(key)
-        label = str(h.keyword or "").strip()
-        if not label:
-            continue
-        text = _escape_drawtext(label.title())
-        end = ct + min(hold, float(h.duration or hold))
-        enable = f"between(t\\,{ct:.3f}\\,{end:.3f})"
-        next_v = f"[lt{n}]"
-        fc.append(
-            f"{vlabel}drawtext=text='{text}':fontsize={fontsize}:fontcolor=white:"
-            f"borderw=2:bordercolor=black@0.65:"
-            f"box=1:boxcolor=black@0.55:boxborderw=14:"
-            f"x=56:y=h-132:enable='{enable}'{next_v}"
-        )
-        vlabel = next_v
-        n += 1
+    """Keyword lower-thirds are disabled — captions carry the words.
+
+    Kept as a no-op so older callers don't crash; never injects drawtext.
+    """
     return vlabel
 
 

@@ -234,26 +234,16 @@ def composite_with_moviepy(
                 target_w = int(width * (0.42 if broll_mode == "pip" else 0.92))
                 clip = clip.resized(width=target_w)
                 if broll_mode == "pip":
-                    clip = clip.with_position((width - clip.w - 40, height - clip.h - 40))
+                    # Caption-aware: top-right by default (away from lower captions).
+                    clip = clip.with_position((width - clip.w - 40, 40))
                 else:
-                    clip = clip.with_position(("center", "center"))
+                    clip = clip.with_position(("center", int(height * 0.06)))
                 clip = clip.with_start(ct).with_opacity(0.92 if broll_mode == "pip" else 0.88)
                 layers.append(clip)
             except Exception as e:
                 print(f"[polish_oss] MoviePy overlay skip {asset.name}: {e}")
-        if lower_thirds and keyword:
-            try:
-                txt = TextClip(
-                    text=keyword.strip().title()[:48],
-                    font_size=max(28, int(width * 0.028)),
-                    color="white",
-                    bg_color="black",
-                    method="label",
-                ).with_duration(min(2.2, dur)).with_start(ct).with_position((56, height - 140))
-                layers.append(txt)
-            except Exception:
-                # TextClip needs a system font; skip rather than fail polish.
-                pass
+        # lower_thirds / TextClip keyword popups intentionally omitted — captions
+        # already carry spoken words; text boxes fought the karaoke track.
 
     final = CompositeVideoClip(layers, size=(width, height)).with_duration(base.duration)
 

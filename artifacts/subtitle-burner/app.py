@@ -5575,41 +5575,111 @@ def _fetch_broll_image_for_keyword_ex(
 
 
 def _overlay_layout_for_index(i: int, placement: str = "pip") -> dict:
+    return _caption_aware_overlay_layout(i, placement)
+
+
+def _caption_aware_overlay_layout(
+    i: int,
+    placement: str = "pip",
+    *,
+    face_cx: float | None = None,
+    face_cy: float | None = None,
+    caption_y_pct: float = 82.0,
+) -> dict:
+    """Place PiP / center plates in free real estate (away from face + captions).
+
+    Captions usually sit in the lower third (position_y ~75–85). Prefer top
+    corners / top plate so overlays don't cover karaoke or the talking head.
+    """
     placement = (placement or "pip").lower()
+    try:
+        cap_y = float(caption_y_pct)
+    except (TypeError, ValueError):
+        cap_y = 82.0
+    # Fraction of frame height where the caption band begins (with padding).
+    caption_band_top = max(0.48, min(0.88, (cap_y / 100.0) - 0.16))
+
     if placement in ("center", "centre", "full"):
+        # If the face is high, drop the plate mid-frame but still above captions.
+        if face_cy is not None and face_cy < 0.32:
+            y = min(0.40, caption_band_top - 0.30)
+            return {
+                "x": 0.10, "y": max(0.34, y), "w": 0.80, "h": 0.28,
+                "fit": "contain", "layout": "center",
+            }
+        # Default: top half plate — never into the caption band.
+        h = min(0.36, max(0.22, caption_band_top - 0.08))
         return {
-            "x": 0.12, "y": 0.18, "w": 0.76, "h": 0.52,
+            "x": 0.10, "y": 0.05, "w": 0.80, "h": h,
             "fit": "contain", "layout": "center",
         }
-    corners = [
-        {"x": 0.58, "y": 0.06},
-        {"x": 0.04, "y": 0.06},
-        {"x": 0.58, "y": 0.62},
-        {"x": 0.04, "y": 0.62},
+
+    candidates = [
+        {"x": 0.58, "y": 0.04, "w": 0.36, "h": 0.22, "fit": "cover", "layout": "pip_tr", "score": 0.0},
+        {"x": 0.04, "y": 0.04, "w": 0.36, "h": 0.22, "fit": "cover", "layout": "pip_tl", "score": 0.0},
+        {"x": 0.58, "y": 0.30, "w": 0.36, "h": 0.22, "fit": "cover", "layout": "pip_mr", "score": 0.0},
+        {"x": 0.04, "y": 0.30, "w": 0.36, "h": 0.22, "fit": "cover", "layout": "pip_ml", "score": 0.0},
     ]
-    pos = corners[i % 4]
-    return {
-        "x": pos["x"], "y": pos["y"], "w": 0.38, "h": 0.24,
-        "fit": "cover", "layout": "pip_auto",
-    }
+    for c in candidates:
+        bottom = c["y"] + c["h"]
+        if bottom > caption_band_top:
+            c["score"] -= 6.0
+        cx = c["x"] + c["w"] / 2.0
+        cy = c["y"] + c["h"] / 2.0
+        if face_cx is not None and face_cy is not None:
+            if abs(cx - float(face_cx)) < 0.28 and abs(cy - float(face_cy)) < 0.28:
+                c["score"] -= 10.0
+            # Prefer the side opposite the face.
+            if (float(face_cx) < 0.5 and c["x"] >= 0.5) or (float(face_cx) >= 0.5 and c["x"] < 0.5):
+                c["score"] += 2.5
+            if float(face_cy) > 0.45 and c["y"] < 0.2:
+                c["score"] += 1.5
+        # Prefer top slots generally (Captions-style).
+        if c["y"] < 0.15:
+            c["score"] += 1.0
+    candidates.sort(key=lambda c: (-c["score"], c["y"], c["x"]))
+    top_score = candidates[0]["score"]
+    best = [c for c in candidates if c["score"] >= top_score - 0.5] or candidates
+    pick = best[int(i) % len(best)]
+    return {k: pick[k] for k in ("x", "y", "w", "h", "fit", "layout")}
+
+
+def _face_hint_for_job(job_id: str | None) -> tuple[float | None, float | None]:
+    """Best-effort face center from reframe cache (normalized 0–1)."""
+    if not job_id or job_id not in jobs:
+        return None, None
+    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+    if not cache_path.exists():
+        return None, None
+    try:
+        rd = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None, None
+    faces = rd.get("faces") or rd.get("face_track") or []
+    if isinstance(faces, list) and faces:
+        f0 = faces[0] if isinstance(faces[0], dict) else None
+        if f0:
+            try:
+                return float(f0.get("cx", f0.get("x", 0.5))), float(f0.get("cy", f0.get("y", 0.4)))
+            except (TypeError, ValueError):
+                pass
+    for key in ("face_cx", "cx", "center_x"):
+        if key in rd:
+            try:
+                cx = float(rd.get(key))
+                cy = float(rd.get("face_cy") or rd.get("cy") or rd.get("center_y") or 0.4)
+                return cx, cy
+            except (TypeError, ValueError):
+                break
+    return None, None
 
 
 def _make_keyword_badge_png(text: str, dest: Path) -> bool:
-    """Render a simple keyword badge PNG via ffmpeg (no Pillow required)."""
-    label = re.sub(r"[^\w\s\-']", "", str(text or "")).strip()[:28] or "B-roll"
-    safe = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    vf = (
-        f"drawbox=x=0:y=0:w=iw:h=ih:color=0x10131d@1:t=fill,"
-        f"drawbox=x=16:y=16:w=iw-32:h=ih-32:color=0x6c5cff@1:t=6,"
-        f"drawtext=text='{safe}':fontcolor=white:fontsize=54:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2:font=Sans"
-    )
-    cmd = [
-        FFMPEG, "-y", "-f", "lavfi", "-i", "color=c=0x10131d:s=640x360:d=0.1",
-        "-frames:v", "1", "-update", "1", "-vf", vf, str(dest),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    return proc.returncode == 0 and dest.exists() and dest.stat().st_size > 100
+    """Deprecated — keyword text badges are disabled (dated look / caption clash).
+
+    Kept as a no-op so old call sites fail soft instead of drawing purple boxes.
+    """
+    return False
 
 
 @app.route('/fetch-auto-overlays', methods=['POST'])
@@ -5634,10 +5704,22 @@ def fetch_auto_overlays():
     except (TypeError, ValueError):
         budget = 5
     mode = str(data.get("mode") or "auto").lower().strip()
-    if mode not in ("auto", "photo", "badge", "gif"):
-        mode = "auto"
     placement = str(data.get("placement") or "pip").lower().strip()
     use_ai_photos = bool(data.get("use_ai_photos")) and _gemini_image_ready()
+    # Keyword text badges are retired — map legacy "badge" → photo when possible.
+    if mode == "badge":
+        mode = "photo" if (_broll_any_photo_provider() or use_ai_photos) else "auto"
+    if mode not in ("auto", "photo", "gif"):
+        mode = "auto"
+
+    face_cx, face_cy = _face_hint_for_job(job_id if isinstance(job_id, str) else None)
+    caption_y = 82.0
+    if isinstance(job_id, str) and job_id in jobs:
+        st = (jobs[job_id].get("style") or {})
+        try:
+            caption_y = float(st.get("position_y") or caption_y)
+        except (TypeError, ValueError):
+            pass
 
     try:
         win_start = float(data["start"]) if data.get("start") is not None else 0.0
@@ -5739,15 +5821,8 @@ def fetch_auto_overlays():
                         pass
 
         if asset_path is None:
-            if mode in ("photo", "gif"):
-                continue
-            dest = ASSET_DIR / f"{asset_id}.png"
-            if not _make_keyword_badge_png(label, dest):
-                _safe_unlink(dest)
-                continue
-            asset_path = dest
-            source = "badge"
-            used_badge += 1
+            # No more purple keyword badges — skip until a real photo/GIF is found.
+            continue
 
         stem = asset_path.stem
         if stem != asset_id:
@@ -5761,7 +5836,10 @@ def fetch_auto_overlays():
             source=source,
         )
 
-        pos = _overlay_layout_for_index(len(overlays), placement)
+        pos = _caption_aware_overlay_layout(
+            len(overlays), placement,
+            face_cx=face_cx, face_cy=face_cy, caption_y_pct=caption_y,
+        )
         is_gif_asset = source == "gif" or _is_gif_path(asset_path)
         overlays.append({
             "asset_id": asset_id,
@@ -5774,7 +5852,7 @@ def fetch_auto_overlays():
             "y": pos["y"],
             "w": pos["w"],
             "h": pos["h"],
-            "opacity": 0.95 if source == "badge" else 1.0,
+            "opacity": 1.0,
             "fit": pos["fit"],
             "fade_in": 0.15,
             "fade_out": 0.25,
@@ -5802,11 +5880,10 @@ def fetch_auto_overlays():
             "gemini": used_gemini,
         },
         "hint": (
-            None if _broll_any_photo_provider() or use_ai_photos or mode == "badge"
-            else "No photo API key in this Studio process. "
-                 "On Replit: Tools → Secrets → PEXELS_API_KEY, then Stop + Run. "
-                 "Or enable Generate AI photos (needs GEMINI_API_KEY). "
-                 "Cursor secrets do not sync to Replit."
+            None if _broll_any_photo_provider() or use_ai_photos
+            else "No photo API key in this Studio process — keyword text badges are disabled. "
+                 "On Replit: Tools → Secrets → PEXELS_API_KEY (and/or GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX), "
+                 "then Stop + Run. Or enable Generate AI photos (GEMINI_API_KEY)."
         ),
     })
 
@@ -10479,12 +10556,13 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             dur = min(2.8, max(1.4, float(co.get("duration") or 1.8))) if photo_match else min(
                 2.2, max(1.2, float(co.get("duration") or 1.8))
             )
-            # Photo-match: prefer real stills (Gemini / stock); else keyword badge.
+            # Photo-match: prefer real stills (Gemini / stock). Never fall back
+            # to keyword text badges (dated purple boxes that fight captions).
             try:
                 asset_id = uuid.uuid4().hex
                 dest_stem = ASSET_DIR / asset_id
                 asset_path = None
-                source = "badge"
+                source = "photo"
                 if photo_match and (_broll_any_photo_provider() or use_ai):
                     asset_path, src_tag = _fetch_broll_image_for_keyword_ex(
                         str(co["text"]), dest_stem, use_ai=use_ai,
@@ -10501,64 +10579,63 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             except OSError:
                                 pass
                 if asset_path is None:
-                    dest = ASSET_DIR / f"{asset_id}.png"
-                    if _make_keyword_badge_png(str(co["text"]), dest):
-                        asset_path = dest
-                        source = "badge"
-                    else:
-                        _safe_unlink(dest)
-                if asset_path is not None:
-                    _write_asset_meta(
-                        asset_id,
-                        filename=f"{co['text']}{asset_path.suffix.lower()}",
-                        keyword=str(co["text"]),
-                        source=source,
+                    continue
+                _write_asset_meta(
+                    asset_id,
+                    filename=f"{co['text']}{asset_path.suffix.lower()}",
+                    keyword=str(co["text"]),
+                    source=source,
+                )
+                face_cx, face_cy = _face_hint_for_job(job_id)
+                cap_y = 82.0
+                try:
+                    cap_y = float((pack.get("style") or {}).get("position_y") or cap_y)
+                except (TypeError, ValueError):
+                    pass
+                if photo_match and source in ("photo", "gemini"):
+                    pos = _caption_aware_overlay_layout(
+                        i, "center",
+                        face_cx=face_cx, face_cy=face_cy, caption_y_pct=cap_y,
                     )
-                    if photo_match and source in ("photo", "gemini"):
-                        # Center full-bleed still with Ken Burns (Always look).
-                        pos = {"x": 0.08, "y": 0.12, "w": 0.84, "h": 0.55}
-                        layout = "center"
-                        opacity = 1.0
-                        border = 0
-                        ken = None
-                        if ken_default and ken_default.get("enabled"):
-                            ken = {
-                                "enabled": True,
-                                "direction": ken_default.get("direction") or "in",
-                                "intensity": ken_default.get("intensity") or "med",
-                            }
-                        else:
-                            ken = {"enabled": True, "direction": "in", "intensity": "med"}
+                    layout = pos.get("layout") or "center"
+                    opacity = 1.0
+                    border = 0
+                    if ken_default and ken_default.get("enabled"):
+                        ken = {
+                            "enabled": True,
+                            "direction": ken_default.get("direction") or "in",
+                            "intensity": ken_default.get("intensity") or "med",
+                        }
                     else:
-                        corners = [
-                            {"x": 0.58, "y": 0.06}, {"x": 0.04, "y": 0.06},
-                            {"x": 0.58, "y": 0.62}, {"x": 0.04, "y": 0.62},
-                        ]
-                        pos = corners[i % 4]
-                        pos = {"x": pos["x"], "y": pos["y"], "w": 0.36, "h": 0.20}
-                        layout = "pip_auto"
-                        opacity = 0.92
-                        border = 0
-                        ken = None
-                    overlay_track.append({
-                        "id": _uid_short(),
-                        "asset_id": asset_id,
-                        "keyword": str(co["text"])[:40],
-                        "source": source,
-                        "in": 0,
-                        "out": dur,
-                        "start": start,
-                        "x": pos["x"], "y": pos["y"],
-                        "w": pos["w"], "h": pos["h"],
-                        "opacity": opacity,
-                        "fit": "cover" if layout == "center" else "contain",
-                        "fade_in": 0.15, "fade_out": 0.25,
-                        "border_px": border,
-                        "layout": layout,
-                        "ken_burns": ken,
-                        "anchor": pieces[0]["id"] if pieces else None,
-                        "anchor_offset": start,
-                    })
+                        ken = {"enabled": True, "direction": "in", "intensity": "med"}
+                else:
+                    pos = _caption_aware_overlay_layout(
+                        i, "pip",
+                        face_cx=face_cx, face_cy=face_cy, caption_y_pct=cap_y,
+                    )
+                    layout = pos.get("layout") or "pip_auto"
+                    opacity = 1.0
+                    border = 0
+                    ken = None
+                overlay_track.append({
+                    "id": _uid_short(),
+                    "asset_id": asset_id,
+                    "keyword": str(co["text"])[:40],
+                    "source": source,
+                    "in": 0,
+                    "out": dur,
+                    "start": start,
+                    "x": pos["x"], "y": pos["y"],
+                    "w": pos["w"], "h": pos["h"],
+                    "opacity": opacity,
+                    "fit": pos.get("fit") or ("cover" if str(layout).startswith("pip") else "contain"),
+                    "fade_in": 0.15, "fade_out": 0.25,
+                    "border_px": border,
+                    "layout": layout,
+                    "ken_burns": ken,
+                    "anchor": pieces[0]["id"] if pieces else None,
+                    "anchor_offset": start,
+                })
             except Exception:
                 pass
 
@@ -10624,21 +10701,19 @@ _VISUAL_KEYWORDS = {
     "nature", "technology", "health", "travel", "work", "home",
     "success", "power", "brand", "product", "design", "video", "photo",
     "founder", "vendor", "market", "customer", "sale", "shop",
+    "event", "events", "nightlife", "concert", "venue", "park", "street",
+    "influencer", "influencers", "social", "media", "content", "creator",
 }
 
 
 def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
                                  budget: int) -> list:
-    """Pick visual keywords inside [t_in, t_out] for text-track callouts."""
-    stop = {
-        "the", "and", "a", "to", "of", "in", "i", "is", "that", "it", "on", "you",
-        "this", "for", "but", "with", "are", "have", "be", "at", "or", "as", "was",
-        "so", "if", "out", "not", "we", "my", "they", "your", "all", "do", "can",
-        "will", "about", "which", "up", "one", "there", "what", "would", "when",
-        "an", "she", "he", "their", "her", "his", "has", "who", "from", "by",
-        "some", "me", "how", "like", "just", "know", "then", "them", "now", "well",
-        "think", "um", "uh", "okay", "ok", "right",
-    }
+    """Pick visual keywords inside [t_in, t_out] from the STT transcript only.
+
+    Strict allow-list — never promote arbitrary long tokens (names like
+    \"Anthony\", place fragments like \"Central\") into B-roll search. That
+    was the \"metadata bleed / phonetic guess\" failure mode.
+    """
     out = []
     seen = set()
     for w in words or []:
@@ -10653,15 +10728,16 @@ def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
             continue
         text = str(w.get("word", "")).strip()
         clean = re.sub(r"[^a-zA-Z0-9]", "", text).lower()
-        if not clean or clean in stop or clean in seen:
+        if not clean or clean in seen:
             continue
-        if clean in _VISUAL_KEYWORDS or len(clean) > 5:
-            seen.add(clean)
-            out.append({
-                "text": text.strip(".,!?").capitalize(),
-                "start": ws,
-                "duration": 1.8,
-            })
+        if clean not in _VISUAL_KEYWORDS:
+            continue
+        seen.add(clean)
+        out.append({
+            "text": clean,
+            "start": ws,
+            "duration": max(1.4, min(2.4, we - ws + 1.2)),
+        })
     return out
 
 
@@ -11346,7 +11422,7 @@ def timeline_polish():
         "fps": int(data.get("fps") or 60),
         "face_reframe": data.get("face_reframe", True) is not False,
         "cut_stumbles": data.get("cut_stumbles", True) is not False,
-        "lower_thirds": data.get("lower_thirds", False) is not False,
+        "lower_thirds": bool(data.get("lower_thirds") is True),
         "export_edl": data.get("export_edl", True) is not False,
         "silence_engine": str(data.get("silence_engine") or "auto"),
         "composite_engine": str(data.get("composite_engine") or "ffmpeg"),

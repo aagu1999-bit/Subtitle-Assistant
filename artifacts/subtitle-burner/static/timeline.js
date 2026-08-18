@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-64-compile-stitch-qt-download-ts-ass";
+  const TL_BUILD = "studio-editor-build-65-no-text-badges-caption-aware-overlays";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -642,15 +642,17 @@
         if (photoOpt) photoOpt.disabled = !(photoReady || geminiReady);
         if (gifOpt) gifOpt.disabled = !st.google_cse;
         // If photos just became available and UI was stuck on badges, flip to Auto.
-        if ((photoReady || geminiReady) && modeEl.value === "badge" && autoOpt) {
+        if ((photoReady || geminiReady) && (modeEl.value === "badge" || !modeEl.value) && autoOpt) {
           modeEl.value = "auto";
         }
-        if (!(photoReady || geminiReady) && modeEl.value === "photo" && badgeOpt) {
-          modeEl.value = "badge";
+        if (!(photoReady || geminiReady) && modeEl.value === "photo" && autoOpt) {
+          modeEl.value = "auto";
         }
-        if (!st.google_cse && modeEl.value === "gif" && badgeOpt) {
-          modeEl.value = (photoReady || geminiReady) ? "auto" : "badge";
+        if (!st.google_cse && modeEl.value === "gif" && autoOpt) {
+          modeEl.value = (photoReady || geminiReady) ? "auto" : "auto";
         }
+        // Legacy badge option removed from the DOM — clear if still selected.
+        if (modeEl.value === "badge" && autoOpt) modeEl.value = "auto";
       }
       // Always session: re-apply photo/AI defaults after providers unlock.
       if (!opts.probe && isAlwaysPhotoMatchSession()) {
@@ -671,10 +673,11 @@
           const aliasNote = aliases.length
             ? " Found env names: " + aliases.join(", ") + "."
             : " No PEXELS_* env visible in this process.";
-          hintEl.innerHTML = "No photo API key in <em>this</em> Studio process — badges still work. "
-            + "On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>, then <strong>Stop + Run</strong> "
+          hintEl.innerHTML = "No photo API key in <em>this</em> Studio process — keyword text badges are off. "
+            + "On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code> "
+            + "(or <code>GOOGLE_CSE_API_KEY</code> + <code>GOOGLE_CSE_CX</code>), then <strong>Stop + Run</strong> "
             + "(Cursor secrets do not sync)." + aliasNote
-            + " Optional: <code>GEMINI_API_KEY</code> for AI photos.";
+            + " Optional: <code>GEMINI_API_KEY</code> + check Generate AI photos.";
         }
       }
       if (opts.probe && data.pexels_probe) {
@@ -6379,7 +6382,7 @@
       btn.disabled = true;
       btn.textContent = useAiPhotos && mode !== "badge" && mode !== "gif"
         ? "Generating AI photos…"
-        : (mode === "badge" ? "Making badges…" : (mode === "gif" ? "Fetching GIFs…" : "Fetching B-roll…"));
+        : (mode === "gif" ? "Fetching GIFs…" : "Fetching B-roll…");
     }
     try {
       let jobId = null;
@@ -6439,15 +6442,15 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const list = data.overlays || [];
+      const list = (data.overlays || []).filter((ov) => ov && ov.source !== "badge");
       if (!list.length) {
         alert(mode === "gif"
           ? "No GIFs found. Needs Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) with Image search on, and sites like giphy.com / tenor.com / imgur.com."
           : mode === "photo"
           ? (useAiPhotos
-            ? "No AI/stock photo B-roll found. Check GEMINI_API_KEY / stock keys, or try Badges."
-            : "No photo B-roll found. Check API keys / try Auto or Badges.")
-          : "No keyword overlay moments found in this window.");
+            ? "No AI/stock photo B-roll found. Check GEMINI_API_KEY / PEXELS_API_KEY (or Unsplash / Google CSE)."
+            : "No photo B-roll found. Set PEXELS_API_KEY or GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX, or enable Generate AI photos.")
+          : (data.hint || "No photo B-roll moments found in this window. Configure a photo provider or enable AI photos."));
         return;
       }
       // Review queue — do NOT auto-place on Overlay until Accept.
@@ -6457,9 +6460,7 @@
         if (always && ov.source !== "gif" && !(item.ken_burns && item.ken_burns.enabled)) {
           item.ken_burns = alwaysKenBurnsDefault();
         }
-        if (always && item.source !== "badge" && item.source !== "gif") {
-          applyBrollLayoutRecipe(item);
-        } else if ((!item.layout || item.layout === "pip_auto") && item.source !== "badge") {
+        if ((!item.layout || item.layout === "pip_auto") && item.source !== "gif") {
           applyBrollLayoutRecipe(item);
         }
         return item;
@@ -6474,18 +6475,17 @@
       if (st.gemini) bits.push(`${st.gemini} AI`);
       if (st.photo) bits.push(`${st.photo} photo`);
       if (st.gif) bits.push(`${st.gif} gif`);
-      if (st.badge) bits.push(`${st.badge} badge`);
       const scopeLabel = scope === "playhead" ? "near playhead" : (scope === "selected" ? "selected clip" : "full transcript");
       setSaveState(
         (always ? "Always · " : "")
         + `${list.length} B-roll suggestion${list.length === 1 ? "" : "s"} (${scopeLabel}) — Accept / As Main / Skip`
         + (bits.length ? ` · ${bits.join(", ")}` : "")
       );
-      if (!data.photo_ready && !data.gemini_image_ready && mode !== "badge" && st.badge && !st.photo && !st.gemini) {
+      if (!data.photo_ready && !data.gemini_image_ready && !st.photo && !st.gemini && !st.gif) {
         const hint = data.hint || "No photo API key in this Studio process. On Replit set PEXELS_API_KEY then Stop+Run.";
         const statusEl = $("tlBrollStatus");
         if (statusEl) {
-          statusEl.textContent = "Photos unavailable — showing badges. " + hint;
+          statusEl.textContent = "Photos unavailable — text badges disabled. " + hint;
           statusEl.style.color = "#f0c674";
         }
         refreshBrollStatus().catch(() => {});

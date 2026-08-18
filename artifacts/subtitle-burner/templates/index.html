@@ -1282,7 +1282,7 @@
                 <li>✓ Whisper stumble / retake cuts</li>
                 <li>✓ Alternating ±2% jump-cut zoom</li>
                 <li>✓ Face-bias reframe (optional)</li>
-                <li>✓ Keyword B-roll + lower-thirds (FFmpeg or MoviePy)</li>
+                <li>✓ Keyword photo B-roll (FFmpeg or MoviePy) — no text badges</li>
                 <li>✓ Contrast grade + speech compress + −14 LUFS</li>
                 <li>✓ Music sidechain duck (~−18 dB) if Music lane set</li>
                 <li>✓ Kdenlive + Shotcut projects + CMX EDL</li>
@@ -1359,10 +1359,9 @@
               <div class="tl-broll-controls" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
                 <label class="muted" style="font-size:.74rem">Auto B-roll from transcript
                   <select id="tlBrollMode" style="display:block;width:100%;margin-top:4px;padding:6px 8px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px">
-                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured, else badges)</option>
+                    <option value="auto" {% if broll_photo_ready %}selected{% endif %}>Auto (photos if configured)</option>
                     <option value="photo" {% if not broll_photo_ready %}disabled{% endif %}>Photos only (Pexels / Unsplash / Google CSE)</option>
                     <option value="gif" {% if not broll_google_cse %}disabled{% endif %}>GIFs (Google CSE · giphy/tenor/imgur)</option>
-                    <option value="badge" {% if not broll_photo_ready %}selected{% endif %}>Keyword badges only</option>
                   </select>
                 </label>
                 <label class="muted" style="font-size:.74rem">Scope
@@ -1394,7 +1393,11 @@
                     Photo providers ready. Suggest → <strong>Overlay</strong> or <strong>As Main</strong>. Each Suggest returns up to ~4–5 clips (max 12); run again / change Scope for more on long videos.
                     {% if broll_google_cse %} GIF mode uses Google CSE.{% endif %}
                   {% else %}
-                    No photo API keys in <em>this</em> Studio process — badges still work. On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>, then <strong>Stop + Run</strong> (Cursor secrets do not sync). GIF mode needs CSE.
+                    No photo API keys in <em>this</em> Studio process — keyword text badges are off.
+                    On Replit: Tools → Secrets → <code>PEXELS_API_KEY</code>
+                    (optional <code>UNSPLASH_ACCESS_KEY</code>, or
+                    <code>GOOGLE_CSE_API_KEY</code> + <code>GOOGLE_CSE_CX</code> for Google/GIF search),
+                    then <strong>Stop + Run</strong>. Or check “Generate AI photos” with <code>GEMINI_API_KEY</code>.
                   {% endif %}
                 </p>
               </div>
@@ -1530,7 +1533,8 @@
           Rough cut of the <strong>primary Main source</strong> (not your full timeline).
           Expect shorter length if silences/fillers are cut; jump-zooms punch every few seconds
           on long takes (visual beats). Face reframe samples the talking head when detectable.
-          Blank keywords → auto cues from the transcript (lower-thirds even without B-roll files).
+          Blank keywords → auto cues from the transcript for <strong>photo B-roll only</strong>
+          (no keyword text boxes — captions carry the words).
           <em>Does not burn captions</em> — still use ▶ Render for that.
           After polish, stay on this preview; scrubbing the timeline returns to the original source.
         </p>
@@ -1555,7 +1559,7 @@
             <input type="text" id="tlPolishKeywords" maxlength="400"
               placeholder="money, focus, gym — blank = auto from transcript"
               style="width:100%;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font:inherit">
-            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Comma-separated. Matches Media assets when present; otherwise lower-third text only.</p>
+            <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Comma-separated. Matches Media assets when present. Keyword text popups are disabled.</p>
           </div>
         </div>
         <div class="row">
@@ -1607,9 +1611,9 @@
         </div>
         <div class="row">
           <label style="min-width:110px">Lower-thirds</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
-            <input type="checkbox" id="tlPolishLowerThirds">
-            Keyword text accents with B-roll hits
+          <label style="display:flex;align-items:center;gap:8px;font-size:.86rem;opacity:.55">
+            <input type="checkbox" id="tlPolishLowerThirds" disabled>
+            Keyword text accents — retired (use captions + photo B-roll)
           </label>
         </div>
         <div class="row">
