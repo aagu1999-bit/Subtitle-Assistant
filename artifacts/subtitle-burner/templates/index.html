@@ -1095,7 +1095,7 @@
         <strong>AI Edit…</strong> (applies cuts + the pack) →
         <strong>Export clip</strong> →
         <strong>Add to compilation</strong>.
-        Or click <strong>Make mid-form</strong> to stitch related Shorts into one ~90s mini-episode.
+        Or click <strong>Make mid-form</strong> for one mini-episode, or <strong>Make 2–3 versions</strong> for Punchy / Story / Deep A/B cuts of the same story.
       </p>
 
       <div class="row" style="margin-bottom:14px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px;flex-wrap:wrap;gap:8px;align-items:center">
@@ -1152,21 +1152,24 @@
 
       <div class="row" style="align-items:center;margin-top:4px">
         <label style="min-width:120px" for="hlMidformGoal">Mid-form goal</label>
-        <select id="hlMidformGoal" title="Target length for one mini-episode stitched from Shorts">
+        <select id="hlMidformGoal" title="Target length for mid-form / A/B base goal">
           <option value="60">~60s</option>
           <option value="90" selected>~90s</option>
           <option value="120">~120s</option>
         </select>
-        <span class="muted" style="font-size:.78rem;margin-left:8px">One storyline · hook + related beats (YouTube mini-episode)</span>
+        <span class="muted" style="font-size:.78rem;margin-left:8px">Story ≈ goal · Punchy shorter · Deep longer (A/B versions)</span>
       </div>
 
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff"{% if not gemini_enabled %} disabled title="Set GEMINI_API_KEY to enable"{% endif %}>Find highlights</button>
         <button id="hlMidformBtn" class="btn btn-secondary" type="button" title="Stitch AI Shorts into one ~90s mini-episode and open Timeline"{% if not gemini_enabled %} disabled{% endif %}>🎞 Make mid-form</button>
+        <button id="hlMidformVersionsBtn" class="btn btn-secondary" type="button" title="Build Punchy / Story / Deep alternate cuts of the same story for A/B posting"{% if not gemini_enabled %} disabled{% endif %}>🧪 Make 2–3 versions</button>
         <button id="hlAiEditFullBtn" class="btn btn-secondary" type="button" title="Edit the entire uploaded video (not a Shorts chop) — optional purpose + style pack"{% if not gemini_enabled %} disabled{% endif %}>✨ AI Edit full video</button>
         <button id="batchExportBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;margin-left:auto">🚀 Batch Export All Shorts (ZIP / MP4)</button>
         <button id="hlMoreBtn" class="btn" style="display:none">↻ More options</button>
       </div>
+
+      <div id="hlMidformVersions" class="hidden" style="margin-top:12px;display:none;flex-direction:column;gap:8px"></div>
 
       <div id="hlStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
       <div id="hlResults" class="hl-gallery" style="margin-top:14px"></div>

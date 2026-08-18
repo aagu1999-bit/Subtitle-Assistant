@@ -7576,7 +7576,9 @@ def _heuristic_midform_order(clips: list, target_sec: float) -> list:
 
 
 def _gemini_midform_plan(words: list, clips: list, target_sec: float,
-                          format_type: str = "interview") -> dict:
+                          format_type: str = "interview",
+                          variant: str = "story",
+                          avoid_hook_indices: list | None = None) -> dict:
     """Ask Gemini to pick + order Shorts into one mini-episode toward target_sec."""
     pool = []
     for i, c in enumerate(clips):
@@ -7594,14 +7596,39 @@ def _gemini_midform_plan(words: list, clips: list, target_sec: float,
     # Keep prompt bounded
     if len(transcript) > 12000:
         transcript = transcript[:12000] + "\n…"
+    variant = (variant or "story").lower().strip()
+    if variant not in ("punchy", "story", "deep"):
+        variant = "story"
+    avoid_hook_indices = list(avoid_hook_indices or [])
+    variant_rules = {
+        "punchy": (
+            "VARIANT=punchy: shortest cut. Prefer 2–3 clips, sharpest alternate hook, "
+            "cut filler proof. Lean toward the low end of the duration range."
+        ),
+        "story": (
+            "VARIANT=story: most coherent mini-episode. Best narrative flow, classic hook→body→payoff."
+        ),
+        "deep": (
+            "VARIANT=deep: richer version of the SAME through-line. Prefer 3–5 clips, include "
+            "extra proof/context beats, lean toward the high end of the duration range."
+        ),
+    }[variant]
+    avoid_block = ""
+    if avoid_hook_indices:
+        avoid_block = (
+            f"Prefer a DIFFERENT hook than candidate index(es) {avoid_hook_indices} "
+            f"(those hooks are used by sibling A/B versions). Body overlap with siblings is OK "
+            f"when it serves the same through-line.\n"
+        )
     prompt = f"""You are a YouTube editor building ONE mid-form mini-episode from highlight clips of a single interview/talking-head source.
 
 Goal runtime: ~{target_sec:.0f} seconds (soft range {max(20, target_sec - 15):.0f}–{target_sec + 15:.0f}s).
 Format hint: {format_type}.
-
+{variant_rules}
+{avoid_block}
 Rules:
 - This is NOT a random compilation. Pick clips that share ONE through-line (same claim, story, or question).
-- Order: HOOK first (strongest open), then body beats that continue that story, optional soft closer.
+- Order: HOOK first (strongest open for THIS variant), then body beats that continue that story, optional soft closer.
 - Prefer seamless topical flow over raw viral_score. Drop high-score clips that belong to a different chapter.
 - Do not invent times — only use the candidate clip indices below (you may use a clip once).
 - Aim for 2–5 clips total so packed duration lands near {target_sec:.0f}s.
@@ -7657,7 +7684,155 @@ Return STRICT JSON:
         "title": str(result.get("title") or "Mini-episode")[:120],
         "why": str(result.get("why") or "")[:400],
         "engine": "gemini",
+        "variant": variant,
+        "hook_index": next(
+            (i for i, c in enumerate(clips)
+             if abs(float(c["start_time"]) - float(packed[0]["start_time"])) < 0.05
+             and abs(float(c["end_time"]) - float(packed[0]["end_time"])) < 0.05),
+            None,
+        ) if packed else None,
     }
+
+
+def _midform_variant_targets(base_goal: float) -> dict:
+    """A/B variant duration goals from a shared base (e.g. 90 → 60/90/110)."""
+    g = float(base_goal)
+    return {
+        "punchy": max(45.0, min(90.0, round(g * 0.67))),
+        "story": max(60.0, min(150.0, g)),
+        "deep": max(75.0, min(180.0, round(g * 1.22))),
+    }
+
+
+def _heuristic_midform_variants(clips: list, base_goal: float) -> list:
+    """Build Punchy / Story / Deep without Gemini — different hooks + budgets."""
+    if not clips:
+        return []
+    targets = _midform_variant_targets(base_goal)
+    ranked = sorted(clips, key=lambda c: (-int(c.get("viral_score") or 0), c["start_time"]))
+    versions = []
+    used_hooks = set()
+    specs = [
+        ("punchy", "Punchy", "Shortest alternate cut for A/B testing"),
+        ("story", "Story", "Most coherent mini-episode"),
+        ("deep", "Deep", "Richer proof version of the same story"),
+    ]
+    for key, label, blurb in specs:
+        # Pick hook: prefer unused high-score hooks
+        hook = None
+        for c in ranked:
+            sig = (round(c["start_time"], 1), round(c["end_time"], 1))
+            if sig in used_hooks:
+                continue
+            hook = c
+            used_hooks.add(sig)
+            break
+        if hook is None:
+            hook = ranked[0]
+        rest = sorted(
+            [c for c in clips if not (
+                abs(c["start_time"] - hook["start_time"]) < 0.05
+                and abs(c["end_time"] - hook["end_time"]) < 0.05
+            )],
+            key=lambda c: c["start_time"],
+        )
+        after = [c for c in rest if c["start_time"] >= hook["end_time"] - 1.0]
+        before = [c for c in rest if c not in after]
+        # Punchy: fewer after-hook beats; Deep: allow more
+        if key == "punchy":
+            body = (after + before)[:3]
+        elif key == "deep":
+            body = (after + before)[:6]
+        else:
+            body = (after + before)[:5]
+        ordered = [dict(hook, role="hook")] + [dict(c, role="body") for c in body]
+        packed, total = _pack_midform_segments(ordered, targets[key])
+        if not packed:
+            continue
+        versions.append({
+            "id": key,
+            "label": label,
+            "blurb": blurb,
+            "goal_duration": targets[key],
+            "packed_duration": total,
+            "delta_sec": round(total - targets[key], 1),
+            "title": f"{label}: {packed[0].get('title') or 'Mini-episode'}"[:120],
+            "throughline": blurb,
+            "why": f"Heuristic {label} pack",
+            "engine": "heuristic",
+            "variant": key,
+            "segment_count": len(packed),
+            "segments": packed,
+        })
+    return versions
+
+
+def _ensure_midform_clip_pool(job_id: str, *, format_type: str,
+                               refresh_shorts: bool, num_pool: int) -> list:
+    """Return normalized highlight pool, refreshing Shorts when sparse."""
+    job = jobs[job_id]
+    words = job.get("words") or []
+    pool_raw = list(job.get("clip_suggestions") or [])
+    if refresh_shorts or len(pool_raw) < 3:
+        transcript_text = _format_transcript_for_llm(words)
+        durations = [15, 30, 45, 60]
+        prompt = _build_clip_suggestion_prompt(
+            transcript_text, format_type, durations, max(5, min(12, int(num_pool))),
+        )
+        result = _gemini_generate_clip_suggestions(prompt)
+        clips_raw = result.get("clips", []) if isinstance(result, dict) else []
+        cleaned = []
+        for c in clips_raw:
+            try:
+                start = float(c.get("start_time"))
+                end = float(c.get("end_time"))
+                if end <= start or start < 0:
+                    continue
+                cleaned.append({
+                    "start_time": start,
+                    "end_time": end,
+                    "hook_start_time": float(c.get("hook_start_time", start)),
+                    "hook_end_time": float(c.get("hook_end_time", min(end, start + 5))),
+                    "hook_quote": str(c.get("hook_quote", ""))[:300],
+                    "title": str(c.get("title", ""))[:120],
+                    "reason": str(c.get("reason", ""))[:500],
+                    "viral_score": int(c.get("viral_score", 0)),
+                    "category": str(c.get("category", "")),
+                    "suggested_headline": str(c.get("suggested_headline", "")),
+                })
+            except (TypeError, ValueError):
+                continue
+        _snap_clip_to_target_durations(cleaned, words, durations)
+        cleaned = [c for c in cleaned if (c["end_time"] - c["start_time"]) >= 3]
+        cleaned.sort(key=lambda c: c["start_time"])
+        _detect_overlap_groups(cleaned, threshold=0.90)
+        if cleaned:
+            pool_raw = cleaned
+            job["clip_suggestions"] = cleaned
+            job["clip_format"] = format_type
+            _db_save_job(job_id)
+    clips = []
+    for c in pool_raw:
+        n = _normalize_highlight_clip(c)
+        if n:
+            clips.append(n)
+    return clips
+
+
+def _segments_payload(job_id: str, segs: list) -> list:
+    out = []
+    for s in segs or []:
+        out.append({
+            "source_job_id": job_id,
+            "start_time": s["start_time"],
+            "end_time": s["end_time"],
+            "duration": s.get("duration") or round(float(s["end_time"]) - float(s["start_time"]), 3),
+            "title": s.get("title") or "",
+            "hook_quote": s.get("hook_quote") or "",
+            "role": s.get("role") or "body",
+            "trimmed": bool(s.get("trimmed")),
+        })
+    return out
 
 
 def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
@@ -7790,19 +7965,151 @@ def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
     return payload
 
 
+
+def _build_midform_versions(job_id: str, *, base_goal: float = 90.0,
+                             format_type: str = "interview",
+                             refresh_shorts: bool = False,
+                             num_pool: int = 10) -> dict:
+    """A/B: 2–3 alternate mid-form cuts (Punchy / Story / Deep) of the same story."""
+    if job_id not in jobs:
+        raise ValueError("Unknown job")
+    job = jobs[job_id]
+    words = job.get("words") or []
+    if not words:
+        raise ValueError("Transcript not ready yet")
+    base_goal = max(45.0, min(180.0, float(base_goal)))
+    format_type = (format_type or "interview").lower()
+    if format_type not in _FORMAT_RUBRICS:
+        format_type = "interview"
+
+    clips = _ensure_midform_clip_pool(
+        job_id, format_type=format_type, refresh_shorts=refresh_shorts, num_pool=num_pool,
+    )
+    if len(clips) < 2:
+        raise ValueError(
+            "Need at least 2 AI Shorts moments to build A/B mid-form versions. "
+            "Run Find highlights first."
+        )
+
+    targets = _midform_variant_targets(base_goal)
+    versions: list[dict] = []
+    gemini_err = None
+    throughline = ""
+    used_hook_idxs: list[int] = []
+
+    for key, label, blurb in (
+        ("story", "Story", "Most coherent mini-episode"),
+        ("punchy", "Punchy", "Shortest alternate cut for A/B"),
+        ("deep", "Deep", "Richer proof version of the same story"),
+    ):
+        plan = None
+        try:
+            plan = _gemini_midform_plan(
+                words, clips, targets[key],
+                format_type=format_type,
+                variant=key,
+                avoid_hook_indices=used_hook_idxs if key != "story" else None,
+            )
+            if plan.get("throughline") and not throughline:
+                throughline = plan["throughline"]
+            elif throughline and not plan.get("throughline"):
+                plan["throughline"] = throughline
+            hi = plan.get("hook_index")
+            if isinstance(hi, int) and hi not in used_hook_idxs:
+                used_hook_idxs.append(hi)
+        except Exception as exc:
+            gemini_err = str(exc)
+            ai_logger.warning(f"[midform] variant {key} Gemini failed: {exc}")
+            plan = None
+        if not plan or not plan.get("segments"):
+            continue
+        segs = plan["segments"]
+        packed = float(plan.get("packed_duration") or sum(s["duration"] for s in segs))
+        versions.append({
+            "id": key,
+            "label": label,
+            "blurb": blurb,
+            "goal_duration": targets[key],
+            "packed_duration": round(packed, 1),
+            "delta_sec": round(packed - targets[key], 1),
+            "within_tolerance": abs(packed - targets[key]) <= 18.0,
+            "title": str(plan.get("title") or f"{label} mini-episode")[:120],
+            "throughline": str(plan.get("throughline") or throughline or "")[:240],
+            "why": str(plan.get("why") or blurb)[:400],
+            "engine": plan.get("engine") or "gemini",
+            "variant": key,
+            "segment_count": len(segs),
+            "segments": _segments_payload(job_id, segs),
+        })
+
+    if len(versions) < 2:
+        # Full heuristic set when Gemini only produced 0–1 usable variants.
+        heur = _heuristic_midform_variants(clips, base_goal)
+        for h in heur:
+            h["segments"] = _segments_payload(job_id, h.get("segments") or [])
+            h["job_id"] = job_id
+        if heur:
+            versions = heur
+            if gemini_err is None:
+                gemini_err = "Fell back to heuristic A/B packs"
+
+    if not versions:
+        raise ValueError("Could not build mid-form A/B versions")
+
+    # Deduplicate near-identical packs (same segment fingerprint)
+    def _fp(v: dict) -> tuple:
+        return tuple(
+            (round(float(s["start_time"]), 1), round(float(s["end_time"]), 1))
+            for s in (v.get("segments") or [])
+        )
+    unique = []
+    seen_fp = set()
+    for v in versions:
+        fp = _fp(v)
+        if fp in seen_fp:
+            continue
+        seen_fp.add(fp)
+        unique.append(v)
+    # Prefer keeping punchy/story/deep labels even if we had to drop one
+    versions = unique[:3]
+    if len(versions) < 2 and len(clips) >= 3:
+        # Force heuristic diversity
+        versions = _heuristic_midform_variants(clips, base_goal)
+        for h in versions:
+            h["segments"] = _segments_payload(job_id, h.get("segments") or [])
+
+    payload = {
+        "ok": True,
+        "job_id": job_id,
+        "base_goal": round(base_goal, 1),
+        "throughline": throughline or (versions[0].get("throughline") if versions else ""),
+        "version_count": len(versions),
+        "versions": versions,
+        "pool_size": len(clips),
+        "gemini_warning": gemini_err,
+        "engine": versions[0].get("engine") if versions else "unknown",
+    }
+    job["midform_versions"] = payload
+    _db_save_job(job_id)
+    print(
+        f"[midform] versions {job_id} base={base_goal:.0f}s n={len(versions)} "
+        f"durs={[v.get('packed_duration') for v in versions]}",
+        flush=True,
+    )
+    return payload
+
+
 @app.route("/midform-episode", methods=["POST"])
 def midform_episode():
-    """Build one mid-form mini-episode (~90s default) from AI Shorts of a job.
+    """Build one mid-form mini-episode, or 2–3 A/B versions (Punchy/Story/Deep).
 
     Body: {
       job_id,
       target_duration?: 60|90|120 (default 90),
       format?: shorts format,
-      refresh_shorts?: bool  # re-run Find highlights pool if true / sparse
+      refresh_shorts?: bool,
+      versions?: bool | int  # true/3 → A/B pack; false/omit → single Story cut
     }
-
-    Returns plan with segments (source ranges in story order) + goal vs packed length.
-    Client opens Timeline with those Main clips — does not bake MP4 unless user Compiles.
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
@@ -7814,17 +8121,64 @@ def midform_episode():
         target = 90.0
     format_type = (data.get("format") or jobs[job_id].get("clip_format") or "interview")
     refresh = bool(data.get("refresh_shorts"))
+    want_versions = data.get("versions")
+    multi = False
+    if want_versions is True or str(want_versions).lower() in ("1", "true", "yes", "ab", "all"):
+        multi = True
+    else:
+        try:
+            multi = int(want_versions) >= 2
+        except (TypeError, ValueError):
+            multi = False
     try:
-        plan = _build_midform_episode(
+        if multi:
+            plan = _build_midform_versions(
+                job_id,
+                base_goal=target,
+                format_type=str(format_type),
+                refresh_shorts=refresh,
+            )
+        else:
+            plan = _build_midform_episode(
+                job_id,
+                target_sec=target,
+                format_type=str(format_type),
+                refresh_shorts=refresh,
+            )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        ai_logger.exception(f"[midform] failed for {job_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+    return jsonify(plan)
+
+
+@app.route("/midform-versions", methods=["POST"])
+def midform_versions():
+    """Alias: always returns Punchy / Story / Deep A/B packs."""
+    data = request.get_json(force=True) or {}
+    data["versions"] = True
+    # Reuse handler logic via internal call shape
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job — select a transcribed video first"}), 404
+    try:
+        target = float(data.get("target_duration") or data.get("goal_duration") or 90)
+    except (TypeError, ValueError):
+        target = 90.0
+    format_type = (data.get("format") or jobs[job_id].get("clip_format") or "interview")
+    refresh = bool(data.get("refresh_shorts"))
+    try:
+        plan = _build_midform_versions(
             job_id,
-            target_sec=target,
+            base_goal=target,
             format_type=str(format_type),
             refresh_shorts=refresh,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        ai_logger.exception(f"[midform] failed for {job_id}: {e}")
+        ai_logger.exception(f"[midform] versions failed for {job_id}: {e}")
         return jsonify({"error": str(e)}), 500
     return jsonify(plan)
 

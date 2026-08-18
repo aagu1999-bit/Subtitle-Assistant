@@ -3883,16 +3883,169 @@ function _fmtMidformClock(sec) {
   return m + ":" + String(r).padStart(2, "0");
 }
 
+async function _openMidformVersion(version, baseGoal) {
+  const segs = (version && version.segments) || [];
+  if (!segs.length) {
+    alert("That version has no segments.");
+    return;
+  }
+  const goal = Number(version.goal_duration) || baseGoal || 90;
+  const packed = Number(version.packed_duration) || 0;
+  try {
+    saveCompileQueue(segs.map((s) => ({
+      source_job_id: s.source_job_id || currentJobId,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      title: s.title || "",
+      hook_quote: s.hook_quote || "",
+      source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+      role: s.role || "",
+    })));
+    if (typeof renderCompileQueue === "function") renderCompileQueue();
+    if (compileLabelEl) {
+      compileLabelEl.value = (version.title || version.label || "Mid-form") + " (~" + Math.round(goal) + "s)";
+    }
+  } catch (e) {
+    console.warn("[midform] queue seed failed", e);
+  }
+  if (typeof window.openTimelineEditor !== "function") {
+    alert(
+      `${version.label || "Version"} ready (${_fmtMidformClock(packed)}). Timeline still loading — use Compilation → Send to timeline.`
+    );
+    return;
+  }
+  await window.openTimelineEditor(null, {
+    clips: segs.map((s) => ({
+      source_job_id: s.source_job_id || currentJobId,
+      start_time: s.start_time,
+      end_time: s.end_time,
+    })),
+    replace: true,
+    newProject: true,
+    label: (version.title || version.label || "Mid-form") + ` (${_fmtMidformClock(packed)})`,
+    canvas: "16x9",
+    longForm: true,
+  });
+}
+
+function _renderMidformVersions(payload) {
+  const host = $("hlMidformVersions");
+  if (!host) return;
+  const versions = (payload && payload.versions) || [];
+  host.innerHTML = "";
+  if (!versions.length) {
+    host.style.display = "none";
+    host.classList.add("hidden");
+    return;
+  }
+  host.classList.remove("hidden");
+  host.style.display = "flex";
+
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap";
+  head.innerHTML =
+    `<strong style="color:#c8c0ff">A/B mid-form versions</strong>` +
+    `<span class="muted" style="font-size:.78rem">Same story · different hook / pacing · pick one to open in Timeline</span>`;
+  host.appendChild(head);
+  if (payload.throughline) {
+    const tl = document.createElement("p");
+    tl.className = "muted";
+    tl.style.cssText = "margin:0;font-size:.8rem";
+    tl.textContent = payload.throughline;
+    host.appendChild(tl);
+  }
+
+  versions.forEach((v) => {
+    const card = document.createElement("div");
+    card.style.cssText = "padding:12px 14px;background:#181c28;border:1px solid #3b4252;border-radius:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+    const meta = document.createElement("div");
+    meta.style.cssText = "flex:1;min-width:180px";
+    const packed = Number(v.packed_duration) || 0;
+    const goal = Number(v.goal_duration) || 0;
+    const delta = Number(v.delta_sec) || (packed - goal);
+    meta.innerHTML =
+      `<div style="font-weight:700;color:#fff">${String(v.label || v.id || "Version").replace(/</g, "&lt;")}` +
+      ` <span class="pill" style="font-size:.72rem;margin-left:6px">${_fmtMidformClock(packed)}</span></div>` +
+      `<div class="muted" style="font-size:.78rem;margin-top:2px">goal ${_fmtMidformClock(goal)} · ${(delta >= 0 ? "+" : "") + Math.round(delta)}s · ${v.segment_count || (v.segments || []).length} beats</div>` +
+      (v.blurb ? `<div class="muted" style="font-size:.74rem;margin-top:4px">${String(v.blurb).replace(/</g, "&lt;")}</div>` : "") +
+      (v.title ? `<div style="font-size:.8rem;margin-top:4px;color:#c8c0ff">${String(v.title).replace(/</g, "&lt;")}</div>` : "");
+    card.appendChild(meta);
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "btn btn-primary";
+    openBtn.style.cssText = "background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff";
+    openBtn.textContent = "Open in Timeline";
+    openBtn.onclick = () => _openMidformVersion(v, payload.base_goal);
+    card.appendChild(openBtn);
+    host.appendChild(card);
+  });
+}
+
+async function runMakeMidformVersions() {
+  if (!requireReadyTranscript("Mid-form A/B versions")) return;
+  const goalEl = $("hlMidformGoal");
+  const goal = goalEl ? parseInt(goalEl.value, 10) : 90;
+  const btn = $("hlMidformVersionsBtn");
+  const singleBtn = $("hlMidformBtn");
+  if (btn) btn.disabled = true;
+  if (singleBtn) singleBtn.disabled = true;
+  if (hlFindBtn) hlFindBtn.disabled = true;
+  if (hlStatus) {
+    hlStatus.textContent = `Building Punchy / Story / Deep versions (base ~${goal}s)…`;
+  }
+  try {
+    const res = await fetch("/midform-versions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        target_duration: goal,
+        format: (hlFormatEl && hlFormatEl.value) || "interview",
+        refresh_shorts: !(hlResults && hlResults.querySelectorAll(".hl-card").length >= 3),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      throw new Error((data && data.error) || `HTTP ${res.status}`);
+    }
+    const versions = data.versions || [];
+    if (versions.length < 2) {
+      throw new Error("Need at least 2 distinct versions — try Find highlights first, then retry.");
+    }
+    window._midformVersions = data;
+    _renderMidformVersions(data);
+    if (hlStatus) {
+      const bits = versions.map((v) =>
+        `${v.label || v.id} ${_fmtMidformClock(v.packed_duration)}`
+      );
+      hlStatus.innerHTML =
+        `<strong>${versions.length} versions</strong> · ${bits.join(" · ")}` +
+        (data.throughline ? `<br><span class="muted">${String(data.throughline).replace(/</g, "&lt;")}</span>` : "") +
+        (data.gemini_warning ? `<br><span class="muted">${String(data.gemini_warning).replace(/</g, "&lt;")}</span>` : "");
+    }
+  } catch (e) {
+    if (hlStatus) hlStatus.textContent = "A/B mid-form failed: " + e.message;
+  } finally {
+    if (btn && !$("hlGeminiDisabled")) btn.disabled = false;
+    if (singleBtn && !$("hlGeminiDisabled")) singleBtn.disabled = false;
+    if (hlFindBtn && !$("hlGeminiDisabled")) hlFindBtn.disabled = false;
+  }
+}
+
 async function runMakeMidform() {
   if (!requireReadyTranscript("Mid-form episode")) return;
   const goalEl = $("hlMidformGoal");
   const goal = goalEl ? parseInt(goalEl.value, 10) : 90;
   const btn = $("hlMidformBtn");
+  const verBtn = $("hlMidformVersionsBtn");
   if (btn) btn.disabled = true;
+  if (verBtn) verBtn.disabled = true;
   if (hlFindBtn) hlFindBtn.disabled = true;
   if (hlStatus) {
     hlStatus.textContent = `Building mid-form mini-episode (goal ~${goal}s)…`;
   }
+  const host = $("hlMidformVersions");
+  if (host) { host.style.display = "none"; host.classList.add("hidden"); host.innerHTML = ""; }
   try {
     const res = await fetch("/midform-episode", {
       method: "POST",
@@ -3958,35 +4111,26 @@ async function runMakeMidform() {
       })), (hlFormatEl && hlFormatEl.value) || "interview");
     } catch (e) { /* non-fatal */ }
 
-    if (typeof window.openTimelineEditor !== "function") {
-      alert(
-        `Mid-form ready (${_fmtMidformClock(packed)} / goal ${_fmtMidformClock(goal)}).\n` +
-        "Timeline is still loading — open Compilation and Send to timeline, or try again."
-      );
-      return;
-    }
-    await window.openTimelineEditor(null, {
-      clips: segs.map((s) => ({
-        source_job_id: s.source_job_id || currentJobId,
-        start_time: s.start_time,
-        end_time: s.end_time,
-      })),
-      replace: true,
-      newProject: true,
-      label: (data.title || "Mid-form") + ` (${_fmtMidformClock(packed)})`,
-      canvas: "16x9",
-      longForm: true,
-    });
+    await _openMidformVersion({
+      label: "Story",
+      title: data.title || "Mid-form",
+      goal_duration: goal,
+      packed_duration: packed,
+      segments: segs,
+    }, goal);
   } catch (e) {
     if (hlStatus) hlStatus.textContent = "Mid-form failed: " + e.message;
   } finally {
     if (btn && !$("hlGeminiDisabled")) btn.disabled = false;
+    if (verBtn && !$("hlGeminiDisabled")) verBtn.disabled = false;
     if (hlFindBtn && !$("hlGeminiDisabled")) hlFindBtn.disabled = false;
   }
 }
 
 const hlMidformBtn = $("hlMidformBtn");
 if (hlMidformBtn) hlMidformBtn.onclick = () => runMakeMidform();
+const hlMidformVersionsBtn = $("hlMidformVersionsBtn");
+if (hlMidformVersionsBtn) hlMidformVersionsBtn.onclick = () => runMakeMidformVersions();
 
 // =====================================================================
 // AI Edit plan modal — style + intensity → seeded timeline project
