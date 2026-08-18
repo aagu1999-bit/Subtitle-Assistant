@@ -6,7 +6,11 @@
 (function () {
   "use strict";
 
+<<<<<<< HEAD
   const TL_BUILD = "studio-editor-build-73-chunked-upload";
+=======
+  const TL_BUILD = "studio-editor-build-74-silence-taste";
+>>>>>>> origin/cursor/silence-taste-protect-83fb
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);

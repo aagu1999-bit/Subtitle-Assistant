@@ -904,12 +904,14 @@
               </label>
             </div>
 
-            <div class="row" style="margin-bottom:0">
+            <div class="row" style="margin-bottom:0;gap:8px;flex-wrap:wrap;align-items:center">
               <button type="button" id="tightenPreviewBtn" class="btn btn-secondary">Scan for gaps</button>
+              <button type="button" id="tightenTasteBtn" class="btn btn-secondary" title="Keep comedy/shock/dramatic pauses — identify silence first, then protect beats">Protect taste beats</button>
               <span id="tightenPreviewSummary" class="muted" style="font-size:.82rem"></span>
             </div>
             <p class="muted" style="font-size:.78rem;margin:8px 0 0">
               Gap markers appear inline in the Subtitles list above. Tick <strong>Keep</strong> on any gap to preserve it.
+              <strong>Protect taste beats</strong> auto-keeps pauses after humor, shock, or dramatic lines (Gemini when configured).
             </p>
           </div>
         </section>

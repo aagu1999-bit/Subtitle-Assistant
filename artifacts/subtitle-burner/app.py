@@ -7978,9 +7978,73 @@ Sources:
 def preview_tightening():
     """Compute silence-compression stats and per-gap details for a job.
 
-    Body: {job_id, max_gap, target_gap, preserved_gap_starts?}
-    Returns: {stats: {...}, gaps: [{index, start, end, duration,
-                                    preserved, context_before, context_after}, …]}
+    Body: {job_id, max_gap, target_gap, preserved_gap_starts?, taste_protect?}
+    Returns: {stats, gaps, taste?}
+
+    Identification (gap scan) stays separate from taste: when taste_protect is
+    true, humor/shock pauses are auto-marked preserved before execution.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words")
+    if not words:
+        return jsonify({"error": "Transcript not available for this job."}), 400
+    try:
+        max_gap = float(data.get("max_gap", 1.0))
+        target_gap = float(data.get("target_gap", 0.3))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid threshold values"}), 400
+    preserved = list(data.get("preserved_gap_starts") or [])
+    taste_protect = data.get("taste_protect") is True or str(
+        data.get("taste_protect") or ""
+    ).lower() in ("1", "true", "yes")
+
+    # Identify gaps first (no taste yet) so we can score them.
+    base = compute_silence_compression(
+        words,
+        max_gap=max_gap,
+        target_gap=target_gap,
+        preserved_gap_starts=preserved,
+    )
+    taste = {"protected_starts": [], "decisions": [], "engine": "none"}
+    if taste_protect and base.get("gaps"):
+        try:
+            taste = _taste_protect_silence_gaps(words, base["gaps"])
+        except Exception as exc:
+            ai_logger.warning(f"[taste] preview protect failed: {exc}")
+            taste = {"protected_starts": [], "decisions": [], "engine": "error"}
+        # Merge LLM/heuristic protects into preserved, then recompute execution.
+        merged_preserved = sorted({
+            round(float(t), 1) for t in (preserved + list(taste.get("protected_starts") or []))
+        })
+        comp = compute_silence_compression(
+            words,
+            max_gap=max_gap,
+            target_gap=target_gap,
+            preserved_gap_starts=merged_preserved,
+        )
+        gaps = _apply_taste_to_gaps(comp.get("gaps") or [], taste)
+        stats = dict(comp["stats"])
+        stats["taste_protected"] = len(taste.get("protected_starts") or [])
+        stats["taste_engine"] = taste.get("engine")
+        return jsonify({
+            "stats": stats,
+            "gaps": gaps,
+            "taste": taste,
+            "preserved_gap_starts": merged_preserved,
+        })
+
+    return jsonify({"stats": base["stats"], "gaps": base["gaps"], "taste": taste})
+
+
+@app.route("/taste-protect-gaps", methods=["POST"])
+def taste_protect_gaps():
+    """Run taste scoring on current silence gaps and return Protected starts.
+
+    Body: {job_id, max_gap?, target_gap?, preserved_gap_starts?}
+    Does not cut anything — only returns which gaps editing taste would keep.
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
@@ -7995,13 +8059,17 @@ def preview_tightening():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid threshold values"}), 400
     preserved = data.get("preserved_gap_starts") or []
-    comp = compute_silence_compression(
-        words,
-        max_gap=max_gap,
-        target_gap=target_gap,
+    base = compute_silence_compression(
+        words, max_gap=max_gap, target_gap=target_gap,
         preserved_gap_starts=preserved,
     )
-    return jsonify({"stats": comp["stats"], "gaps": comp["gaps"]})
+    taste = _taste_protect_silence_gaps(words, base.get("gaps") or [])
+    gaps = _apply_taste_to_gaps(base.get("gaps") or [], taste)
+    return jsonify({
+        "taste": taste,
+        "gaps": gaps,
+        "protected_gap_starts": taste.get("protected_starts") or [],
+    })
 
 
 @app.route("/rename-job", methods=["POST"])
@@ -11716,11 +11784,275 @@ def _merge_cut_ranges(ranges: list) -> list:
     return out
 
 
+
+def _preceding_sentence_for_gap(words: list, gap_start: float, max_words: int = 28) -> str:
+    """Words spoken immediately before a silence gap (for taste scoring)."""
+    before = []
+    for w in words or []:
+        try:
+            we = float(w.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if we <= gap_start + 0.05:
+            before.append(str(w.get("word", "") or "").strip())
+    before = [t for t in before if t]
+    if not before:
+        return ""
+    # Prefer the last clause after ., !, ? — else last N words.
+    joined = " ".join(before[-max_words:])
+    for sep in ("! ", "? ", ". "):
+        if sep in joined:
+            joined = joined.rsplit(sep, 1)[-1]
+            if sep.startswith("!"):
+                joined = joined  # already stripped
+            break
+    return joined.strip()
+
+
+_TASTE_PROTECT_SENTIMENTS = frozenset({
+    "humor", "comedy", "joke", "punchline", "shock", "surprise",
+    "dramatic", "reveal", "emotional", "rhetorical", "suspense", "beat",
+})
+
+_TASTE_PROTECT_PHRASES = (
+    "wait for it", "get this", "here's the thing", "heres the thing",
+    "plot twist", "no joke", "dead serious", "you won't believe",
+    "you wont believe", "check this out", "listen to this",
+)
+
+
+def _heuristic_taste_decisions(gaps: list) -> list[dict]:
+    """Offline taste: protect pauses after punchy / shocked delivery without Gemini."""
+    out = []
+    for g in gaps or []:
+        try:
+            start = float(g.get("start", 0) or 0)
+            dur = float(g.get("duration") or (float(g.get("end", 0)) - start))
+        except (TypeError, ValueError):
+            continue
+        before = str(g.get("context_before") or g.get("sentence_before") or "").strip()
+        low = before.lower()
+        sentiment = None
+        reason = None
+        if any(p in low for p in _TASTE_PROTECT_PHRASES) and dur >= 0.7:
+            sentiment = "suspense"
+            reason = "Setup phrase before pause — keep the beat"
+        elif before.endswith("!") and dur >= 0.9:
+            sentiment = "shock" if dur >= 1.2 else "punchline"
+            reason = "Exclamation before silence — protect the reaction beat"
+        elif before.endswith("?") and dur >= 1.0:
+            sentiment = "rhetorical"
+            reason = "Question hang — keep space for the answer beat"
+        elif dur >= 1.4 and len(before.split()) <= 8 and before.endswith((".", "…", "...")):
+            # Short declarative line then long pause → often intentional.
+            sentiment = "dramatic"
+            reason = "Short line + long pause — likely intentional beat"
+        if sentiment:
+            out.append({
+                "start": round(start, 1),
+                "decision": "protect",
+                "sentiment": sentiment,
+                "reason": reason,
+                "source": "heuristic",
+            })
+        else:
+            out.append({
+                "start": round(start, 1),
+                "decision": "cut",
+                "sentiment": "dead_air",
+                "reason": "No taste cue — safe to tighten",
+                "source": "heuristic",
+            })
+    return out
+
+
+def _taste_protect_silence_gaps(words: list, gaps: list) -> dict:
+    """Score already-identified silence gaps; return which to Protect.
+
+    Separation of concerns (editing taste):
+      1) Identification — silencedetect / word-gap scan finds candidate pauses
+      2) Taste — this function only decides protect vs cut (never invents gaps)
+      3) Execution — caller skips Protected starts when building cut ranges
+
+    Humor / shock / dramatic beats → Protected. Dead air / breath → Cut.
+    Uses Gemini when configured; always runs a heuristic pass as baseline.
+    """
+    enriched = []
+    for g in gaps or []:
+        if not isinstance(g, dict):
+            continue
+        try:
+            start = float(g.get("start", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        item = dict(g)
+        item["start"] = start
+        if not item.get("sentence_before"):
+            item["sentence_before"] = _preceding_sentence_for_gap(words, start)
+        if not item.get("context_before") and item.get("sentence_before"):
+            item["context_before"] = item["sentence_before"]
+        enriched.append(item)
+
+    if not enriched:
+        return {
+            "protected_starts": [],
+            "decisions": [],
+            "engine": "none",
+        }
+
+    decisions = _heuristic_taste_decisions(enriched)
+    engine = "heuristic"
+    by_start = {round(float(d["start"]), 1): d for d in decisions}
+
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if api_key and len(enriched) > 0:
+        # Cap payload — long interviews can have dozens of gaps.
+        sample = enriched[:40]
+        lines = []
+        for i, g in enumerate(sample):
+            sent = (g.get("sentence_before") or g.get("context_before") or "").strip()[:180]
+            after = (g.get("context_after") or "").strip()[:80]
+            try:
+                dur = float(g.get("duration") or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            lines.append(
+                f"{i}. t={float(g['start']):.1f}s dur={dur:.1f}s "
+                f"| BEFORE: \"{sent}\" | AFTER: \"{after}\""
+            )
+        prompt = f"""You are an expert dialogue editor deciding which SILENCE GAPS to protect.
+
+Each gap was already IDENTIFIED by audio/transcript timing. Your only job is TASTE —
+do NOT invent new gaps. For each gap, decide:
+- "protect" if the pause after the preceding line carries comedy, shock, drama, a punchline,
+  rhetorical hang, or emotional beat (cutting it would kill the timing).
+- "cut" if it is dead air, a breath, an um-pause, or unmotivated lag.
+
+Sentiment tags when protecting: humor, punchline, shock, dramatic, rhetorical, suspense, emotional.
+Be conservative: prefer cut for ordinary breaths; protect when the silence IS the joke or the reaction.
+
+Gaps:
+{chr(10).join(lines)}
+
+Return STRICT JSON:
+{{
+  "gaps": [
+    {{"index": 0, "decision": "protect", "sentiment": "humor", "reason": "short punchline needs hang"}},
+    {{"index": 1, "decision": "cut", "sentiment": "dead_air", "reason": "unmotivated breath"}}
+  ]
+}}
+"""
+        try:
+            result = _gemini_generate_clip_suggestions(prompt)
+            raw = result.get("gaps") if isinstance(result, dict) else None
+            if isinstance(raw, list):
+                engine = "gemini+heuristic"
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        idx = int(item.get("index"))
+                    except (TypeError, ValueError):
+                        continue
+                    if idx < 0 or idx >= len(sample):
+                        continue
+                    start_key = round(float(sample[idx]["start"]), 1)
+                    decision = str(item.get("decision") or "cut").strip().lower()
+                    if decision not in ("protect", "cut"):
+                        decision = "cut"
+                    sentiment = str(item.get("sentiment") or "").strip().lower() or (
+                        "beat" if decision == "protect" else "dead_air"
+                    )
+                    # Sentiment override: humor/shock etc. force protect even if model said cut.
+                    if decision == "cut" and sentiment in _TASTE_PROTECT_SENTIMENTS:
+                        decision = "protect"
+                    reason = str(item.get("reason") or "")[:200]
+                    by_start[start_key] = {
+                        "start": start_key,
+                        "decision": decision,
+                        "sentiment": sentiment,
+                        "reason": reason or (
+                            "LLM taste protect" if decision == "protect" else "LLM: safe to cut"
+                        ),
+                        "source": "gemini",
+                    }
+        except Exception as exc:
+            ai_logger.warning(f"[taste] Gemini silence taste failed; heuristic only: {exc}")
+
+    decisions = [by_start[k] for k in sorted(by_start.keys())]
+    protected = [
+        d["start"] for d in decisions
+        if d.get("decision") == "protect"
+        or str(d.get("sentiment") or "").lower() in _TASTE_PROTECT_SENTIMENTS
+    ]
+    # De-dupe while preserving order
+    seen = set()
+    protected_starts = []
+    for t in protected:
+        key = round(float(t), 1)
+        if key in seen:
+            continue
+        seen.add(key)
+        protected_starts.append(key)
+
+    print(
+        f"[taste] silence protect {len(protected_starts)}/{len(enriched)} "
+        f"gaps engine={engine}",
+        flush=True,
+    )
+    return {
+        "protected_starts": protected_starts,
+        "decisions": decisions,
+        "engine": engine,
+    }
+
+
+def _apply_taste_to_gaps(gaps: list, taste: dict | None) -> list:
+    """Annotate gap dicts with taste fields and flip preserved for Protected starts."""
+    if not gaps:
+        return []
+    taste = taste or {}
+    decisions = {
+        round(float(d.get("start", 0)), 1): d
+        for d in (taste.get("decisions") or [])
+        if isinstance(d, dict)
+    }
+    protected = {round(float(t), 1) for t in (taste.get("protected_starts") or [])}
+    out = []
+    for g in gaps:
+        if not isinstance(g, dict):
+            continue
+        item = dict(g)
+        try:
+            key = round(float(item.get("start", 0)), 1)
+        except (TypeError, ValueError):
+            out.append(item)
+            continue
+        dec = decisions.get(key) or {}
+        if key in protected or dec.get("decision") == "protect":
+            item["preserved"] = True
+            item["taste_protected"] = True
+        item["taste_decision"] = dec.get("decision") or (
+            "protect" if item.get("preserved") else "cut"
+        )
+        item["taste_sentiment"] = dec.get("sentiment") or ""
+        item["taste_reason"] = dec.get("reason") or ""
+        item["taste_source"] = dec.get("source") or taste.get("engine") or ""
+        out.append(item)
+    return out
+
+
 def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
                                 max_gap: float = 1.0,
                                 include_fillers: bool = True,
-                                include_silence: bool = True) -> dict:
-    """Build filler + silence cut ranges (source seconds) for AI Trim parity."""
+                                include_silence: bool = True,
+                                taste_protect: bool = True) -> dict:
+    """Build filler + silence cut ranges (source seconds) for AI Trim parity.
+
+    Silence identification (word gaps) is separate from execution: when
+    ``taste_protect`` is on, humor/shock/dramatic pauses are Protected and
+    never become cut ranges.
+    """
     window = [w for w in (words or [])
               if float(w.get("end", 0) or 0) > t_in
               and float(w.get("start", 0) or 0) < t_out]
@@ -11738,15 +12070,40 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
                 cuts.append([ws, we])
                 filler_count += 1
     silence_gaps = []
+    taste_meta = {"protected_starts": [], "decisions": [], "engine": "none"}
     if include_silence and len(window) >= 2:
         silence = compute_silence_compression(window, max_gap=max_gap, target_gap=0.25)
-        for g in silence.get("gaps") or []:
-            if g.get("preserved"):
+        raw_gaps = silence.get("gaps") or []
+        if taste_protect and raw_gaps:
+            try:
+                taste_meta = _taste_protect_silence_gaps(window, raw_gaps)
+            except Exception as exc:
+                ai_logger.warning(f"[taste] recommended-cuts protect failed: {exc}")
+                taste_meta = {"protected_starts": [], "decisions": [], "engine": "error"}
+            raw_gaps = _apply_taste_to_gaps(raw_gaps, taste_meta)
+        protected = {
+            round(float(t), 1) for t in (taste_meta.get("protected_starts") or [])
+        }
+        for g in raw_gaps:
+            if g.get("preserved") or g.get("taste_protected"):
+                silence_gaps.append({
+                    "start": float(g["start"]),
+                    "end": float(g["end"]),
+                    "duration": float(g.get("duration") or 0),
+                    "preserved": True,
+                    "taste_protected": True,
+                    "taste_sentiment": g.get("taste_sentiment") or "",
+                    "taste_reason": g.get("taste_reason") or "",
+                    "context_before": g.get("context_before", ""),
+                    "context_after": g.get("context_after", ""),
+                })
                 continue
             try:
                 gs = max(t_in, float(g["start"]))
                 ge = min(t_out, float(g["end"]))
             except (KeyError, TypeError, ValueError):
+                continue
+            if round(gs, 1) in protected:
                 continue
             # Cut the middle of the gap, leave target_gap/2 on each side.
             cut_len = (ge - gs) - 0.25
@@ -11758,6 +12115,10 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
                 cuts.append([mid_start, mid_end])
                 silence_gaps.append({
                     "start": gs, "end": ge, "duration": ge - gs,
+                    "preserved": False,
+                    "taste_protected": False,
+                    "taste_sentiment": g.get("taste_sentiment") or "",
+                    "taste_reason": g.get("taste_reason") or "",
                     "context_before": g.get("context_before", ""),
                     "context_after": g.get("context_after", ""),
                 })
@@ -11767,13 +12128,15 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
     for a, b in merged:
         kind = "silence"
         for g in silence_gaps:
-            if a < g["end"] and b > g["start"]:
+            if a < g["end"] and b > g["start"] and not g.get("preserved"):
                 kind = "silence"
                 labeled.append({
                     "start": a, "end": b,
                     "kind": kind,
                     "context_before": g.get("context_before", ""),
                     "context_after": g.get("context_after", ""),
+                    "taste_sentiment": g.get("taste_sentiment", ""),
+                    "taste_reason": g.get("taste_reason", ""),
                 })
                 break
         else:
@@ -11788,11 +12151,14 @@ def _recommended_cuts_for_words(words: list, t_in: float, t_out: float,
         "cut_details": labeled,
         "filler_count": filler_count,
         "silence_gaps": silence_gaps,
+        "taste": taste_meta,
         "stats": {
             "cut_count": len(merged),
             "seconds_removed": round(cut_total, 2),
             "window_in": t_in,
             "window_out": t_out,
+            "taste_protected": len(taste_meta.get("protected_starts") or []),
+            "taste_engine": taste_meta.get("engine"),
         },
     }
 

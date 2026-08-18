@@ -2012,13 +2012,21 @@ function _buildInlineGapRow(g) {
   const textEl = document.createElement("span");
   textEl.className = "phrase-text gap-label";
   const _gapRange = `${fmtTime(g.start)} → ${fmtTime(g.end)}`;
+  const tasteBit = g.taste_sentiment
+    ? ` · ${g.taste_sentiment}`
+    : "";
   textEl.textContent = g.preserved
-    ? `⏸ Pause kept (${_gapRange})`
+    ? `⏸ Pause kept${tasteBit} (${_gapRange})`
     : `✂ Cutting silence (${_gapRange})`;
+  if (g.taste_reason) {
+    textEl.title = g.taste_reason;
+  }
 
   const label = document.createElement("label");
   label.className = "gap-toggle";
-  label.title = "Tick to PRESERVE this pause";
+  label.title = g.taste_reason
+    ? `Taste: ${g.taste_reason}`
+    : "Tick to PRESERVE this pause";
   const cb = document.createElement("input");
   cb.type = "checkbox";
   cb.checked = !!g.preserved;
@@ -2032,7 +2040,7 @@ function _buildInlineGapRow(g) {
     g.preserved = cb.checked;
     row.classList.toggle("preserved", cb.checked);
     textEl.textContent = cb.checked
-      ? `⏸ Pause kept (${_gapRange})`
+      ? `⏸ Pause kept${tasteBit} (${_gapRange})`
       : `✂ Cutting silence (${_gapRange})`;
     // Refresh summary numbers from server.
     if (typeof _tFetchPreview === "function") _tFetchPreview(false);
@@ -5539,9 +5547,11 @@ const _tTargetGap = $("tightenTargetGap");
 const _tMaxGapLbl = $("tightenMaxGapVal");
 const _tTargetGapLbl = $("tightenTargetGapVal");
 const _tPreviewBtn = $("tightenPreviewBtn");
+const _tTasteBtn = $("tightenTasteBtn");
 const _tPreviewSummary = $("tightenPreviewSummary");
 const _tGapListEl = $("tightenGapList");
 let _tLastGaps = [];
+let _tTasteOn = false;
 
 if (_tEnabled && _tControls) {
   _tEnabled.addEventListener("change", () => {
@@ -5609,10 +5619,12 @@ function _tRenderSummary(stats) {
   const newd = stats.new_duration || 0;
   const pct = orig > 0 ? Math.round((cut / orig) * 100) : 0;
   const preserved = stats.gaps_total - stats.gaps_cut;
+  const tasteN = stats.taste_protected || 0;
   const preservedNote = preserved > 0 ? `, ${preserved} preserved` : "";
+  const tasteNote = tasteN > 0 ? ` · ${tasteN} taste-protected` : "";
   _tPreviewSummary.style.color = "#7cd98a";
   _tPreviewSummary.textContent =
-    `${stats.gaps_cut} cut${preservedNote} → ${cut.toFixed(1)}s removed (${pct}% tighter). New length ≈ ${newd.toFixed(1)}s (was ${orig.toFixed(1)}s).`;
+    `${stats.gaps_cut} cut${preservedNote}${tasteNote} → ${cut.toFixed(1)}s removed (${pct}% tighter). New length ≈ ${newd.toFixed(1)}s (was ${orig.toFixed(1)}s).`;
 }
 
 function _tRenderGapList(gaps) {
@@ -5644,6 +5656,14 @@ function _tRenderGapList(gaps) {
       ? `<span>“…${_tEscapeHTML(before)}”</span> <span class="tighten-gap-arrow">→</span> <span>“${_tEscapeHTML(after)}…”</span>`
       : `<span>“${_tEscapeHTML(after)}…”</span>`;
     left.appendChild(ctx);
+    if (g.taste_reason || g.taste_sentiment) {
+      const tasteEl = document.createElement("div");
+      tasteEl.className = "muted";
+      tasteEl.style.cssText = "font-size:.72rem;margin-top:2px";
+      const tag = g.taste_sentiment ? `[${g.taste_sentiment}] ` : "";
+      tasteEl.textContent = tag + (g.taste_reason || (g.preserved ? "Protected" : "Cut"));
+      left.appendChild(tasteEl);
+    }
     row.appendChild(left);
 
     const label = document.createElement("label");
@@ -5682,14 +5702,21 @@ function _tRenderGapList(gaps) {
   });
 }
 
-async function _tFetchPreview(showLoading) {
+async function _tFetchPreview(showLoading, opts) {
+  opts = opts || {};
+  const useTaste = opts.taste_protect === true || _tTasteOn;
   if (!currentJobId) {
     if (_tPreviewSummary) _tPreviewSummary.textContent = "Open a transcribed video first.";
     return;
   }
   if (showLoading && _tPreviewBtn) {
     _tPreviewBtn.disabled = true;
-    if (_tPreviewSummary) _tPreviewSummary.textContent = "Scanning gaps…";
+    if (_tTasteBtn) _tTasteBtn.disabled = true;
+    if (_tPreviewSummary) {
+      _tPreviewSummary.textContent = useTaste
+        ? "Scanning gaps + scoring taste beats…"
+        : "Scanning gaps…";
+    }
   }
   try {
     const preserved = (getStyle().tighten_silences || {}).preserved_gap_starts || [];
@@ -5701,12 +5728,26 @@ async function _tFetchPreview(showLoading) {
         max_gap: parseFloat(_tMaxGap.value),
         target_gap: parseFloat(_tTargetGap.value),
         preserved_gap_starts: preserved,
+        taste_protect: !!useTaste,
       }),
     });
     const j = await res.json();
     if (j.error) throw new Error(j.error);
     _tLastGaps = j.gaps || [];
+    // Persist auto-protected starts so Enable on render keeps them.
+    if (useTaste && Array.isArray(j.preserved_gap_starts)) {
+      const set = new Set(
+        (preserved || []).map((x) => Math.round(parseFloat(x) * 10) / 10)
+      );
+      j.preserved_gap_starts.forEach((t) => {
+        set.add(Math.round(parseFloat(t) * 10) / 10);
+      });
+      _tCommitPreservedSet(set);
+    }
     _tRenderSummary(j.stats);
+    if (_tGapListEl && typeof _tRenderGapList === "function") {
+      _tRenderGapList(_tLastGaps);
+    }
     // Inline: re-render the transcript phrase list so gap markers appear
     // between phrases at their actual time positions.
     if (Array.isArray(currentWords) && currentWords.length) {
@@ -5719,16 +5760,26 @@ async function _tFetchPreview(showLoading) {
     }
   } finally {
     if (showLoading && _tPreviewBtn) _tPreviewBtn.disabled = false;
+    if (_tTasteBtn) _tTasteBtn.disabled = false;
   }
 }
 
-if (_tPreviewBtn) _tPreviewBtn.onclick = () => _tFetchPreview(true);
+if (_tPreviewBtn) _tPreviewBtn.onclick = () => {
+  _tTasteOn = false;
+  _tFetchPreview(true, { taste_protect: false });
+};
+if (_tTasteBtn) {
+  _tTasteBtn.onclick = () => {
+    _tTasteOn = true;
+    _tFetchPreview(true, { taste_protect: true });
+  };
+}
 
 // Re-scan automatically if the user changes thresholds AFTER an initial scan.
 function _tMaybeReScan() {
   if (Array.isArray(_tLastGaps) && _tLastGaps.length >= 0 &&
       _tPreviewSummary && _tPreviewSummary.textContent.trim() !== "") {
-    _tFetchPreview(false);
+    _tFetchPreview(false, { taste_protect: _tTasteOn });
   }
 }
 if (_tMaxGap) _tMaxGap.addEventListener("change", _tMaybeReScan);
