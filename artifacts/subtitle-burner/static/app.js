@@ -5974,8 +5974,11 @@ function _renderAssemblyBar() {
     return activeTabBtn ? activeTabBtn.getAttribute("data-tab") : "ingest";
   }
 
-  function showExportProgress(msg) {
-    if (typeof setActiveTab === "function") setActiveTab("ingest");
+  function showExportProgress(msg, opts) {
+    opts = opts || {};
+    // Timeline exports stay on the editor — switching to Ingest mid-render made
+    // people download the wrong / older Instant Export MP4 (or audio remux).
+    if (!opts.stayOnTab && typeof setActiveTab === "function") setActiveTab("ingest");
     if (progress) progress.classList.remove("hidden");
     if (result) result.classList.add("hidden");
     if (barFill) barFill.style.width = "8%";
@@ -5995,8 +5998,9 @@ function _renderAssemblyBar() {
     }
   }
 
-  function showDownloadReadyBanner(output) {
+  function showDownloadReadyBanner(output, opts) {
     if (!output) return;
+    opts = opts || {};
     const id = "studioDownloadBanner";
     let ban = document.getElementById(id);
     if (!ban) {
@@ -6010,17 +6014,22 @@ function _renderAssemblyBar() {
         "font-size:14px;color:#fff";
       document.body.appendChild(ban);
     }
-    const url = "/download/" + encodeURIComponent(String(output).replace(/^\/+/, ""));
+    const url = "/download/" + encodeURIComponent(String(output).replace(/^\/+/, ""))
+      + "?t=" + Date.now();
+    const label = opts.timeline
+      ? "Timeline export ready — full edited video (not Instant Export / audio-only)."
+      : "Export ready — tap Download to save the MP4.";
     ban.innerHTML =
-      `<span style="flex:1;min-width:140px;line-height:1.35">Export ready — tap Download to save the MP4.</span>` +
+      `<span style="flex:1;min-width:140px;line-height:1.35">${label}</span>` +
       `<a class="btn btn-primary" href="${url}" download style="text-decoration:none;white-space:nowrap">⬇ Download MP4</a>` +
       `<button type="button" class="btn btn-secondary" data-dismiss style="white-space:nowrap">Dismiss</button>`;
     const dismiss = ban.querySelector("[data-dismiss]");
     if (dismiss) dismiss.onclick = () => ban.remove();
   }
 
-  function triggerVideoDownload(output) {
+  function triggerVideoDownload(output, opts) {
     if (!output) return;
+    opts = opts || {};
     const name = String(output).split("/").pop() || "export.mp4";
     const url = "/download/" + encodeURIComponent(name) + "?t=" + Date.now();
     try {
@@ -6033,7 +6042,7 @@ function _renderAssemblyBar() {
       a.click();
       setTimeout(() => a.remove(), 500);
     } catch (e) { /* iOS may block programmatic click after async */ }
-    showDownloadReadyBanner(output);
+    showDownloadReadyBanner(output, opts);
   }
   window.triggerVideoDownload = triggerVideoDownload;
   window.showDownloadReadyBanner = showDownloadReadyBanner;
@@ -6043,8 +6052,8 @@ function _renderAssemblyBar() {
     if (!output) return;
     const isMobile = !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
     // Desktop Instant Export lands on Ingest where the classic download link lives.
-    // On mobile / Timeline stay-put so the user can tap the download banner.
-    if (!opts.stayOnTab && !isMobile && typeof setActiveTab === "function") {
+    // Timeline / mobile stay put so the user downloads the correct file.
+    if (!opts.stayOnTab && !opts.timeline && !isMobile && typeof setActiveTab === "function") {
       setActiveTab("ingest");
     }
     if (barFill) barFill.style.width = "100%";
@@ -6055,15 +6064,19 @@ function _renderAssemblyBar() {
       try { player.load(); } catch (e) { /* ignore */ }
     }
     if (dl) {
-      dl.href = "/download/" + output;
+      dl.href = "/download/" + output + "?t=" + Date.now();
       dl.setAttribute("download", String(output).split("/").pop() || "export.mp4");
     }
     if (renderBtn) renderBtn.disabled = false;
-    if (statusText) statusText.textContent = "Done — download ready";
+    if (statusText) {
+      statusText.textContent = opts.timeline
+        ? "Done — Timeline MP4 ready"
+        : "Done — download ready";
+    }
     try {
       result?.scrollIntoView?.({ behavior: "smooth", block: "start" });
     } catch (e) { /* ignore */ }
-    triggerVideoDownload(output);
+    triggerVideoDownload(output, { timeline: !!opts.timeline });
   }
 
   window.showExportProgressUpdate = showExportProgressUpdate;
@@ -6130,15 +6143,24 @@ function _renderAssemblyBar() {
 
       const tabName = activeStudioTab();
 
-      // Timeline project with Main clips → Timeline Render (full edit bake).
-      if (!opts.forceJobRender && tabName === "editor" && typeof window.renderTimelineVideo === "function") {
-        const hasMain = !!(window.timelineHasMainClips && window.timelineHasMainClips());
-        if (hasMain) {
-          showExportProgress("Rendering Timeline… (long videos can take several minutes)");
-          const s = await window.renderTimelineVideo();
-          if (s && s.output) showExportDone(s.output, { jobId: s.job_id || (window.tl && window.tl.job_id) });
-          return;
+      // Prefer Timeline bake whenever a project has Main clips — even if the
+      // user is on Caption look / Ingest. Instant Export of the source job is
+      // captions-only and is NOT the edited Timeline.
+      const hasMain = !!(window.timelineHasMainClips && window.timelineHasMainClips());
+      if (!opts.forceJobRender && hasMain && typeof window.renderTimelineVideo === "function") {
+        if (typeof setActiveTab === "function" && tabName !== "editor") {
+          setActiveTab("editor");
         }
+        showExportProgress("Rendering Timeline… (full edited video)", { stayOnTab: true });
+        const s = await window.renderTimelineVideo();
+        if (s && s.output) {
+          showExportDone(s.output, {
+            jobId: s.job_id || (window.tl && window.tl.job_id),
+            stayOnTab: true,
+            timeline: true,
+          });
+        }
+        return;
       }
 
       if (tabName === "highlights") {
@@ -6157,7 +6179,7 @@ function _renderAssemblyBar() {
         }
       }
 
-      // Default: burn current job captions → MP4 (works even when Render UI is in a hidden tab).
+      // Default: burn current job captions → MP4 (no Timeline Main clips).
       await renderCurrentJobDirect();
     } catch (e) {
       alert("Instant Export failed: " + (e && e.message ? e.message : e));

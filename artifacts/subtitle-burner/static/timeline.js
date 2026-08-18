@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-71-serpapi";
+  const TL_BUILD = "studio-editor-build-72-timeline-export-video";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -5710,9 +5710,13 @@
               v.play().catch(() => {});
             }
             if (typeof window.showExportDone === "function") {
-              window.showExportDone(s.output, { jobId: tl.job_id, stayOnTab: true });
+              window.showExportDone(s.output, {
+                jobId: tl.job_id,
+                stayOnTab: true,
+                timeline: true,
+              });
             } else if (typeof window.triggerVideoDownload === "function") {
-              window.triggerVideoDownload(s.output);
+              window.triggerVideoDownload(s.output, { timeline: true });
             }
             resolve(s);
           } else if (s.status === "error") {

@@ -4002,10 +4002,24 @@ def mux_audio_into_video(silent_video: Path, audio_source: Path, output_path: Pa
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
+        "-movflags", "+faststart",
         str(output_path),
     ]
     if not _run_ffmpeg_encode(cmd, what="audio remux"):
         raise RuntimeError("Audio remux failed (see ffmpeg_render.log)")
+    _assert_mp4_has_video(output_path, "audio remux")
+
+
+def _assert_mp4_has_video(path: Path, what: str = "export") -> None:
+    """Reject audio-only / empty MP4s so downloads never ship a soundtrack without picture."""
+    if not path or not path.exists() or path.stat().st_size < 1024:
+        raise RuntimeError(f"{what} produced an empty or missing file.")
+    probe = _probe_media_streams(path)
+    if not probe.get("has_video"):
+        raise RuntimeError(
+            f"{what} produced an audio-only file (no video track). "
+            "Try Timeline → ▶ Render again, or turn off Look → Audio Enhancement and re-export."
+        )
 
 
 def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Path, job_id: str = "") -> str:
@@ -5138,12 +5152,12 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         if not silent_is_cache:
             _safe_unlink(silent_path)
 
-        # Verify the final mp4 is real and non-empty before announcing done.
-        # This catches the "render said done but nothing showed up" case.
+        # Verify the final mp4 is real video (not audio-only) before announcing done.
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError(
                 "Render produced an empty or missing output file."
             )
+        _assert_mp4_has_video(output_path, "Instant Export")
         # Touch mtime so the cleanup loop's TTL clock resets on completion.
         output_path.touch()
 
@@ -9359,8 +9373,14 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
                     _safe_unlink(out_path)
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1024:
-                    muxed = True
-                    break
+                    try:
+                        _assert_mp4_has_video(out_path, "audio enhance mux")
+                        muxed = True
+                        break
+                    except RuntimeError as ve:
+                        mux_err = str(ve)
+                        _safe_unlink(out_path)
+                        continue
                 mux_err = (proc.stderr or "")[-800:]
             if not muxed:
                 raise RuntimeError(f"Mux enhanced audio failed: {mux_err}")
@@ -10932,6 +10952,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError("Render produced an empty or missing output file.")
+        _assert_mp4_has_video(output_path, "Timeline Render")
         output_path.touch()
 
         jobs[job_id]["status"] = "done"
