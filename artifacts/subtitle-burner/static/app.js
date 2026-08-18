@@ -3876,6 +3876,118 @@ if (hlMoreBtn) {
   hlMoreBtn.onclick = () => _runFindHighlights({ avoid: _hlAvoidRanges.slice() });
 }
 
+function _fmtMidformClock(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return m + ":" + String(r).padStart(2, "0");
+}
+
+async function runMakeMidform() {
+  if (!requireReadyTranscript("Mid-form episode")) return;
+  const goalEl = $("hlMidformGoal");
+  const goal = goalEl ? parseInt(goalEl.value, 10) : 90;
+  const btn = $("hlMidformBtn");
+  if (btn) btn.disabled = true;
+  if (hlFindBtn) hlFindBtn.disabled = true;
+  if (hlStatus) {
+    hlStatus.textContent = `Building mid-form mini-episode (goal ~${goal}s)…`;
+  }
+  try {
+    const res = await fetch("/midform-episode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentJobId,
+        target_duration: goal,
+        format: (hlFormatEl && hlFormatEl.value) || "interview",
+        // Refresh pool when we have few/no Shorts yet
+        refresh_shorts: !(_hlAvoidRanges && _hlAvoidRanges.length) && !(
+          hlResults && hlResults.querySelectorAll(".hl-card").length >= 3
+        ),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      throw new Error((data && data.error) || `HTTP ${res.status}`);
+    }
+    const segs = data.segments || [];
+    if (!segs.length) throw new Error("No segments returned");
+
+    // Mirror plan into the compilation queue for optional Compile bake.
+    try {
+      saveCompileQueue(segs.map((s) => ({
+        source_job_id: s.source_job_id || currentJobId,
+        start_time: s.start_time,
+        end_time: s.end_time,
+        title: s.title || "",
+        hook_quote: s.hook_quote || "",
+        source_filename: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "",
+        role: s.role || "",
+      })));
+      if (typeof renderCompileQueue === "function") renderCompileQueue();
+      if (compileLabelEl) {
+        compileLabelEl.value = (data.title || "Mid-form") + " (~" + goal + "s)";
+      }
+    } catch (e) {
+      console.warn("[midform] queue seed failed", e);
+    }
+
+    const packed = Number(data.packed_duration) || 0;
+    const delta = Number(data.delta_sec) || (packed - goal);
+    const deltaLabel = (delta >= 0 ? "+" : "") + delta.toFixed(0) + "s vs goal";
+    if (hlStatus) {
+      hlStatus.innerHTML =
+        `<strong>${_fmtMidformClock(packed)}</strong> packed` +
+        ` · goal ${_fmtMidformClock(goal)} (${deltaLabel})` +
+        ` · ${segs.length} beat${segs.length === 1 ? "" : "s"}` +
+        (data.throughline ? `<br><span class="muted">${String(data.throughline).replace(/</g, "&lt;")}</span>` : "") +
+        (data.engine === "heuristic" ? `<br><span class="muted">Heuristic pack (${data.gemini_warning ? "Gemini unavailable" : "fallback"})</span>` : "");
+    }
+
+    // Show the chosen beats in the Shorts gallery when possible.
+    try {
+      renderHighlights(segs.map((s) => ({
+        start_time: s.start_time,
+        end_time: s.end_time,
+        title: (s.role === "hook" ? "Hook · " : "") + (s.title || "Beat"),
+        hook_quote: s.hook_quote || "",
+        reason: data.throughline || data.why || "Mid-form beat",
+        viral_score: s.role === "hook" ? 95 : 70,
+        category: "midform",
+      })), (hlFormatEl && hlFormatEl.value) || "interview");
+    } catch (e) { /* non-fatal */ }
+
+    if (typeof window.openTimelineEditor !== "function") {
+      alert(
+        `Mid-form ready (${_fmtMidformClock(packed)} / goal ${_fmtMidformClock(goal)}).\n` +
+        "Timeline is still loading — open Compilation and Send to timeline, or try again."
+      );
+      return;
+    }
+    await window.openTimelineEditor(null, {
+      clips: segs.map((s) => ({
+        source_job_id: s.source_job_id || currentJobId,
+        start_time: s.start_time,
+        end_time: s.end_time,
+      })),
+      replace: true,
+      newProject: true,
+      label: (data.title || "Mid-form") + ` (${_fmtMidformClock(packed)})`,
+      canvas: "16x9",
+      longForm: true,
+    });
+  } catch (e) {
+    if (hlStatus) hlStatus.textContent = "Mid-form failed: " + e.message;
+  } finally {
+    if (btn && !$("hlGeminiDisabled")) btn.disabled = false;
+    if (hlFindBtn && !$("hlGeminiDisabled")) hlFindBtn.disabled = false;
+  }
+}
+
+const hlMidformBtn = $("hlMidformBtn");
+if (hlMidformBtn) hlMidformBtn.onclick = () => runMakeMidform();
+
 // =====================================================================
 // AI Edit plan modal — style + intensity → seeded timeline project
 // =====================================================================

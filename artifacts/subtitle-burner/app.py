@@ -7466,6 +7466,369 @@ def auto_process_job():
         ai_logger.error(f"[{job_id}] Auto-process failed: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+def _normalize_highlight_clip(c: dict) -> dict | None:
+    """Coerce a Shorts / suggestion dict into a mid-form segment candidate."""
+    if not isinstance(c, dict):
+        return None
+    try:
+        start = float(c.get("start_time", c.get("start", 0)) or 0)
+        end = float(c.get("end_time", c.get("end", 0)) or 0)
+    except (TypeError, ValueError):
+        return None
+    if end <= start + 2.5:
+        return None
+    return {
+        "start_time": round(start, 3),
+        "end_time": round(end, 3),
+        "duration": round(end - start, 3),
+        "title": str(c.get("title") or "Beat")[:120],
+        "hook_quote": str(c.get("hook_quote") or "")[:300],
+        "reason": str(c.get("reason") or "")[:400],
+        "viral_score": int(c.get("viral_score") or 0),
+        "category": str(c.get("category") or "")[:80],
+        "hook_start_time": float(c.get("hook_start_time", start) or start),
+        "hook_end_time": float(c.get("hook_end_time", min(end, start + 5)) or min(end, start + 5)),
+    }
+
+
+def _pack_midform_segments(ordered: list, target_sec: float,
+                            tolerance: float = 15.0) -> tuple[list, float]:
+    """Greedy pack story-ordered beats toward target (±tolerance).
+
+    Always keeps the first beat (hook). Soft-trims the last beat if needed.
+    """
+    if not ordered:
+        return [], 0.0
+    lo = max(20.0, float(target_sec) - float(tolerance))
+    hi = float(target_sec) + float(tolerance)
+    packed: list[dict] = []
+    total = 0.0
+    for i, raw in enumerate(ordered):
+        seg = dict(raw)
+        try:
+            dur = float(seg["end_time"]) - float(seg["start_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dur < 2.5:
+            continue
+        # Skip heavy overlap with already-packed material (same source timeline).
+        overlap_bad = False
+        for p in packed:
+            ov = min(float(seg["end_time"]), float(p["end_time"])) - max(
+                float(seg["start_time"]), float(p["start_time"])
+            )
+            shorter = min(dur, float(p["end_time"]) - float(p["start_time"]))
+            if shorter > 0 and ov / shorter > 0.55:
+                overlap_bad = True
+                break
+        if overlap_bad and packed:
+            continue
+        if not packed:
+            # Hook always included (trim only if absurdly longer than hi).
+            if dur > hi and dur > target_sec * 1.35:
+                seg["end_time"] = round(float(seg["start_time"]) + hi, 3)
+                seg["trimmed"] = True
+                dur = hi
+            packed.append(seg)
+            total = dur
+            continue
+        if total >= lo and total >= target_sec - 5 and len(packed) >= 2:
+            break
+        if total + dur <= hi:
+            packed.append(seg)
+            total += dur
+            if total >= target_sec and len(packed) >= 2:
+                break
+            continue
+        remain = hi - total
+        if remain >= 10:
+            seg = dict(seg)
+            seg["end_time"] = round(float(seg["start_time"]) + remain, 3)
+            seg["trimmed"] = True
+            packed.append(seg)
+            total += remain
+        break
+    # If still short and we skipped candidates, that's ok — report under-goal.
+    for i, seg in enumerate(packed):
+        seg["duration"] = round(float(seg["end_time"]) - float(seg["start_time"]), 3)
+        if not seg.get("role"):
+            seg["role"] = "hook" if i == 0 else "body"
+    return packed, round(total, 2)
+
+
+def _heuristic_midform_order(clips: list, target_sec: float) -> list:
+    """No-Gemini fallback: strongest hook first, then chronological non-overlapping body."""
+    if not clips:
+        return []
+    ranked = sorted(clips, key=lambda c: (-int(c.get("viral_score") or 0), c["start_time"]))
+    hook = ranked[0]
+    rest = sorted(
+        [c for c in clips if c is not hook],
+        key=lambda c: c["start_time"],
+    )
+    # Prefer body that continues after the hook in source time when possible.
+    after = [c for c in rest if c["start_time"] >= hook["end_time"] - 1.0]
+    before = [c for c in rest if c not in after]
+    ordered = [dict(hook, role="hook")] + [dict(c, role="body") for c in (after + before)]
+    packed, _ = _pack_midform_segments(ordered, target_sec)
+    return packed
+
+
+def _gemini_midform_plan(words: list, clips: list, target_sec: float,
+                          format_type: str = "interview") -> dict:
+    """Ask Gemini to pick + order Shorts into one mini-episode toward target_sec."""
+    pool = []
+    for i, c in enumerate(clips):
+        pool.append({
+            "index": i,
+            "start_time": c["start_time"],
+            "end_time": c["end_time"],
+            "duration": c["duration"],
+            "title": c["title"],
+            "hook_quote": c.get("hook_quote") or "",
+            "reason": c.get("reason") or "",
+            "viral_score": c.get("viral_score") or 0,
+        })
+    transcript = _format_transcript_for_llm(words)
+    # Keep prompt bounded
+    if len(transcript) > 12000:
+        transcript = transcript[:12000] + "\n…"
+    prompt = f"""You are a YouTube editor building ONE mid-form mini-episode from highlight clips of a single interview/talking-head source.
+
+Goal runtime: ~{target_sec:.0f} seconds (soft range {max(20, target_sec - 15):.0f}–{target_sec + 15:.0f}s).
+Format hint: {format_type}.
+
+Rules:
+- This is NOT a random compilation. Pick clips that share ONE through-line (same claim, story, or question).
+- Order: HOOK first (strongest open), then body beats that continue that story, optional soft closer.
+- Prefer seamless topical flow over raw viral_score. Drop high-score clips that belong to a different chapter.
+- Do not invent times — only use the candidate clip indices below (you may use a clip once).
+- Aim for 2–5 clips total so packed duration lands near {target_sec:.0f}s.
+- Reject joins that jump topics or speakers mid-thought.
+
+Candidates:
+{json.dumps(pool, ensure_ascii=False)}
+
+Transcript (context):
+{transcript}
+
+Return STRICT JSON:
+{{
+  "throughline": "one sentence describing the mini-episode story",
+  "title": "3-8 word episode title",
+  "ordered_indices": [2, 0, 5],
+  "roles": ["hook", "body", "body"],
+  "why": "why this order tells a complete mini-story"
+}}
+"""
+    result = _gemini_generate_clip_suggestions(prompt)
+    if not isinstance(result, dict):
+        raise RuntimeError("Gemini mid-form returned non-object")
+    idxs = result.get("ordered_indices") or result.get("indices") or []
+    if not isinstance(idxs, list) or not idxs:
+        raise RuntimeError("Gemini mid-form returned no ordered_indices")
+    roles = result.get("roles") if isinstance(result.get("roles"), list) else []
+    ordered = []
+    seen = set()
+    for n, raw_i in enumerate(idxs):
+        try:
+            i = int(raw_i)
+        except (TypeError, ValueError):
+            continue
+        if i < 0 or i >= len(clips) or i in seen:
+            continue
+        seen.add(i)
+        seg = dict(clips[i])
+        role = str(roles[n] if n < len(roles) else ("hook" if not ordered else "body")).lower()
+        if role not in ("hook", "body", "closer", "button"):
+            role = "hook" if not ordered else "body"
+        seg["role"] = role
+        ordered.append(seg)
+    if not ordered:
+        raise RuntimeError("Gemini mid-form indices invalid")
+    # Ensure first role is hook
+    ordered[0]["role"] = "hook"
+    packed, total = _pack_midform_segments(ordered, target_sec)
+    return {
+        "segments": packed,
+        "packed_duration": total,
+        "throughline": str(result.get("throughline") or "")[:240],
+        "title": str(result.get("title") or "Mini-episode")[:120],
+        "why": str(result.get("why") or "")[:400],
+        "engine": "gemini",
+    }
+
+
+def _build_midform_episode(job_id: str, *, target_sec: float = 90.0,
+                            format_type: str = "interview",
+                            refresh_shorts: bool = False,
+                            num_pool: int = 8) -> dict:
+    """Plan a ~target_sec mini-episode from AI Shorts for one source job."""
+    if job_id not in jobs:
+        raise ValueError("Unknown job")
+    job = jobs[job_id]
+    words = job.get("words") or []
+    if not words:
+        raise ValueError("Transcript not ready yet")
+    target_sec = max(45.0, min(180.0, float(target_sec)))
+    format_type = (format_type or "interview").lower()
+    if format_type not in _FORMAT_RUBRICS:
+        format_type = "interview"
+
+    pool_raw = list(job.get("clip_suggestions") or [])
+    if refresh_shorts or len(pool_raw) < 3:
+        transcript_text = _format_transcript_for_llm(words)
+        # Mid-form wants a diverse pool of short beats to stitch.
+        durations = [15, 30, 45, 60]
+        prompt = _build_clip_suggestion_prompt(
+            transcript_text, format_type, durations, max(5, min(12, int(num_pool))),
+        )
+        result = _gemini_generate_clip_suggestions(prompt)
+        clips_raw = result.get("clips", []) if isinstance(result, dict) else []
+        cleaned = []
+        for c in clips_raw:
+            try:
+                start = float(c.get("start_time"))
+                end = float(c.get("end_time"))
+                if end <= start or start < 0:
+                    continue
+                cleaned.append({
+                    "start_time": start,
+                    "end_time": end,
+                    "hook_start_time": float(c.get("hook_start_time", start)),
+                    "hook_end_time": float(c.get("hook_end_time", min(end, start + 5))),
+                    "hook_quote": str(c.get("hook_quote", ""))[:300],
+                    "title": str(c.get("title", ""))[:120],
+                    "reason": str(c.get("reason", ""))[:500],
+                    "viral_score": int(c.get("viral_score", 0)),
+                    "category": str(c.get("category", "")),
+                    "suggested_headline": str(c.get("suggested_headline", "")),
+                })
+            except (TypeError, ValueError):
+                continue
+        _snap_clip_to_target_durations(cleaned, words, durations)
+        cleaned = [c for c in cleaned if (c["end_time"] - c["start_time"]) >= 3]
+        cleaned.sort(key=lambda c: c["start_time"])
+        _detect_overlap_groups(cleaned, threshold=0.90)
+        if cleaned:
+            pool_raw = cleaned
+            job["clip_suggestions"] = cleaned
+            job["clip_format"] = format_type
+            _db_save_job(job_id)
+
+    clips = []
+    for c in pool_raw:
+        n = _normalize_highlight_clip(c)
+        if n:
+            clips.append(n)
+    if len(clips) < 2:
+        raise ValueError(
+            "Need at least 2 AI Shorts moments to stitch a mid-form episode. "
+            "Run Find highlights first, or try again with refresh."
+        )
+
+    plan = None
+    gemini_err = None
+    try:
+        plan = _gemini_midform_plan(words, clips, target_sec, format_type=format_type)
+    except Exception as exc:
+        gemini_err = str(exc)
+        ai_logger.warning(f"[midform] Gemini plan failed ({exc}); heuristic fallback")
+        packed = _heuristic_midform_order(clips, target_sec)
+        plan = {
+            "segments": packed,
+            "packed_duration": round(sum(s["duration"] for s in packed), 2),
+            "throughline": "Heuristic pack: strongest hook + chronological body beats",
+            "title": (packed[0]["title"] if packed else "Mini-episode")[:120],
+            "why": "Gemini unavailable or failed — used viral hook + story-order packing",
+            "engine": "heuristic",
+        }
+
+    segs = plan.get("segments") or []
+    if not segs:
+        raise ValueError("Could not pack a mid-form episode from these highlights")
+
+    packed_dur = float(plan.get("packed_duration") or sum(s["duration"] for s in segs))
+    delta = packed_dur - target_sec
+    payload = {
+        "ok": True,
+        "job_id": job_id,
+        "goal_duration": round(target_sec, 1),
+        "packed_duration": round(packed_dur, 1),
+        "delta_sec": round(delta, 1),
+        "within_tolerance": abs(delta) <= 15.0,
+        "title": plan.get("title") or "Mini-episode",
+        "throughline": plan.get("throughline") or "",
+        "why": plan.get("why") or "",
+        "engine": plan.get("engine") or "unknown",
+        "segment_count": len(segs),
+        "segments": [
+            {
+                "source_job_id": job_id,
+                "start_time": s["start_time"],
+                "end_time": s["end_time"],
+                "duration": s["duration"],
+                "title": s.get("title") or "",
+                "hook_quote": s.get("hook_quote") or "",
+                "role": s.get("role") or "body",
+                "trimmed": bool(s.get("trimmed")),
+            }
+            for s in segs
+        ],
+        "pool_size": len(clips),
+        "gemini_warning": gemini_err,
+        "shorts_refreshed": bool(refresh_shorts or len(pool_raw) >= 3),
+    }
+    job["midform_plan"] = payload
+    _db_save_job(job_id)
+    print(
+        f"[midform] {job_id} goal={target_sec:.0f}s packed={packed_dur:.1f}s "
+        f"segs={len(segs)} engine={payload['engine']}",
+        flush=True,
+    )
+    return payload
+
+
+@app.route("/midform-episode", methods=["POST"])
+def midform_episode():
+    """Build one mid-form mini-episode (~90s default) from AI Shorts of a job.
+
+    Body: {
+      job_id,
+      target_duration?: 60|90|120 (default 90),
+      format?: shorts format,
+      refresh_shorts?: bool  # re-run Find highlights pool if true / sparse
+    }
+
+    Returns plan with segments (source ranges in story order) + goal vs packed length.
+    Client opens Timeline with those Main clips — does not bake MP4 unless user Compiles.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job — select a transcribed video first"}), 404
+    try:
+        target = float(data.get("target_duration") or data.get("goal_duration") or 90)
+    except (TypeError, ValueError):
+        target = 90.0
+    format_type = (data.get("format") or jobs[job_id].get("clip_format") or "interview")
+    refresh = bool(data.get("refresh_shorts"))
+    try:
+        plan = _build_midform_episode(
+            job_id,
+            target_sec=target,
+            format_type=str(format_type),
+            refresh_shorts=refresh,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        ai_logger.exception(f"[midform] failed for {job_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+    return jsonify(plan)
+
+
 import zipfile
 @app.route("/batch-render-clips", methods=["POST"])
 def batch_render_clips():
