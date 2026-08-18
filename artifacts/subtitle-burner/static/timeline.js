@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-78-midform-arc-regen";
+  const TL_BUILD = "studio-editor-build-79-edit-receipt-multi-arc";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -143,6 +143,7 @@
       style: tl.style || null,
       audio: tl.audio || null,
       ai_edit: tl.ai_edit || null,
+      edit_receipt: tl.edit_receipt || null,
       speaker_colors: tl.speaker_colors || null,
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -178,6 +179,7 @@
     if (d.style !== undefined) tl.style = d.style;
     if (d.audio !== undefined) tl.audio = d.audio;
     if (d.ai_edit !== undefined) tl.ai_edit = d.ai_edit;
+    if (d.edit_receipt !== undefined) tl.edit_receipt = d.edit_receipt;
     if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
     if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
     if (d.track_states !== undefined) tl.track_states = d.track_states;
@@ -854,6 +856,7 @@
       audio: tl.audio || null,
       sfx_overlays: tl.sfx_overlays !== false,
       ai_edit: tl.ai_edit || null,
+      edit_receipt: tl.edit_receipt || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -867,6 +870,9 @@
           color: c.color || null, color_grade: c.color_grade || null,
           reframe: c.reframe || null, shot_index: c.shot_index != null ? c.shot_index : null,
           burn_captions: c.burn_captions,
+          source_label: c.source_label || null,
+          theme: c.theme || null,
+          arc_role: c.arc_role || null,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         effects: (tl.tracks.effects || []).map((c) => ({ ...c })),
@@ -2178,6 +2184,9 @@
       tl.tracks.main.push({
         id: uid(), source_job_id: jobId, in: ci, out: co > ci ? co : dur,
         _max: dur, transition: null, burn_captions: true,
+        source_label: opts.source_label || null,
+        theme: opts.theme || null,
+        arc_role: opts.arc_role || null,
       });
       if (!opts.skipRender) {
         renderTimeline();
@@ -2764,16 +2773,18 @@
   function clipLabel(track, c, idx) {
     if (track === "main") {
       const s = sources.find((x) => x.job_id === c.source_job_id);
-      const name = s ? (s.filename || "clip") : "clip";
+      const rawName = c.source_label || (s ? (s.filename || "clip") : "clip");
+      const name = String(rawName).replace(/\.[^.]+$/, "");
       let badges = "";
       // S# matches co-editor seq (timeline order). Detect-shots shot_index is
       // separate metadata and must not override what the editor sees on the lane.
       badges += ` S${idx + 1}`;
+      if (c.arc_role) badges += ` · ${String(c.arc_role).replace(/_/g, " ")}`;
       if (c.ken_burns && c.ken_burns.enabled) badges += " 🔍";
       if (c.punch_zoom && c.punch_zoom.enabled) badges += " ⚡";
       if (c.split && c.split.enabled) badges += " ⬓";
       if (c.cuts && c.cuts.length) badges += " ✂️";
-      return `${idx + 1}. ${name.replace(/\.[^.]+$/, "")}${badges}`;
+      return `${idx + 1}. ${name}${badges}`;
     }
     if (track === "effects") {
       const meta = EFFECT_TYPES.find((t) => t.id === c.type);
@@ -2815,6 +2826,9 @@
     if (track === "main") {
       const s = sources.find((x) => x.job_id === c.source_job_id);
       lines.push(`Main clip ${idx + 1}: ${s && s.filename ? s.filename : (c.source_job_id ? "clip" : "no source")}`);
+      if (c.source_label) lines.push(`Source label: ${c.source_label}`);
+      if (c.arc_role) lines.push(`Arc role: ${c.arc_role}`);
+      if (c.theme) lines.push(`Theme: ${c.theme}`);
       const cin = c.in || 0, cout = c.out != null ? c.out : cin;
       lines.push(`Trim: ${fmtTime(cin)} – ${fmtTime(cout)} (source) · ${fmtTime(clipDuration(c))} on timeline`);
       const fx = [];
@@ -4390,6 +4404,12 @@
     }
     const t = selected.track;
     let html = `<h3>${({ main: "🎬 Main clip", overlay: "🖼 Overlay", effects: "✨ Effect", text: "🔤 Title", music: "🎵 Music" })[t]}</h3>`;
+    if (tl && tl.edit_receipt) {
+      const r = tl.edit_receipt;
+      const kindLabel = r.kind === "polish" ? "Polish" : "AI Edit";
+      const n = Array.isArray(r.rows) ? r.rows.length : 0;
+      html += `<button type="button" class="tl-receipt-chip" data-act="show-receipt">🧾 ${esc(kindLabel)} receipt · ${n} change${n === 1 ? "" : "s"}</button>`;
+    }
 
     if (t === "effects") {
       const typeOpts = EFFECT_TYPES.map((x) => [x.id, `${x.icon} ${x.label}`]);
@@ -4615,6 +4635,14 @@
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+    const showReceipt = wrap.querySelector('[data-act="show-receipt"]');
+    if (showReceipt) {
+      showReceipt.onclick = () => {
+        selected = null;
+        renderProps();
+        renderTimeline();
+      };
+    }
     // Color swatch clicks (not a generic data-key control).
     wrap.querySelectorAll(".tl-swatch").forEach((sw) => {
       sw.onclick = () => {
@@ -4708,9 +4736,12 @@
       html += `<p class="muted" style="font-size:.72rem;margin-top:8px">AI Edit seed: ${esc(tl.ai_edit.style_pack || "")} · ${esc(tl.ai_edit.intensity || "med")}</p>`;
     }
 
+    html += buildEditReceiptSectionHtml();
+
     html += `<button class="tl-del-btn" data-act="delete-project" type="button" style="margin-top:12px">🗑 Delete project</button>`;
     wrap.innerHTML = html;
 
+    wireEditReceiptClicks(wrap);
     const openCap = wrap.querySelector('[data-act="open-captions"]');
     if (openCap) openCap.onclick = () => jumpLookSection("captions");
     const openAud = wrap.querySelector('[data-act="open-audio"]');
@@ -5365,6 +5396,7 @@
       audio: d.audio || null,
       sfx_overlays: d.sfx_overlays !== false,
       ai_edit: d.ai_edit || null,
+      edit_receipt: d.edit_receipt || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
         return {
@@ -5539,6 +5571,152 @@
     modal.setAttribute("aria-hidden", "true");
   }
 
+  // ---- Edit receipt (Polish hygiene / AI Edit creative changelog) ----
+  function fmtReceiptClock(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    const m = Math.floor(s / 60);
+    const r = Math.floor(s % 60);
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
+  function buildPolishReceipt(status) {
+    const st = (status && status.stats) || {};
+    const before = st.source_duration_s != null ? Number(st.source_duration_s) : null;
+    const after = st.cut_duration_s != null ? Number(st.cut_duration_s) : null;
+    const removed = (before != null && after != null) ? +(before - after).toFixed(2) : null;
+    const rows = [];
+    if (before != null && after != null) {
+      rows.push({
+        id: "dur",
+        kind: "duration",
+        label: `Length ${fmtReceiptClock(before)} → ${fmtReceiptClock(after)}`
+          + (removed != null ? ` (−${removed.toFixed(0)}s)` : ""),
+      });
+    }
+    const segs = st.segments != null ? Number(st.segments) : null;
+    const stumble = st.stumble_cuts != null ? Number(st.stumble_cuts) : 0;
+    rows.push({
+      id: "cuts",
+      kind: "cuts",
+      label: segs != null
+        ? `Kept ${segs} segment(s)`
+          + (stumble ? `; ${stumble} stumble cut(s)` : "")
+          + (st.silence_engine ? ` · silence: ${st.silence_engine}` : "")
+        : "Silence / stumble hygiene applied",
+    });
+    const zooms = Array.isArray(st.zoom_levels) ? st.zoom_levels : [];
+    const beats = st.visual_beats != null ? Number(st.visual_beats) : zooms.length;
+    if (beats || zooms.length) {
+      rows.push({
+        id: "zooms",
+        kind: "zooms",
+        label: `${beats || zooms.length} jump-zoom beat(s)`
+          + (zooms.length ? ` (${zooms.slice(0, 4).join(", ")}${zooms.length > 4 ? "…" : ""})` : ""),
+      });
+    }
+    const broll = st.broll_overlays != null ? Number(st.broll_overlays) : 0;
+    if (broll > 0) {
+      const keys = Array.isArray(st.keywords) ? st.keywords.slice(0, 4) : [];
+      rows.push({
+        id: "broll",
+        kind: "broll",
+        label: `${broll} B-roll overlay(s)`
+          + (keys.length ? ` — ${keys.join(", ")}` : ""),
+      });
+    }
+    rows.push({
+      id: "audio",
+      kind: "audio",
+      label: "Audio master: loudnorm ≈ −14 LUFS"
+        + ((status && status.has_music) ? " + music duck" : ""),
+    });
+    return {
+      kind: "polish",
+      at: Date.now() / 1000,
+      polish_id: status && status.polish_id,
+      output: status && status.output,
+      source_job_id: status && status.source_job_id,
+      pacing: status && status.pacing,
+      duration: { before_s: before, after_s: after, removed_s: removed },
+      cuts: { segments: segs, stumble_cuts: stumble, silence_engine: st.silence_engine },
+      zooms: { levels: zooms, visual_beats: beats },
+      overlays: { count: broll, keywords: st.keywords || [] },
+      audio: { summary: "loudnorm −14 LUFS" },
+      warnings: (status && status.warnings) || [],
+      rows,
+    };
+  }
+
+  function buildEditReceiptSectionHtml() {
+    const r = tl && tl.edit_receipt;
+    if (!r) return "";
+    const kindLabel = r.kind === "polish" ? "Polish (hygiene)" : "AI Edit (creative)";
+    const when = r.at ? new Date(Number(r.at) * 1000).toLocaleString() : "";
+    const pack = r.style_pack || r.pacing || "";
+    let body = `<p class="muted" style="font-size:.72rem;margin:0 0 8px;line-height:1.4">`
+      + `<strong>${esc(kindLabel)}</strong>`
+      + (pack ? ` · ${esc(String(pack))}` : "")
+      + (when ? ` · ${esc(when)}` : "")
+      + `</p>`;
+    const rows = Array.isArray(r.rows) && r.rows.length
+      ? r.rows
+      : [];
+    if (!rows.length) {
+      body += `<p class="muted" style="font-size:.74rem">No change rows recorded.</p>`;
+    } else {
+      body += `<ul class="tl-receipt-list">`;
+      rows.forEach((row, i) => {
+        const clickable = !!(row.clip_id && row.track);
+        const cls = clickable ? "tl-receipt-row is-clickable" : "tl-receipt-row";
+        body += `<li class="${cls}" data-receipt-idx="${i}"`
+          + (clickable ? ` data-track="${esc(row.track)}" data-clip-id="${esc(row.clip_id)}" title="Select on timeline"` : "")
+          + `>${esc(row.label || "")}</li>`;
+      });
+      body += `</ul>`;
+    }
+    if (Array.isArray(r.warnings) && r.warnings.length) {
+      body += `<p class="muted" style="font-size:.72rem;margin-top:8px">⚠ ${esc(String(r.warnings[0]))}</p>`;
+    }
+    body += `<p class="muted" style="font-size:.7rem;margin-top:8px;line-height:1.35">Click a zoom / B-roll row to select it on the Timeline.</p>`;
+    return propSection("🧾 Edit receipt", body, true);
+  }
+
+  function wireEditReceiptClicks(wrap) {
+    if (!wrap) return;
+    wrap.querySelectorAll(".tl-receipt-row.is-clickable").forEach((el) => {
+      el.addEventListener("click", () => {
+        const track = el.dataset.track;
+        const clipId = el.dataset.clipId;
+        if (!track || !clipId || !tl) return;
+        const lane = (tl.tracks && tl.tracks[track]) || [];
+        const hit = lane.find((c) => c.id === clipId);
+        if (!hit) {
+          setSaveState("Receipt item not on timeline anymore");
+          return;
+        }
+        selectClip(track, clipId);
+        renderTimeline();
+        renderProps();
+      });
+    });
+  }
+
+  function setEditReceipt(receipt, opts) {
+    opts = opts || {};
+    if (!tl || !receipt) return;
+    tl.edit_receipt = receipt;
+    if (!opts.quiet) {
+      const kind = receipt.kind === "polish" ? "Polish" : "AI Edit";
+      const dur = receipt.duration || {};
+      const note = (dur.before_s != null && dur.after_s != null)
+        ? ` · ${Number(dur.before_s).toFixed(0)}s → ${Number(dur.after_s).toFixed(0)}s`
+        : "";
+      setSaveState(`${kind} receipt updated${note}`);
+    }
+    scheduleSave();
+    try { renderProps(); } catch (e) { /* ignore */ }
+  }
+
   async function runTimelinePolish(opts) {
     opts = opts || {};
     if (!tl || !tl.tracks.main.length) {
@@ -5638,6 +5816,11 @@
             const durNote = (srcDur != null && cutDur != null)
               ? ` · ${Number(srcDur).toFixed(1)}s → ${Number(cutDur).toFixed(1)}s`
               : "";
+            try {
+              setEditReceipt(buildPolishReceipt(s));
+            } catch (receiptErr) {
+              console.warn("[timeline] polish receipt:", receiptErr);
+            }
             setRenderStatus("Polish done ✓ — playing polished output (not timeline source)" + durNote);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
             if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
@@ -5656,6 +5839,7 @@
               "Polish finished.\n\n" +
               "The Timeline preview is now the polished MP4 (not your Main source).\n" +
               (durNote ? ("Length change:" + durNote + "\n") : "") +
+              "Open Properties → Edit receipt for a change list.\n" +
               "Download: /download/" + s.output + "\n\n" +
               "Note: scrubbing the timeline or Preview cut switches back to the original source. " +
               "Captions still need ▶ Render."
@@ -7063,7 +7247,20 @@
             : (item.in != null ? Number(item.in) : null);
           const outS = item.end_time != null ? Number(item.end_time)
             : (item.out != null ? Number(item.out) : null);
-          await addMainClip(jid, inS, outS, { skipRender: true, skipHistory: true });
+          await addMainClip(jid, inS, outS, {
+            skipRender: true,
+            skipHistory: true,
+            source_label: item.source_label || item.source_filename || null,
+            theme: item.theme || null,
+            arc_role: item.arc_role || null,
+          });
+          if (item.title || item.hook_quote) {
+            const last = tl.tracks.main[tl.tracks.main.length - 1];
+            if (last) {
+              if (item.title) last.title = item.title;
+              if (item.hook_quote) last.hook_quote = item.hook_quote;
+            }
+          }
         }
         seedStyleFromCaptionLook(clips[0] && (clips[0].source_job_id || clips[0].job_id));
         renderTimeline();
@@ -7102,6 +7299,7 @@
     tl.bg = seed.bg || tl.bg || "#000000";
     if (seed.style) tl.style = normalizeTlStyle(seed.style);
     if (seed.ai_edit) tl.ai_edit = seed.ai_edit;
+    if (seed.edit_receipt) tl.edit_receipt = seed.edit_receipt;
     if (label) {
       tl.label = label;
       if ($("tlLabel")) $("tlLabel").value = label;
@@ -7119,6 +7317,10 @@
     tl.tracks.music = Array.isArray(tracks.music) ? tracks.music.map((c) => ({ ...c, id: c.id || uid() })) : [];
     selected = tl.tracks.main[0] ? { track: "main", id: tl.tracks.main[0].id } : null;
     applyStage();
+    // Prefer Edit receipt in Properties after an AI Edit seed so changes are visible.
+    if (seed.edit_receipt) {
+      selected = null;
+    }
   }
 
   // ---- Merge adjacent Main shots ----

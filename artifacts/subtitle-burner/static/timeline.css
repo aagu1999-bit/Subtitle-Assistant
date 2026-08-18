@@ -887,6 +887,48 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
 .tl-prop-body {
   padding: 0 10px 10px;
 }
+.tl-receipt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tl-receipt-row {
+  font-size: .78rem;
+  line-height: 1.35;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #0e1118;
+  border: 1px solid #252a36;
+  color: #c8ceda;
+}
+.tl-receipt-row.is-clickable {
+  cursor: pointer;
+  border-color: #3b4560;
+  color: #e8eaee;
+}
+.tl-receipt-row.is-clickable:hover {
+  border-color: #6c5cff;
+  background: #151a28;
+}
+.tl-receipt-chip {
+  display: block;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: .78rem;
+  text-align: left;
+  border-radius: 8px;
+  border: 1px solid #3b4560;
+  background: #151a28;
+  color: #e8eaee;
+  cursor: pointer;
+}
+.tl-receipt-chip:hover {
+  border-color: #6c5cff;
+}
 .tl-prop-stack {
   display: flex;
   flex-direction: column;

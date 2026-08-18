@@ -8452,12 +8452,17 @@ def _compile_trim_segment(
         f"fps=30,format=yuv420p,setsar=1"
     )
     has_a = _has_audio_stream(src)
+    # Soft loudness match across interviews so volume doesn't jump on stitch.
+    af = (
+        "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+        "loudnorm=I=-14:TP=-1.5:LRA=11"
+    )
     # Accurate seek (-ss after -i) so highlight IN/OUT match the AI Shorts card.
     cmd = [FFMPEG, "-y", "-i", str(src), "-ss", f"{start:.3f}", "-t", f"{dur:.3f}"]
     if has_a:
         cmd += [
             "-vf", vf,
-            "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+            "-af", af,
             "-map", "0:v:0", "-map", "0:a:0?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
@@ -8521,6 +8526,9 @@ def compile_clips():
             "title": str(item.get("title") or "")[:120],
             "hook_quote": str(item.get("hook_quote") or "")[:300],
             "source_filename": str(item.get("source_filename") or "")[:200],
+            "source_label": str(item.get("source_label") or "")[:80],
+            "theme": str(item.get("theme") or "")[:120],
+            "arc_role": str(item.get("arc_role") or "")[:40],
         })
 
     new_job_id = uuid.uuid4().hex
@@ -8617,6 +8625,9 @@ def compile_clips():
                 "title": v["title"],
                 "hook_quote": v["hook_quote"],
                 "source_filename": v["source_filename"],
+                "source_label": v.get("source_label") or "",
+                "theme": v.get("theme") or "",
+                "arc_role": v.get("arc_role") or "",
             }
             for v in validated
         ],
@@ -8709,8 +8720,15 @@ def load_compilation(job_id: str):
 def multi_interview_plan():
     """Plan a cross-interview reel from multiple uploaded / transcribed jobs.
 
-    Body: { job_ids: [...], format?: "interview", max_themes?: 6, clips_per_theme?: 4 }
-    Returns themes with matched clip ranges across sources for the compile queue.
+    Body: {
+      job_ids: [...],
+      format?: "interview",
+      goal_sec?: 90,
+      max_themes?: 6,
+      clips_per_theme?: 4,
+      avoid_fingerprints?: [...]   # prior arc fingerprints for regenerate
+    }
+    Returns themes (browse) + arc (ordered story beats) for the compile queue.
     """
     data = request.get_json(force=True) or {}
     raw_ids = data.get("job_ids") or data.get("jobs") or []
@@ -8732,7 +8750,16 @@ def multi_interview_plan():
         clips_per = max(2, min(8, int(data.get("clips_per_theme") or 4)))
     except (TypeError, ValueError):
         clips_per = 4
+    try:
+        goal_sec = float(data.get("goal_sec") or data.get("target_sec") or 90)
+    except (TypeError, ValueError):
+        goal_sec = 90.0
+    goal_sec = max(45.0, min(180.0, goal_sec))
     format_type = str(data.get("format") or "interview")
+    avoid = data.get("avoid_fingerprints") or []
+    if not isinstance(avoid, list):
+        avoid = []
+    avoid = [str(a)[:200] for a in avoid[-8:] if a]
 
     blocks = []
     meta = []
@@ -8758,21 +8785,49 @@ def multi_interview_plan():
     if len(blocks) < 2:
         return jsonify({"error": "At least 2 jobs need transcripts (words)."}), 400
 
-    prompt = f"""You are editing a MULTI-INTERVIEW reel. Several different videos ask related questions.
-Find SHARED themes / questions answered across sources, then pick the best clip range from EACH relevant source.
+    avoid_note = ""
+    if avoid:
+        avoid_note = (
+            "\nREGENERATE: pick DIFFERENT clip ranges / source order than these "
+            "prior fingerprints (same arc roles OK):\n- "
+            + "\n- ".join(avoid)
+            + "\n"
+        )
+
+    prompt = f"""You are editing a MULTI-INTERVIEW reel across DIFFERENT speakers/sources.
+Build a mini story arc (not just theme clusters), aiming for ~{goal_sec:.0f}s total.
 
 Format hint: {format_type}
-Return at most {max_themes} themes. Each theme should include up to {clips_per} clips from DIFFERENT source_job_ids when possible (same question, different interviewees).
+{avoid_note}
+Return TWO things:
+1) "arc" — ordered story beats: hook → answer_a → answer_b (more answers OK) → closer.
+   Each beat is ONE clip from ONE source. Prefer DIFFERENT sources for consecutive beats.
+   Hook = strongest quotable / emotional open (any source). Closer = button/payoff.
+2) "themes" — up to {max_themes} shared questions with up to {clips_per} clips each (browse/add later).
 
 Rules:
 - Use ONLY the provided source_job_id values.
 - start_time / end_time must be inside that source's transcript timestamps.
 - Prefer answer-led hooks (lead with the quotable line, not the question).
-- Clip length 12–75 seconds when possible.
-- Skip themes that only appear in one source unless uniquely strong.
+- Arc clip length 8–40s each; total arc duration near {goal_sec:.0f}s (±25s OK).
+- roles MUST use: hook | answer | closer  (use answer for all middle beats)
+- Skip weak single-source themes unless uniquely strong.
 
 Return STRICT JSON:
 {{
+  "throughline": "one-sentence shared question / thesis",
+  "arc": [
+    {{
+      "role": "hook",
+      "source_job_id": "abc123",
+      "start_time": 40.2,
+      "end_time": 55.0,
+      "title": "Shock open",
+      "hook_quote": "exact spoken line",
+      "reason": "why this opens the reel",
+      "theme": "Finding local events"
+    }}
+  ],
   "themes": [
     {{
       "theme": "Finding local events",
@@ -8799,55 +8854,120 @@ Sources:
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
 
-    themes_raw = result.get("themes") if isinstance(result, dict) else None
-    if not isinstance(themes_raw, list):
-        return jsonify({"error": "Gemini returned no themes", "raw": result}), 500
-
     allowed = set(job_ids)
+
+    def _normalize_clip(c, *, role="", theme=""):
+        if not isinstance(c, dict):
+            return None
+        sid = str(c.get("source_job_id") or "").strip()
+        if sid not in allowed:
+            return None
+        try:
+            st = float(c.get("start_time", c.get("start", 0)))
+            en = float(c.get("end_time", c.get("end", 0)))
+        except (TypeError, ValueError):
+            return None
+        if en - st < 3.0:
+            return None
+        words = jobs[sid].get("words") or []
+        if words:
+            tmax = float(words[-1].get("end") or en)
+            st = max(0.0, min(st, tmax - 3.0))
+            en = max(st + 3.0, min(en, tmax))
+        fname = jobs[sid].get("filename") or ""
+        label = str(fname).rsplit(".", 1)[0][:60] if fname else sid[:8]
+        clip_role = str(c.get("role") or role or "").strip().lower()
+        if clip_role not in ("hook", "answer", "closer", "grand_intro", "body"):
+            clip_role = role or "answer"
+        if clip_role in ("grand_intro", "body"):
+            clip_role = "answer"
+        return {
+            "source_job_id": sid,
+            "source_filename": fname,
+            "source_label": label,
+            "start_time": round(st, 3),
+            "end_time": round(en, 3),
+            "title": str(c.get("title") or theme or clip_role or "clip")[:120],
+            "hook_quote": str(c.get("hook_quote") or "")[:300],
+            "reason": str(c.get("reason") or "")[:300],
+            "theme": str(c.get("theme") or theme or "")[:120],
+            "arc_role": clip_role,
+        }
+
+    # ---- Arc beats ----
+    arc_raw = result.get("arc") if isinstance(result, dict) else None
+    arc = []
+    if isinstance(arc_raw, list):
+        for i, beat in enumerate(arc_raw[:10]):
+            default_role = "hook" if i == 0 else ("closer" if i == len(arc_raw) - 1 else "answer")
+            norm = _normalize_clip(beat, role=default_role)
+            if norm:
+                arc.append(norm)
+
+    # Fallback: synthesize arc from first theme if Gemini omitted arc.
+    themes_raw = result.get("themes") if isinstance(result, dict) else None
+    if not arc and isinstance(themes_raw, list) and themes_raw:
+        first = themes_raw[0] if isinstance(themes_raw[0], dict) else {}
+        theme_name = str(first.get("theme") or "Theme")[:120]
+        for i, c in enumerate((first.get("clips") or [])[:4]):
+            role = "hook" if i == 0 else ("closer" if i == min(3, len(first.get("clips") or []) - 1) else "answer")
+            norm = _normalize_clip(c, role=role, theme=theme_name)
+            if norm:
+                arc.append(norm)
+
+    # Pack toward goal_sec (prefer keeping hook + closer).
+    if arc:
+        packed = []
+        total = 0.0
+        for i, beat in enumerate(arc):
+            dur = float(beat["end_time"]) - float(beat["start_time"])
+            is_edge = beat.get("arc_role") in ("hook", "closer") or i == 0 or i == len(arc) - 1
+            if packed and total + dur > goal_sec * 1.35 and not is_edge:
+                continue
+            if total >= goal_sec and not is_edge and len(packed) >= 3:
+                continue
+            packed.append(beat)
+            total += dur
+        if packed:
+            arc = packed
+
+    # ---- Themes (browse) ----
     themes = []
-    for th in themes_raw[:max_themes]:
-        if not isinstance(th, dict):
-            continue
-        clips_out = []
-        for c in (th.get("clips") or [])[:clips_per]:
-            if not isinstance(c, dict):
+    if isinstance(themes_raw, list):
+        for th in themes_raw[:max_themes]:
+            if not isinstance(th, dict):
                 continue
-            sid = str(c.get("source_job_id") or "").strip()
-            if sid not in allowed:
-                continue
-            try:
-                st = float(c.get("start_time", c.get("start", 0)))
-                en = float(c.get("end_time", c.get("end", 0)))
-            except (TypeError, ValueError):
-                continue
-            if en - st < 3.0:
-                continue
-            # Clamp to transcript end when available.
-            words = jobs[sid].get("words") or []
-            if words:
-                tmax = float(words[-1].get("end") or en)
-                st = max(0.0, min(st, tmax - 3.0))
-                en = max(st + 3.0, min(en, tmax))
-            clips_out.append({
-                "source_job_id": sid,
-                "source_filename": jobs[sid].get("filename") or "",
-                "start_time": round(st, 3),
-                "end_time": round(en, 3),
-                "title": str(c.get("title") or th.get("theme") or "clip")[:120],
-                "hook_quote": str(c.get("hook_quote") or "")[:300],
-                "reason": str(c.get("reason") or "")[:300],
-                "theme": str(th.get("theme") or "")[:120],
-            })
-        if len(clips_out) >= 1:
-            themes.append({
-                "theme": str(th.get("theme") or "Theme")[:120],
-                "question": str(th.get("question") or "")[:240],
-                "clips": clips_out,
-            })
+            theme_name = str(th.get("theme") or "Theme")[:120]
+            clips_out = []
+            for c in (th.get("clips") or [])[:clips_per]:
+                norm = _normalize_clip(c, theme=theme_name)
+                if norm:
+                    clips_out.append(norm)
+            if clips_out:
+                themes.append({
+                    "theme": theme_name,
+                    "question": str(th.get("question") or "")[:240],
+                    "clips": clips_out,
+                })
+
+    arc_total = sum(float(b["end_time"]) - float(b["start_time"]) for b in arc)
+    fingerprint = "|".join(
+        f"{b['arc_role']}:{b['source_job_id'][:8]}:{b['start_time']:.1f}-{b['end_time']:.1f}"
+        for b in arc
+    )
+
+    if not arc and not themes:
+        return jsonify({"error": "Gemini returned no arc or themes", "raw": result}), 500
 
     return jsonify({
         "ok": True,
         "sources": meta,
+        "throughline": str((result or {}).get("throughline") or "")[:240] if isinstance(result, dict) else "",
+        "arc": arc,
+        "arc_total_s": round(arc_total, 1),
+        "goal_sec": goal_sec,
+        "fingerprint": fingerprint,
+        "formula": "hook>answer*>closer",
         "themes": themes,
         "theme_count": len(themes),
         "clip_count": sum(len(t["clips"]) for t in themes),
@@ -13432,6 +13552,117 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
     badge_n = sum(1 for o in overlay_track if o.get("source") == "badge")
     gemini_n = sum(1 for o in overlay_track if o.get("source") == "gemini")
 
+    cut_removed = 0.0
+    for c in (cuts or []):
+        try:
+            cut_removed += max(0.0, float(c[1]) - float(c[0]))
+        except (TypeError, ValueError, IndexError):
+            continue
+    before_s = max(0.0, float(t_out) - float(t_in))
+    after_s = max(0.0, before_s - cut_removed)
+    edit_receipt = {
+        "kind": "ai_edit",
+        "at": time.time(),
+        "label": (label or pack.get("label") or "AI Edit")[:80],
+        "style_pack": pack.get("label"),
+        "intensity": intensity,
+        "scope": "full" if (t_in <= 0.05 and before_s > 30) else "window",
+        "duration": {
+            "before_s": round(before_s, 2),
+            "after_s": round(after_s, 2),
+            "removed_s": round(cut_removed, 2),
+        },
+        "cuts": {
+            "count": len(cuts or []),
+            "seconds_removed": round(cut_removed, 2),
+            "summary": (
+                f"Applied {len(cuts or [])} cut range(s) (−{cut_removed:.1f}s)"
+                if cuts else "No silence/stumble cuts applied"
+            ),
+        },
+        "effects": [
+            {
+                "id": e.get("id"),
+                "type": e.get("type"),
+                "start": e.get("start"),
+                "duration": e.get("out"),
+                "intensity": e.get("intensity"),
+                "quote": e.get("quote") or "",
+                "track": "effects",
+            }
+            for e in effects_track
+        ],
+        "overlays": [
+            {
+                "id": o.get("id"),
+                "start": o.get("start"),
+                "keyword": o.get("keyword") or "",
+                "source": o.get("source") or "",
+                "track": "overlay",
+            }
+            for o in overlay_track
+        ],
+        "audio": {
+            "summary": "Captions Audio Enhancement applies on ▶ Render (loudnorm / noise / duck)",
+        },
+        "hook": {
+            "pulled": bool(hook_pulled),
+            "quote": hook_quote or ((hook or {}).get("quote") if isinstance(hook, dict) else None),
+        },
+        "rows": [],
+    }
+    # Flat clickable rows for Timeline UI (duration → cuts → zooms → B-roll).
+    edit_receipt["rows"] = [
+        {
+            "id": "dur",
+            "kind": "duration",
+            "label": (
+                f"Length {edit_receipt['duration']['before_s']:.0f}s → "
+                f"{edit_receipt['duration']['after_s']:.0f}s"
+                f" (−{edit_receipt['duration']['removed_s']:.0f}s)"
+            ),
+        },
+        {
+            "id": "cuts",
+            "kind": "cuts",
+            "label": edit_receipt["cuts"]["summary"],
+        },
+    ]
+    for e in edit_receipt["effects"]:
+        tlabel = {
+            "punch_zoom": "Punch zoom",
+            "zoom_1_5": "1.5× zoom",
+            "zoom_2x": "2× zoom",
+            "ken_burns": "Ken Burns",
+        }.get(e.get("type"), e.get("type") or "Effect")
+        st = float(e.get("start") or 0)
+        mm, ss = divmod(int(st), 60)
+        edit_receipt["rows"].append({
+            "id": e.get("id"),
+            "kind": "effect",
+            "track": "effects",
+            "clip_id": e.get("id"),
+            "label": f"{tlabel} @{mm}:{ss:02d}"
+                     + (f" — “{(e.get('quote') or '')[:40]}”" if e.get("quote") else ""),
+        })
+    for o in edit_receipt["overlays"]:
+        st = float(o.get("start") or 0)
+        mm, ss = divmod(int(st), 60)
+        kw = o.get("keyword") or o.get("source") or "B-roll"
+        edit_receipt["rows"].append({
+            "id": o.get("id"),
+            "kind": "overlay",
+            "track": "overlay",
+            "clip_id": o.get("id"),
+            "label": f"B-roll “{kw}” @{mm}:{ss:02d}",
+        })
+    if hook_pulled and hook_quote:
+        edit_receipt["rows"].append({
+            "id": "hook",
+            "kind": "hook",
+            "label": f"Hook pulled forward — “{str(hook_quote)[:60]}”",
+        })
+
     return {
         "canvas": pack.get("canvas") or "9x16",
         "fit": "cover",
@@ -13453,6 +13684,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "hook_pulled": hook_pulled,
             "hook_quote": hook_quote,
         },
+        "edit_receipt": edit_receipt,
         "tracks": {
             "main": pieces,
             "overlay": overlay_track,
@@ -13867,6 +14099,7 @@ def ai_edit_seed():
         "effects": effects,
         "hook": hook,
         "timeline": timeline,
+        "edit_receipt": (timeline or {}).get("edit_receipt"),
         "media_hints": (timeline or {}).get("media_hints") or {},
         "warning": gemini_warning,
     })

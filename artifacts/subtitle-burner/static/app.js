@@ -4599,7 +4599,9 @@ function renderCompileQueue() {
     // it lives outside the editable element, otherwise the edit cursor
     // would land in dead text.
     const prefix = document.createElement("span");
-    prefix.textContent = `${idx + 1}. ${item.source_filename || item.source_job_id.slice(0, 8) + "…"} · `;
+    const roleBit = item.arc_role ? `[${item.arc_role}] ` : "";
+    const srcName = item.source_label || item.source_filename || (item.source_job_id || "").slice(0, 8) + "…";
+    prefix.textContent = `${idx + 1}. ${roleBit}${srcName} · `;
     src.appendChild(prefix);
 
     // Editable title — persisted to localStorage immediately so the new
@@ -4906,6 +4908,11 @@ function sendCompileQueueToTimeline() {
       source_job_id: it.source_job_id,
       start_time: it.start_time,
       end_time: it.end_time,
+      source_label: it.source_label || it.source_filename || "",
+      theme: it.theme || "",
+      arc_role: it.arc_role || "",
+      title: it.title || "",
+      hook_quote: it.hook_quote || "",
     })),
     replace: true,
     newProject: true,
@@ -4935,6 +4942,9 @@ if (compileGoBtn) {
             title: c.title || "",
             hook_quote: c.hook_quote || "",
             source_filename: c.source_filename || "",
+            source_label: c.source_label || "",
+            theme: c.theme || "",
+            arc_role: c.arc_role || "",
           })),
           label: (compileLabelEl.value || "compilation").trim(),
         }),
@@ -4986,12 +4996,38 @@ renderCompileQueue();
 // ---- Multi-interview: shared themes across uploaded jobs ----
 const multiJobListEl = $("multiInterviewJobList");
 const multiThemesEl = $("multiInterviewThemes");
+const multiArcEl = $("multiInterviewArc");
 const multiStatusEl = $("multiInterviewStatus");
+const multiGoalEl = $("multiInterviewGoal");
+let _multiLastPlan = null;
+let _multiAvoidFingerprints = [];
 
 function _jobReadyForMulti(j) {
   if (!j || !j.job_id) return false;
   const st = String(j.status || "");
   return st === "awaiting_edit" || st === "done" || st === "ready" || !!j.has_words || (j.word_count || 0) > 0;
+}
+
+function _sourceLabelForJob(jobId, fallback) {
+  const j = (jobsById && jobsById[jobId]) || null;
+  const fname = (j && j.filename) || fallback || String(jobId || "").slice(0, 8);
+  return String(fname).replace(/\.[^.]+$/, "");
+}
+
+function _queueClipFromPlan(c, extras) {
+  extras = extras || {};
+  return {
+    source_job_id: c.source_job_id,
+    source_filename: c.source_filename || "",
+    source_label: c.source_label || _sourceLabelForJob(c.source_job_id, c.source_filename),
+    start_time: c.start_time,
+    end_time: c.end_time,
+    title: c.title || extras.theme || "",
+    hook_quote: c.hook_quote || "",
+    theme: c.theme || extras.theme || "",
+    reason: c.reason || "",
+    arc_role: c.arc_role || extras.arc_role || "",
+  };
 }
 
 function renderMultiInterviewJobs() {
@@ -5024,13 +5060,64 @@ function renderMultiInterviewJobs() {
   });
 }
 
+function renderMultiInterviewArc(plan) {
+  if (!multiArcEl) return;
+  multiArcEl.innerHTML = "";
+  const arc = (plan && plan.arc) || [];
+  if (!arc.length) return;
+  const card = document.createElement("div");
+  card.style.cssText = "padding:12px;background:#0f172a;border:1px solid #3b82f6;border-radius:10px";
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:flex-start";
+  const title = document.createElement("div");
+  const total = plan.arc_total_s != null ? Number(plan.arc_total_s) : arc.reduce((s, b) => s + (b.end_time - b.start_time), 0);
+  const goal = plan.goal_sec != null ? Number(plan.goal_sec) : 90;
+  title.innerHTML = `<strong>Story arc</strong>`
+    + `<span class="muted" style="font-size:.78rem;margin-left:8px">hook → answers → closer · ~${Math.round(total)}s / ${Math.round(goal)}s goal</span>`
+    + (plan.throughline ? `<div class="muted" style="font-size:.78rem;margin-top:4px">${escHtml(plan.throughline)}</div>` : "");
+  const useBtn = document.createElement("button");
+  useBtn.className = "btn btn-primary";
+  useBtn.type = "button";
+  useBtn.style.cssText = "background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff";
+  useBtn.textContent = `＋ Use arc (${arc.length} clips)`;
+  useBtn.onclick = () => {
+    arc.forEach((c) => addToCompileQueue(_queueClipFromPlan(c)));
+    useBtn.textContent = "✓ Arc queued";
+    useBtn.disabled = true;
+    if (multiStatusEl) multiStatusEl.textContent = `Queued ${arc.length}-beat arc (~${Math.round(total)}s).`;
+  };
+  head.appendChild(title);
+  head.appendChild(useBtn);
+  card.appendChild(head);
+  const list = document.createElement("ol");
+  list.style.cssText = "margin:10px 0 0;padding-left:20px;font-size:.8rem;color:#a8b0c0";
+  arc.forEach((c) => {
+    const li = document.createElement("li");
+    const role = (c.arc_role || "beat").replace(/_/g, " ");
+    const label = c.source_label || c.source_filename || String(c.source_job_id || "").slice(0, 8);
+    li.innerHTML = `<strong style="text-transform:capitalize;color:#93c5fd">${escHtml(role)}</strong>`
+      + ` · ${escHtml(label)} · ${Number(c.start_time).toFixed(1)}s–${Number(c.end_time).toFixed(1)}s`
+      + (c.hook_quote ? `<div style="opacity:.85">“${escHtml(c.hook_quote)}”</div>` : "");
+    list.appendChild(li);
+  });
+  card.appendChild(list);
+  multiArcEl.appendChild(card);
+}
+
 function renderMultiInterviewThemes(themes) {
   if (!multiThemesEl) return;
   multiThemesEl.innerHTML = "";
   if (!themes || !themes.length) {
-    multiThemesEl.innerHTML = `<p class="muted" style="font-size:.84rem">No shared themes found. Try more interviews or a broader topic set.</p>`;
+    if (!_multiLastPlan || !(_multiLastPlan.arc || []).length) {
+      multiThemesEl.innerHTML = `<p class="muted" style="font-size:.84rem">No shared themes found. Try more interviews or a broader topic set.</p>`;
+    }
     return;
   }
+  const browse = document.createElement("p");
+  browse.className = "muted";
+  browse.style.cssText = "font-size:.8rem;margin:0 0 6px";
+  browse.textContent = "Browse themes (optional) — add individual question clusters:";
+  multiThemesEl.appendChild(browse);
   themes.forEach((th, idx) => {
     const card = document.createElement("div");
     card.style.cssText = "padding:12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px";
@@ -5045,14 +5132,7 @@ function renderMultiInterviewThemes(themes) {
     addBtn.textContent = `＋ Add ${ (th.clips || []).length } clip(s) to queue`;
     addBtn.onclick = () => {
       (th.clips || []).forEach((c) => {
-        addToCompileQueue({
-          source_job_id: c.source_job_id,
-          source_filename: c.source_filename || "",
-          start_time: c.start_time,
-          end_time: c.end_time,
-          title: c.title || th.theme || "",
-          hook_quote: c.hook_quote || "",
-        });
+        addToCompileQueue(_queueClipFromPlan(c, { theme: th.theme || "" }));
       });
       addBtn.textContent = "✓ Added";
       addBtn.disabled = true;
@@ -5065,7 +5145,7 @@ function renderMultiInterviewThemes(themes) {
     list.style.cssText = "margin:10px 0 0;padding-left:18px;font-size:.8rem;color:#a8b0c0";
     (th.clips || []).forEach((c) => {
       const li = document.createElement("li");
-      const fname = c.source_filename || String(c.source_job_id || "").slice(0, 8);
+      const fname = c.source_label || c.source_filename || String(c.source_job_id || "").slice(0, 8);
       li.textContent = `${fname}: ${Number(c.start_time).toFixed(1)}s–${Number(c.end_time).toFixed(1)}s`
         + (c.hook_quote ? ` — “${c.hook_quote}”` : "");
       list.appendChild(li);
@@ -5081,6 +5161,62 @@ function escHtml(s) {
   }[ch]));
 }
 
+async function runMultiInterviewPlan(opts) {
+  opts = opts || {};
+  const ids = Array.from(document.querySelectorAll(".multi-interview-job:checked")).map((el) => el.value);
+  if (ids.length < 2) {
+    alert("Select at least 2 transcribed interviews.");
+    return;
+  }
+  const planBtn = $("multiInterviewPlanBtn");
+  const regenBtn = $("multiInterviewRegenBtn");
+  if (planBtn) planBtn.disabled = true;
+  if (regenBtn) regenBtn.disabled = true;
+  const goal = multiGoalEl ? Number(multiGoalEl.value) || 90 : 90;
+  if (multiStatusEl) {
+    multiStatusEl.textContent = opts.regenerate
+      ? "Regenerating arc (new beats)…"
+      : "Planning story arc with Gemini…";
+  }
+  try {
+    const body = {
+      job_ids: ids,
+      format: "interview",
+      goal_sec: goal,
+    };
+    if (opts.regenerate && _multiAvoidFingerprints.length) {
+      body.avoid_fingerprints = _multiAvoidFingerprints.slice(-6);
+    }
+    const res = await fetch("/multi-interview/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    _multiLastPlan = data;
+    if (data.fingerprint) {
+      _multiAvoidFingerprints.push(data.fingerprint);
+      if (_multiAvoidFingerprints.length > 8) _multiAvoidFingerprints.shift();
+    }
+    renderMultiInterviewArc(data);
+    renderMultiInterviewThemes(data.themes || []);
+    if (multiStatusEl) {
+      const arcN = (data.arc || []).length;
+      multiStatusEl.textContent = arcN
+        ? `Arc ready · ${arcN} beat(s) · ~${Math.round(data.arc_total_s || 0)}s`
+          + (data.theme_count ? ` · ${data.theme_count} theme(s)` : "")
+        : `Found ${data.theme_count || 0} theme(s), ${data.clip_count || 0} clip(s).`;
+    }
+  } catch (e) {
+    if (multiStatusEl) multiStatusEl.textContent = "Error: " + e.message;
+    alert("Multi-interview plan failed: " + e.message);
+  } finally {
+    if (planBtn) planBtn.disabled = false;
+    if (regenBtn) regenBtn.disabled = !_multiLastPlan;
+  }
+}
+
 const multiRefreshBtn = $("multiInterviewRefreshBtn");
 if (multiRefreshBtn) {
   multiRefreshBtn.onclick = async () => {
@@ -5090,33 +5226,11 @@ if (multiRefreshBtn) {
 }
 const multiPlanBtn = $("multiInterviewPlanBtn");
 if (multiPlanBtn) {
-  multiPlanBtn.onclick = async () => {
-    const ids = Array.from(document.querySelectorAll(".multi-interview-job:checked")).map((el) => el.value);
-    if (ids.length < 2) {
-      alert("Select at least 2 transcribed interviews.");
-      return;
-    }
-    multiPlanBtn.disabled = true;
-    if (multiStatusEl) multiStatusEl.textContent = "Planning with Gemini…";
-    try {
-      const res = await fetch("/multi-interview/plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_ids: ids, format: "interview" }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      renderMultiInterviewThemes(data.themes || []);
-      if (multiStatusEl) {
-        multiStatusEl.textContent = `Found ${data.theme_count || 0} theme(s), ${data.clip_count || 0} clip(s).`;
-      }
-    } catch (e) {
-      if (multiStatusEl) multiStatusEl.textContent = "Error: " + e.message;
-      alert("Multi-interview plan failed: " + e.message);
-    } finally {
-      multiPlanBtn.disabled = false;
-    }
-  };
+  multiPlanBtn.onclick = () => runMultiInterviewPlan({ regenerate: false });
+}
+const multiRegenBtn = $("multiInterviewRegenBtn");
+if (multiRegenBtn) {
+  multiRegenBtn.onclick = () => runMultiInterviewPlan({ regenerate: true });
 }
 
 renderMultiInterviewJobs();
