@@ -225,7 +225,7 @@ CAPCUT_TEMPLATES = {
         "color_grade": "warm",
         "auto_overlays": True,
         "photo_match": True,
-        "use_ai_photos": True,
+        "use_ai_photos": False,
         "broll_mode": "photo",
         "broll_placement": "center",
         "broll_scope": "full",
@@ -371,7 +371,7 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "hormozi",
         "photo_match": True,
-        "use_ai_photos": True,
+        "use_ai_photos": False,
         "style": {
             "font": "Montserrat Thin Black", "size": 62, "primary": "#FFFFFF",
             "highlight": "#FFE566", "accent": "#FF6B9A", "group": 2,

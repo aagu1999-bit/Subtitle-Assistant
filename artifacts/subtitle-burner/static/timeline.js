@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-67-cse-prefer-probe";
+  const TL_BUILD = "studio-editor-build-68-ai-photos-opt-in";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -380,11 +380,10 @@
     }
     if (placeEl) placeEl.value = place;
     if (scopeEl) scopeEl.value = scope;
-    if (aiEl && !aiEl.disabled) {
-      const wantAi = opts.use_ai_photos != null
-        ? !!opts.use_ai_photos
-        : !!(ae.use_ai_photos || pack.use_ai_photos);
-      aiEl.checked = wantAi;
+    // Only set the AI checkbox when explicitly requested (e.g. Always pack apply).
+    // Never re-force it on Suggest / status refresh — that blocked stock CSE/Pexels.
+    if (aiEl && !aiEl.disabled && opts.use_ai_photos != null) {
+      aiEl.checked = !!opts.use_ai_photos;
     }
     return true;
   }
@@ -588,7 +587,8 @@
       style_pack: "Always",
       style_pack_id: "always",
       photo_match: true,
-      use_ai_photos: true,
+      // Stock first by default — user opts into Gemini via the checkbox.
+      use_ai_photos: false,
       broll_mode: "photo",
       broll_placement: "center",
       broll_scope: "full",
@@ -596,7 +596,7 @@
       brand_kit: brandKit,
       caption_preset: brandKit.caption_preset || t.viral_preset || "hormozi",
     });
-    syncAlwaysBrollDefaults({ photo_match: true, use_ai_photos: true });
+    syncAlwaysBrollDefaults({ photo_match: true, use_ai_photos: false });
     await refreshBrollStatus().catch(() => {});
     setLeftTab("media", { pin: true });
     setSaveState("Always pack + brand kit — Suggest B-roll to match stills");
@@ -6216,6 +6216,15 @@
             try { localStorage.setItem("tl_broll_prefer", el.value || "auto"); } catch (err) { /* ignore */ }
           }
         });
+        on("tlBrollAiPhotos", "onchange", (e) => {
+          const on = !!(e && e.target && e.target.checked);
+          if (tl) {
+            if (!tl.ai_edit) tl.ai_edit = {};
+            tl.ai_edit.use_ai_photos = on;
+            scheduleSave();
+          }
+          try { localStorage.setItem("tl_broll_use_ai", on ? "1" : "0"); } catch (err) { /* ignore */ }
+        });
         on("tlAssetBtn", "onclick", () => $("tlAssetFile")?.click());
         on("tlAssetFile", "onchange", async (e) => {
           const f = e.target.files && e.target.files[0];
@@ -6441,7 +6450,7 @@
     const placeEl = $("tlBrollPlacement");
     const scopeEl = $("tlBrollScope");
     const aiEl = $("tlBrollAiPhotos");
-    // Always session: lock photo + AI defaults before Suggest.
+    // Always session: sync photo mode/placement only — do NOT re-check AI photos.
     if (isAlwaysPhotoMatchSession()) {
       syncAlwaysBrollDefaults({ photo_match: true });
       await refreshBrollStatus().catch(() => {});
@@ -6450,9 +6459,8 @@
     const mode = modeEl ? modeEl.value : "auto";
     const placement = placeEl ? placeEl.value : "pip";
     const scope = scopeEl ? scopeEl.value : "full";
-    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled)
-      || (isAlwaysPhotoMatchSession() && aiEl && !aiEl.disabled);
-    if (isAlwaysPhotoMatchSession() && aiEl && !aiEl.disabled) aiEl.checked = true;
+    // Opt-in only: unchecked means stock providers (CSE / Pexels / Unsplash).
+    const useAiPhotos = !!(aiEl && aiEl.checked && !aiEl.disabled);
     const isLong = tl && tl.canvas === "16x9";
     if (btn) {
       btn.disabled = true;

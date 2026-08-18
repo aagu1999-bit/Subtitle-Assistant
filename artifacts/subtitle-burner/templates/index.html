@@ -1404,7 +1404,7 @@
                 </label>
                 <label class="muted tl-broll-ai-opt" style="font-size:.74rem;display:flex;align-items:flex-start;gap:8px;cursor:pointer">
                   <input type="checkbox" id="tlBrollAiPhotos" style="margin-top:2px" {% if not gemini_enabled %}disabled{% endif %}>
-                  <span>Generate AI photos (Gemini){% if not gemini_enabled %} — set <code>GEMINI_API_KEY</code>{% else %} — opt-in; falls back to stock{% endif %}</span>
+                  <span>Generate AI photos (Gemini){% if not gemini_enabled %} — set <code>GEMINI_API_KEY</code>{% else %} — off by default; stock CSE/Pexels used when unchecked{% endif %}</span>
                 </label>
                 <button id="tlAutoOverlaysBtn" class="btn btn-secondary btn-block" type="button" title="Suggest timed B-roll from transcript keywords — you approve each one">✨ Suggest B-roll</button>
                 <button id="tlAlwaysPackBtn" class="tl-chip-btn" type="button" title="CapCut Always · Photo Match — keyword stills + Ken Burns on Accept">🖼️ Always pack</button>
