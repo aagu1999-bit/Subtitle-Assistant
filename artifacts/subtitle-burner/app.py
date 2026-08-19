@@ -1636,8 +1636,9 @@ def _probe_analyze_deps() -> dict:
         out["error"] = (
             f"{HUGGINGFACE_TOKEN_ENV} env var missing in the running Studio process. "
             f"Set it in the host env / .env.local and restart the server "
-            f"(accept licences at https://huggingface.co/pyannote/speaker-diarization-3.1 "
-            f"and https://huggingface.co/pyannote/segmentation-3.0)."
+            f"(accept licences at https://huggingface.co/pyannote/speaker-diarization-3.1 , "
+            f"https://huggingface.co/pyannote/segmentation-3.0 , and "
+            f"https://huggingface.co/pyannote/speaker-diarization-community-1)."
         )
     else:
         out["diarization_ok"] = True

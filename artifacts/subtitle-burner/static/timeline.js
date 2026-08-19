@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-79-edit-receipt-multi-arc";
+  const TL_BUILD = "studio-editor-build-80-polish-download";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -144,6 +144,7 @@
       audio: tl.audio || null,
       ai_edit: tl.ai_edit || null,
       edit_receipt: tl.edit_receipt || null,
+      last_polish: tl.last_polish || null,
       speaker_colors: tl.speaker_colors || null,
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -180,6 +181,7 @@
     if (d.audio !== undefined) tl.audio = d.audio;
     if (d.ai_edit !== undefined) tl.ai_edit = d.ai_edit;
     if (d.edit_receipt !== undefined) tl.edit_receipt = d.edit_receipt;
+    if (d.last_polish !== undefined) tl.last_polish = d.last_polish;
     if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
     if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
     if (d.track_states !== undefined) tl.track_states = d.track_states;
@@ -857,6 +859,7 @@
       sfx_overlays: tl.sfx_overlays !== false,
       ai_edit: tl.ai_edit || null,
       edit_receipt: tl.edit_receipt || null,
+      last_polish: tl.last_polish || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -5397,6 +5400,7 @@
       sfx_overlays: d.sfx_overlays !== false,
       ai_edit: d.ai_edit || null,
       edit_receipt: d.edit_receipt || null,
+      last_polish: d.last_polish || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
         return {
@@ -5431,6 +5435,7 @@
     applyStage();
     renderTimeline();
     refreshMaxTrims();
+    try { restorePolishDownloadUi(); } catch (e) { /* ignore */ }
   }
 
   async function refreshMaxTrims() {
@@ -5717,6 +5722,65 @@
     try { renderProps(); } catch (e) { /* ignore */ }
   }
 
+  /** Wire Timeline + Ingest download controls to the polished MP4 (not raw source). */
+  function updatePolishDownloadUi(output) {
+    const name = output ? String(output).split("/").pop() : "";
+    const url = name ? ("/download/" + encodeURIComponent(name) + "?t=" + Date.now()) : "";
+    const btn = $("tlPolishDownloadBtn");
+    if (btn) {
+      if (url) {
+        btn.href = url;
+        btn.setAttribute("download", name || "polish.mp4");
+        btn.classList.remove("hidden");
+      } else {
+        btn.classList.add("hidden");
+        btn.removeAttribute("href");
+      }
+    }
+    // Keep Ingest download link pointed at the polished file so a later
+    // Download click doesn't silently grab the pre-polish job MP4.
+    const dl = document.getElementById("downloadBtn") || document.getElementById("dl");
+    if (dl && url) {
+      dl.href = url;
+      dl.setAttribute("download", name || "polish.mp4");
+      dl.dataset.polishOutput = name;
+    }
+    const player = document.getElementById("player");
+    if (player && name) {
+      try {
+        player.src = "/preview/" + name + "?t=" + Date.now();
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  function setPolishReady(status) {
+    if (!tl || !status || !status.output) return;
+    const output = String(status.output).split("/").pop();
+    tl.last_polish = {
+      output,
+      polish_id: status.polish_id || null,
+      at: Date.now() / 1000,
+      pacing: status.pacing || null,
+      stats: status.stats || {},
+    };
+    updatePolishDownloadUi(output);
+    scheduleSave();
+    if (typeof window.triggerVideoDownload === "function") {
+      window.triggerVideoDownload(output, { timeline: true, polish: true });
+    } else if (typeof window.showDownloadReadyBanner === "function") {
+      window.showDownloadReadyBanner(output, { timeline: true, polish: true });
+    }
+  }
+
+  function restorePolishDownloadUi() {
+    const out = tl && tl.last_polish && tl.last_polish.output;
+    if (out) updatePolishDownloadUi(out);
+    else updatePolishDownloadUi(null);
+  }
+  window.getLastPolishOutput = function () {
+    return (tl && tl.last_polish && tl.last_polish.output) || null;
+  };
+
   async function runTimelinePolish(opts) {
     opts = opts || {};
     if (!tl || !tl.tracks.main.length) {
@@ -5821,7 +5885,12 @@
             } catch (receiptErr) {
               console.warn("[timeline] polish receipt:", receiptErr);
             }
-            setRenderStatus("Polish done ✓ — playing polished output (not timeline source)" + durNote);
+            try {
+              setPolishReady(s);
+            } catch (dlErr) {
+              console.warn("[timeline] polish download wire:", dlErr);
+            }
+            setRenderStatus("Polish done ✓ — download ready (⬇ Polished)" + durNote);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
             if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             const v = $("tlPreviewVideo");
@@ -5833,16 +5902,16 @@
               v.load();
               v.play().catch(() => {});
             }
-            // Do NOT call showExportDone() — that jumps to Ingest and makes
-            // Timeline play the unmodified Main source again ("nothing changed").
+            // Stay on Timeline. Download is wired to the polished file via
+            // ⬇ Polished + Ingest download link + sticky banner — do NOT jump
+            // tabs (that used to make people grab the pre-polish source MP4).
             alert(
               "Polish finished.\n\n" +
-              "The Timeline preview is now the polished MP4 (not your Main source).\n" +
+              "⬇ Download the polished MP4 with the blue banner or the Timeline “⬇ Polished” button.\n" +
               (durNote ? ("Length change:" + durNote + "\n") : "") +
-              "Open Properties → Edit receipt for a change list.\n" +
-              "Download: /download/" + s.output + "\n\n" +
-              "Note: scrubbing the timeline or Preview cut switches back to the original source. " +
-              "Captions still need ▶ Render."
+              "Open Properties → Edit receipt for a change list.\n\n" +
+              "Note: clicking a Timeline clip switches preview back to the raw source for editing — " +
+              "that does not change the polished download. Captions still need ▶ Render."
             );
             resolve(s);
           } else if (s.status === "error") {

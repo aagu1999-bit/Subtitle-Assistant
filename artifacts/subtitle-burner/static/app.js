@@ -6541,7 +6541,9 @@ function _renderAssemblyBar() {
     }
     const url = "/download/" + encodeURIComponent(String(output).replace(/^\/+/, ""))
       + "?t=" + Date.now();
-    const label = opts.timeline
+    const label = opts.polish
+      ? "Polish ready — this is the hygiene cut (silence/zooms/B-roll), not Instant Export."
+      : opts.timeline
       ? "Timeline export ready — full edited video (not Instant Export / audio-only)."
       : "Export ready — tap Download to save the MP4.";
     ban.innerHTML =
