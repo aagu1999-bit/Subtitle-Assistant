@@ -5598,9 +5598,36 @@ async function recapImportFiles(fileList) {
   renderRecapScenes();
 }
 
+/** Repaint selection state without rebuilding the tray (keeps scroll + speed). */
+function _recapSyncTraySelection() {
+  const host = $("recapImportBody");
+  if (!host) return;
+  host.querySelectorAll("[data-recap-key]").forEach((tile) => {
+    tile.style.borderColor = _recapTraySel.has(tile.dataset.recapKey) ? "#f59e0b" : "#2a2f3a";
+  });
+  const lab = host.querySelector("[data-recap-sendlabel]");
+  if (lab) {
+    lab.textContent = _recapTraySel.size
+      ? `Send ${_recapTraySel.size} selected \u2192`
+      : "Select media, then send \u2192";
+  }
+  host.querySelectorAll("[data-recap-assign]").forEach((b) => {
+    b.disabled = !_recapTraySel.size;
+  });
+  const selAll = host.querySelector("[data-recap-selectall]");
+  if (selAll) {
+    const total = host.querySelectorAll("[data-recap-key]").length;
+    selAll.textContent = (_recapTraySel.size === total && total) ? "Clear selection" : "Select all";
+  }
+}
+
 function renderRecapImport() {
   const host = $("recapImportBody");
   if (!host) return;
+  // Preserve where the user was scrolled when a rebuild IS necessary
+  // (assignment, import, filter change).
+  const prevGrid = host.querySelector("[data-recap-grid]");
+  const prevScroll = prevGrid ? prevGrid.scrollTop : 0;
   host.innerHTML = "";
 
   // Upload progress rows (only while something is in flight / recently failed)
@@ -5641,11 +5668,12 @@ function renderRecapImport() {
   selAll.type = "button";
   selAll.className = "btn btn-secondary btn-sm";
   selAll.style.cssText = "font-size:.72rem;padding:3px 8px";
+  selAll.dataset.recapSelectall = "1";
   selAll.textContent = _recapTraySel.size === shown.length && shown.length ? "Clear selection" : "Select all";
   selAll.onclick = () => {
     if (_recapTraySel.size === shown.length && shown.length) _recapTraySel.clear();
     else shown.forEach((it) => _recapTraySel.add(it.key));
-    renderRecapImport();
+    _recapSyncTraySelection();
   };
   const toggle = document.createElement("button");
   toggle.type = "button";
@@ -5687,6 +5715,7 @@ function renderRecapImport() {
     host.appendChild(empty);
   } else {
     const grid = document.createElement("div");
+    grid.dataset.recapGrid = "1";
     grid.style.cssText =
       "display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:6px;max-height:220px;overflow:auto;padding:2px";
     shown.forEach((it, i) => {
@@ -5720,6 +5749,7 @@ function renderRecapImport() {
         badge.textContent = where.replace("⚡ ", "⚡");
         tile.appendChild(badge);
       }
+      tile.dataset.recapKey = it.key;
       tile.onclick = (ev) => {
         if (ev.shiftKey && _recapTrayAnchor >= 0) {
           const [a, b] = [_recapTrayAnchor, i].sort((x, y) => x - y);
@@ -5729,11 +5759,14 @@ function renderRecapImport() {
           else _recapTraySel.add(it.key);
           _recapTrayAnchor = i;
         }
-        renderRecapImport();
+        // Restyle in place — never re-render, or the grid jumps to the top.
+        _recapSyncTraySelection();
       };
       grid.appendChild(tile);
     });
     host.appendChild(grid);
+    // Restore scroll after the rebuild so the view doesn't jump.
+    if (prevScroll) grid.scrollTop = prevScroll;
   }
 
   // Assignment buttons
@@ -5742,6 +5775,7 @@ function renderRecapImport() {
   const lab = document.createElement("span");
   lab.className = "muted";
   lab.style.fontSize = ".76rem";
+  lab.dataset.recapSendlabel = "1";
   lab.textContent = _recapTraySel.size ? `Send ${_recapTraySel.size} selected →` : "Select media, then send →";
   actions.appendChild(lab);
   _recapEnsureScenes();
@@ -5751,6 +5785,7 @@ function renderRecapImport() {
     b.className = "btn btn-secondary btn-sm";
     b.style.cssText = "font-size:.72rem;padding:3px 8px";
     b.textContent = sc.name || "Scene " + (i + 1);
+    b.dataset.recapAssign = "1";
     b.disabled = !_recapTraySel.size;
     b.onclick = () => _recapAssignSelection(i);
     actions.appendChild(b);
@@ -5760,6 +5795,7 @@ function renderRecapImport() {
   fb.className = "btn btn-secondary btn-sm";
   fb.style.cssText = "font-size:.72rem;padding:3px 8px;border-color:#f59e0b;color:#fbbf24";
   fb.textContent = "⚡ Photo Flash";
+  fb.dataset.recapAssign = "1";
   fb.disabled = !_recapTraySel.size;
   fb.title = "Photos only — these become the stills the camera shutter fires over.";
   fb.onclick = () => _recapAssignSelection("flash");
@@ -5964,6 +6000,12 @@ async function runRecapApply() {
     if (typeof window.openTimelineEditor !== "function") {
       throw new Error("Timeline still loading — try again in a second.");
     }
+    if (status) status.textContent = "Plan ready — review it.";
+    const go = await showRecapPreview(data, payload);
+    if (!go) {
+      if (status) status.textContent = "Cancelled — nothing sent to the Timeline.";
+      return;
+    }
     await window.openTimelineEditor(null, {
       seedTimeline: data.seedTimeline,
       newProject: true,
@@ -6006,6 +6048,134 @@ async function runRecapApply() {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+/** Local HTML escape — `esc` lives in timeline.js's scope, not this one. */
+function _recapEsc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
+/** Review popup: storyboard + beat math + audible shutter, before committing. */
+function showRecapPreview(data, payload) {
+  return new Promise((resolve) => {
+    const seed = data.seedTimeline || {};
+    const tracks = seed.tracks || {};
+    const main = tracks.main || [];
+    const music = tracks.music || [];
+    const st = data.stats || {};
+    const recap = seed.recap || {};
+
+    const back = document.createElement("div");
+    back.style.cssText =
+      "position:fixed;inset:0;background:rgba(6,8,12,.82);z-index:9999;display:flex;" +
+      "align-items:center;justify-content:center;padding:20px";
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:#12151f;border:1px solid #2a2f3a;border-radius:14px;max-width:900px;width:100%;" +
+      "max-height:88vh;overflow:auto;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.6)";
+
+    const flash = main.filter((c) => c.arc_role === "flash");
+    const scene = main.filter((c) => c.arc_role !== "flash");
+    let html = `<h2 style="margin:0 0 4px">Preview — ${_recapEsc(data.label || "Recap Reel")}</h2>` +
+      `<p class="muted" style="margin:0 0 14px;font-size:.84rem">` +
+      `${st.clip_count || 0} beats · ~${st.total_sec || "?"}s · hang ${st.hang_sec || "?"}s` +
+      (flash.length ? ` · ⚡ ${flash.length} flash stills` : "") +
+      `</p>`;
+
+    (data.warnings || []).forEach((w) => {
+      html += `<div style="font-size:.78rem;color:#fbbf24;margin-bottom:4px">⚠ ${_recapEsc(w)}</div>`;
+    });
+
+    (recap.scenes || []).forEach((sc) => {
+      const all = sc.used_source_count >= sc.source_count;
+      html += `<div style="font-size:.78rem;color:#94a3b8;margin-top:8px">` +
+        `<strong style="color:#e8eaee">${_recapEsc(sc.name)}</strong> — ${sc.beat_count} beats from ` +
+        `${sc.used_source_count}/${sc.source_count} sources, ${sc.beats_per_source} each ` +
+        (all ? `<span style="color:#4ade80">(all appear)</span>`
+             : `<span style="color:#fbbf24">(${sc.source_count - sc.used_source_count} won\u2019t fit)</span>`) +
+        `</div>`;
+    });
+
+    html += `<div style="margin-top:14px;font-size:.78rem;color:#c8cdd3">Shot order</div>`;
+    html += `<div id="recapPvStrip" style="display:flex;gap:4px;overflow-x:auto;padding:8px 2px;margin-bottom:6px"></div>`;
+    if (music.length) {
+      html += `<div style="margin-top:6px"><button type="button" id="recapPvAudio" class="btn btn-secondary btn-sm" ` +
+        `style="font-size:.76rem">🔊 Hear the shutter bed</button> ` +
+        `<span class="muted" style="font-size:.74rem">${flash.length} clicks over the opener</span></div>`;
+    } else if (payload.photo_flash && payload.photo_flash.enabled && payload.photo_flash.shutter_sfx) {
+      html += `<div style="margin-top:6px;font-size:.78rem;color:#f87171">⚠ Shutter was requested but no bed was produced.</div>`;
+    }
+    html += `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">` +
+      `<button type="button" id="recapPvBack" class="btn btn-secondary">← Keep editing</button>` +
+      `<button type="button" id="recapPvGo" class="btn btn-primary" ` +
+      `style="background:linear-gradient(135deg,#f59e0b,#ea580c);color:#fff">Send to Timeline →</button></div>`;
+    box.innerHTML = html;
+    back.appendChild(box);
+    document.body.appendChild(back);
+
+    // Storyboard thumbnails in playback order.
+    const strip = box.querySelector("#recapPvStrip");
+    main.slice(0, 80).forEach((c, i) => {
+      const cell = document.createElement("div");
+      cell.style.cssText =
+        "flex:0 0 auto;width:54px;height:74px;border-radius:6px;overflow:hidden;position:relative;" +
+        "background:#1a1e2a;border:1px solid " + (c.arc_role === "flash" ? "#f59e0b" : "#2a2f3a");
+      if (c.asset_id) {
+        const img = document.createElement("img");
+        img.src = "/asset-thumb/" + c.asset_id;
+        img.loading = "lazy";
+        img.style.cssText = "width:100%;height:100%;object-fit:cover";
+        img.onerror = () => img.remove();
+        cell.appendChild(img);
+      } else {
+        const t = document.createElement("div");
+        t.style.cssText = "font-size:.6rem;color:#94a3b8;padding:4px;line-height:1.2";
+        t.textContent = "🎬 " + String(c.source_label || "clip").slice(0, 14);
+        cell.appendChild(t);
+      }
+      const n = document.createElement("span");
+      n.style.cssText = "position:absolute;left:2px;bottom:2px;font-size:.58rem;color:#e8eaee;" +
+        "background:rgba(8,10,16,.8);padding:0 3px;border-radius:3px";
+      n.textContent = i + 1;
+      cell.appendChild(n);
+      cell.title = (c.arc_role === "flash" ? "Flash still " : "Beat ") + (i + 1) +
+        " · " + (c.source_label || "");
+      strip.appendChild(cell);
+    });
+    if (main.length > 80) {
+      const more = document.createElement("div");
+      more.className = "muted";
+      more.style.cssText = "flex:0 0 auto;align-self:center;font-size:.72rem;padding:0 6px";
+      more.textContent = `+${main.length - 80} more`;
+      strip.appendChild(more);
+    }
+
+    let audio = null;
+    const audioBtn = box.querySelector("#recapPvAudio");
+    if (audioBtn && music[0] && music[0].asset_id) {
+      audioBtn.onclick = () => {
+        if (audio && !audio.paused) { audio.pause(); audioBtn.textContent = "🔊 Hear the shutter bed"; return; }
+        audio = new Audio("/asset/" + music[0].asset_id);
+        audio.play().catch(() => {});
+        audioBtn.textContent = "⏹ Stop";
+        audio.onended = () => { audioBtn.textContent = "🔊 Hear the shutter bed"; };
+      };
+    }
+
+    const close = (val) => {
+      try { if (audio) audio.pause(); } catch (e) {}
+      back.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onKey = (e) => { if (e.key === "Escape") close(false); };
+    document.addEventListener("keydown", onKey);
+    box.querySelector("#recapPvBack").onclick = () => close(false);
+    box.querySelector("#recapPvGo").onclick = () => close(true);
+    back.onclick = (e) => { if (e.target === back) close(false); };
+  });
 }
 
 async function initRecapReelPanel() {
