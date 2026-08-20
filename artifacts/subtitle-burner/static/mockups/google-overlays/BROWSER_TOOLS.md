@@ -41,6 +41,22 @@ falls back to downloading the full-size `murl` when the SERP crop is still small
 - Spacing: 18s min gap between kept overlays
 - `SERP_CAPTURE=1` (default) enables Playwright capture API
 - `SERP_ENGINE=auto|google|bing` — Google often CAPTCHA from cloud IPs; auto falls back to Bing
+- `PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL=0` — prefer full Chromium (set by worker; helps Replit)
+
+## Replit Chromium
+Capture SERP needs a working Playwright browser. If you see
+`BrowserType.launch: Target page, context or browser has been closed` (and a wall of
+Chromium flags in the alert), Chromium crashed on start — usually sandbox/shm on Replit.
+
+```bash
+cd artifacts/subtitle-burner   # or your Studio root
+pip install playwright
+python -m playwright install chromium
+# then Stop + Run the Project workflow
+```
+
+The SERP worker launches with `--no-sandbox`, `--disable-dev-shm-usage`, and retries
+`--single-process` if the first launch dies.
 
 ## Live API
 - `POST /overlay/serp-capture` `{ "query": "...", "tab": "images" }` → Timeline `asset_id`

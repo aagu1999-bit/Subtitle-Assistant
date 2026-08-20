@@ -7052,12 +7052,20 @@ def overlay_serp_capture():
     try:
         meta = capture_serp(query, tab=tab, out_path=dest, engine=engine)
     except Exception as exc:
-        return jsonify({"error": f"capture failed: {exc}"}), 500
+        from scripts.serp_screenshot import _short_pw_error
+        return jsonify({
+            "error": f"capture failed: {_short_pw_error(exc)}",
+            "hint": (
+                "Replit: in Shell run `python -m playwright install chromium`, then Stop + Run. "
+                "Chromium needs --no-sandbox on Replit (now default in the SERP worker)."
+            ),
+        }), 500
 
     if not meta.get("ok") or not dest.exists() or dest.stat().st_size < 800:
         return jsonify({
             "ok": False,
             "error": meta.get("error") or "empty_capture",
+            "hint": meta.get("hint"),
             "query": query,
             "tab": tab,
             "engine": meta.get("engine"),

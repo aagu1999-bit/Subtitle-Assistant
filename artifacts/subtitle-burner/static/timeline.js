@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-81-checkpoint-b-serp";
+  const TL_BUILD = "studio-editor-build-82-serp-replit";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -7030,7 +7030,14 @@
       setSaveState(`SERP ready · “${query.slice(0, 40)}” · ${bits.join(" · ")} — Accept / Skip`);
       if (window.StudioLogger) StudioLogger.clip("serp_capture_pending", `${id}:${tab}:${data.engine || "?"}`);
     } catch (e) {
-      alert("SERP capture failed: " + (e && e.message ? e.message : e));
+      const raw = String((e && e.message) ? e.message : e);
+      // Playwright dumps huge Chromium flag lists — keep the alert readable.
+      let msg = raw.split("Browser logs:")[0].trim();
+      if (msg.length > 320) msg = msg.slice(0, 317) + "…";
+      const replitHint = /browser has been closed|chromium|launch|playwright/i.test(raw)
+        ? "\n\nReplit fix: Shell → `python -m playwright install chromium` → Stop + Run, then try Capture SERP again."
+        : "";
+      alert("SERP capture failed: " + msg + replitHint);
       setSaveState("SERP capture failed");
       if (btn) {
         btn.disabled = false;

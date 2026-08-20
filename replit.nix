@@ -11,8 +11,27 @@
     pkgs.xorg.libX11
     pkgs.xorg.libXext
     pkgs.xorg.libXrender
+    pkgs.xorg.libXcomposite
+    pkgs.xorg.libXdamage
+    pkgs.xorg.libXfixes
+    pkgs.xorg.libXrandr
     pkgs.libGL
     pkgs.glib
     pkgs.zlib
+    # Playwright Chromium (Capture SERP) — common shared libs on Replit
+    pkgs.nss
+    pkgs.nspr
+    pkgs.atk
+    pkgs.at-spi2-atk
+    pkgs.cups
+    pkgs.dbus
+    pkgs.libdrm
+    pkgs.libxkbcommon
+    pkgs.pango
+    pkgs.cairo
+    pkgs.alsa-lib
+    pkgs.mesa
+    pkgs.expat
+    pkgs.gtk3
   ];
 }

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -475,6 +476,92 @@ def _default_center_crop(page, *, w=720, h=420) -> dict:
     }
 
 
+def _short_pw_error(exc: object) -> str:
+    """Strip Playwright's huge 'Browser logs:' dump so UI alerts stay readable."""
+    s = str(exc or "").strip() or "unknown_error"
+    if "Browser logs:" in s:
+        s = s.split("Browser logs:", 1)[0].strip()
+    # Keep first meaningful line / sentence
+    for sep in ("\n", "Call log:"):
+        if sep in s:
+            s = s.split(sep, 1)[0].strip()
+    s = re.sub(r"\s+", " ", s)
+    if len(s) > 280:
+        s = s[:277] + "…"
+    return s
+
+
+def _chromium_launch_args() -> list[str]:
+    """Flags that keep Chromium alive in Replit / Docker / Nix sandboxes."""
+    return [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--mute-audio",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--font-render-hinting=none",
+    ]
+
+
+def _launch_chromium(p):
+    """Try several Chromium launch strategies until one stays open.
+
+    Replit often kills default ``chromium_headless_shell`` (sandbox / shm).
+    Prefer full Chromium with ``chromium_sandbox=False`` + no-sandbox args.
+    """
+    # Prefer full Chromium over headless_shell when the env allows it.
+    os.environ.setdefault("PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL", "0")
+
+    attempts = [
+        {
+            "headless": True,
+            "chromium_sandbox": False,
+            "args": _chromium_launch_args(),
+        },
+        {
+            "headless": True,
+            "chromium_sandbox": False,
+            "args": _chromium_launch_args() + ["--single-process", "--no-zygote"],
+        },
+        {
+            # Last resort: headed mode behind a virtual display if present
+            "headless": False,
+            "chromium_sandbox": False,
+            "args": _chromium_launch_args(),
+        },
+    ]
+    errors: list[str] = []
+    for opts in attempts:
+        browser = None
+        try:
+            browser = p.chromium.launch(**opts)
+            # Smoke-check: create a page so we fail fast if the process dies.
+            ctx = browser.new_context(viewport={"width": 800, "height": 600})
+            page = ctx.new_page()
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=8000)
+            page.close()
+            ctx.close()
+            return browser
+        except Exception as exc:
+            errors.append(_short_pw_error(exc))
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+            continue
+    hint = (
+        "Chromium failed to start on this host. In Replit Shell run: "
+        "`python -m playwright install chromium` then Stop + Run. "
+        "If it still fails: `playwright install-deps chromium` (needs packages)."
+    )
+    raise RuntimeError(hint + " Last errors: " + " | ".join(errors[:3]))
+
+
 def capture_serp(
     query: str,
     *,
@@ -509,134 +596,148 @@ def capture_serp(
 
     last_err = None
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            viewport=DEFAULT_VIEWPORT,
-            device_scale_factor=DEVICE_SCALE_FACTOR if clarity else 1,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-        )
-        page = context.new_page()
-        page.set_default_timeout(timeout_ms)
+        try:
+            browser = _launch_chromium(p)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "query": query,
+                "tab": tab,
+                "error": _short_pw_error(exc),
+                "path": str(out_path),
+                "hint": (
+                    "Replit: python -m playwright install chromium && Stop+Run. "
+                    "Needs --no-sandbox (bundled in this worker)."
+                ),
+            }
 
-        for eng in engines:
-            try:
-                if eng == "google":
-                    if tab == "images":
-                        url = f"https://www.google.com/search?tbm=isch&q={_quote(query)}&hl=en&gl=us"
-                    elif tab == "maps":
-                        url = f"https://www.google.com/maps/search/{_quote(query)}"
-                    elif tab == "flights":
-                        url = f"https://www.google.com/travel/flights?q={_quote(query)}"
-                    else:
-                        url = f"https://www.google.com/search?q={_quote(query)}&hl=en&gl=us"
-                else:
-                    if tab == "images":
-                        url = f"https://www.bing.com/images/search?q={_quote(query)}"
-                    elif tab == "maps":
-                        url = f"https://www.bing.com/maps?q={_quote(query)}"
-                    else:
-                        url = f"https://www.bing.com/search?q={_quote(query)}"
+        try:
+            context = browser.new_context(
+                viewport=DEFAULT_VIEWPORT,
+                device_scale_factor=DEVICE_SCALE_FACTOR if clarity else 1,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+            )
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
 
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(900)
-                _try_dismiss_consent(page)
-                page.wait_for_timeout(700)
-                block = _detect_block(page)
-                if block and eng == "google":
-                    last_err = block
-                    continue
-
-                # Extra settle for images/maps
-                page.wait_for_timeout(1200)
-                clarity_mode = "grid"
-                murls: list[str] = []
-
-                if eng == "google":
-                    if tab == "images":
-                        if clarity:
-                            _open_google_image_detail(page)
-                            clip = _crop_box_google_detail(page) or _crop_box_images_google(page)
-                            clarity_mode = "detail" if clip else "grid"
+            for eng in engines:
+                try:
+                    if eng == "google":
+                        if tab == "images":
+                            url = f"https://www.google.com/search?tbm=isch&q={_quote(query)}&hl=en&gl=us"
+                        elif tab == "maps":
+                            url = f"https://www.google.com/maps/search/{_quote(query)}"
+                        elif tab == "flights":
+                            url = f"https://www.google.com/travel/flights?q={_quote(query)}"
                         else:
-                            clip = _crop_box_images_google(page)
-                    elif tab == "maps":
-                        clip = _crop_box_maps_google(page)
+                            url = f"https://www.google.com/search?q={_quote(query)}&hl=en&gl=us"
                     else:
-                        clip = _crop_box_web_google(page)
-                else:
-                    if tab == "images":
-                        murls = _bing_image_murls(page) if clarity else []
-                        if clarity:
-                            opened = _open_bing_image_detail(page)
-                            clip = _crop_box_bing_detail(page) if opened else None
-                            if clip:
-                                clarity_mode = "detail"
+                        if tab == "images":
+                            url = f"https://www.bing.com/images/search?q={_quote(query)}"
+                        elif tab == "maps":
+                            url = f"https://www.bing.com/maps?q={_quote(query)}"
+                        else:
+                            url = f"https://www.bing.com/search?q={_quote(query)}"
+
+                    page.goto(url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(900)
+                    _try_dismiss_consent(page)
+                    page.wait_for_timeout(700)
+                    block = _detect_block(page)
+                    if block and eng == "google":
+                        last_err = block
+                        continue
+
+                    # Extra settle for images/maps
+                    page.wait_for_timeout(1200)
+                    clarity_mode = "grid"
+                    murls: list[str] = []
+
+                    if eng == "google":
+                        if tab == "images":
+                            if clarity:
+                                _open_google_image_detail(page)
+                                clip = _crop_box_google_detail(page) or _crop_box_images_google(page)
+                                clarity_mode = "detail" if clip else "grid"
+                            else:
+                                clip = _crop_box_images_google(page)
+                        elif tab == "maps":
+                            clip = _crop_box_maps_google(page)
+                        else:
+                            clip = _crop_box_web_google(page)
+                    else:
+                        if tab == "images":
+                            murls = _bing_image_murls(page) if clarity else []
+                            if clarity:
+                                opened = _open_bing_image_detail(page)
+                                clip = _crop_box_bing_detail(page) if opened else None
+                                if clip:
+                                    clarity_mode = "detail"
+                                else:
+                                    clip = _crop_box_bing_images(page)
+                                    clarity_mode = "grid"
                             else:
                                 clip = _crop_box_bing_images(page)
-                                clarity_mode = "grid"
                         else:
-                            clip = _crop_box_bing_images(page)
-                    else:
-                        clip = _crop_box_bing_web(page)
+                            clip = _crop_box_bing_web(page)
 
-                if not clip:
-                    clip = _default_center_crop(page)
+                    if not clip:
+                        clip = _default_center_crop(page)
 
-                # Clamp to viewport
-                vw, vh = page.viewport_size["width"], page.viewport_size["height"]
-                clip["x"] = max(0, min(clip["x"], vw - 40))
-                clip["y"] = max(0, min(clip["y"], vh - 40))
-                clip["width"] = max(120, min(clip["width"], vw - clip["x"]))
-                clip["height"] = max(100, min(clip["height"], vh - clip["y"]))
+                    # Clamp to viewport
+                    vw, vh = page.viewport_size["width"], page.viewport_size["height"]
+                    clip["x"] = max(0, min(clip["x"], vw - 40))
+                    clip["y"] = max(0, min(clip["y"], vh - 40))
+                    clip["width"] = max(120, min(clip["width"], vw - clip["x"]))
+                    clip["height"] = max(100, min(clip["height"], vh - clip["y"]))
 
-                page.screenshot(path=str(out_path), clip=clip, type="png")
-                bytes_n = out_path.stat().st_size if out_path.exists() else 0
+                    page.screenshot(path=str(out_path), clip=clip, type="png")
+                    bytes_n = out_path.stat().st_size if out_path.exists() else 0
 
-                # Bing Images: prefer full-size murl when the SERP crop is still a soft thumb.
-                crop_soft = (
-                    float(clip.get("width") or 0) < 520
-                    or float(clip.get("height") or 0) < 360
-                    or bytes_n < 220_000
-                )
-                if (
-                    clarity
-                    and eng == "bing"
-                    and tab == "images"
-                    and murls
-                    and crop_soft
-                ):
-                    for murl in murls[:4]:
-                        if _download_url_to_path(murl, out_path):
-                            clarity_mode = "murl"
-                            bytes_n = out_path.stat().st_size
-                            break
+                    # Bing Images: prefer full-size murl when the SERP crop is still a soft thumb.
+                    crop_soft = (
+                        float(clip.get("width") or 0) < 520
+                        or float(clip.get("height") or 0) < 360
+                        or bytes_n < 220_000
+                    )
+                    if (
+                        clarity
+                        and eng == "bing"
+                        and tab == "images"
+                        and murls
+                        and crop_soft
+                    ):
+                        for murl in murls[:4]:
+                            if _download_url_to_path(murl, out_path):
+                                clarity_mode = "murl"
+                                bytes_n = out_path.stat().st_size
+                                break
 
-                meta = {
-                    "ok": True,
-                    "query": query,
-                    "tab": tab,
-                    "engine": eng,
-                    "path": str(out_path),
-                    "clip": clip if clarity_mode != "murl" else None,
-                    "url": page.url,
-                    "bytes": bytes_n,
-                    "clarity": clarity_mode,
-                    "device_scale_factor": DEVICE_SCALE_FACTOR if clarity else 1,
-                }
+                    meta = {
+                        "ok": True,
+                        "query": query,
+                        "tab": tab,
+                        "engine": eng,
+                        "path": str(out_path),
+                        "clip": clip if clarity_mode != "murl" else None,
+                        "url": page.url,
+                        "bytes": bytes_n,
+                        "clarity": clarity_mode,
+                        "device_scale_factor": DEVICE_SCALE_FACTOR if clarity else 1,
+                    }
+                    return meta
+                except Exception as exc:
+                    last_err = _short_pw_error(exc)
+                    continue
+        finally:
+            try:
                 browser.close()
-                return meta
-            except Exception as exc:
-                last_err = str(exc)
-                continue
-
-        browser.close()
+            except Exception:
+                pass
 
     return {
         "ok": False,
