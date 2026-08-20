@@ -7009,7 +7009,10 @@
         body: JSON.stringify({ query, tab, google_tab: tab }),
       });
       if (!data || !data.ok || !data.asset_id) {
-        throw new Error((data && (data.error || data.hint)) || "capture failed");
+        const bits = [];
+        if (data && data.error) bits.push(data.error);
+        if (data && data.hint) bits.push(data.hint);
+        throw new Error(bits.join(" — ") || "capture failed");
       }
       const oldId = p.asset_id;
       p.asset_id = data.asset_id;
