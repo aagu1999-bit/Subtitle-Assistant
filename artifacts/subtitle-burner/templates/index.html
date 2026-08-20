@@ -1232,18 +1232,25 @@
   <section id="recapReelPanel" class="panel" style="margin-top:0;border-color:#f59e0b">
     <h2>🏙 Recap Reel <span class="muted" style="font-size:.78rem;font-weight:normal">(event / space montage)</span></h2>
     <p class="muted panel-desc">
-      Up to <strong>5 videos</strong> in context. Tag media into <strong>scenes</strong>, set how long each scene should run
-      (longer for denser voiceover later), then Apply seeds one Timeline with evenly split short beats.
-      Optional <strong>Photo Flash</strong> cold-open (8–30 stills in 2–5s; can pull frames from your videos).
+      Up to <strong>5 videos</strong> in context. Tag media into <strong>scenes</strong>, set each scene’s
+      <strong>total length</strong>, and set <strong>Hang</strong> for how long each cut stays on screen
+      (scene length ÷ hang ≈ number of cuts). Long sources are sampled evenly — start, middle, and end —
+      and passed around between videos. Optional <strong>Photo Flash</strong> cold-open with CapCut-style
+      camera snaps (8–30 stills in 2–5s).
     </p>
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <input type="text" id="recapLabel" placeholder="Recap name (optional)" maxlength="80"
         style="flex:1;min-width:160px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.88rem">
-      <label class="muted" style="font-size:.82rem;display:flex;align-items:center;gap:6px">Beat
-        <select id="recapBeatSec" style="padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
-          <option value="0.5">0.5s</option>
-          <option value="0.75" selected>0.75s</option>
-          <option value="1">1.0s</option>
+      <label class="muted" style="font-size:.82rem;display:flex;align-items:center;gap:6px" title="How long each cut stays on screen. Raise this for more hang time / space — scene duration alone only adds more cuts.">Hang
+        <select id="recapHangSec" style="padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
+          <option value="0.5">0.5s snap</option>
+          <option value="0.75">0.75s quick</option>
+          <option value="1" selected>1s</option>
+          <option value="1.5">1.5s space</option>
+          <option value="2">2s linger</option>
+          <option value="2.5">2.5s</option>
+          <option value="3">3s hold</option>
+          <option value="4">4s long</option>
         </select>
       </label>
       <label class="muted" style="font-size:.82rem;display:flex;align-items:center;gap:6px">Canvas
@@ -1276,6 +1283,9 @@
         </label>
         <label style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#94a3b8">
           <input type="checkbox" id="recapFlashVideoStills" checked> Include stills from videos
+        </label>
+        <label style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#fbbf24" title="CapCut-style shutter click on each still (Timeline preview + Render)">
+          <input type="checkbox" id="recapFlashSnap" checked> Camera snap sound
         </label>
       </div>
     </details>

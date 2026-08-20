@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-89-recap-reel";
+  const TL_BUILD = "studio-editor-build-90-recap-hang-snap";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -7866,6 +7866,7 @@
     if (seed.edit_receipt) tl.edit_receipt = seed.edit_receipt;
     if (seed.template) tl.template = seed.template;
     if (seed.recap) tl.recap = seed.recap;
+    if (seed.sfx_overlays != null) tl.sfx_overlays = !!seed.sfx_overlays;
     if (label) {
       tl.label = label;
       if ($("tlLabel")) $("tlLabel").value = label;

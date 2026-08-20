@@ -5467,13 +5467,14 @@ function renderRecapScenes() {
     const durLab = document.createElement("label");
     durLab.className = "muted";
     durLab.style.cssText = "font-size:.8rem;display:flex;align-items:center;gap:6px";
-    durLab.textContent = "Cover for";
+    durLab.textContent = "Scene length";
     const durInp = document.createElement("input");
     durInp.type = "number";
     durInp.min = "2";
     durInp.max = "120";
     durInp.step = "1";
     durInp.value = String(sc.target_sec || 10);
+    durInp.title = "Total seconds this scene covers. Raise Hang (top) to make each cut longer — this field alone only adds more cuts.";
     durInp.style.cssText = "width:64px;padding:4px 6px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px";
     durInp.oninput = () => {
       const v = parseFloat(durInp.value);
@@ -5482,7 +5483,7 @@ function renderRecapScenes() {
     const sec = document.createElement("span");
     sec.className = "muted";
     sec.style.fontSize = ".8rem";
-    sec.textContent = "seconds";
+    sec.textContent = "s total";
     const rm = document.createElement("button");
     rm.type = "button";
     rm.className = "btn btn-secondary btn-sm";
@@ -5577,12 +5578,14 @@ function _recapCollectPayload() {
   return {
     label: ($("recapLabel") && $("recapLabel").value.trim()) || "Recap Reel",
     canvas: ($("recapCanvas") && $("recapCanvas").value) || "9x16",
-    beat_sec: parseFloat(($("recapBeatSec") && $("recapBeatSec").value) || "0.75") || 0.75,
+    hang_sec: parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1,
+    beat_sec: parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1,
     photo_flash: {
       enabled: flashOn,
       duration_sec: parseFloat(($("recapFlashDur") && $("recapFlashDur").value) || "3") || 3,
       count: parseInt(($("recapFlashCount") && $("recapFlashCount").value) || "12", 10) || 12,
       include_video_stills: !($("recapFlashVideoStills") && !$("recapFlashVideoStills").checked),
+      snap_sfx: !($("recapFlashSnap") && !$("recapFlashSnap").checked),
     },
     scenes,
   };
@@ -5625,6 +5628,7 @@ async function runRecapApply() {
     }
     const st = data.stats || {};
     let msg = `Seeded ${st.clip_count || 0} beats (~${st.total_sec || "?"}s)`;
+    if (st.hang_sec) msg += ` · hang ${st.hang_sec}s`;
     if (st.flash_count) msg += ` · flash ${st.flash_count}`;
     if ((data.warnings || []).length) {
       msg += " · " + data.warnings[0];

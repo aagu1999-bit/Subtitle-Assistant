@@ -9245,16 +9245,22 @@ def _recap_resolve_source(raw: dict) -> dict | None:
 def _recap_even_beats_for_scene(
     sources: list[dict],
     target_sec: float,
-    beat_sec: float,
+    hang_sec: float,
     scene_name: str,
     scene_id: str,
 ) -> tuple[list[dict], list[str]]:
-    """Evenly sample short Main beats to fill *target_sec* from scene media."""
+    """Fill *target_sec* with *hang_sec* cuts, sampling sources evenly + interleaved.
+
+    Hang controls on-screen time per cut (not scene length). Scene length only
+    sets how many cuts. Long videos get windows spaced across the full duration
+    (start → middle → end). Multiple sources are round-robin interleaved so the
+    scene passes around instead of dumping one file at a time.
+    """
     warnings: list[str] = []
-    beat_sec = max(0.45, min(1.25, float(beat_sec)))
+    hang_sec = max(0.45, min(4.0, float(hang_sec)))
     target_sec = max(2.0, min(180.0, float(target_sec)))
-    n = max(1, int(round(target_sec / beat_sec)))
-    actual_beat = target_sec / n
+    n = max(1, int(round(target_sec / hang_sec)))
+    actual_hang = target_sec / n
 
     videos = [s for s in sources if s.get("kind") == "video" and s.get("duration", 0) > 0.4]
     images = [s for s in sources if s.get("kind") == "image"]
@@ -9264,12 +9270,12 @@ def _recap_even_beats_for_scene(
         warnings.append(f"Scene “{scene_name}”: no usable video/photo sources.")
         return clips, warnings
 
-    # Weighted pool: video weight = duration; each photo ≈ one beat of presence.
+    # Weighted pool: video weight = duration; each photo ≈ one hang slot.
     weighted: list[tuple[dict, float]] = []
     for s in videos:
         weighted.append((s, max(0.5, float(s["duration"]))))
     for s in images:
-        weighted.append((s, max(actual_beat, 1.0)))
+        weighted.append((s, max(actual_hang, 1.0)))
     total_w = sum(w for _, w in weighted) or 1.0
     available = sum(float(s["duration"]) for s in videos)
     if videos and available + 0.05 < target_sec:
@@ -9289,17 +9295,25 @@ def _recap_even_beats_for_scene(
             alloc.append(share)
             remaining -= share
 
+    # Precompute evenly spaced sample windows across EACH source's full span.
+    queues: list[list[dict]] = []
     for (s, _w), count in zip(weighted, alloc):
+        q: list[dict] = []
         if s.get("kind") == "video":
             dur = float(s["duration"])
-            usable = max(0.0, dur - actual_beat)
+            # Usable start range so every window fits hang inside the clip.
+            span = max(0.0, dur - actual_hang)
             for i in range(count):
-                t0 = ((i + 0.5) / count) * usable if count else 0.0
-                t1 = min(dur, t0 + actual_beat)
+                # Even lattice including middle: centers at (i+0.5)/count of span.
+                if count <= 1 or span <= 0.01:
+                    t0 = max(0.0, (dur - actual_hang) * 0.5)
+                else:
+                    t0 = ((i + 0.5) / count) * span
+                t1 = min(dur, t0 + actual_hang)
                 if t1 - t0 < 0.35:
-                    t0 = max(0.0, dur - actual_beat)
+                    t0 = max(0.0, dur - actual_hang)
                     t1 = dur
-                clips.append({
+                q.append({
                     "id": _recap_uid(),
                     "source_job_id": s["job_id"],
                     "in": round(t0, 3),
@@ -9312,12 +9326,12 @@ def _recap_even_beats_for_scene(
                 })
         else:
             for _i in range(count):
-                clips.append({
+                q.append({
                     "id": _recap_uid(),
                     "asset_id": s["asset_id"],
                     "in": 0,
-                    "out": round(actual_beat, 3),
-                    "_max": round(actual_beat, 3),
+                    "out": round(actual_hang, 3),
+                    "_max": round(actual_hang, 3),
                     "burn_captions": False,
                     "cutaway": True,
                     "theme": scene_name,
@@ -9326,18 +9340,118 @@ def _recap_even_beats_for_scene(
                     "scene_id": scene_id,
                     "ken_burns": None,
                 })
+        queues.append(q)
+
+    # Round-robin interleave so variety passes around sources (A→B→C→A…).
+    pointers = [0] * len(queues)
+    while len(clips) < n:
+        progressed = False
+        for qi, q in enumerate(queues):
+            if pointers[qi] >= len(q):
+                continue
+            clips.append(q[pointers[qi]])
+            pointers[qi] += 1
+            progressed = True
+            if len(clips) >= n:
+                break
+        if not progressed:
+            break
 
     return clips, warnings
+
+
+def _ensure_camera_snap_wav() -> Path | None:
+    """CapCut-style mechanical shutter one-shot (cached under CACHE_DIR/sfx)."""
+    assets = _ensure_ui_sfx_assets()
+    return assets.get("snap")
+
+
+def _recap_build_snap_bed(count: int, beat: float) -> str | None:
+    """Build/reuse one Music-track WAV with shutter clicks at each still onset.
+
+    Returns asset_id for Timeline preview + Render (single music clip).
+    """
+    snap = _ensure_camera_snap_wav()
+    if not snap or not snap.exists():
+        return None
+    count = max(1, min(30, int(count)))
+    beat = max(0.05, float(beat))
+    dur = count * beat
+    cache_key = f"recap_snap_bed_{count}_{int(round(beat * 1000))}"
+    # Asset paths require a 32-char hex id — hash the stable cache key.
+    asset_id = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.wav"
+    if dest.exists() and dest.stat().st_size > 200:
+        return asset_id
+    try:
+        ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    # Layer delayed snaps onto a silent bed of flash duration.
+    inputs: list[str] = [
+        "-f", "lavfi", "-t", f"{dur:.3f}",
+        "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+    ]
+    filt_parts: list[str] = []
+    labels: list[str] = []
+    next_i = 1
+    # Cap layers so FFmpeg stays happy; every still still gets a click when ≤24.
+    step = 1 if count <= 24 else 2
+    for i in range(0, count, step):
+        inputs += ["-i", str(snap)]
+        delay = int(round(i * beat * 1000))
+        filt_parts.append(
+            f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            f"volume=1.45,adelay={delay}|{delay},apad=whole_dur={dur:.3f}[s{next_i}]"
+        )
+        labels.append(f"[s{next_i}]")
+        next_i += 1
+    if not labels:
+        return None
+    filt_parts.append(
+        f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.01[bed]"
+    )
+    if len(labels) == 1:
+        filt_parts.append(f"{labels[0]}anull[snaps]")
+    else:
+        filt_parts.append(
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:"
+            f"dropout_transition=0[snaps]"
+        )
+    filt_parts.append(
+        "[bed][snaps]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "volume=1.15[aout]"
+    )
+    cmd = [
+        FFMPEG, "-y", *inputs,
+        "-filter_complex", ";".join(filt_parts),
+        "-map", "[aout]", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
+        str(dest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 200:
+        print(f"[recap] snap bed failed: {(proc.stderr or '')[-240:]}", flush=True)
+        _safe_unlink(dest)
+        return None
+    _write_asset_meta(
+        asset_id,
+        filename="camera_snap_bed.wav",
+        source="recap_snap",
+        kind="audio",
+        cache_key=cache_key,
+    )
+    return asset_id
 
 
 def _recap_build_photo_flash(
     flash: dict,
     scene_sources: list[dict],
-) -> tuple[list[dict], list[str]]:
-    """Rapid stills for the open (cutaways). Optionally pull frames from videos."""
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Rapid stills for the open (cutaways). Optionally pull frames + snap bed."""
     warnings: list[str] = []
+    music: list[dict] = []
     if not flash or not flash.get("enabled"):
-        return [], warnings
+        return [], music, warnings
     try:
         dur = float(flash.get("duration_sec") or 3)
     except (TypeError, ValueError):
@@ -9349,6 +9463,7 @@ def _recap_build_photo_flash(
         count = 12
     count = max(8, min(30, count))
     include_stills = flash.get("include_video_stills") is not False
+    snap_on = flash.get("snap_sfx") is not False
     beat = dur / count
 
     pool: list[dict] = []
@@ -9359,7 +9474,7 @@ def _recap_build_photo_flash(
 
     if include_stills:
         videos = [s for s in scene_sources if s.get("kind") == "video" and s.get("path")]
-        # Spread stills across videos
+        # Spread stills across videos, evenly through each full clip
         need = max(0, count - len(pool))
         if videos and need:
             per = max(1, int(math.ceil(need / len(videos))))
@@ -9372,6 +9487,7 @@ def _recap_build_photo_flash(
                     continue
                 take = min(per, need - extracted)
                 for i in range(take):
+                    # Even lattice across full video (includes middle)
                     t = ((i + 0.5) / take) * max(0.05, vdur - 0.05)
                     asset_id = uuid.uuid4().hex
                     dest = ASSET_DIR / asset_id
@@ -9393,7 +9509,7 @@ def _recap_build_photo_flash(
             "Add photos or enable video stills."
         )
     if not pool:
-        return [], warnings
+        return [], music, warnings
 
     # Cycle pool to fill count
     clips = []
@@ -9409,10 +9525,30 @@ def _recap_build_photo_flash(
             "cutaway": True,
             "theme": "Photo Flash",
             "arc_role": "flash",
+            "sfx": "snap" if snap_on else None,
             "source_label": src.get("label") or "flash",
             "ken_burns": None,
         })
-    return clips, warnings
+
+    if snap_on:
+        snap_aid = _recap_build_snap_bed(count, beat)
+        if snap_aid:
+            music.append({
+                "id": _recap_uid(),
+                "asset_id": snap_aid,
+                "in": 0,
+                "out": round(dur, 3),
+                "_max": round(dur, 3),
+                "start": 0,
+                "gain_db": -2,
+                "duck": False,
+                "label": "Camera snap",
+                "source": "recap_snap",
+            })
+        else:
+            warnings.append("Camera snap sound could not be generated — stills still apply.")
+
+    return clips, music, warnings
 
 
 def build_recap_reel_plan(payload: dict) -> dict:
@@ -9421,11 +9557,16 @@ def build_recap_reel_plan(payload: dict) -> dict:
     if not isinstance(scenes_in, list) or not scenes_in:
         raise ValueError("Add at least one scene with media.")
     scenes_in = scenes_in[:_RECAP_MAX_SCENES]
+    # hang_sec = on-screen time per cut; beat_sec kept as alias for older clients
     try:
-        beat_sec = float(payload.get("beat_sec") or 0.75)
+        hang_sec = float(
+            payload.get("hang_sec")
+            if payload.get("hang_sec") is not None
+            else (payload.get("beat_sec") or 1.0)
+        )
     except (TypeError, ValueError):
-        beat_sec = 0.75
-    beat_sec = max(0.5, min(1.0, beat_sec))
+        hang_sec = 1.0
+    hang_sec = max(0.5, min(4.0, hang_sec))
     label = str(payload.get("label") or "Recap Reel").strip()[:80] or "Recap Reel"
     flash_cfg = payload.get("photo_flash") if isinstance(payload.get("photo_flash"), dict) else {}
 
@@ -9471,18 +9612,19 @@ def build_recap_reel_plan(payload: dict) -> dict:
         if not resolved:
             warnings.append(f"Scene “{name}”: no resolvable media.")
             continue
-        beats, w = _recap_even_beats_for_scene(resolved, target, beat_sec, name, sid)
+        beats, w = _recap_even_beats_for_scene(resolved, target, hang_sec, name, sid)
         warnings.extend(w)
         main_clips.extend(beats)
         scene_summaries.append({
             "id": sid,
             "name": name,
             "target_sec": round(target, 1),
+            "hang_sec": round(hang_sec, 2),
             "beat_count": len(beats),
             "source_count": len(resolved),
         })
 
-    flash_clips, fw = _recap_build_photo_flash(flash_cfg, all_resolved)
+    flash_clips, flash_music, fw = _recap_build_photo_flash(flash_cfg, all_resolved)
     warnings.extend(fw)
 
     ordered = list(flash_clips) + list(main_clips)
@@ -9514,14 +9656,17 @@ def build_recap_reel_plan(payload: dict) -> dict:
             "overlay": [],
             "effects": [],
             "text": [],
-            "music": [],
+            "music": list(flash_music),
         },
         "template": "recap_reel",
+        "sfx_overlays": True,
         "recap": {
             "scenes": scene_summaries,
             "photo_flash": bool(flash_cfg.get("enabled")),
-            "beat_sec": beat_sec,
+            "hang_sec": hang_sec,
+            "beat_sec": hang_sec,
             "video_count": len(video_ids),
+            "snap_sfx": bool(flash_cfg.get("enabled") and flash_cfg.get("snap_sfx") is not False),
         },
     }
 
@@ -9536,6 +9681,7 @@ def build_recap_reel_plan(payload: dict) -> dict:
             "flash_count": len(flash_clips),
             "scene_count": len(scene_summaries),
             "total_sec": round(total, 1),
+            "hang_sec": hang_sec,
             "video_ids": video_ids,
         },
     }
@@ -9546,11 +9692,13 @@ def recap_reel_plan():
     """Plan an event/space Recap Reel Timeline seed (does not bake an MP4).
 
     Body: {
-      label?, canvas?, beat_sec?: 0.5-1.0,
-      photo_flash?: { enabled, duration_sec 2-5, count 8-30, include_video_stills },
+      label?, canvas?, hang_sec?: 0.5-4.0 (alias: beat_sec),
+      photo_flash?: { enabled, duration_sec 2-5, count 8-30,
+                      include_video_stills, snap_sfx },
       scenes: [{ id?, name, target_sec, sources: [{job_id}|{asset_id}] }]
     }
     Max 5 scenes, max 5 unique videos in context.
+    Hang = on-screen time per cut; scene target_sec = total section length.
     """
     data = request.get_json(force=True) or {}
     try:
@@ -12159,30 +12307,57 @@ def _tl_build_main_track(segments: list, transitions: list,
 
 
 def _ensure_ui_sfx_assets() -> dict[str, Path]:
-    """Generate short click/whoosh WAVs once (no binary assets in git)."""
+    """Generate short click/whoosh/snap WAVs once (no binary assets in git)."""
     sfx_dir = CACHE_DIR / "sfx"
     sfx_dir.mkdir(parents=True, exist_ok=True)
     out: dict[str, Path] = {}
-    specs = {
+    # (name, ffmpeg_input_args, af_or_filter_complex, use_filter_complex)
+    specs = [
         # Soft high click — pairs with punch / badge-like pops
-        "click": (
+        (
+            "click",
             ["-f", "lavfi", "-i", "sine=frequency=1650:duration=0.06"],
             "afade=t=out:st=0.015:d=0.045,volume=0.85",
+            False,
         ),
         # Pink-noise whoosh — pairs with B-roll / split / Ken Burns arrivals
-        "whoosh": (
+        (
+            "whoosh",
             ["-f", "lavfi", "-i", "anoisesrc=d=0.38:color=pink:sample_rate=44100"],
             "afade=t=in:st=0:d=0.035,afade=t=out:st=0.22:d=0.14,"
             "highpass=f=220,lowpass=f=7200,volume=0.72",
+            False,
         ),
-    }
-    for name, (src, af) in specs.items():
-        # Bump generation stamp so louder assets replace quiet cached WAVs.
-        path = sfx_dir / f"{name}_v2.wav"
+        # CapCut-ish mechanical shutter: bright click + brief noise burst
+        (
+            "snap",
+            [
+                "-f", "lavfi", "-i", "sine=frequency=1950:duration=0.032",
+                "-f", "lavfi", "-i", "anoisesrc=d=0.085:color=white:sample_rate=44100",
+            ],
+            "[0]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            "volume=1.55,afade=t=out:st=0.01:d=0.022[c];"
+            "[1]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            "highpass=f=900,lowpass=f=10000,volume=1.25,"
+            "afade=t=out:st=0.018:d=0.06[n];"
+            "[c][n]amix=inputs=2:duration=longest:normalize=0,volume=1.2[aout]",
+            True,
+        ),
+    ]
+    for name, src, af, use_fc in specs:
+        # Bump generation stamp so louder / new assets replace quiet cached WAVs.
+        path = sfx_dir / f"{name}_v3.wav"
         if path.exists() and path.stat().st_size > 200:
             out[name] = path
             continue
-        cmd = [FFMPEG, "-y", *src, "-af", af, "-ar", "44100", "-ac", "2", str(path)]
+        if use_fc:
+            cmd = [
+                FFMPEG, "-y", *src,
+                "-filter_complex", af, "-map", "[aout]",
+                "-ar", "44100", "-ac", "2", str(path),
+            ]
+        else:
+            cmd = [FFMPEG, "-y", *src, "-af", af, "-ar", "44100", "-ac", "2", str(path)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode == 0 and path.exists():
             out[name] = path
