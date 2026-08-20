@@ -3300,7 +3300,13 @@ function renderJobsList() {
   // Keep the shell visible while an upload is in flight even before the
   // job id lands in localStorage (otherwise the 4s /jobs poll bounces the
   // user back to "Choose a video to start").
-  const showShell = ids.length > 0 || _ingestBusy > 0;
+  //
+  // Recap mode counts as "has work" even with zero transcription jobs. A
+  // recap is built from imported photos/clips that never become jobs, so
+  // keying the shell purely off job ids bounced the user out of the recap
+  // tool every poll — the feature was unreachable without first
+  // transcribing an unrelated video.
+  const showShell = ids.length > 0 || _ingestBusy > 0 || _recapModeActive();
   const emptyEl = document.getElementById("emptyState");
   const shellEl = document.getElementById("appShell");
   const headerEl = document.getElementById("appHeader");
@@ -6212,6 +6218,20 @@ function hasReadyTranscript() {
   return !!(currentJobId && Array.isArray(currentWords) && currentWords.length);
 }
 
+/** Recap mode: the user came in to build an event recap, not caption a video.
+ *  Persisted so a refresh doesn't dump them back on the welcome screen. */
+function _recapModeActive() {
+  try { return localStorage.getItem("recapMode") === "1"; } catch (e) { return false; }
+}
+function setRecapMode(on) {
+  try {
+    if (on) localStorage.setItem("recapMode", "1");
+    else localStorage.removeItem("recapMode");
+  } catch (e) { /* ignore */ }
+}
+window._recapModeActive = _recapModeActive;
+window.setRecapMode = setRecapMode;
+
 function requireReadyTranscript(actionLabel) {
   if (hasReadyTranscript()) return true;
   const meta = currentJobId ? (jobsById[currentJobId] || {}) : null;
@@ -6234,11 +6254,17 @@ function requireReadyTranscript(actionLabel) {
 
 function setActiveTab(tab) {
   // Tabs that only make sense after Whisper produced words.
+  //
+  // `compilation` is deliberately NOT in this list. It hosts the Recap Reel
+  // template, whose whole point is bulk-importing photos and video that are
+  // never transcribed — gating it behind "wait for Whisper" made the recap
+  // bulk-import pathway unreachable without first transcribing an unrelated
+  // video. The panels inside that tab which do need words (multi-interview
+  // reel, clip queue) render their own empty states.
   const needsTranscript = {
     transcript: "Edit words",
     highlights: "AI Shorts",
     branding: "Caption look",
-    compilation: "Compilation",
     editor: "Timeline",
     result: "Result",
   };

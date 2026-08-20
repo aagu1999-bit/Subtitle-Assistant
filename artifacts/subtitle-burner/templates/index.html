@@ -85,7 +85,7 @@
   <div class="empty-hero">
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
-    <p class="empty-tagline">Drop a video, transcribe it, find AI Shorts, then finish on the Timeline.<br>Edit words and caption look stay one click away after transcription.</p>
+    <p class="empty-tagline">Two ways in — pick what you're making.<br>Captioning one video, or building an event recap from a pile of photos and clips.</p>
     <!-- Input INSIDE the label is the most reliable picker pattern across
          browsers (for= alone can fail if app.js never finishes wiring). -->
     <label id="emptyDropBtn" class="btn btn-primary btn-lg empty-pick-btn" style="cursor:pointer;position:relative;overflow:hidden">
@@ -93,12 +93,42 @@
       <input type="file" id="emptyFile" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" multiple
              style="position:absolute;inset:0;opacity:0;cursor:pointer;font-size:100px">
     </label>
-    <p id="emptyPickStatus" class="muted" style="margin-top:14px">or drag &amp; drop a video anywhere on this page</p>
+    <p id="emptyPickStatus" class="muted" style="margin-top:14px">Transcribe &amp; caption · or drag &amp; drop a video anywhere on this page</p>
+    <div style="margin-top:22px;padding-top:18px;border-top:1px solid #2a2f3a">
+      <button type="button" id="emptyRecapBtn" class="btn btn-secondary btn-lg"
+        style="border-color:#f59e0b;color:#fbbf24">🏙 Build an event recap</button>
+      <p class="muted" style="margin-top:10px;font-size:.84rem">
+        Bulk-import up to 50 photos &amp; videos — <strong>no transcription</strong>, no one-at-a-time uploads
+      </p>
+    </div>
   </div>
 </div>
 <!-- Early empty-state wiring: runs even if app.js later throws. -->
 <script>
 (function () {
+  // Recap route: reveal the app shell straight onto the Compilation tab.
+  // Deliberately does NOT require a transcribed video — the recap flow
+  // imports media that is never sent to Whisper, so gating it behind
+  // "drop a video first" left it with no front door at all.
+  var recapBtn = document.getElementById("emptyRecapBtn");
+  if (recapBtn) {
+    recapBtn.addEventListener("click", function () {
+      // Persist the choice: the jobs poll decides shell visibility from this.
+      try { localStorage.setItem("recapMode", "1"); } catch (e) {}
+      var empty = document.getElementById("emptyState");
+      var shell = document.getElementById("appShell");
+      var header = document.getElementById("appHeader");
+      if (empty) empty.classList.add("hidden");
+      if (shell) shell.classList.remove("hidden");
+      if (header) header.classList.remove("hidden");
+      if (typeof window.setActiveTab === "function") {
+        try { window.setActiveTab("compilation"); } catch (e) { /* fall through */ }
+      }
+      var panel = document.getElementById("recapReelPanel");
+      if (panel && panel.scrollIntoView) panel.scrollIntoView({ block: "start" });
+    });
+  }
+
   var input = document.getElementById("emptyFile");
   var status = document.getElementById("emptyPickStatus");
   if (!input) return;
