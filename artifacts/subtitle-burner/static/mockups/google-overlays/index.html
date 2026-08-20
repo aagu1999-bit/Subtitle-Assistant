@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Google SERP overlay examples</title>
+  <style>
+    :root {
+      --bg: #0e1118;
+      --card: #161a24;
+      --line: #2a2f3a;
+      --text: #e8eaee;
+      --muted: #9aa3b5;
+      --accent: #6c9eff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "DM Sans", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding: 28px 20px 64px;
+    }
+    h1 { font-size: 1.45rem; margin: 0 0 8px; }
+    .lede { color: var(--muted); max-width: 62ch; margin: 0 0 28px; }
+    .grid {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      max-width: 1100px;
+    }
+    article {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    article img {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      background: #000;
+      display: block;
+    }
+    article.wide img { aspect-ratio: 16 / 9; }
+    .body { padding: 14px 14px 16px; }
+    .tab {
+      display: inline-block;
+      font-size: .72rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+    h2 { font-size: 1rem; margin: 0 0 6px; }
+    .cue {
+      font-size: .84rem;
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+    .cue strong { color: #c9d4ea; font-weight: 600; }
+    .crop {
+      font-size: .78rem;
+      color: #b7c0d0;
+      margin: 0;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
+    }
+    code { font-size: .86em; color: #d7e2ff; }
+  </style>
+</head>
+<body>
+  <h1>Google SERP overlay examples</h1>
+  <p class="lede">
+    Reference crops for “search Google → stay on the results page → screenshot + crop”
+    overlays. We do <strong>not</strong> click into destination sites. Router picks a tab
+    from the spoken cue; crop is tight to the useful card/photo only.
+  </p>
+
+  <div class="grid">
+    <article>
+      <img src="overlay-ex-images-festival.png" alt="Images tab festival crop" />
+      <div class="body">
+        <span class="tab">Images</span>
+        <h2>Event / atmosphere photo</h2>
+        <p class="cue"><strong>Spoken cue:</strong> “We were at that Asbury festival last summer…”</p>
+        <p class="cue"><strong>Query:</strong> <code>Asbury Park music festival stage night</code></p>
+        <p class="crop"><strong>Crop:</strong> one Images tile + tiny source line — not the full Images grid.</p>
+      </div>
+    </article>
+
+    <article class="wide">
+      <img src="overlay-ex-flights-card.png" alt="Flights tab result card" />
+      <div class="body">
+        <span class="tab">Flights</span>
+        <h2>Itinerary card</h2>
+        <p class="cue"><strong>Spoken cue:</strong> “I flew Newark to Miami that Friday for about two hundred bucks…”</p>
+        <p class="cue"><strong>Query:</strong> <code>flights EWR to MIA Friday</code></p>
+        <p class="crop"><strong>Crop:</strong> single Flights result card (route, time, price) — not the whole Flights chrome.</p>
+      </div>
+    </article>
+
+    <article>
+      <img src="overlay-ex-ai-overview.png" alt="AI Overview box crop" />
+      <div class="body">
+        <span class="tab">Web · AI Overview</span>
+        <h2>Summarized answer box</h2>
+        <p class="cue"><strong>Spoken cue:</strong> “They’re reopening the boardwalk for weekend events…”</p>
+        <p class="cue"><strong>Query:</strong> <code>New Jersey boardwalk summer weekend events reopen</code></p>
+        <p class="crop"><strong>Crop:</strong> AI Overview / featured summary card only, including citation chips.</p>
+      </div>
+    </article>
+
+    <article class="wide">
+      <img src="overlay-ex-web-article.png" alt="Web result headline crop" />
+      <div class="body">
+        <span class="tab">Web / News</span>
+        <h2>Headline + snippet</h2>
+        <p class="cue"><strong>Spoken cue:</strong> “The city just approved that waterfront park expansion…”</p>
+        <p class="cue"><strong>Query:</strong> <code>Jersey City waterfront park expansion approved</code></p>
+        <p class="crop"><strong>Crop:</strong> top organic result block (title, URL, snippet) — no ads row.</p>
+      </div>
+    </article>
+
+    <article>
+      <img src="overlay-ex-maps-place.png" alt="Maps place card crop" />
+      <div class="body">
+        <span class="tab">Maps / Places</span>
+        <h2>Place card</h2>
+        <p class="cue"><strong>Spoken cue:</strong> “We met at that little Italian place in Hoboken…”</p>
+        <p class="cue"><strong>Query:</strong> <code>Italian restaurant Hoboken</code></p>
+        <p class="crop"><strong>Crop:</strong> place panel (photo, rating, hours) — not the full map canvas.</p>
+      </div>
+    </article>
+  </div>
+</body>
+</html>
