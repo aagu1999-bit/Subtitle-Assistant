@@ -17,6 +17,12 @@ moviepy>=2.0.0
 #   REFRAME_FACE_SAMPLE_FPS=2              # lower = faster face pass
 #   DIARIZATION_MODEL=pyannote/speaker-diarization-3.1
 #
+# SERP screenshot overlays (optional — Playwright Chromium):
+#   pip install playwright && python -m playwright install chromium
+#   SERP_CAPTURE=1 to allow /overlay/serp-capture + Suggest B-roll serp provider
+#   SERP_ENGINE=auto|google|bing   (auto tries Google then Bing; Google often CAPTCHA)
+playwright>=1.40.0
+
 # IMPORTANT — on minimal Linux sandboxes (Replit, Docker slim), after
 # `pip install -r requirements.txt` you must also:
 #   pip uninstall -y opencv-contrib-python

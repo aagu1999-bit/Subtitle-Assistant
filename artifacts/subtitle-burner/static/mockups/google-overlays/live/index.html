@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live SERP overlay captures (NJ)</title>
+  <style>
+    body { margin:0; font-family: "DM Sans", system-ui, sans-serif; background:#0e1118; color:#e8eaee; padding:28px 20px; }
+    h1 { font-size:1.35rem; margin:0 0 8px; }
+    .lede { color:#9aa3b5; max-width:70ch; margin:0 0 22px; line-height:1.45; }
+    .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); max-width:1000px; }
+    article { background:#161a24; border:1px solid #2a2f3a; border-radius:14px; overflow:hidden; }
+    img { width:100%; display:block; aspect-ratio: 4/3; object-fit:cover; background:#000; }
+    .body { padding:12px 14px 16px; }
+    .tab { color:#6c9eff; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+    h2 { font-size:.98rem; margin:6px 0; }
+    p { margin:0; color:#9aa3b5; font-size:.84rem; line-height:1.4; }
+  </style>
+</head>
+<body>
+  <h1>Live Playwright SERP crops — New Jersey trio</h1>
+  <p class="lede">
+    Real browser captures (Bing Images fallback — Google returns sorry/CAPTCHA from this host).
+    Each file is a <strong>hero tile crop</strong> for Timeline overlays. Re-run via
+    <code>python scripts/serp_screenshot.py --demo-nj</code> or <code>POST /overlay/serp-demo-nj</code>.
+  </p>
+  <div class="grid">
+    <article>
+      <img src="serp-juneteenth-nj-2026.png" alt="Juneteenth 2026 New Jersey" />
+      <div class="body">
+        <div class="tab">Images · Bing</div>
+        <h2>Juneteenth 2026 — New Jersey</h2>
+        <p>Query: Juneteenth 2026 New Jersey events</p>
+      </div>
+    </article>
+    <article>
+      <img src="serp-asbury-concert.png" alt="Asbury Park concert" />
+      <div class="body">
+        <div class="tab">Images · Bing</div>
+        <h2>Concert — Asbury Park, NJ</h2>
+        <p>Query: concert Asbury Park New Jersey live music</p>
+      </div>
+    </article>
+    <article>
+      <img src="serp-exchange-place-jersey-city.png" alt="Exchange Place Jersey City" />
+      <div class="body">
+        <div class="tab">Images · Bing</div>
+        <h2>Exchange Place — Jersey City</h2>
+        <p>Query: Exchange Place Jersey City waterfront</p>
+      </div>
+    </article>
+  </div>
+</body>
+</html>

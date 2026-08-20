@@ -7018,6 +7018,101 @@ def overlay_worthiness_preview():
     })
 
 
+@app.route("/overlay/serp-capture", methods=["POST"])
+def overlay_serp_capture():
+    """Playwright SERP screenshot → crop → Timeline asset (Checkpoint B input).
+
+    Body: { query: str, tab?: images|web|maps|flights|ai_overview, engine?: auto|google|bing }
+    Returns: { ok, asset_id, path, engine, tab, query, clip }
+
+    Google often returns a sorry/CAPTCHA page from datacenter IPs — engine=auto
+    falls back to Bing Images/Web which still yields real SERP crops.
+    Set SERP_CAPTURE=0 to disable.
+    """
+    if os.environ.get("SERP_CAPTURE", "1").strip() in ("0", "false", "False", "no"):
+        return jsonify({"error": "SERP capture disabled (SERP_CAPTURE=0)"}), 403
+    data = request.get_json(force=True) or {}
+    query = str(data.get("query") or data.get("text") or "").strip()
+    if len(query) < 3:
+        return jsonify({"error": "query required"}), 400
+    tab = str(data.get("tab") or data.get("google_tab") or "images").strip().lower()
+    engine = str(data.get("engine") or os.environ.get("SERP_ENGINE") or "auto").strip().lower()
+
+    try:
+        from scripts.serp_screenshot import capture_serp
+    except Exception as exc:
+        return jsonify({
+            "error": f"Playwright SERP worker unavailable: {exc}",
+            "hint": "pip install playwright && python -m playwright install chromium",
+        }), 501
+
+    asset_id = uuid.uuid4().hex
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ASSET_DIR / f"{asset_id}.png"
+    try:
+        meta = capture_serp(query, tab=tab, out_path=dest, engine=engine)
+    except Exception as exc:
+        return jsonify({"error": f"capture failed: {exc}"}), 500
+
+    if not meta.get("ok") or not dest.exists() or dest.stat().st_size < 800:
+        return jsonify({
+            "ok": False,
+            "error": meta.get("error") or "empty_capture",
+            "query": query,
+            "tab": tab,
+            "engine": meta.get("engine"),
+        }), 502
+
+    _write_asset_meta(
+        asset_id,
+        filename=f"serp-{tab}-{query[:40].replace(' ', '-')}.png",
+        keyword=query[:80],
+        source="serp_screenshot",
+        provider=meta.get("engine") or "serp",
+    )
+    return jsonify({
+        "ok": True,
+        "asset_id": asset_id,
+        "query": query,
+        "tab": tab,
+        "engine": meta.get("engine"),
+        "url": meta.get("url"),
+        "clip": meta.get("clip"),
+        "bytes": meta.get("bytes"),
+        "overlay": {
+            "asset_id": asset_id,
+            "keyword": query[:80],
+            "source": "serp_screenshot",
+            "provider": meta.get("engine"),
+            "in": 0,
+            "out": 2.2,
+            "start": 0,
+            "google_tab": tab,
+        },
+    })
+
+
+@app.route("/overlay/serp-demo-nj", methods=["POST", "GET"])
+def overlay_serp_demo_nj():
+    """Capture the 3 NJ reference SERP crops (Juneteenth / Asbury / Exchange Place)."""
+    if os.environ.get("SERP_CAPTURE", "1").strip() in ("0", "false", "False", "no"):
+        return jsonify({"error": "SERP capture disabled"}), 403
+    try:
+        from scripts.serp_screenshot import run_demo_nj
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 501
+    out_dir = BASE_DIR / "static" / "mockups" / "google-overlays" / "live"
+    try:
+        results = run_demo_nj(out_dir)
+    except Exception as exc:
+        return jsonify({"error": f"demo failed: {exc}"}), 500
+    return jsonify({
+        "ok": all(r.get("ok") for r in results),
+        "results": results,
+        "catalog": "/static/mockups/google-overlays/live/",
+    })
+
+
 @app.route("/broll/status", methods=["GET"])
 def broll_status():
     """Which B-roll image providers are configured.

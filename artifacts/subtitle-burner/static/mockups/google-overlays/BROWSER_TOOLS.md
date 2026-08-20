@@ -32,3 +32,10 @@ Advertised “AI browser agents” are optional wrappers — underneath they sti
 ## Env knobs
 - `OVERLAY_WORTHINESS_THRESHOLD` (default `55`)
 - Spacing: 18s min gap between kept overlays
+- `SERP_CAPTURE=1` (default) enables Playwright capture API
+- `SERP_ENGINE=auto|google|bing` — Google often CAPTCHA from cloud IPs; auto falls back to Bing
+
+## Live API
+- `POST /overlay/serp-capture` `{ "query": "...", "tab": "images" }` → Timeline `asset_id`
+- `GET/POST /overlay/serp-demo-nj` → captures the 3 NJ reference crops
+- CLI: `python scripts/serp_screenshot.py --demo-nj`

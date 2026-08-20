@@ -1,0 +1,53 @@
+[
+  {
+    "ok": true,
+    "query": "Juneteenth 2026 New Jersey events",
+    "tab": "images",
+    "engine": "bing",
+    "path": "/workspace/artifacts/subtitle-burner/static/mockups/google-overlays/live/serp-juneteenth-nj-2026.png",
+    "clip": {
+      "x": 712,
+      "y": 196,
+      "width": 353,
+      "height": 207
+    },
+    "url": "https://www.bing.com/images/search?q=Juneteenth+2026+New+Jersey+events&first=1&cw=1280&ch=900",
+    "bytes": 109753,
+    "id": "juneteenth-nj-2026",
+    "note": "Celebration / event atmosphere"
+  },
+  {
+    "ok": true,
+    "query": "concert Asbury Park New Jersey live music",
+    "tab": "images",
+    "engine": "bing",
+    "path": "/workspace/artifacts/subtitle-burner/static/mockups/google-overlays/live/serp-asbury-concert.png",
+    "clip": {
+      "x": 0,
+      "y": 196,
+      "width": 352,
+      "height": 207
+    },
+    "url": "https://www.bing.com/images/search?q=concert+Asbury+Park+New+Jersey+live+music&first=1&cw=1280&ch=900",
+    "bytes": 124135,
+    "id": "asbury-concert",
+    "note": "Boardwalk / venue concert energy"
+  },
+  {
+    "ok": true,
+    "query": "Exchange Place Jersey City waterfront",
+    "tab": "images",
+    "engine": "bing",
+    "path": "/workspace/artifacts/subtitle-burner/static/mockups/google-overlays/live/serp-exchange-place-jersey-city.png",
+    "clip": {
+      "x": 0,
+      "y": 196,
+      "width": 320,
+      "height": 220
+    },
+    "url": "https://www.bing.com/images/search?q=Exchange+Place+Jersey+City+waterfront&first=1&cw=1280&ch=900",
+    "bytes": 119917,
+    "id": "exchange-place-jersey-city",
+    "note": "Skyline / PATH plaza (Hoboken\u2013JC waterfront)"
+  }
+]
