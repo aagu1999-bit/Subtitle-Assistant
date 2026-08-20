@@ -9175,7 +9175,15 @@ _RECAP_MAX_SCENES = 5
 # Bump when the shutter bed recipe changes (volume, spacing, one-shot) so
 # cached beds are rebuilt instead of serving the old, quieter WAV. The
 # one-shots stamp their filename (`shutter_v3.wav`); beds stamp the cache key.
-_RECAP_SHUTTER_BED_GEN = 1
+# v2: real Fujifilm X-T30 II one-shot + one click per photo at any count.
+_RECAP_SHUTTER_BED_GEN = 2
+
+# Bundled shutter source: a real camera burst. The clicks in it are
+# mechanically regular (~0.25s apart from 1.19s on, all ~-11 dBFS), so one
+# period is a clean single-click one-shot.
+_SHUTTER_SRC = BASE_DIR / "sfx" / "camera_shutter_burst.mp3"
+_SHUTTER_CLICK_AT = 1.19
+_SHUTTER_CLICK_LEN = 0.25
 
 
 def _recap_uid() -> str:
@@ -9380,85 +9388,150 @@ def _recap_even_beats_for_scene(
     return clips, warnings
 
 
+def _atempo_chain(factor: float) -> list[str]:
+    """atempo filters implementing *factor*, split so each stays in 0.5-2.0.
+
+    Older ffmpeg builds (Replit) reject a single atempo outside that range.
+    """
+    parts: list[str] = []
+    f = float(factor)
+    while f > 2.0:
+        parts.append("atempo=2.0")
+        f /= 2.0
+    while f < 0.5:
+        parts.append("atempo=0.5")
+        f /= 0.5
+    if abs(f - 1.0) > 0.001:
+        parts.append(f"atempo={f:.4f}")
+    return parts
+
+
 def _ensure_camera_shutter_wav() -> Path | None:
-    """CapCut-style mechanical shutter one-shot (cached under CACHE_DIR/sfx)."""
-    assets = _ensure_ui_sfx_assets()
-    return assets.get("shutter")
+    """One real shutter click, cut from the bundled burst and normalized.
+
+    Synthesized sine+noise stood in before; this is the actual camera.
+    """
+    if not _SHUTTER_SRC.exists():
+        print(f"[sfx] shutter source missing: {_SHUTTER_SRC}", flush=True)
+        return None
+    sfx_dir = CACHE_DIR / "sfx"
+    dest = sfx_dir / "shutter_oneshot_v4.wav"
+    try:
+        if dest.exists() and dest.stat().st_size > 200:
+            return dest
+        sfx_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    fade_at = max(0.0, _SHUTTER_CLICK_LEN - 0.04)
+    cmd = [
+        FFMPEG, "-y",
+        "-ss", f"{_SHUTTER_CLICK_AT:.3f}", "-t", f"{_SHUTTER_CLICK_LEN:.3f}",
+        "-i", str(_SHUTTER_SRC),
+        "-af",
+        # Source peaks around -11 dBFS; lift close to full scale, trim the
+        # tail so consecutive clicks don't smear into each other.
+        f"volume=10dB,afade=t=out:st={fade_at:.3f}:d=0.04,"
+        "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+        "-ar", "44100", "-ac", "2", str(dest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 200:
+        print(f"[sfx] shutter one-shot failed: {(proc.stderr or '')[-200:]}", flush=True)
+        _safe_unlink(dest)
+        return None
+    return dest
 
 
 def _recap_build_shutter_bed(count: int, beat: float) -> str | None:
-    """Build/reuse one Music-track WAV with a shutter click at each still onset.
+    """One Music-track WAV with exactly one shutter click per still.
+
+    Built as "one cell, concatenated" rather than N delayed copies mixed
+    together. The old amix approach capped itself at 24 layers and skipped
+    every other still above that, so a 30-photo flash got 15 clicks and the
+    sound visibly fell out of step with the pictures.
+
+    The click is time-scaled to the photo rate: if stills change faster than
+    one click lasts, the click is sped up (pitch-preserving) so each one
+    lands inside its own slot instead of smearing into the next. It is never
+    slowed below natural speed — a stretched shutter loses its snap.
 
     Returns asset_id for Timeline preview + Render (single music clip).
     """
-    shutter = _ensure_camera_shutter_wav()
-    if not shutter or not shutter.exists():
+    click = _ensure_camera_shutter_wav()
+    if not click or not click.exists():
         return None
-    count = max(1, min(30, int(count)))
-    beat = max(0.05, float(beat))
-    dur = count * beat
-    cache_key = f"recap_shutter_bed_v{_RECAP_SHUTTER_BED_GEN}_{count}_{int(round(beat * 1000))}"
-    # Asset paths require a 32-char hex id — hash the stable cache key.
+    count = max(1, min(120, int(count)))
+    beat = max(0.04, float(beat))
+    total = count * beat
+
+    click_dur = float(_media_duration(click) or _SHUTTER_CLICK_LEN)
+    # Fit inside 92% of a beat so there's a hair of air between clicks.
+    fit = beat * 0.92
+    tempo = (click_dur / fit) if click_dur > fit else 1.0
+
+    cache_key = (
+        f"recap_shutter_bed_v{_RECAP_SHUTTER_BED_GEN}_"
+        f"{count}_{int(round(beat * 1000))}"
+    )
     asset_id = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
     dest = ASSET_DIR / f"{asset_id}.wav"
     if dest.exists() and dest.stat().st_size > 200:
         return asset_id
     try:
         ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        (CACHE_DIR / "sfx").mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-    # Layer delayed shutter clicks onto a silent bed of flash duration.
-    inputs: list[str] = [
-        "-f", "lavfi", "-t", f"{dur:.3f}",
-        "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-    ]
-    filt_parts: list[str] = []
-    labels: list[str] = []
-    next_i = 1
-    # Cap layers so FFmpeg stays happy; every still still gets a click when ≤24.
-    step = 1 if count <= 24 else 2
-    for i in range(0, count, step):
-        inputs += ["-i", str(shutter)]
-        delay = int(round(i * beat * 1000))
-        filt_parts.append(
-            f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume=1.45,adelay={delay}|{delay},apad=whole_dur={dur:.3f}[s{next_i}]"
+
+    # ---- 1. One cell: the click, rate-fitted, padded to exactly one beat.
+    cell = CACHE_DIR / "sfx" / f"cell_v{_RECAP_SHUTTER_BED_GEN}_{int(round(beat * 1000))}.wav"
+    if not (cell.exists() and cell.stat().st_size > 200):
+        af = list(_atempo_chain(tempo)) if tempo > 1.001 else []
+        af.append("aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo")
+        af.append(f"apad=whole_dur={beat:.4f}")
+        af.append(f"atrim=end={beat:.4f}")
+        af.append("asetpts=PTS-STARTPTS")
+        proc = subprocess.run(
+            [FFMPEG, "-y", "-i", str(click), "-af", ",".join(af),
+             "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(cell)],
+            capture_output=True, text=True,
         )
-        labels.append(f"[s{next_i}]")
-        next_i += 1
-    if not labels:
-        return None
-    filt_parts.append(
-        f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.01[bed]"
-    )
-    if len(labels) == 1:
-        filt_parts.append(f"{labels[0]}anull[clicks]")
-    else:
-        filt_parts.append(
-            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:"
-            f"dropout_transition=0[clicks]"
+        if proc.returncode != 0 or not cell.exists():
+            print(f"[recap] shutter cell failed: {(proc.stderr or '')[-240:]}", flush=True)
+            _safe_unlink(cell)
+            return None
+
+    # ---- 2. Concat that cell once per still. Exact count at any scale, and
+    # no filtergraph input explosion.
+    list_path = CACHE_DIR / "sfx" / f"{asset_id}.concat.txt"
+    try:
+        list_path.write_text(
+            "".join(f"file '{cell.absolute()}'\n" for _ in range(count)),
+            encoding="utf-8",
         )
-    filt_parts.append(
-        "[bed][clicks]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-        "volume=1.15[aout]"
-    )
-    cmd = [
-        FFMPEG, "-y", *inputs,
-        "-filter_complex", ";".join(filt_parts),
-        "-map", "[aout]", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
-        str(dest),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(
+            [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+             "-c", "copy", str(dest)],
+            capture_output=True, text=True,
+        )
+    finally:
+        _safe_unlink(list_path)
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 200:
         print(f"[recap] shutter bed failed: {(proc.stderr or '')[-240:]}", flush=True)
         _safe_unlink(dest)
         return None
+
+    print(
+        f"[recap] shutter bed: {count} clicks over {total:.2f}s "
+        f"(beat {beat:.3f}s, tempo x{tempo:.2f})", flush=True,
+    )
     _write_asset_meta(
         asset_id,
         filename="camera_shutter_bed.wav",
         source="recap_shutter",
         kind="audio",
         cache_key=cache_key,
+        duration=round(total, 3),
     )
     return asset_id
 
@@ -9476,12 +9549,12 @@ def _recap_build_photo_flash(
         dur = float(flash.get("duration_sec") or 3)
     except (TypeError, ValueError):
         dur = 3.0
-    dur = max(2.0, min(5.0, dur))
+    dur = max(2.0, min(8.0, dur))
     try:
         count = int(flash.get("count") or 12)
     except (TypeError, ValueError):
         count = 12
-    count = max(8, min(30, count))
+    count = max(8, min(60, count))
     include_stills = flash.get("include_video_stills") is not False
     # `shutter_sfx` is the current key; `snap_sfx` is the pre-rename alias kept
     # so recap projects saved before the rename keep their setting.
@@ -9739,7 +9812,7 @@ def recap_reel_plan():
 
     Body: {
       label?, canvas?, hang_sec?: 0.5-4.0 (alias: beat_sec),
-      photo_flash?: { enabled, duration_sec 2-5, count 8-30,
+      photo_flash?: { enabled, duration_sec 2-8, count 8-60,
                       include_video_stills, shutter_sfx,
                       sources?: [{asset_id}] },
       scenes: [{ id?, name, target_sec, sources: [{job_id}|{asset_id}] }]
@@ -12715,7 +12788,17 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     duck = any(m.get("duck", True) for m, _ in resolved)
 
     inputs: list[str] = ["-i", str(base)]
-    _fmt = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+    # The base is concat-demuxed from one segment per beat, and still frames
+    # contribute no real samples — so its audio timeline has gaps and its
+    # stream can run a hair longer than its video. Resample against a clean
+    # clock and pad to the full length before mixing; otherwise `duration=first`
+    # measures a ragged voice track and cuts the music short. A 4s shutter bed
+    # was landing as 3.27s of clicks plus 0.74s of silence because of this.
+    _fmt = (
+        "aresample=async=1:first_pts=0,"
+        "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+        f"apad=whole_dur={duration:.3f},atrim=end={duration:.3f},asetpts=PTS-STARTPTS"
+    )
     if _tl_input_has_audio(base):
         src_label, next_i = "[0:a]", 1
     else:
@@ -12775,7 +12858,8 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
         filt.append("[musicall]anull[musicfinal]")
 
     filt.append(
-        "[voice][musicfinal]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]"
+        "[voice][musicfinal]amix=inputs=2:duration=longest:dropout_transition=0:"
+        "normalize=0[aout]"
     )
     print(f"[music] mixing {len(music_labels)} bed(s) duck={duck}", flush=True)
 
