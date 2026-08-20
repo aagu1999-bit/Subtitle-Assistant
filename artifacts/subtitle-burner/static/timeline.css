@@ -387,6 +387,22 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   background: #2a3148;
   color: #e8eaee;
 }
+.tl-lib-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #2a2f3a;
+  background: #10131d;
+  color: #e8eaee;
+  font-size: .78rem;
+}
+.tl-lib-search::placeholder { color: #6b7280; }
+.tl-lib-search:focus {
+  outline: none;
+  border-color: #4a5678;
+}
 .tl-source-list.tl-view-icons {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

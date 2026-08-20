@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-83-analyze-project-lib";
+  const TL_BUILD = "studio-editor-build-84-sfx-lib-search";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -301,8 +301,9 @@
 
   // ---- Anchoring (Phase 3) ----
   // Overlays / titles / music remember which Main clip they sit under (anchor)
-  // and how far into it (anchor_offset), so reordering/retrimming Main carries
-  // them along instead of leaving them stranded at an absolute second.
+  // and the SOURCE time they attach to (anchor_src). When silence/filler cuts
+  // shrink Main, applyAnchors remaps start via sourceTimeToLocalOutput so
+  // B-roll stays on the same spoken beat.
   function reanchor(c) {
     if (!tl.tracks.main.length) {
       if (typeof c.anchor === "string") c.anchor = null;
@@ -315,8 +316,11 @@
     for (let i = 0; i < tl.tracks.main.length; i++) {
       if ((c.start || 0) >= mainStart(i) - 0.001) idx = i;
     }
-    c.anchor = tl.tracks.main[idx].id;
-    c.anchor_offset = Math.max(0, (c.start || 0) - mainStart(idx));
+    const clip = tl.tracks.main[idx];
+    const localOt = Math.max(0, (c.start || 0) - mainStart(idx));
+    c.anchor = clip.id;
+    c.anchor_offset = localOt; // legacy (output-local); kept for older docs
+    c.anchor_src = localOutputToSourceTime(clip, localOt);
   }
 
   function applyAnchors() {
@@ -325,7 +329,18 @@
         // Face-coord anchors are objects; only Main-clip id strings retime.
         if (typeof c.anchor !== "string" || !c.anchor) return;
         const idx = tl.tracks.main.findIndex((m) => m.id === c.anchor);
-        if (idx >= 0) c.start = Math.max(0, mainStart(idx) + (c.anchor_offset || 0));
+        if (idx < 0) return;
+        const clip = tl.tracks.main[idx];
+        let localOt;
+        if (c.anchor_src != null && Number.isFinite(Number(c.anchor_src))) {
+          localOt = sourceTimeToLocalOutput(clip, Number(c.anchor_src));
+        } else {
+          // Legacy projects: approximate with output-local offset, then pin src.
+          localOt = Math.max(0, Number(c.anchor_offset) || 0);
+          c.anchor_src = localOutputToSourceTime(clip, localOt);
+        }
+        c.anchor_offset = localOt;
+        c.start = Math.max(0, mainStart(idx) + localOt);
       });
     });
   }
@@ -970,6 +985,7 @@
   // ---- Library rendering ----
   let libraryView = "list"; // "list" | "icons" | "dense"
   let libraryScope = "project"; // "project" | "all"
+  let libraryQuery = "";
 
   function applyLibraryViewClass() {
     ["tlSourceList", "tlAssetList"].forEach((id) => {
@@ -1005,6 +1021,15 @@
         renderAssetList();
       };
     });
+    const search = $("tlLibrarySearch");
+    if (search && !search.dataset.wired) {
+      search.dataset.wired = "1";
+      search.addEventListener("input", () => {
+        libraryQuery = String(search.value || "").trim().toLowerCase();
+        renderSourceList();
+        renderAssetList();
+      });
+    }
   }
 
   function projectSourceJobIds() {
@@ -1030,20 +1055,31 @@
     return ids;
   }
 
+  function _libMatchesQuery(parts) {
+    if (!libraryQuery) return true;
+    const blob = parts.filter(Boolean).join(" ").toLowerCase();
+    return blob.includes(libraryQuery);
+  }
+
   function filteredSources() {
-    if (libraryScope !== "project" || !tl) return sources.slice();
-    const used = projectSourceJobIds();
-    if (!used.size) return [];
-    return sources.filter((s) => used.has(s.job_id));
+    let list = sources.slice();
+    if (libraryScope === "project" && tl) {
+      const used = projectSourceJobIds();
+      list = used.size ? list.filter((s) => used.has(s.job_id)) : [];
+    }
+    return list.filter((s) => _libMatchesQuery([s.filename, s.job_id]));
   }
 
   function filteredAssets() {
-    if (libraryScope !== "project" || !tl) return assets.slice();
-    const used = projectAssetIds();
-    const pid = tl.job_id;
-    return assets.filter((a) =>
-      used.has(a.asset_id) || (pid && a.project_id && a.project_id === pid) || a.in_project
-    );
+    let list = assets.slice();
+    if (libraryScope === "project" && tl) {
+      const used = projectAssetIds();
+      const pid = tl.job_id;
+      list = list.filter((a) =>
+        used.has(a.asset_id) || (pid && a.project_id && a.project_id === pid) || a.in_project
+      );
+    }
+    return list.filter((a) => _libMatchesQuery([a.filename, a.keyword, a.source, a.kind, a.asset_id]));
   }
 
   function _bindLibraryDrag(el, payload) {
@@ -4858,7 +4894,7 @@
     html += propSection("🏷 Logo / watermark", logoBody, !!lg.asset_id);
 
     let sfxBody = propCheck("__sfx_overlays", "Auto whoosh / click when overlays & zooms land", tl.sfx_overlays !== false);
-    sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Baked on ▶ Render — tiny accents under speech (Captions-style). Uncheck to silence.</p>`;
+    sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Baked on <strong>▶ Render</strong> (not Timeline preview scrub). Louder accents under speech — uncheck to silence.</p>`;
     html += propSection("🔊 Overlay SFX", sfxBody, true);
 
     const sc = tl.speaker_colors || {};

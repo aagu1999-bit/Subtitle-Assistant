@@ -2863,18 +2863,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 word_text = word_text.replace("{", "").replace("}", "")
                 
                 speaker_color = None
-                if diarization and speaker_colors:
+                # Prefer stamped word.speaker (Timeline remaps to output time);
+                # fall back to diarization mid-point match (source-time jobs).
+                spk = w.get("speaker") if isinstance(w, dict) else None
+                if not spk and diarization and speaker_colors:
                     word_mid = (float(w.get('start', 0)) + float(w.get('end', 0))) / 2
                     for seg in diarization:
                         if seg['start'] <= word_mid <= seg['end']:
-                            spk = seg['speaker']
-                            if spk in speaker_colors:
-                                hc = speaker_colors[spk]
-                                if hc.startswith('#'):
-                                    hc = hc[1:]
-                                if len(hc) == 6:
-                                    speaker_color = f"&H{hc[4:6]}{hc[2:4]}{hc[0:2]}&"
+                            spk = seg.get('speaker')
                             break
+                if spk and speaker_colors and spk in speaker_colors:
+                    hc = speaker_colors[spk]
+                    if isinstance(hc, str) and hc.startswith('#'):
+                        hc = hc[1:]
+                    if isinstance(hc, str) and len(hc) == 6:
+                        speaker_color = f"&H{hc[4:6]}{hc[2:4]}{hc[0:2]}&"
 
                 base_col = speaker_color if speaker_color else primary
                 word_prefix = f"{{\\c{speaker_color}}}" if speaker_color else ""
@@ -11562,18 +11565,19 @@ def _ensure_ui_sfx_assets() -> dict[str, Path]:
     specs = {
         # Soft high click — pairs with punch / badge-like pops
         "click": (
-            ["-f", "lavfi", "-i", "sine=frequency=1650:duration=0.05"],
-            "afade=t=out:st=0.012:d=0.038,volume=0.42",
+            ["-f", "lavfi", "-i", "sine=frequency=1650:duration=0.06"],
+            "afade=t=out:st=0.015:d=0.045,volume=0.85",
         ),
         # Pink-noise whoosh — pairs with B-roll / split / Ken Burns arrivals
         "whoosh": (
-            ["-f", "lavfi", "-i", "anoisesrc=d=0.32:color=pink:sample_rate=44100"],
-            "afade=t=in:st=0:d=0.04,afade=t=out:st=0.20:d=0.12,"
-            "highpass=f=280,lowpass=f=6500,volume=0.28",
+            ["-f", "lavfi", "-i", "anoisesrc=d=0.38:color=pink:sample_rate=44100"],
+            "afade=t=in:st=0:d=0.035,afade=t=out:st=0.22:d=0.14,"
+            "highpass=f=220,lowpass=f=7200,volume=0.72",
         ),
     }
     for name, (src, af) in specs.items():
-        path = sfx_dir / f"{name}.wav"
+        # Bump generation stamp so louder assets replace quiet cached WAVs.
+        path = sfx_dir / f"{name}_v2.wav"
         if path.exists() and path.stat().st_size > 200:
             out[name] = path
             continue
@@ -11586,12 +11590,19 @@ def _ensure_ui_sfx_assets() -> dict[str, Path]:
     return out
 
 
+def _tl_input_has_audio(path: Path) -> bool:
+    try:
+        return _has_audio_stream(path)
+    except Exception:
+        return False
+
+
 def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
                         out_path: Path) -> None:
     """Mix auto click/whoosh one-shots at overlay / effect onsets.
 
     Captions-style sensory sync: every visual pop gets a tiny audio accent.
-    Voice stays primary; SFX are quiet and short.
+    Voice stays primary; SFX are short but clearly audible on Render.
     """
     assets = _ensure_ui_sfx_assets()
     if not assets:
@@ -11638,20 +11649,29 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
                 "SFX passthrough")
         return
 
-    inputs = ["-i", str(base)]
-    filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[voice]"]
+    # Base with no audio track → silent bed so adelay mix still works.
+    inputs: list[str] = ["-i", str(base)]
+    if _tl_input_has_audio(base):
+        filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[voice]"]
+        next_i = 1
+    else:
+        inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        filt = ["[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.01[voice]"]
+        next_i = 2
+
     labels = []
-    for i, (t, kind) in enumerate(cleaned, start=1):
+    for t, kind in cleaned:
         path = assets.get(kind) or assets.get("whoosh") or assets.get("click")
         if not path:
             continue
         inputs += ["-i", str(path)]
         delay = int(t * 1000)
         filt.append(
-            f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume=0.85,adelay={delay}|{delay}[s{i}]"
+            f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            f"volume=1.35,adelay={delay}|{delay},apad[s{next_i}]"
         )
-        labels.append(f"[s{i}]")
+        labels.append(f"[s{next_i}]")
+        next_i += 1
     if not labels:
         _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
                 "SFX passthrough")
@@ -11660,9 +11680,14 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
         filt.append(f"{labels[0]}anull[sfxall]")
     else:
         filt.append(
-            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0[sfxall]"
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0[sfxall]"
         )
-    filt.append("[voice][sfxall]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+    # Prefer hearing the accent; voice still dominates after amix.
+    filt.append(
+        "[voice][sfxall]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:"
+        "weights=1 1.15[aout]"
+    )
+    print(f"[sfx] mixing {len(labels)} hits onto {base.name}", flush=True)
     _tl_run(
         [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
          "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
@@ -12487,7 +12512,45 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     "word": text,
                     "start": seg_start + local_s,
                     "end": seg_start + local_e,
+                    "speaker": w.get("speaker"),
                 })
+
+        # Stamp remapped caption words from each segment's Analyze diarization
+        # (source time → output time). Prefer already-stamped word.speaker.
+        for idx, meta in enumerate(seg_meta):
+            sjid = meta.get("source_job_id")
+            if not sjid:
+                continue
+            cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
+            if not cache_path.exists():
+                continue
+            try:
+                diar_src = (json.loads(cache_path.read_text(encoding="utf-8")).get("diarization") or [])
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not diar_src:
+                continue
+            seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+            src_in = float(meta.get("src_in") or 0)
+            src_out = float(meta.get("src_out") or 0)
+            for w in caption_words:
+                if w.get("speaker"):
+                    continue
+                try:
+                    mid_out = (float(w["start"]) + float(w["end"])) / 2.0
+                except (TypeError, ValueError, KeyError):
+                    continue
+                local = mid_out - seg_start
+                if local < -0.05 or local > (src_out - src_in) + 0.05:
+                    continue
+                src_mid = src_in + max(0.0, local)
+                for seg in diar_src:
+                    try:
+                        if float(seg.get("start", 0)) <= src_mid <= float(seg.get("end", 0)):
+                            w["speaker"] = seg.get("speaker")
+                            break
+                    except (TypeError, ValueError):
+                        continue
 
         # ---- Persistent logo / watermark (whole-video overlay) ----
         if tl.get("logo"):
