@@ -2576,9 +2576,13 @@ async function startReframeAnalyze(triggerBtn, opts) {
   opts = opts || {};
   const jobId = opts.jobId || currentJobId;
   const onStatus = typeof opts.onStatus === "function" ? opts.onStatus : null;
+  const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+  // Soft cap — pyannote can be slow on CPU, but 30min with no ready/error is a hung worker.
+  const MAX_MS = Number(opts.maxMs) > 0 ? Number(opts.maxMs) : 18 * 60 * 1000;
+  const STUCK_MS = Number(opts.stuckMs) > 0 ? Number(opts.stuckMs) : 4 * 60 * 1000;
   if (!jobId) {
     alert("Select a Main clip in Timeline (or a transcribed video), then click Analyze speakers.");
-    return;
+    return Promise.reject(new Error("No job selected"));
   }
   // Prefer the Timeline-selected source when Analyze is launched from Timeline.
   if (opts.jobId) currentJobId = opts.jobId;
@@ -2586,6 +2590,7 @@ async function startReframeAnalyze(triggerBtn, opts) {
   if (reframeAnalyzeBtn) reframeAnalyzeBtn.disabled = true;
   const ingestBtn = $("ingestAnalyzeBtn");
   const tlBtn = $("tlAnalyzeBtn");
+  const tlAllBtn = $("tlAnalyzeAllBtn");
   if (ingestBtn) {
     ingestBtn.disabled = true;
     ingestBtn.textContent = "Analysing…";
@@ -2594,6 +2599,7 @@ async function startReframeAnalyze(triggerBtn, opts) {
     tlBtn.disabled = true;
     tlBtn.textContent = "Analysing…";
   }
+  if (tlAllBtn && tlAllBtn !== triggerBtn) tlAllBtn.disabled = true;
   if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analysing…";
   if (reframeSwapBtn) reframeSwapBtn.style.display = "none";
   if (reframeStatus) {
@@ -2601,6 +2607,7 @@ async function startReframeAnalyze(triggerBtn, opts) {
     reframeStatus.textContent = "Starting…";
   }
   if (onStatus) onStatus("Starting…");
+  if (onProgress) onProgress(3);
   // Ensure the empty/status node exists even after cards were rendered.
   let empty = $("ingestSpeakerEmpty");
   const cardsWrap = $("ingestSpeakerCards");
@@ -2618,6 +2625,7 @@ async function startReframeAnalyze(triggerBtn, opts) {
       tlBtn.disabled = false;
       if (!tlBtn.textContent || /analys/i.test(tlBtn.textContent)) tlBtn.textContent = "Analyze speakers";
     }
+    if (tlAllBtn) tlAllBtn.disabled = false;
   };
 
   if (_reframePollTimer) {
@@ -2663,79 +2671,126 @@ async function startReframeAnalyze(triggerBtn, opts) {
     if (reframeStatus) reframeStatus.textContent = startMsg;
     if (empty) empty.textContent = startMsg;
     if (onStatus) onStatus(startMsg);
+    if (onProgress) onProgress(8);
     if (data.faces_note && empty) {
       empty.textContent = `Analysing speakers${deviceHint}… (${data.faces_note})`;
     }
 
-    let pollFails = 0;
-    _reframePollTimer = setInterval(async () => {
-      try {
-        const statusRes = await fetch(`/reframe-status/${jobId}`);
-        let r = null;
+    return await new Promise((resolve, reject) => {
+      let pollFails = 0;
+      const startedAt = Date.now();
+      let lastProgress = -1;
+      let lastProgressAt = Date.now();
+      _reframePollTimer = setInterval(async () => {
         try {
-          r = await statusRes.json();
-        } catch (_) {
+          const elapsed = Date.now() - startedAt;
+          if (elapsed > MAX_MS) {
+            clearInterval(_reframePollTimer);
+            _reframePollTimer = null;
+            unlockAnalyzeBtns();
+            const msg = "Analyze timed out after ~" + Math.round(MAX_MS / 60000)
+              + " min — worker may be stuck. Stop+Run, check HF_TOKEN / pyannote access, then try again.";
+            if (reframeStatus) { reframeStatus.textContent = "❌ " + msg; reframeStatus.style.color = "#ff8a8a"; }
+            if (empty) empty.textContent = msg;
+            if (onStatus) onStatus("❌ " + msg);
+            if (ingestBtn) ingestBtn.textContent = "Analyze";
+            if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+            reject(new Error(msg));
+            return;
+          }
+          const statusRes = await fetch(`/reframe-status/${jobId}`);
+          let r = null;
+          try {
+            r = await statusRes.json();
+          } catch (_) {
+            pollFails += 1;
+            if (pollFails >= 5) {
+              clearInterval(_reframePollTimer);
+              _reframePollTimer = null;
+              unlockAnalyzeBtns();
+              if (ingestBtn) ingestBtn.textContent = "Analyze";
+              if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+              const msg = "Lost contact with server while analysing — try Analyze again.";
+              if (empty) empty.textContent = msg;
+              if (onStatus) onStatus(msg);
+              reject(new Error(msg));
+            }
+            return;
+          }
+          pollFails = 0;
+          if (r.ready) {
+            clearInterval(_reframePollTimer);
+            _reframePollTimer = null;
+            if (onProgress) onProgress(100);
+            await refreshReframeStatus();
+            unlockAnalyzeBtns();
+            if (tlBtn) tlBtn.textContent = "Re-analyze";
+            if (reframeEnabled) {
+              reframeEnabled.disabled = false;
+              reframeEnabled.checked = true;
+            }
+            if (onStatus) {
+              const n = (r.stats && r.stats.speaker_count) || "?";
+              onStatus(`✓ ${n} speakers — Host/Guest colors apply in transcript`);
+            }
+            if (typeof window.onTimelineAnalyzeReady === "function") {
+              try { window.onTimelineAnalyzeReady(jobId, r); } catch (_) { /* optional */ }
+            }
+            resolve(r);
+          } else if (r.error) {
+            clearInterval(_reframePollTimer);
+            _reframePollTimer = null;
+            if (reframeStatus) {
+              reframeStatus.textContent = `❌ ${r.error}`;
+              reframeStatus.style.color = "#ff8a8a";
+            }
+            if (empty) empty.textContent = "Analyze failed: " + r.error;
+            if (onStatus) onStatus("❌ " + r.error);
+            unlockAnalyzeBtns();
+            if (ingestBtn) ingestBtn.textContent = "Analyze";
+            if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+            reject(new Error(r.error));
+          } else if (r.status) {
+            const pct = r.progress != null ? Number(r.progress) : null;
+            if (pct != null && onProgress) onProgress(pct);
+            if (pct != null && pct !== lastProgress) {
+              lastProgress = pct;
+              lastProgressAt = Date.now();
+            } else if (Date.now() - lastProgressAt > STUCK_MS) {
+              clearInterval(_reframePollTimer);
+              _reframePollTimer = null;
+              unlockAnalyzeBtns();
+              const msg = "Analyze stuck at " + (lastProgress >= 0 ? lastProgress + "%" : r.status)
+                + " for ~" + Math.round(STUCK_MS / 60000)
+                + " min. Often HF gated model / missing chromium deps — Stop+Run and check Analyze deps.";
+              if (reframeStatus) { reframeStatus.textContent = "❌ " + msg; reframeStatus.style.color = "#ff8a8a"; }
+              if (empty) empty.textContent = msg;
+              if (onStatus) onStatus("❌ " + msg);
+              if (ingestBtn) ingestBtn.textContent = "Analyze";
+              if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
+              reject(new Error(msg));
+              return;
+            }
+            const msg = `${r.status}${pct != null ? ` (${pct}%)` : ""}`;
+            if (reframeStatus) reframeStatus.textContent = msg;
+            if (empty) empty.textContent = msg;
+            if (onStatus) onStatus(msg);
+          }
+        } catch (pollErr) {
           pollFails += 1;
           if (pollFails >= 5) {
             clearInterval(_reframePollTimer);
             _reframePollTimer = null;
             unlockAnalyzeBtns();
             if (ingestBtn) ingestBtn.textContent = "Analyze";
-            if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
-            if (empty) empty.textContent = "Lost contact with server while analysing — try Analyze again.";
-            if (onStatus) onStatus("Lost contact — try Analyze again.");
+            const msg = "Analyze poll failed: " + (pollErr.message || pollErr);
+            if (empty) empty.textContent = msg;
+            if (onStatus) onStatus(msg);
+            reject(pollErr);
           }
-          return;
         }
-        pollFails = 0;
-        if (r.ready) {
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
-          await refreshReframeStatus();
-          unlockAnalyzeBtns();
-          if (tlBtn) tlBtn.textContent = "Re-analyze";
-          if (reframeEnabled) {
-            reframeEnabled.disabled = false;
-            reframeEnabled.checked = true;
-          }
-          if (onStatus) {
-            const n = (r.stats && r.stats.speaker_count) || "?";
-            onStatus(`✓ ${n} speakers — colors apply in transcript`);
-          }
-          if (typeof window.onTimelineAnalyzeReady === "function") {
-            try { window.onTimelineAnalyzeReady(jobId, r); } catch (_) { /* optional */ }
-          }
-        } else if (r.error) {
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
-          if (reframeStatus) {
-            reframeStatus.textContent = `❌ ${r.error}`;
-            reframeStatus.style.color = "#ff8a8a";
-          }
-          if (empty) empty.textContent = "Analyze failed: " + r.error;
-          if (onStatus) onStatus("❌ " + r.error);
-          unlockAnalyzeBtns();
-          if (ingestBtn) ingestBtn.textContent = "Analyze";
-          if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
-        } else if (r.status) {
-          const pct = r.progress != null ? ` (${r.progress}%)` : "";
-          const msg = `${r.status}${pct}`;
-          if (reframeStatus) reframeStatus.textContent = msg;
-          if (empty) empty.textContent = msg;
-          if (onStatus) onStatus(msg);
-        }
-      } catch (pollErr) {
-        pollFails += 1;
-        if (pollFails >= 5) {
-          clearInterval(_reframePollTimer);
-          _reframePollTimer = null;
-          unlockAnalyzeBtns();
-          if (ingestBtn) ingestBtn.textContent = "Analyze";
-          if (empty) empty.textContent = "Analyze poll failed: " + (pollErr.message || pollErr);
-          if (onStatus) onStatus("Analyze poll failed: " + (pollErr.message || pollErr));
-        }
-      }
-    }, 1500);
+      }, 1500);
+    });
   } catch (e) {
     if (reframeStatus) {
       reframeStatus.textContent = "Error: " + e.message;
@@ -2746,7 +2801,8 @@ async function startReframeAnalyze(triggerBtn, opts) {
     if (reframeAnalyzeBtn) reframeAnalyzeBtn.textContent = "Analyze speakers + faces";
     if (empty) empty.textContent = "Analyze failed: " + e.message;
     if (onStatus) onStatus("Error: " + e.message);
-    alert("Analyze failed:\n\n" + e.message);
+    if (!opts.quietAlert) alert("Analyze failed:\n\n" + e.message);
+    throw e;
   }
 }
 

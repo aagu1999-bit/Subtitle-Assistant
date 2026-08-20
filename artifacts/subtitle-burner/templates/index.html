@@ -1381,10 +1381,16 @@
               <span id="tlTranscriptMeta" class="muted tl-transcript-meta"></span>
               <div class="tl-transcript-actions">
                 <button type="button" id="tlAnalyzeBtn" class="btn btn-secondary btn-sm" title="PyAnnote speaker diarization (+ optional faces) for this clip’s source">Analyze speakers</button>
+                <button type="button" id="tlAnalyzeAllBtn" class="btn btn-secondary btn-sm" title="Analyze every unique Main source (multi-interview)">Analyze all Main</button>
                 <button type="button" id="tlTranscriptFillersBtn" class="btn btn-secondary btn-sm" title="Strike common filler words (um, uh, like, you know…)">Cut fillers</button>
                 <button type="button" id="tlTranscriptRestoreBtn" class="btn btn-secondary btn-sm" title="Restore every struck word in this clip">Restore all</button>
               </div>
-              <span id="tlAnalyzeStatus" class="muted tl-transcript-meta" style="width:100%"></span>
+              <div class="tl-analyze-progress-wrap" id="tlAnalyzeProgressWrap" hidden>
+                <div class="tl-analyze-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <div class="tl-analyze-progress-fill" id="tlAnalyzeProgressFill"></div>
+                </div>
+                <span id="tlAnalyzeStatus" class="muted tl-transcript-meta"></span>
+              </div>
             </div>
             <div id="tlTranscriptDoc" class="tl-transcript-doc"></div>
           </div>
@@ -1392,12 +1398,17 @@
           <div class="tl-leftpanel hidden" data-lpanel="media">
             <div class="tl-media-head">
               <h3 style="margin:0">Library</h3>
+              <div class="tl-lib-scope" role="group" aria-label="Library scope">
+                <button type="button" class="tl-scope-btn active" data-scope="project" title="Videos and assets used in this project">This project</button>
+                <button type="button" class="tl-scope-btn" data-scope="all" title="Entire Studio library">All library</button>
+              </div>
               <div class="tl-view-toggle" role="group" aria-label="Library view">
                 <button type="button" class="tl-view-btn active" data-view="list" title="List view">☰</button>
                 <button type="button" class="tl-view-btn" data-view="icons" title="Icon grid">▦</button>
+                <button type="button" class="tl-view-btn" data-view="dense" title="Dense icons — more per row">⠿</button>
               </div>
             </div>
-            <p class="muted tl-hint">Drag videos/assets onto <strong>Main</strong>, <strong>Overlay</strong>, <strong>Effects</strong>, or <strong>Music</strong> — or use the quick buttons.</p>
+            <p class="muted tl-hint">Drag onto <strong>Main</strong>, <strong>Overlay</strong>, <strong>Effects</strong>, or <strong>Music</strong>. Use <em>This project</em> to hide other projects’ media.</p>
             <h3 class="tl-lib-sect">Your videos</h3>
             <div id="tlSourceList" class="tl-source-list tl-view-list"></div>
             <h3 class="tl-lib-sect" style="margin-top:16px">Assets <span class="muted" style="font-weight:normal;font-size:.75rem">B-roll · images · music</span></h3>

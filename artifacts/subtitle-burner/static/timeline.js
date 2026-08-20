@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-82-serp-replit";
+  const TL_BUILD = "studio-editor-build-83-analyze-project-lib";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -953,7 +953,8 @@
 
   async function loadAssets() {
     try {
-      const data = await api("/list-assets");
+      const q = (tl && tl.job_id) ? ("?project_id=" + encodeURIComponent(tl.job_id)) : "";
+      const data = await api("/list-assets" + q);
       assets = data.assets || [];
       renderAssetList();
     } catch (e) { /* ignore */ }
@@ -967,7 +968,8 @@
   }
 
   // ---- Library rendering ----
-  let libraryView = "list"; // "list" | "icons"
+  let libraryView = "list"; // "list" | "icons" | "dense"
+  let libraryScope = "project"; // "project" | "all"
 
   function applyLibraryViewClass() {
     ["tlSourceList", "tlAssetList"].forEach((id) => {
@@ -975,21 +977,73 @@
       if (!el) return;
       el.classList.toggle("tl-view-list", libraryView === "list");
       el.classList.toggle("tl-view-icons", libraryView === "icons");
+      el.classList.toggle("tl-view-dense", libraryView === "dense");
     });
     document.querySelectorAll(".tl-view-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === libraryView);
+    });
+    document.querySelectorAll(".tl-scope-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.scope === libraryScope);
     });
   }
 
   function wireLibraryViewToggle() {
     document.querySelectorAll(".tl-view-btn").forEach((b) => {
       b.onclick = () => {
-        libraryView = b.dataset.view === "icons" ? "icons" : "list";
+        const v = b.dataset.view;
+        libraryView = (v === "icons" || v === "dense") ? v : "list";
         applyLibraryViewClass();
         renderSourceList();
         renderAssetList();
       };
     });
+    document.querySelectorAll(".tl-scope-btn").forEach((b) => {
+      b.onclick = () => {
+        libraryScope = b.dataset.scope === "all" ? "all" : "project";
+        applyLibraryViewClass();
+        renderSourceList();
+        renderAssetList();
+      };
+    });
+  }
+
+  function projectSourceJobIds() {
+    const ids = new Set();
+    if (!tl || !tl.tracks) return ids;
+    TRACK_KEYS.forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (c && c.source_job_id) ids.add(c.source_job_id);
+      });
+    });
+    return ids;
+  }
+
+  function projectAssetIds() {
+    const ids = new Set();
+    if (!tl || !tl.tracks) return ids;
+    TRACK_KEYS.forEach((k) => {
+      (tl.tracks[k] || []).forEach((c) => {
+        if (c && c.asset_id) ids.add(c.asset_id);
+      });
+    });
+    if (tl.logo && tl.logo.asset_id) ids.add(tl.logo.asset_id);
+    return ids;
+  }
+
+  function filteredSources() {
+    if (libraryScope !== "project" || !tl) return sources.slice();
+    const used = projectSourceJobIds();
+    if (!used.size) return [];
+    return sources.filter((s) => used.has(s.job_id));
+  }
+
+  function filteredAssets() {
+    if (libraryScope !== "project" || !tl) return assets.slice();
+    const used = projectAssetIds();
+    const pid = tl.job_id;
+    return assets.filter((a) =>
+      used.has(a.asset_id) || (pid && a.project_id && a.project_id === pid) || a.in_project
+    );
   }
 
   function _bindLibraryDrag(el, payload) {
@@ -1010,11 +1064,14 @@
     if (!wrap) return;
     wrap.innerHTML = "";
     applyLibraryViewClass();
-    if (!sources.length) {
-      wrap.innerHTML = '<p class="muted tl-hint">Upload &amp; transcribe a video first — it\'ll show up here.</p>';
+    const list = filteredSources();
+    if (!list.length) {
+      wrap.innerHTML = libraryScope === "project"
+        ? '<p class="muted tl-hint">No videos in this project yet. Switch to <strong>All library</strong> to add one, or upload &amp; transcribe.</p>'
+        : '<p class="muted tl-hint">Upload &amp; transcribe a video first — it\'ll show up here.</p>';
       return;
     }
-    sources.forEach((s) => {
+    list.forEach((s) => {
       const div = document.createElement("div");
       div.className = "tl-source-item";
       const thumb = `<span class="tl-asset-thumb tl-asset-thumb-ph" aria-hidden="true">🎬</span>`;
@@ -1229,18 +1286,21 @@
     }
     wrap.innerHTML = "";
     applyLibraryViewClass();
-    if (!assets.length) {
-      wrap.innerHTML = '<p class="muted tl-hint">No assets yet. Upload a file or Suggest B-roll overlays.</p>';
+    const assetList = filteredAssets();
+    if (!assetList.length) {
+      wrap.innerHTML = libraryScope === "project"
+        ? '<p class="muted tl-hint">No assets in this project yet. Switch to <strong>All library</strong>, upload, or Suggest B-roll.</p>'
+        : '<p class="muted tl-hint">No assets yet. Upload a file or Suggest B-roll overlays.</p>';
       return;
     }
     // Drop selections for assets that no longer exist.
-    const liveIds = new Set(assets.map((a) => a.asset_id));
+    const liveIds = new Set(assetList.map((a) => a.asset_id));
     Array.from(selectedAssetIds).forEach((id) => { if (!liveIds.has(id)) selectedAssetIds.delete(id); });
 
     if (!replacing) {
       const bulk = document.createElement("div");
       bulk.className = "tl-asset-bulkbar";
-      const allChecked = assets.length > 0 && assets.every((a) => selectedAssetIds.has(a.asset_id));
+      const allChecked = assetList.length > 0 && assetList.every((a) => selectedAssetIds.has(a.asset_id));
       bulk.innerHTML =
         `<label class="tl-asset-bulk-all"><input type="checkbox" id="tlAssetSelectAll"${allChecked ? " checked" : ""}> Select all</label>` +
         `<button type="button" id="tlAssetDeleteSelected" class="tl-chip-btn tl-chip-danger" ${selectedAssetIds.size ? "" : "disabled"}>🗑 Delete selected (${selectedAssetIds.size})</button>`;
@@ -1248,7 +1308,7 @@
       const allBox = bulk.querySelector("#tlAssetSelectAll");
       if (allBox) {
         allBox.onchange = () => {
-          if (allBox.checked) assets.forEach((a) => selectedAssetIds.add(a.asset_id));
+          if (allBox.checked) assetList.forEach((a) => selectedAssetIds.add(a.asset_id));
           else selectedAssetIds.clear();
           renderAssetList();
         };
@@ -1257,7 +1317,7 @@
       if (delBtn) delBtn.onclick = () => deleteSelectedAssets();
     }
 
-    assets.forEach((a) => {
+    assetList.forEach((a) => {
       const div = document.createElement("div");
       div.className = "tl-source-item" + (replacing ? " tl-replace-candidate" : "");
       const icon = a.kind === "audio" ? "🎵" : a.kind === "image" ? "🖼" : "🎞";
@@ -2100,10 +2160,80 @@
     scheduleSave();
   }
 
+  function setAnalyzeProgressUI(pct, msg) {
+    const wrap = $("tlAnalyzeProgressWrap");
+    const fill = $("tlAnalyzeProgressFill");
+    const statusEl = $("tlAnalyzeStatus");
+    if (wrap) wrap.hidden = false;
+    if (fill && pct != null && Number.isFinite(Number(pct))) {
+      const n = Math.max(0, Math.min(100, Number(pct) || 0));
+      fill.style.width = n + "%";
+      const bar = fill.parentElement;
+      if (bar) bar.setAttribute("aria-valuenow", String(Math.round(n)));
+    }
+    if (statusEl && msg != null) statusEl.textContent = msg;
+  }
+
+  function hideAnalyzeProgressUI(keepMsg) {
+    const wrap = $("tlAnalyzeProgressWrap");
+    const fill = $("tlAnalyzeProgressFill");
+    if (fill && !keepMsg) fill.style.width = "0%";
+    if (wrap && !keepMsg) {
+      // Keep visible briefly when done with a success message.
+      if (!keepMsg) wrap.hidden = true;
+    }
+  }
+
+  async function runAnalyzeForJobIds(jobIds, triggerBtn) {
+    const ids = (jobIds || []).filter(Boolean);
+    if (!ids.length) {
+      alert("Select a Main clip with a transcribed source, then Analyze speakers.");
+      return;
+    }
+    const statusEl = $("tlAnalyzeStatus");
+    const wrap = $("tlAnalyzeProgressWrap");
+    if (wrap) wrap.hidden = false;
+    if (typeof window.startReframeAnalyze !== "function") {
+      alert("Analyze is still loading — try again in a second.");
+      return;
+    }
+    let ok = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const jobId = ids[i];
+      const prefix = ids.length > 1 ? `(${i + 1}/${ids.length}) ` : "";
+      try {
+        await window.startReframeAnalyze(triggerBtn, {
+          jobId,
+          quietAlert: ids.length > 1,
+          onStatus: (msg) => setAnalyzeProgressUI(null, prefix + (msg || "")),
+          onProgress: (pct) => {
+            // Map per-job progress into overall bar when analyzing many sources.
+            const base = (i / ids.length) * 100;
+            const span = 100 / ids.length;
+            setAnalyzeProgressUI(base + (Number(pct) || 0) * span / 100, null);
+            if (statusEl && statusEl.textContent) {
+              /* keep last status text */
+            }
+          },
+        });
+        ok += 1;
+      } catch (e) {
+        if (ids.length === 1) break;
+        setAnalyzeProgressUI((i + 1) / ids.length * 100, prefix + "failed: " + (e.message || e));
+      }
+    }
+    if (ok) {
+      setAnalyzeProgressUI(100, ids.length > 1
+        ? `✓ Analyzed ${ok}/${ids.length} Main sources — Host/Guest colors ready`
+        : (statusEl && statusEl.textContent) || "✓ Speakers ready");
+    }
+  }
+
   function wireTranscriptToolbar() {
     const restoreBtn = $("tlTranscriptRestoreBtn");
     const fillerBtn = $("tlTranscriptFillersBtn");
     const analyzeBtn = $("tlAnalyzeBtn");
+    const analyzeAllBtn = $("tlAnalyzeAllBtn");
     if (restoreBtn) {
       restoreBtn.onclick = () => {
         if (!selected || selected.track !== "main") return;
@@ -2127,15 +2257,24 @@
           alert("Select a Main clip with a transcribed source, then Analyze speakers.");
           return;
         }
-        const statusEl = $("tlAnalyzeStatus");
-        if (typeof window.startReframeAnalyze === "function") {
-          window.startReframeAnalyze(analyzeBtn, {
-            jobId: clip.source_job_id,
-            onStatus: (msg) => { if (statusEl) statusEl.textContent = msg || ""; },
-          });
-        } else {
-          alert("Analyze is still loading — try again in a second.");
+        runAnalyzeForJobIds([clip.source_job_id], analyzeBtn).catch(() => {});
+      };
+    }
+    if (analyzeAllBtn) {
+      analyzeAllBtn.onclick = () => {
+        const ids = [];
+        const seen = new Set();
+        ((tl && tl.tracks && tl.tracks.main) || []).forEach((c) => {
+          if (c && c.source_job_id && !seen.has(c.source_job_id)) {
+            seen.add(c.source_job_id);
+            ids.push(c.source_job_id);
+          }
+        });
+        if (!ids.length) {
+          alert("Add transcribed Main clips first, then Analyze all Main.");
+          return;
         }
+        runAnalyzeForJobIds(ids, analyzeAllBtn).catch(() => {});
       };
     }
     window.onTimelineAnalyzeReady = (jobId) => {
@@ -2147,13 +2286,23 @@
           if (!tl || !data.ready || !data.stats) return;
           const breakdown = (data.stats.speaker_breakdown) || [];
           tl.speaker_colors = tl.speaker_colors || {};
+          const palette = [
+            "#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770",
+            "#88c0d0", "#bf616a", "#5e81ac", "#ebcb8b", "#c084fc",
+          ];
           breakdown.forEach((spk, i) => {
             if (!spk || !spk.id) return;
             if (!tl.speaker_colors[spk.id]) {
-              tl.speaker_colors[spk.id] = _spkColor({}, spk.id) ||
-                ["#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770"][i % 5];
+              tl.speaker_colors[spk.id] = _spkColor({}, spk.id) || palette[i % palette.length];
             }
           });
+          // Keep Caption Look Host/Guest pickers in sync when present.
+          try {
+            const hostEl = document.getElementById("hostColor");
+            const guestEl = document.getElementById("guestColor");
+            if (hostEl && tl.speaker_colors.SPEAKER_00) hostEl.value = tl.speaker_colors.SPEAKER_00;
+            if (guestEl && tl.speaker_colors.SPEAKER_01) guestEl.value = tl.speaker_colors.SPEAKER_01;
+          } catch (_) { /* optional */ }
           scheduleSave();
           renderProps();
           const clip = (selected && selected.track === "main")
@@ -2162,6 +2311,7 @@
           if (clip && clip.source_job_id === jobId) renderTranscript(clip);
           else if (clip) renderTranscriptWords(clip);
           refreshTlAnalyzeStatus(jobId);
+          setAnalyzeProgressUI(100, `✓ ${(data.stats.speaker_count || breakdown.length || "?")} speakers labelled`);
         })
         .catch(() => {});
     };
@@ -6053,6 +6203,7 @@
   async function uploadAsset(file) {
     const fd = new FormData();
     fd.append("file", file);
+    if (tl && tl.job_id) fd.append("project_id", tl.job_id);
     setSaveState("Uploading asset…");
     try {
       await api("/upload-asset", { method: "POST", body: fd });

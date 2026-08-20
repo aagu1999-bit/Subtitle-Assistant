@@ -668,6 +668,9 @@ def _is_stale_in_progress_status(status: str | None) -> bool:
         return False
     if s in ("queued", "transcribing", "uploading", "analyzing", "processing"):
         return True
+    # British spelling "analysing speakers" / face tracking — common hang after Stop+Run.
+    if "analys" in s or "diariz" in s or "speaker" in s or "tracking face" in s:
+        return True
     hints = (
         "render", "remux", "mix", "build", "encod", "compos", "burn",
         "final", "mux", "stitch", "overlay", "export", "writing",
@@ -1940,6 +1943,17 @@ def analyze_reframe(
     faces: list[dict] = []
     faces_warning: str | None = None
     errors: list[BaseException] = []
+    # Heartbeat so the UI progress bar moves during long pyannote loads.
+    stop_hb = threading.Event()
+    hb_pct = {"n": 15}
+
+    def _heartbeat() -> None:
+        while not stop_hb.wait(7.0):
+            hb_pct["n"] = min(52, hb_pct["n"] + 2)
+            _progress(hb_pct["n"], "analysing speakers (diarization running…)")
+
+    hb_thread = threading.Thread(target=_heartbeat, name="reframe-hb", daemon=True)
+    hb_thread.start()
 
     def _run_diar():
         return diarize_audio(
@@ -1954,38 +1968,43 @@ def analyze_reframe(
             raise RuntimeError(deps.get("faces_error") or "Face tracking unavailable")
         return detect_face_tracks(video_path, sample_fps=fps)
 
-    if deps["faces_ok"]:
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="reframe") as pool:
-            fut_diar = pool.submit(_run_diar)
-            fut_faces = pool.submit(_run_faces)
-            for fut in as_completed([fut_diar, fut_faces]):
-                try:
-                    if fut is fut_diar:
-                        diar = fut.result()
-                        _progress(55, "speakers labelled — tracking faces")
-                    else:
-                        faces = fut.result()
-                        _progress(70, "faces sampled — finishing diarization")
-                except BaseException as e:
-                    if fut is fut_diar:
-                        errors.append(e)
-                    else:
-                        faces_warning = str(e)
-                        faces = []
-                        _progress(70, "speakers labelled — faces skipped")
-        if errors:
-            raise errors[0]
-    else:
-        # Speakers-only path (no mediapipe / libGL).
-        faces_warning = deps.get("faces_error") or "Face tracking unavailable"
-        try:
-            diar = _run_diar()
-        except BaseException as e:
-            raise
-        _progress(70, "speakers labelled — faces skipped (no mediapipe)")
+    try:
+        if deps["faces_ok"]:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="reframe") as pool:
+                fut_diar = pool.submit(_run_diar)
+                fut_faces = pool.submit(_run_faces)
+                for fut in as_completed([fut_diar, fut_faces]):
+                    try:
+                        if fut is fut_diar:
+                            diar = fut.result()
+                            stop_hb.set()
+                            _progress(55, "speakers labelled — tracking faces")
+                        else:
+                            faces = fut.result()
+                            _progress(70, "faces sampled — finishing diarization")
+                    except BaseException as e:
+                        if fut is fut_diar:
+                            errors.append(e)
+                        else:
+                            faces_warning = str(e)
+                            faces = []
+                            _progress(70, "speakers labelled — faces skipped")
+            if errors:
+                raise errors[0]
+        else:
+            # Speakers-only path (no mediapipe / libGL).
+            faces_warning = deps.get("faces_error") or "Face tracking unavailable"
+            try:
+                diar = _run_diar()
+            except BaseException:
+                raise
+            stop_hb.set()
+            _progress(70, "speakers labelled — faces skipped (no mediapipe)")
+    finally:
+        stop_hb.set()
 
     overlaps = find_overlap_regions(diar)
-    speakers = sorted({s["speaker"] for s in diar})
+    speakers = sorted({s["speaker"] for s in diar}, key=_speaker_sort_key)
     _progress(90, "caching speaker map")
     return {
         "diarization": diar,
@@ -1997,6 +2016,7 @@ def analyze_reframe(
             "face_samples": len(faces),
             "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
             "diarization_device": _diarization_device_resolved,
+            "speaker_breakdown": _speaker_breakdown(diar),
             "face_sample_fps": fps,
             "faces_skipped": bool(faces_warning),
             "faces_warning": faces_warning,
@@ -9802,8 +9822,35 @@ def analyze_deps_endpoint():
     })
 
 
+def _speaker_label_for_id(spk: str, index_fallback: int = 0) -> str:
+    """Stable Host/Guest labels by SPEAKER_NN id (not sort order)."""
+    m = re.match(r"SPEAKER_(\d+)$", str(spk or "").strip(), re.I)
+    if m:
+        n = int(m.group(1))
+        if n == 0:
+            return "Host"
+        if n == 1:
+            return "Guest"
+        return f"Speaker {n + 1}"
+    labels = ("Host", "Guest", "Speaker 3", "Speaker 4", "Speaker 5")
+    if 0 <= index_fallback < len(labels):
+        return labels[index_fallback]
+    return f"Speaker {index_fallback + 1}"
+
+
+def _speaker_sort_key(spk: str) -> tuple:
+    m = re.match(r"SPEAKER_(\d+)$", str(spk or "").strip(), re.I)
+    if m:
+        return (0, int(m.group(1)))
+    return (1, str(spk or ""))
+
+
 def _speaker_breakdown(diar: list) -> list:
-    """Per-speaker speech seconds + % for Ingest cards."""
+    """Per-speaker speech seconds + % for Ingest / Timeline cards.
+
+    Labels are tied to SPEAKER_00 → Host, SPEAKER_01 → Guest, etc., so caption
+    colors stay consistent across multi-interview Main clips.
+    """
     totals: dict[str, float] = {}
     for seg in diar or []:
         spk = seg.get("speaker") or "UNKNOWN"
@@ -9813,13 +9860,12 @@ def _speaker_breakdown(diar: list) -> list:
             dur = 0.0
         totals[spk] = totals.get(spk, 0.0) + dur
     total = sum(totals.values()) or 1.0
-    labels = ("Host", "Guest", "Speaker 3", "Speaker 4", "Speaker 5")
     out = []
-    for i, spk in enumerate(sorted(totals.keys())):
+    for i, spk in enumerate(sorted(totals.keys(), key=_speaker_sort_key)):
         sec = totals[spk]
         out.append({
             "id": spk,
-            "label": labels[i] if i < len(labels) else f"Speaker {i + 1}",
+            "label": _speaker_label_for_id(spk, i),
             "speech_sec": round(sec, 1),
             "speech_pct": round(100.0 * sec / total),
         })
@@ -12607,17 +12653,26 @@ def upload_asset():
     dest = ASSET_DIR / f"{asset_id}.{ext}"
     f.save(str(dest))
     _write_asset_meta(asset_id, filename=f.filename, source="upload")
+    project_id = (request.form.get("project_id") or request.form.get("timeline_job_id") or "").strip()
+    if project_id and re.fullmatch(r"[a-f0-9]{32}", project_id):
+        _write_asset_meta(asset_id, project_id=project_id)
     return jsonify({
         "asset_id": asset_id,
         "kind": kind,
         "filename": f.filename,
+        "project_id": project_id or None,
         "duration": _media_duration(dest) if kind in ("video", "audio", "gif") else 0.0,
     })
 
 
 @app.route("/list-assets", methods=["GET"])
 def list_assets():
-    """List uploaded timeline assets, newest first."""
+    """List uploaded timeline assets, newest first.
+
+    Optional query: ``project_id`` — when set, prefer assets tagged to that
+    timeline project (also returns ``in_project`` flags for client filtering).
+    """
+    project_id = (request.args.get("project_id") or "").strip()
     out = []
     for p in ASSET_DIR.glob("*"):
         if not p.is_file():
@@ -12631,6 +12686,7 @@ def list_assets():
         filename = meta.get("filename") or meta.get("keyword") or None
         if not filename and meta.get("keyword"):
             filename = f"{meta['keyword']}.{p.suffix.lstrip('.')}"
+        aid_project = meta.get("project_id") or None
         out.append({
             "asset_id": p.stem,
             "kind": kind,
@@ -12638,11 +12694,13 @@ def list_assets():
             "filename": filename,
             "keyword": meta.get("keyword"),
             "source": meta.get("source"),
+            "project_id": aid_project,
+            "in_project": bool(project_id and aid_project == project_id),
             "duration": _media_duration(p) if kind in ("video", "audio", "gif") else 0.0,
             "mtime": p.stat().st_mtime,
         })
     out.sort(key=lambda a: a["mtime"], reverse=True)
-    return jsonify({"assets": out})
+    return jsonify({"assets": out, "project_id": project_id or None})
 
 
 @app.route("/delete-asset/<asset_id>", methods=["POST", "DELETE"])

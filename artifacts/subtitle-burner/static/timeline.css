@@ -358,6 +358,35 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   color: #aeb4c0;
 }
 .tl-source-list { display: flex; flex-direction: column; gap: 6px; }
+.tl-media-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tl-lib-scope {
+  display: inline-flex;
+  gap: 2px;
+  background: #12151e;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 2px;
+}
+.tl-scope-btn {
+  border: 0;
+  background: transparent;
+  color: #8b91a0;
+  font-size: .68rem;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tl-scope-btn.active {
+  background: #2a3148;
+  color: #e8eaee;
+}
 .tl-source-list.tl-view-icons {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -380,6 +409,76 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+/* Dense icons — more per row, less scrolling */
+.tl-source-list.tl-view-dense {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+.tl-source-list.tl-view-dense .tl-source-item {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 4px;
+  gap: 3px;
+  font-size: .68rem;
+}
+.tl-source-list.tl-view-dense .tl-source-item .tl-asset-thumb,
+.tl-source-list.tl-view-dense .tl-source-item .tl-asset-thumb-ph {
+  width: 100%;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 4px;
+  font-size: .9rem;
+}
+.tl-source-list.tl-view-dense .tl-source-name {
+  font-size: .62rem;
+  line-height: 1.2;
+}
+.tl-source-list.tl-view-dense .tl-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.tl-source-list.tl-view-dense .tl-source-actions .tl-chip-btn {
+  font-size: .58rem;
+  padding: 2px 4px;
+}
+.tl-source-list.tl-view-dense .tl-asset-bulkbar {
+  grid-column: 1 / -1;
+}
+.tl-source-list.tl-view-list .tl-asset-thumb,
+.tl-source-list.tl-view-list .tl-asset-thumb-ph {
+  width: 32px;
+  height: 32px;
+}
+.tl-source-list.tl-view-list .tl-source-item {
+  padding: 5px 7px;
+  font-size: .76rem;
+  gap: 6px;
+}
+.tl-analyze-progress-wrap {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.tl-analyze-progress-wrap[hidden] { display: none !important; }
+.tl-analyze-progress-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #1c2230;
+  overflow: hidden;
+  border: 1px solid #2a3144;
+}
+.tl-analyze-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #5b8def, #7ec8ff);
+  transition: width .35s ease;
+  border-radius: 999px;
 }
 .tl-source-item {
   display: flex;
