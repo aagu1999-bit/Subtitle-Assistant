@@ -7635,8 +7635,27 @@
     if (!merged.SPEAKER_01) merged.SPEAKER_01 = "#00E5FF";
     tl.speaker_colors = merged;
     const banner = style.headline_banner;
-    if (banner) tl.headline_banner = { text: String(banner) };
-    else if (banner === "") tl.headline_banner = null;
+    const hook = style.hook_title;
+    if (hook && typeof hook === "object" && hook.text) {
+      tl.headline_banner = {
+        text: String(hook.text),
+        font: hook.font || style.hook_font || "Bebas Neue",
+        duration_sec: hook.duration_sec != null ? Number(hook.duration_sec) : (style.hook_duration || 2.5),
+        mode: hook.mode || style.hook_mode || "hook",
+      };
+    } else if (banner) {
+      const text = typeof banner === "string" ? banner : (banner.text || "");
+      tl.headline_banner = text ? {
+        text: String(text),
+        font: (typeof banner === "object" && banner.font) || style.hook_font || "Bebas Neue",
+        duration_sec: (typeof banner === "object" && banner.duration_sec != null)
+          ? Number(banner.duration_sec)
+          : (style.hook_duration || 2.5),
+        mode: (typeof banner === "object" && banner.mode) || style.hook_mode || "hook",
+      } : null;
+    } else if (banner === "") {
+      tl.headline_banner = null;
+    }
     if (opts.logo && opts.logo.asset_id) {
       tl.logo = Object.assign(
         { x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 },
