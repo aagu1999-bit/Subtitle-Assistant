@@ -4023,6 +4023,14 @@ def burn_subtitles(
     edge is at least 1080 px, with a light unsharp pass.
     Optional *job_id* streams encode progress into jobs[job_id]["progress"].
     """
+    # FFmpeg will silently ignore -vf / libx264 when the input has no video
+    # stream and happily write an audio-only MP4 — catch that early.
+    if not _probe_media_streams(video_path).get("has_video"):
+        raise RuntimeError(
+            "Caption burn: input has no video track (audio-only). "
+            "Re-render from Timeline → ▶ Render."
+        )
+
     fonts_arg = str(FONT_DIR).replace("\\", "/").replace(":", r"\:")
     ass_arg = str(ass_path).replace("\\", "/").replace(":", r"\:")
 
@@ -4055,10 +4063,13 @@ def burn_subtitles(
 
     cmd: list[str] = [FFMPEG, "-y", "-i", str(video_path)]
     if silent:
-        cmd += ["-vf", vf, *_VIDEO_ENC_ARGS, "-an"]
+        cmd += ["-map", "0:v:0", "-vf", vf, *_VIDEO_ENC_ARGS, "-an"]
     else:
         if audio_path:
             cmd += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            # Force video mapping so an audio-only source cannot "succeed".
+            cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
         # Re-encode audio to AAC-LC (not stream-copy) so QuickTime / iOS
         # don't reject exotic source codecs after caption burn.
         cmd += [
@@ -4066,7 +4077,11 @@ def burn_subtitles(
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
         ]
         if audio_path:
-            cmd += ["-shortest"]
+            # Cap to the picture length — never let short replacement audio
+            # truncate the video via -shortest.
+            burn_dur = _media_duration(video_path)
+            if burn_dur > 0.05:
+                cmd += ["-t", f"{burn_dur:.3f}"]
     cmd += [*_QT_SAFE_MP4_ARGS, str(output_path)]
 
     duration_hint = _media_duration(video_path) or None
@@ -4092,8 +4107,8 @@ def burn_subtitles(
             fallback += [
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             ]
-            if audio_path:
-                fallback += ["-shortest"]
+            if audio_path and duration_hint and duration_hint > 0.05:
+                fallback += ["-t", f"{duration_hint:.3f}"]
         fallback += [*_QT_SAFE_MP4_ARGS, str(output_path)]
         ok = _run_ffmpeg_encode(
             fallback,
@@ -4220,7 +4235,13 @@ def mux_audio_into_video(silent_video: Path, audio_source: Path, output_path: Pa
         "-map", "1:a:0",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
+    ]
+    # Cap to picture length. Do NOT use -shortest: short/corrupt audio can
+    # stop the mux before any video packets are copied (audio-only MP4).
+    vid_dur = _media_duration(silent_video)
+    if vid_dur > 0.05:
+        cmd += ["-t", f"{vid_dur:.3f}"]
+    cmd += [
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -4237,7 +4258,8 @@ def _assert_mp4_has_video(path: Path, what: str = "export") -> None:
     if not probe.get("has_video"):
         raise RuntimeError(
             f"{what} produced an audio-only file (no video track). "
-            "Try Timeline → ▶ Render again, or turn off Look → Audio Enhancement and re-export."
+            "Try Timeline → ▶ Render again. If it keeps failing, turn off Look → "
+            "Audio Enhancement and Project → Auto whoosh/click, then re-export."
         )
 
 
@@ -5411,14 +5433,22 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                     "-i", str(output_path),
                     "-i", str(bg_music_path),
                     "-filter_complex", filter_complex,
-                    "-map", "0:v", "-map", "[outa]",
+                    "-map", "0:v:0", "-map", "[outa]",
                     "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                    str(mixed_output)
                 ]
+                ie_dur = _media_duration(output_path)
+                if ie_dur > 0.05:
+                    cmd += ["-t", f"{ie_dur:.3f}"]
+                cmd += [str(mixed_output)]
                 ffmpeg_logger.info(f"[{job_id}] Mixing bg music: {' '.join(cmd)}")
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode == 0:
-                    shutil.move(mixed_output, output_path)
+                    try:
+                        _assert_mp4_has_video(mixed_output, "Instant Export music mix")
+                        shutil.move(mixed_output, output_path)
+                    except RuntimeError as ve:
+                        ffmpeg_logger.error(f"[{job_id}] Mixing bg music dropped video: {ve}")
+                        _safe_unlink(mixed_output)
                 else:
                     ffmpeg_logger.error(f"[{job_id}] Mixing bg music failed: {proc.stderr}")
                     _safe_unlink(mixed_output)
@@ -11084,11 +11114,19 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
             if not enhanced.exists() or enhanced.stat().st_size < 64:
                 raise RuntimeError("Audio enhancement produced no usable audio.")
 
+            # Prefer an explicit video duration over -shortest: short enhanced
+            # audio + -shortest + -c:v copy can drop every video packet.
+            try:
+                vid_dur = float(_media_duration(video) or _ffprobe_duration(video) or 0.0)
+            except Exception:
+                vid_dur = 0.0
+
             mux_attempts = [
                 [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
                  "-map", "0:v:0", "-map", "1:a:0?",
                  "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                 "-shortest", "-movflags", "+faststart", str(out_path)],
+                 *([ "-t", f"{vid_dur:.3f}" ] if vid_dur > 0.05 else []),
+                 "-movflags", "+faststart", str(out_path)],
                 [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
                  "-map", "0:v:0", "-map", "1:a:0?",
                  "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
@@ -11096,7 +11134,8 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
                 [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
                  "-map", "0:v:0", "-map", "1:a:0?",
                  *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
-                 "-shortest", "-movflags", "+faststart", str(out_path)],
+                 *([ "-t", f"{vid_dur:.3f}" ] if vid_dur > 0.05 else []),
+                 "-movflags", "+faststart", str(out_path)],
             ]
             mux_err = ""
             muxed = False
@@ -11655,6 +11694,70 @@ def _tl_input_has_audio(path: Path) -> bool:
         return False
 
 
+def _tl_require_video(path: Path, what: str) -> float:
+    """Ensure *path* has a video track; return its duration (seconds)."""
+    probe = _probe_media_streams(path)
+    if not probe.get("has_video"):
+        raise RuntimeError(f"{what}: input has no video track.")
+    dur = float(probe.get("duration") or 0.0)
+    if dur <= 0.05:
+        dur = float(_media_duration(path) or 0.0)
+    if dur <= 0.05:
+        try:
+            dur = float(_ffprobe_duration(path) or 0.0)
+        except Exception:
+            dur = 0.0
+    if dur <= 0.05:
+        raise RuntimeError(f"{what}: could not read video duration.")
+    return dur
+
+
+def _tl_mux_filtered_audio(
+    base: Path,
+    inputs: list[str],
+    filter_complex: str,
+    out_path: Path,
+    what: str,
+    duration: float,
+) -> None:
+    """Map filtered audio onto *base* while keeping the full video track.
+
+    Avoids `-shortest` with `-c:v copy`, which can emit audio-only MP4s when
+    the filtered audio ends before the first video packet is copied.
+    """
+    t_args = ["-t", f"{duration:.3f}"]
+    copy_cmd = [
+        FFMPEG, "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        *t_args,
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    try:
+        _tl_run(copy_cmd, what)
+        _assert_mp4_has_video(out_path, what)
+        return
+    except Exception as copy_err:
+        print(f"[{what}] stream-copy mux failed ({copy_err}); re-encoding video", flush=True)
+        _safe_unlink(out_path)
+
+    reenc_cmd = [
+        FFMPEG, "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0", "-map", "[aout]",
+        *_VIDEO_ENC_ARGS,
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        *t_args,
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    _tl_run(reenc_cmd, f"{what} (re-encode)")
+    _assert_mp4_has_video(out_path, what)
+
+
 def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
                         out_path: Path) -> None:
     """Mix auto click/whoosh one-shots at overlay / effect onsets.
@@ -11707,13 +11810,18 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
                 "SFX passthrough")
         return
 
+    duration = _tl_require_video(base, "Overlay SFX mix")
+
     # Base with no audio track → silent bed so adelay mix still works.
     inputs: list[str] = ["-i", str(base)]
     if _tl_input_has_audio(base):
         filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[voice]"]
         next_i = 1
     else:
-        inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        inputs += [
+            "-f", "lavfi", "-t", f"{duration:.3f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        ]
         filt = ["[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.01[voice]"]
         next_i = 2
 
@@ -11724,9 +11832,11 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
             continue
         inputs += ["-i", str(path)]
         delay = int(t * 1000)
+        # Bound apad to the video length — bare apad is infinite and pairs
+        # badly with -shortest / stream-copy muxes.
         filt.append(
             f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume=1.35,adelay={delay}|{delay},apad[s{next_i}]"
+            f"volume=1.35,adelay={delay}|{delay},apad=whole_dur={duration:.3f}[s{next_i}]"
         )
         labels.append(f"[s{next_i}]")
         next_i += 1
@@ -11746,16 +11856,13 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
         "[voice][sfxboost]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
     )
     print(f"[sfx] mixing {len(labels)} hits onto {base.name}", flush=True)
-    _tl_run(
-        [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
-         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
-         "-c:a", "aac", "-b:a", "192k", "-shortest", str(out_path)],
-        "Overlay SFX mix",
+    _tl_mux_filtered_audio(
+        base, inputs, ";".join(filt), out_path, "Overlay SFX mix", duration,
     )
 
 
 def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
-    """Mix background music tracks into *base*'s audio (video stream copied).
+    """Mix background music tracks into *base*'s audio (video stream preserved).
 
     Each clip is trimmed, gain-staged and time-shifted to its start. If any
     clip requests ducking, all music is side-chain compressed against the main
@@ -11779,12 +11886,17 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
                 "Music passthrough")
         return
 
+    duration = _tl_require_video(base, "Music mix")
+
     inputs: list[str] = ["-i", str(base)]
     if _tl_input_has_audio(base):
         filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
         next_i = 1
     else:
-        inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        inputs += [
+            "-f", "lavfi", "-t", f"{duration:.3f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        ]
         filt = ["[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
         next_i = 2
 
@@ -11799,8 +11911,8 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
             m_out = m_in + 30
         if m_out <= m_in:
             # Probe real duration when out was missing / zero.
-            dur = _media_duration(path)
-            m_out = m_in + (dur if dur > 0.5 else 60.0)
+            clip_dur = _media_duration(path)
+            m_out = m_in + (clip_dur if clip_dur > 0.5 else 60.0)
         start = max(0.0, float(m.get("start", 0)))
         try:
             gain = float(m.get("gain_db", -12))
@@ -11816,7 +11928,7 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
             f"channel_layouts=stereo,"
             f"atrim=start={m_in:.3f}:end={m_out:.3f},"
             f"asetpts=PTS-STARTPTS,volume={gain:.2f}dB,"
-            f"adelay={delay}|{delay},apad[m{next_i}]"
+            f"adelay={delay}|{delay},apad=whole_dur={duration:.3f}[m{next_i}]"
         )
         music_labels.append(f"[m{next_i}]")
         next_i += 1
@@ -11836,14 +11948,13 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     else:
         filt.append("[musicall]anull[musicfinal]")
 
-    filt.append("[voice][musicfinal]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]")
+    filt.append(
+        "[voice][musicfinal]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]"
+    )
     print(f"[music] mixing {len(music_labels)} bed(s) duck={duck}", flush=True)
 
-    _tl_run(
-        [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
-         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
-         "-c:a", "aac", "-b:a", "192k", "-shortest", str(out_path)],
-        "Music mix",
+    _tl_mux_filtered_audio(
+        base, inputs, ";".join(filt), out_path, "Music mix", duration,
     )
 
 
@@ -12560,6 +12671,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         base = UPLOAD_DIR / f"{job_id}_tlbase.mp4"
         work.append(base)
         _total_dur, seg_starts = _tl_build_main_track(segments, transitions, base, job_id)
+        _assert_mp4_has_video(base, "Main track bake")
 
         # ---- Remap each captioned segment's words onto the output timeline ----
         caption_words = []
@@ -12679,8 +12791,14 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _stage("mixing music", 55)
             mixed = UPLOAD_DIR / f"{job_id}_tlmusic.mp4"
             work.append(mixed)
-            _tl_mix_music(base, music_clips, mixed)
-            base = mixed
+            try:
+                _tl_mix_music(base, music_clips, mixed)
+                base = mixed
+            except Exception as music_err:
+                # Never fail the whole Timeline Render over a music-bed mux
+                # hiccup — keep the pre-music picture and continue.
+                print(f"[timeline] Music mix skipped: {music_err}", flush=True)
+                _safe_unlink(mixed)
 
         # ---- Pass 3: overlays / B-roll / PiP ----
         if tracks["overlay"]:
@@ -12761,14 +12879,17 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             ass_path.write_text(ass_text, encoding="utf-8")
             work.append(ass_path)
             burn_subtitles(base, ass_path, output_path)
+            _assert_mp4_has_video(output_path, "Caption burn")
         else:
             # Nothing to burn — just finalize (stream copy is enough).
             _stage("finalizing", 90)
             _tl_run([FFMPEG, "-y", "-i", str(base),
+                     "-map", "0:v:0", "-map", "0:a:0?",
                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                      *_QT_SAFE_MP4_ARGS,
                      "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                      str(output_path)], "Finalize")
+            _assert_mp4_has_video(output_path, "Finalize")
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError("Render produced an empty or missing output file.")
