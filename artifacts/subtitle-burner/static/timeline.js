@@ -4970,6 +4970,7 @@
       logoBody += `<div class="tl-prop-grid">${propRange("__logo_w", "Width", lg.w != null ? lg.w : 0.18, 0.03, 0.8, 0.01)}${propRange("__logo_h", "Height", lg.h != null ? lg.h : 0.1, 0.03, 0.8, 0.01)}</div>`;
       logoBody += propRange("__logo_opacity", "Opacity", lg.opacity != null ? lg.opacity : 0.9, 0.1, 1, 0.05);
       logoBody += `<button class="btn btn-secondary btn-block" data-act="select-logo" type="button" style="margin-top:6px">Select logo on preview</button>`;
+      logoBody += `<button class="btn btn-secondary btn-block" data-act="remove-logo" type="button" style="margin-top:6px;border-color:#7f1d1d;color:#f87171">✕ Remove logo</button>`;
     }
     html += propSection("🏷 Logo / watermark", logoBody, !!lg.asset_id);
 
@@ -5027,6 +5028,18 @@
     if (openCap) openCap.onclick = () => jumpLookSection("captions");
     const openAud = wrap.querySelector('[data-act="open-audio"]');
     if (openAud) openAud.onclick = () => jumpLookSection("audio");
+    const rmLogo = wrap.querySelector('[data-act="remove-logo"]');
+    if (rmLogo) rmLogo.onclick = () => {
+      // Clears the watermark from the project. The image stays in Media so a
+      // wrong pick costs nothing but a re-select.
+      tl.logo = null;
+      logoSelected = false;
+      pushHistory();
+      updateStageCompositor();
+      renderProps();
+      scheduleSave();
+      setRenderStatus("Logo removed — the image is still in Media if you want it back");
+    };
     const selLogo = wrap.querySelector('[data-act="select-logo"]');
     if (selLogo) selLogo.onclick = () => {
       selected = null;

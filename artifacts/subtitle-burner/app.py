@@ -11639,7 +11639,15 @@ ASSET_EXT_VIDEO = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
 ASSET_EXT_STILL = {"jpg", "jpeg", "png", "webp", "bmp"}
 ASSET_EXT_GIF = {"gif"}
 ASSET_EXT_IMAGE = ASSET_EXT_STILL | ASSET_EXT_GIF
-ASSET_EXT_AUDIO = {"mp3", "wav", "m4a", "aac", "ogg", "flac"}
+# Music people actually have: Apple/iTunes (m4a, aiff, alac), Bandcamp/DAW
+# exports (flac, aiff, wav), streaming rips (opus, oga, weba), Windows (wma),
+# and phone recordings (amr, caf, 3gp). The 2 GB request cap was never the
+# blocker for a song — this list was.
+ASSET_EXT_AUDIO = {
+    "mp3", "wav", "m4a", "aac", "ogg", "flac",
+    "aif", "aiff", "aifc", "alac", "opus", "oga", "weba", "wma",
+    "m4b", "mp2", "amr", "caf", "3ga", "au", "wv", "ape",
+}
 
 # Canvas presets the UI offers. Keys are sent by the client.
 TIMELINE_CANVASES = {
@@ -12385,11 +12393,19 @@ def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> No
     y = int(H * float(logo.get("y", 0.04)))
     opacity = min(1.0, max(0.0, float(logo.get("opacity", 0.9))))
     is_video = path.suffix.lower().lstrip(".") in ASSET_EXT_VIDEO
+    # How long the picture must survive. Both the loop and the trailing -t
+    # are keyed off this.
+    base_dur = float(_media_duration(base) or 0.0)
     inputs = ["-i", str(base)]
     if is_video:
         inputs += ["-stream_loop", "-1", "-i", str(path)]
     else:
-        inputs += ["-i", str(path)]
+        # A still image decodes as ONE frame. Without -loop it is the shortest
+        # input, and `overlay=shortest=1` then truncated the whole render to
+        # that single frame — a 10s clip came out 0.03s long with 1 packet.
+        # Video logos were fine (-stream_loop above), which is why this only
+        # ever bit image logos: i.e. every normal watermark.
+        inputs += ["-loop", "1", "-i", str(path)]
     # Optional free height (on-stage stretch). Otherwise keep aspect via -2.
     lh = None
     if logo.get("h") is not None:
@@ -12404,12 +12420,20 @@ def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> No
         scale = f"scale={lw}:-2"
     prep = f"[1:v:0]{scale},setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
     fc = f"{prep};[0:v:0][lg]overlay=x={x}:y={y}:shortest=1[v]"
-    _tl_run(
-        [FFMPEG, "-y", *inputs, "-filter_complex", fc,
-         "-map", "[v]", "-map", "0:a?", *_VIDEO_ENC_ARGS,
-         "-c:a", "copy", str(out_path)],
-        "Logo overlay",
-    )
+    cmd = [FFMPEG, "-y", *inputs, "-filter_complex", fc,
+           "-map", "[v]", "-map", "0:a?", *_VIDEO_ENC_ARGS, "-c:a", "copy"]
+    if base_dur > 0.05:
+        # Belt and braces against an endlessly looping still.
+        cmd += ["-t", f"{base_dur:.3f}"]
+    cmd.append(str(out_path))
+    _tl_run(cmd, "Logo overlay")
+    # Fail loudly if the logo pass shortened the video instead of watermarking
+    # it — silently returning a one-frame file is how this went unnoticed.
+    out_dur = float(_media_duration(out_path) or 0.0)
+    if base_dur > 0.05 and out_dur < base_dur * 0.9:
+        raise RuntimeError(
+            f"Logo overlay truncated the video ({out_dur:.2f}s from {base_dur:.2f}s)"
+        )
 
 
 def _tl_concat(paths: list, out_path: Path) -> None:

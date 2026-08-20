@@ -5812,6 +5812,38 @@ function renderRecapImport() {
   host.appendChild(flashLine);
 }
 
+/** Repaint one scene card's beat math in place (no DOM rebuild, no focus loss). */
+function _recapPaintSceneMath(sc, el) {
+  if (!el) return;
+  const hang = parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1;
+  const known = new Set(_recapAllItems().map((it) => it.key));
+  const keys = (sc.sourceKeys || []).filter((k) => known.has(k));
+  const target = Number.isFinite(Number(sc.target_sec)) ? Number(sc.target_sec) : 10;
+  if (target < 2 || target > 120) {
+    el.innerHTML = `<span style="color:#fbbf24">Scene length must be 2–120s.</span>`;
+    return;
+  }
+  const n = Math.max(1, Math.round(target / hang));
+  if (!keys.length) {
+    el.innerHTML = `<span style="color:#f87171">No media assigned</span> — ${n} beats waiting.`;
+    return;
+  }
+  if (keys.length > n) {
+    const dropped = keys.length - n;
+    el.innerHTML =
+      `${keys.length} sources · ${n} beats (${target}s ÷ ${hang}s hang) · ` +
+      `<strong style="color:#fbbf24">${n} appear, 1 beat each — ${dropped} won’t fit.</strong> ` +
+      `Lower Hang or raise scene length to include them.`;
+    return;
+  }
+  const per = Math.floor(n / keys.length);
+  const rem = n % keys.length;
+  const spread = rem ? `${per}–${per + 1}` : String(per);
+  el.innerHTML =
+    `${keys.length} sources · ${n} beats (${target}s ÷ ${hang}s hang) · ` +
+    `<strong style="color:#4ade80">all ${keys.length} appear, ${spread} beat(s) each.</strong>`;
+}
+
 function renderRecapScenes() {
   const host = $("recapScenes");
   if (!host) return;
@@ -5833,7 +5865,8 @@ function renderRecapScenes() {
     nameInp.maxLength = 60;
     nameInp.style.cssText = "flex:1;min-width:120px;padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.86rem";
     nameInp.oninput = () => { sc.name = nameInp.value; };
-    nameInp.onchange = () => renderRecapImport();
+    // Rebuild the tray's "send to scene" buttons on blur, not per keystroke.
+    nameInp.onblur = () => renderRecapImport();
     const durLab = document.createElement("label");
     durLab.className = "muted";
     durLab.style.cssText = "font-size:.8rem;display:flex;align-items:center;gap:6px";
@@ -5847,9 +5880,17 @@ function renderRecapScenes() {
     durInp.title = "Total seconds this scene covers. Raise Hang (top) to make each cut longer — this field alone only adds more cuts.";
     durInp.style.cssText = "width:64px;padding:4px 6px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px";
     durInp.oninput = () => {
+      // Do NOT clamp mid-typing: rewriting the field's value while the user
+      // is between keystrokes fights the caret. Clamp on blur instead.
+      const v = parseFloat(durInp.value);
+      sc.target_sec = Number.isFinite(v) ? v : sc.target_sec;
+      _recapPaintSceneMath(sc, mathEl);
+    };
+    durInp.onblur = () => {
       const v = parseFloat(durInp.value);
       sc.target_sec = Number.isFinite(v) ? Math.max(2, Math.min(120, v)) : 10;
-      renderRecapScenes();
+      durInp.value = String(sc.target_sec);
+      _recapPaintSceneMath(sc, mathEl);
     };
     const sec = document.createElement("span");
     sec.className = "muted";
@@ -5873,29 +5914,14 @@ function renderRecapScenes() {
     head.appendChild(rm);
     card.appendChild(head);
 
-    // ---- Live beat math: what this scene will actually produce ----
+    // Sources on this scene that still resolve to real media.
     const keys = (sc.sourceKeys || []).filter((k) => byKey.has(k));
-    const n = Math.max(1, Math.round((sc.target_sec || 10) / hang));
-    const used = Math.min(keys.length, n);
-    const math = document.createElement("div");
-    math.style.cssText = "font-size:.74rem;margin-bottom:8px;color:#94a3b8";
-    if (!keys.length) {
-      math.innerHTML = `<span style="color:#f87171">No media assigned</span> — ${n} beats waiting.`;
-    } else if (keys.length > n) {
-      const dropped = keys.length - n;
-      math.innerHTML =
-        `${keys.length} sources · ${n} beats (${(sc.target_sec || 10)}s ÷ ${hang}s hang) · ` +
-        `<strong style="color:#fbbf24">${used} appear, 1 beat each — ${dropped} won’t fit.</strong> ` +
-        `Lower Hang or raise scene length to include them.`;
-    } else {
-      const per = Math.floor(n / keys.length);
-      const rem = n % keys.length;
-      const spread = rem ? `${per}–${per + 1}` : String(per);
-      math.innerHTML =
-        `${keys.length} sources · ${n} beats (${(sc.target_sec || 10)}s ÷ ${hang}s hang) · ` +
-        `<strong style="color:#4ade80">all ${keys.length} appear, ${spread} beat(s) each.</strong>`;
-    }
-    card.appendChild(math);
+
+    // ---- Live beat math: what this scene will actually produce ----
+    const mathEl = document.createElement("div");
+    mathEl.style.cssText = "font-size:.74rem;margin-bottom:8px;color:#94a3b8";
+    _recapPaintSceneMath(sc, mathEl);
+    card.appendChild(mathEl);
 
     // ---- Assigned media chips ----
     const media = document.createElement("div");
@@ -6234,6 +6260,7 @@ async function initRecapReelPanel() {
 
   const hangSel = $("recapHangSec");
   if (hangSel) hangSel.onchange = () => renderRecapScenes();
+
 
   const flashEn = $("recapFlashEnabled");
   if (flashEn) flashEn.onchange = () => _recapSyncShutterGate();
@@ -7741,8 +7768,18 @@ function _renderAssemblyBar() {
       if (readyBtn) readyBtn.disabled = true;
       if (mobileBtn) mobileBtn.disabled = true;
 
-      if (typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
-        alert("Instant Export needs a transcribed video first.\n\nGo to Ingest, drop your video, and wait until it shows ready.");
+      // A Timeline project with Main clips can always be exported — that path
+      // bakes the edit and needs no words. Only the captions-only source-job
+      // export genuinely requires a transcript.
+      const _hasMainNow = !!(window.timelineHasMainClips && window.timelineHasMainClips());
+      if (!_hasMainNow && typeof hasReadyTranscript === "function" && !hasReadyTranscript()) {
+        alert(
+          "Nothing to export yet.\n\n" +
+          "Instant Export bakes captions onto a transcribed video — drop one on Ingest " +
+          "and wait for ready.\n\n" +
+          "Building a recap? Assign media to a scene and press Apply first; " +
+          "Export then renders your Timeline (no transcription needed)."
+        );
         if (typeof setActiveTab === "function") setActiveTab("ingest");
         return;
       }
