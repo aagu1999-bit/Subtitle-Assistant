@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-88-hook-faces-nspeakers";
+  const TL_BUILD = "studio-editor-build-89-recap-reel";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -7779,6 +7779,7 @@
           setSaveState("Matched color grade across Main clips");
         }
         await loadSources();
+        await loadAssets();
         await refreshMaxTrims();
         renderTimeline();
         scheduleSave();

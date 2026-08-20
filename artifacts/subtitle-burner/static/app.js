@@ -5345,8 +5345,338 @@ const _origRefreshJobsList = refreshJobsList;
 refreshJobsList = async function () {
   const r = await _origRefreshJobsList.apply(this, arguments);
   try { renderMultiInterviewJobs(); } catch (e) { /* ignore */ }
+  try { if (typeof refreshRecapMediaPool === "function") refreshRecapMediaPool(); } catch (e) { /* ignore */ }
   return r;
 };
+
+// ---- Recap Reel (event / space montage template) ----
+const RECAP_MAX_SCENES = 5;
+const RECAP_MAX_VIDEOS = 5;
+let _recapScenes = [];
+let _recapAssets = [];
+
+/** Event footage often has no transcript — any job with a video file is fair game. */
+function _jobReadyForRecap(j) {
+  if (!j || !j.job_id) return false;
+  if (j.video_available === true) return true;
+  if (j.video_available === false) return false;
+  return _jobReadyForMulti(j);
+}
+
+function _recapNewScene(n) {
+  return {
+    id: "scene_" + Date.now().toString(36) + "_" + n,
+    name: "Scene " + n,
+    target_sec: 10,
+    sourceKeys: [], // "job:ID" | "asset:ID"
+  };
+}
+
+function _recapEnsureScenes() {
+  if (!_recapScenes.length) {
+    _recapScenes = [_recapNewScene(1), _recapNewScene(2)];
+  }
+}
+
+async function _recapLoadAssets() {
+  try {
+    if (typeof refreshJobsList === "function") {
+      try { await refreshJobsList(); } catch (e) { /* best-effort */ }
+    }
+    const res = await fetch("/list-assets");
+    const data = await res.json();
+    _recapAssets = (data.assets || []).filter((a) =>
+      a && (a.kind === "image" || a.kind === "video" || a.kind === "gif")
+    );
+  } catch (e) {
+    _recapAssets = [];
+  }
+}
+
+function refreshRecapMediaPool() {
+  const host = $("recapMediaPool");
+  if (!host) return;
+  host.innerHTML = "";
+  const jobs = Object.values(jobsById || {}).filter(_jobReadyForRecap);
+  const vids = jobs.slice(0, 24);
+  if (!vids.length && !_recapAssets.length) {
+    host.innerHTML = `<span class="muted" style="font-size:.8rem">Upload videos on Ingest (and optional photos in Media) first.</span>`;
+    return;
+  }
+  const hint = document.createElement("div");
+  hint.className = "muted";
+  hint.style.cssText = "width:100%;font-size:.74rem;margin-bottom:2px";
+  hint.textContent = "Click a chip to toggle it on the selected scene (or use scene checkboxes below). Max " + RECAP_MAX_VIDEOS + " videos.";
+  host.appendChild(hint);
+  vids.forEach((j) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "btn btn-secondary btn-sm";
+    chip.style.cssText = "font-size:.72rem;padding:4px 8px";
+    chip.textContent = "🎬 " + (j.filename || j.job_id.slice(0, 8));
+    chip.title = "Add/remove on focused scene";
+    chip.onclick = () => _recapToggleSourceOnFocused("job:" + j.job_id);
+    host.appendChild(chip);
+  });
+  (_recapAssets || []).filter((a) => a.kind === "image").slice(0, 30).forEach((a) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "btn btn-secondary btn-sm";
+    chip.style.cssText = "font-size:.72rem;padding:4px 8px";
+    chip.textContent = "🖼 " + (a.filename || a.asset_id.slice(0, 8));
+    chip.onclick = () => _recapToggleSourceOnFocused("asset:" + a.asset_id);
+    host.appendChild(chip);
+  });
+}
+
+let _recapFocusSceneIdx = 0;
+function _recapToggleSourceOnFocused(key) {
+  _recapEnsureScenes();
+  const i = Math.max(0, Math.min(_recapScenes.length - 1, _recapFocusSceneIdx));
+  const sc = _recapScenes[i];
+  const set = new Set(sc.sourceKeys || []);
+  if (set.has(key)) set.delete(key);
+  else set.add(key);
+  sc.sourceKeys = Array.from(set);
+  renderRecapScenes();
+}
+
+function renderRecapScenes() {
+  const host = $("recapScenes");
+  if (!host) return;
+  _recapEnsureScenes();
+  host.innerHTML = "";
+  const jobOpts = Object.values(jobsById || {}).filter(_jobReadyForRecap);
+  const imgOpts = (_recapAssets || []).filter((a) => a.kind === "image");
+
+  _recapScenes.forEach((sc, idx) => {
+    const card = document.createElement("div");
+    card.style.cssText = "padding:12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px;" +
+      (idx === _recapFocusSceneIdx ? "border-color:#f59e0b;" : "");
+    card.onmousedown = () => { _recapFocusSceneIdx = idx; };
+
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px";
+    const nameInp = document.createElement("input");
+    nameInp.type = "text";
+    nameInp.value = sc.name || ("Scene " + (idx + 1));
+    nameInp.maxLength = 60;
+    nameInp.style.cssText = "flex:1;min-width:120px;padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.86rem";
+    nameInp.oninput = () => { sc.name = nameInp.value; };
+    nameInp.onfocus = () => { _recapFocusSceneIdx = idx; };
+    const durLab = document.createElement("label");
+    durLab.className = "muted";
+    durLab.style.cssText = "font-size:.8rem;display:flex;align-items:center;gap:6px";
+    durLab.textContent = "Cover for";
+    const durInp = document.createElement("input");
+    durInp.type = "number";
+    durInp.min = "2";
+    durInp.max = "120";
+    durInp.step = "1";
+    durInp.value = String(sc.target_sec || 10);
+    durInp.style.cssText = "width:64px;padding:4px 6px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px";
+    durInp.oninput = () => {
+      const v = parseFloat(durInp.value);
+      sc.target_sec = Number.isFinite(v) ? Math.max(2, Math.min(120, v)) : 10;
+    };
+    const sec = document.createElement("span");
+    sec.className = "muted";
+    sec.style.fontSize = ".8rem";
+    sec.textContent = "seconds";
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "btn btn-secondary btn-sm";
+    rm.textContent = "Remove";
+    rm.disabled = _recapScenes.length <= 1;
+    rm.onclick = () => {
+      if (_recapScenes.length <= 1) return;
+      _recapScenes.splice(idx, 1);
+      if (_recapFocusSceneIdx >= _recapScenes.length) _recapFocusSceneIdx = _recapScenes.length - 1;
+      renderRecapScenes();
+    };
+    head.appendChild(nameInp);
+    durLab.appendChild(durInp);
+    head.appendChild(durLab);
+    head.appendChild(sec);
+    head.appendChild(rm);
+    card.appendChild(head);
+
+    const media = document.createElement("div");
+    media.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:110px;overflow:auto";
+    const keys = new Set(sc.sourceKeys || []);
+    jobOpts.forEach((j) => {
+      const key = "job:" + j.job_id;
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.78rem;color:#c8cdd3;cursor:pointer";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = keys.has(key);
+      cb.onchange = () => {
+        const s = new Set(sc.sourceKeys || []);
+        if (cb.checked) s.add(key); else s.delete(key);
+        sc.sourceKeys = Array.from(s);
+        _recapFocusSceneIdx = idx;
+      };
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode((j.filename || j.job_id).slice(0, 48)));
+      media.appendChild(row);
+    });
+    imgOpts.forEach((a) => {
+      const key = "asset:" + a.asset_id;
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.78rem;color:#94a3b8;cursor:pointer";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = keys.has(key);
+      cb.onchange = () => {
+        const s = new Set(sc.sourceKeys || []);
+        if (cb.checked) s.add(key); else s.delete(key);
+        sc.sourceKeys = Array.from(s);
+      };
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode("🖼 " + (a.filename || a.asset_id).slice(0, 40)));
+      media.appendChild(row);
+    });
+    if (!jobOpts.length && !imgOpts.length) {
+      media.innerHTML = `<span class="muted" style="font-size:.76rem">No media yet.</span>`;
+    }
+    card.appendChild(media);
+    host.appendChild(card);
+  });
+}
+
+function _recapCollectPayload() {
+  _recapEnsureScenes();
+  const scenes = [];
+  let videoCount = 0;
+  const seenVid = new Set();
+  _recapScenes.forEach((sc) => {
+    const sources = [];
+    (sc.sourceKeys || []).forEach((key) => {
+      if (key.startsWith("job:")) {
+        const jid = key.slice(4);
+        if (!seenVid.has(jid)) {
+          if (videoCount >= RECAP_MAX_VIDEOS) return;
+          seenVid.add(jid);
+          videoCount += 1;
+        }
+        sources.push({ job_id: jid });
+      } else if (key.startsWith("asset:")) {
+        sources.push({ asset_id: key.slice(6) });
+      }
+    });
+    if (!sources.length) return;
+    scenes.push({
+      id: sc.id,
+      name: sc.name || "Scene",
+      target_sec: Math.max(2, Math.min(120, Number(sc.target_sec) || 10)),
+      sources,
+    });
+  });
+  const flashOn = !!($("recapFlashEnabled") && $("recapFlashEnabled").checked);
+  return {
+    label: ($("recapLabel") && $("recapLabel").value.trim()) || "Recap Reel",
+    canvas: ($("recapCanvas") && $("recapCanvas").value) || "9x16",
+    beat_sec: parseFloat(($("recapBeatSec") && $("recapBeatSec").value) || "0.75") || 0.75,
+    photo_flash: {
+      enabled: flashOn,
+      duration_sec: parseFloat(($("recapFlashDur") && $("recapFlashDur").value) || "3") || 3,
+      count: parseInt(($("recapFlashCount") && $("recapFlashCount").value) || "12", 10) || 12,
+      include_video_stills: !($("recapFlashVideoStills") && !$("recapFlashVideoStills").checked),
+    },
+    scenes,
+  };
+}
+
+async function runRecapApply() {
+  const status = $("recapStatus");
+  const btn = $("recapApplyBtn");
+  const payload = _recapCollectPayload();
+  if (!payload.scenes.length) {
+    alert("Add at least one scene with video or photo checked.");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Planning evenly split beats…";
+  try {
+    const res = await fetch("/recap-reel/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      throw new Error((data && data.error) || ("HTTP " + res.status));
+    }
+    if (!data.seedTimeline || !data.seedTimeline.tracks || !(data.seedTimeline.tracks.main || []).length) {
+      throw new Error("Plan returned no clips.");
+    }
+    if (typeof window.openTimelineEditor !== "function") {
+      throw new Error("Timeline still loading — try again in a second.");
+    }
+    await window.openTimelineEditor(null, {
+      seedTimeline: data.seedTimeline,
+      newProject: true,
+      label: data.label || payload.label,
+      canvas: payload.canvas,
+    });
+    if (typeof window.unifyTimelineColorGrades === "function") {
+      try { window.unifyTimelineColorGrades(); } catch (e) { /* optional */ }
+    }
+    const st = data.stats || {};
+    let msg = `Seeded ${st.clip_count || 0} beats (~${st.total_sec || "?"}s)`;
+    if (st.flash_count) msg += ` · flash ${st.flash_count}`;
+    if ((data.warnings || []).length) {
+      msg += " · " + data.warnings[0];
+      console.warn("[recap]", data.warnings);
+    }
+    if (status) status.textContent = msg;
+    if (typeof setActiveTab === "function") setActiveTab("editor");
+  } catch (e) {
+    if (status) status.textContent = "Recap failed: " + (e.message || e);
+    alert("Recap Reel failed: " + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function initRecapReelPanel() {
+  if (!$("recapReelPanel")) return;
+  _recapEnsureScenes();
+  await _recapLoadAssets();
+  refreshRecapMediaPool();
+  renderRecapScenes();
+  const addBtn = $("recapAddSceneBtn");
+  if (addBtn) {
+    addBtn.onclick = () => {
+      if (_recapScenes.length >= RECAP_MAX_SCENES) {
+        alert("Max " + RECAP_MAX_SCENES + " scenes.");
+        return;
+      }
+      _recapScenes.push(_recapNewScene(_recapScenes.length + 1));
+      _recapFocusSceneIdx = _recapScenes.length - 1;
+      renderRecapScenes();
+    };
+  }
+  const refreshBtn = $("recapRefreshMediaBtn");
+  if (refreshBtn) {
+    refreshBtn.onclick = async () => {
+      await _recapLoadAssets();
+      refreshRecapMediaPool();
+      renderRecapScenes();
+    };
+  }
+  const applyBtn = $("recapApplyBtn");
+  if (applyBtn) applyBtn.onclick = () => runRecapApply();
+  const fd = $("recapFlashDur");
+  const fdv = $("recapFlashDurVal");
+  if (fd) fd.oninput = () => { if (fdv) fdv.textContent = (parseFloat(fd.value) || 3).toFixed(1) + "s"; };
+  const fc = $("recapFlashCount");
+  const fcv = $("recapFlashCountVal");
+  if (fc) fc.oninput = () => { if (fcv) fcv.textContent = String(parseInt(fc.value, 10) || 12); };
+}
+
+initRecapReelPanel();
 
 // ---- Past compilations: list, load-back-into-queue, archive/unhide ----
 const pastCompilesListEl = $("pastCompilesList");

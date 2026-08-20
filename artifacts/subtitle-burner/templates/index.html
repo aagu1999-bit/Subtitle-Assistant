@@ -1229,7 +1229,63 @@
 
   <!-- Tab: Compilation -->
   <div class="tab-content hidden" data-tab-group="compilation">
-  <section id="multiInterviewPanel" class="panel" style="margin-top:0;border-color:#3b82f6">
+  <section id="recapReelPanel" class="panel" style="margin-top:0;border-color:#f59e0b">
+    <h2>🏙 Recap Reel <span class="muted" style="font-size:.78rem;font-weight:normal">(event / space montage)</span></h2>
+    <p class="muted panel-desc">
+      Up to <strong>5 videos</strong> in context. Tag media into <strong>scenes</strong>, set how long each scene should run
+      (longer for denser voiceover later), then Apply seeds one Timeline with evenly split short beats.
+      Optional <strong>Photo Flash</strong> cold-open (8–30 stills in 2–5s; can pull frames from your videos).
+    </p>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input type="text" id="recapLabel" placeholder="Recap name (optional)" maxlength="80"
+        style="flex:1;min-width:160px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.88rem">
+      <label class="muted" style="font-size:.82rem;display:flex;align-items:center;gap:6px">Beat
+        <select id="recapBeatSec" style="padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
+          <option value="0.5">0.5s</option>
+          <option value="0.75" selected>0.75s</option>
+          <option value="1">1.0s</option>
+        </select>
+      </label>
+      <label class="muted" style="font-size:.82rem;display:flex;align-items:center;gap:6px">Canvas
+        <select id="recapCanvas" style="padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px">
+          <option value="9x16" selected>9:16</option>
+          <option value="16x9">16:9</option>
+        </select>
+      </label>
+      <button type="button" id="recapRefreshMediaBtn" class="btn btn-secondary">↻ Refresh media</button>
+    </div>
+    <div id="recapMediaPool" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;max-height:120px;overflow:auto"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <strong style="font-size:.88rem;color:#fbbf24">Scenes</strong>
+      <button type="button" id="recapAddSceneBtn" class="btn btn-secondary btn-sm">+ Add scene</button>
+    </div>
+    <div id="recapScenes" style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px"></div>
+    <details id="recapFlashDetails" style="margin-bottom:12px;padding:10px 12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px">
+      <summary style="cursor:pointer;font-weight:600;font-size:.88rem;color:#e8eaee">⚡ Photo Flash (optional cold open)</summary>
+      <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+        <label style="font-size:.82rem;display:flex;align-items:center;gap:6px;color:#c8cdd3">
+          <input type="checkbox" id="recapFlashEnabled"> Enable photo flash
+        </label>
+        <label class="muted" style="font-size:.8rem">Window
+          <input type="range" id="recapFlashDur" min="2" max="5" step="0.5" value="3" style="vertical-align:middle;width:90px">
+          <span id="recapFlashDurVal" class="pill">3s</span>
+        </label>
+        <label class="muted" style="font-size:.8rem">Stills
+          <input type="range" id="recapFlashCount" min="8" max="30" step="1" value="12" style="vertical-align:middle;width:100px">
+          <span id="recapFlashCountVal" class="pill">12</span>
+        </label>
+        <label style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#94a3b8">
+          <input type="checkbox" id="recapFlashVideoStills" checked> Include stills from videos
+        </label>
+      </div>
+    </details>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+      <button type="button" id="recapApplyBtn" class="btn btn-primary"
+        style="background:linear-gradient(135deg,#f59e0b,#ea580c);color:#fff">🎬 Apply Recap → Timeline</button>
+      <span id="recapStatus" class="muted" style="font-size:.84rem"></span>
+    </div>
+  </section>
+  <section id="multiInterviewPanel" class="panel" style="margin-top:14px;border-color:#3b82f6">
     <h2>🎙 Multi-interview reel</h2>
     <p class="muted panel-desc">
       Upload <strong>2+ different interviews</strong> on Ingest (each becomes its own job).

@@ -14,6 +14,7 @@ if sys.platform == "darwin":
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 import re
 import time
+import math
 import uuid
 import json
 import base64
@@ -9166,6 +9167,400 @@ def archive_compilation(job_id: str):
         "archived": archived,
         "label": recipe.get("label") or jobs[job_id].get("filename"),
     })
+
+
+# ---- Recap Reel template (event / space montages) ----
+
+_RECAP_MAX_VIDEOS = 5
+_RECAP_MAX_SCENES = 5
+
+
+def _recap_uid() -> str:
+    return uuid.uuid4().hex[:10]
+
+
+def _recap_extract_still(video_path: Path, t: float, dest: Path) -> Path | None:
+    """Extract one JPEG still at *t* seconds into *dest* (.jpg)."""
+    dest = dest.with_suffix(".jpg")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    t = max(0.0, float(t))
+    cmd = [
+        FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", str(video_path),
+        "-frames:v", "1", "-q:v", "3", str(dest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 64:
+        _safe_unlink(dest)
+        return None
+    return dest
+
+
+def _recap_resolve_source(raw: dict) -> dict | None:
+    """Normalize a scene source to {kind, job_id?, asset_id?, duration, label, path?}."""
+    if not isinstance(raw, dict):
+        return None
+    jid = str(raw.get("job_id") or raw.get("source_job_id") or "").strip()
+    aid = str(raw.get("asset_id") or "").strip()
+    if jid:
+        if jid not in jobs:
+            return None
+        path = find_video_path(jid)
+        if not path:
+            return None
+        dur = _media_duration(path) or float(jobs[jid].get("duration") or 0) or 0.0
+        label = str(jobs[jid].get("filename") or jid)[:80]
+        return {
+            "kind": "video",
+            "job_id": jid,
+            "duration": float(dur),
+            "label": label,
+            "path": path,
+        }
+    if aid:
+        path = _find_asset_path(aid)
+        if not path:
+            return None
+        kind = _asset_kind(path.suffix) or "image"
+        dur = _media_duration(path) if kind in ("video", "gif", "audio") else 0.0
+        meta = {}
+        try:
+            mp = _asset_meta_path(aid)
+            if mp.exists():
+                meta = json.loads(mp.read_text(encoding="utf-8")) or {}
+        except Exception:
+            meta = {}
+        return {
+            "kind": "image" if kind == "image" else kind,
+            "asset_id": aid,
+            "duration": float(dur or 0),
+            "label": str(meta.get("filename") or aid)[:80],
+            "path": path,
+        }
+    return None
+
+
+def _recap_even_beats_for_scene(
+    sources: list[dict],
+    target_sec: float,
+    beat_sec: float,
+    scene_name: str,
+    scene_id: str,
+) -> tuple[list[dict], list[str]]:
+    """Evenly sample short Main beats to fill *target_sec* from scene media."""
+    warnings: list[str] = []
+    beat_sec = max(0.45, min(1.25, float(beat_sec)))
+    target_sec = max(2.0, min(180.0, float(target_sec)))
+    n = max(1, int(round(target_sec / beat_sec)))
+    actual_beat = target_sec / n
+
+    videos = [s for s in sources if s.get("kind") == "video" and s.get("duration", 0) > 0.4]
+    images = [s for s in sources if s.get("kind") == "image"]
+    clips: list[dict] = []
+
+    if not videos and not images:
+        warnings.append(f"Scene “{scene_name}”: no usable video/photo sources.")
+        return clips, warnings
+
+    # Weighted pool: video weight = duration; each photo ≈ one beat of presence.
+    weighted: list[tuple[dict, float]] = []
+    for s in videos:
+        weighted.append((s, max(0.5, float(s["duration"]))))
+    for s in images:
+        weighted.append((s, max(actual_beat, 1.0)))
+    total_w = sum(w for _, w in weighted) or 1.0
+    available = sum(float(s["duration"]) for s in videos)
+    if videos and available + 0.05 < target_sec:
+        warnings.append(
+            f"Scene “{scene_name}”: only ~{available:.1f}s of video for a "
+            f"{target_sec:.0f}s budget — beats will reuse / compress coverage."
+        )
+
+    remaining = n
+    alloc: list[int] = []
+    for i, (_s, w) in enumerate(weighted):
+        if i == len(weighted) - 1:
+            alloc.append(max(1, remaining))
+        else:
+            share = max(1, int(round(n * w / total_w)))
+            share = min(share, max(1, remaining - (len(weighted) - i - 1)))
+            alloc.append(share)
+            remaining -= share
+
+    for (s, _w), count in zip(weighted, alloc):
+        if s.get("kind") == "video":
+            dur = float(s["duration"])
+            usable = max(0.0, dur - actual_beat)
+            for i in range(count):
+                t0 = ((i + 0.5) / count) * usable if count else 0.0
+                t1 = min(dur, t0 + actual_beat)
+                if t1 - t0 < 0.35:
+                    t0 = max(0.0, dur - actual_beat)
+                    t1 = dur
+                clips.append({
+                    "id": _recap_uid(),
+                    "source_job_id": s["job_id"],
+                    "in": round(t0, 3),
+                    "out": round(t1, 3),
+                    "burn_captions": False,
+                    "theme": scene_name,
+                    "arc_role": "scene",
+                    "source_label": s.get("label") or scene_name,
+                    "scene_id": scene_id,
+                })
+        else:
+            for _i in range(count):
+                clips.append({
+                    "id": _recap_uid(),
+                    "asset_id": s["asset_id"],
+                    "in": 0,
+                    "out": round(actual_beat, 3),
+                    "_max": round(actual_beat, 3),
+                    "burn_captions": False,
+                    "cutaway": True,
+                    "theme": scene_name,
+                    "arc_role": "scene",
+                    "source_label": s.get("label") or scene_name,
+                    "scene_id": scene_id,
+                    "ken_burns": None,
+                })
+
+    return clips, warnings
+
+
+def _recap_build_photo_flash(
+    flash: dict,
+    scene_sources: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Rapid stills for the open (cutaways). Optionally pull frames from videos."""
+    warnings: list[str] = []
+    if not flash or not flash.get("enabled"):
+        return [], warnings
+    try:
+        dur = float(flash.get("duration_sec") or 3)
+    except (TypeError, ValueError):
+        dur = 3.0
+    dur = max(2.0, min(5.0, dur))
+    try:
+        count = int(flash.get("count") or 12)
+    except (TypeError, ValueError):
+        count = 12
+    count = max(8, min(30, count))
+    include_stills = flash.get("include_video_stills") is not False
+    beat = dur / count
+
+    pool: list[dict] = []
+    # User-uploaded images first
+    for s in scene_sources:
+        if s.get("kind") == "image" and s.get("asset_id"):
+            pool.append({"asset_id": s["asset_id"], "label": s.get("label") or "photo"})
+
+    if include_stills:
+        videos = [s for s in scene_sources if s.get("kind") == "video" and s.get("path")]
+        # Spread stills across videos
+        need = max(0, count - len(pool))
+        if videos and need:
+            per = max(1, int(math.ceil(need / len(videos))))
+            extracted = 0
+            for s in videos:
+                if extracted >= need:
+                    break
+                vdur = float(s.get("duration") or 0)
+                if vdur < 0.3:
+                    continue
+                take = min(per, need - extracted)
+                for i in range(take):
+                    t = ((i + 0.5) / take) * max(0.05, vdur - 0.05)
+                    asset_id = uuid.uuid4().hex
+                    dest = ASSET_DIR / asset_id
+                    got = _recap_extract_still(s["path"], t, dest)
+                    if not got:
+                        continue
+                    _write_asset_meta(
+                        asset_id,
+                        filename=f"recap_still_{s.get('job_id', '')}_{t:.1f}.jpg",
+                        source="recap_flash",
+                        job_id=s.get("job_id"),
+                    )
+                    pool.append({"asset_id": asset_id, "label": f"still @{t:.1f}s"})
+                    extracted += 1
+
+    if len(pool) < 8:
+        warnings.append(
+            f"Photo Flash: only {len(pool)} stills available (want ≥8). "
+            "Add photos or enable video stills."
+        )
+    if not pool:
+        return [], warnings
+
+    # Cycle pool to fill count
+    clips = []
+    for i in range(count):
+        src = pool[i % len(pool)]
+        clips.append({
+            "id": _recap_uid(),
+            "asset_id": src["asset_id"],
+            "in": 0,
+            "out": round(beat, 3),
+            "_max": round(beat, 3),
+            "burn_captions": False,
+            "cutaway": True,
+            "theme": "Photo Flash",
+            "arc_role": "flash",
+            "source_label": src.get("label") or "flash",
+            "ken_burns": None,
+        })
+    return clips, warnings
+
+
+def build_recap_reel_plan(payload: dict) -> dict:
+    """Build a Timeline seed for an event/space recap montage."""
+    scenes_in = payload.get("scenes") or []
+    if not isinstance(scenes_in, list) or not scenes_in:
+        raise ValueError("Add at least one scene with media.")
+    scenes_in = scenes_in[:_RECAP_MAX_SCENES]
+    try:
+        beat_sec = float(payload.get("beat_sec") or 0.75)
+    except (TypeError, ValueError):
+        beat_sec = 0.75
+    beat_sec = max(0.5, min(1.0, beat_sec))
+    label = str(payload.get("label") or "Recap Reel").strip()[:80] or "Recap Reel"
+    flash_cfg = payload.get("photo_flash") if isinstance(payload.get("photo_flash"), dict) else {}
+
+    # Cap unique videos in context
+    video_ids: list[str] = []
+    all_resolved: list[dict] = []
+    warnings: list[str] = []
+    main_clips: list[dict] = []
+    scene_summaries: list[dict] = []
+
+    for idx, sc in enumerate(scenes_in):
+        if not isinstance(sc, dict):
+            continue
+        sid = str(sc.get("id") or f"scene_{idx + 1}")
+        name = str(sc.get("name") or f"Scene {idx + 1}").strip()[:60] or f"Scene {idx + 1}"
+        try:
+            target = float(sc.get("target_sec") or sc.get("duration_sec") or 10)
+        except (TypeError, ValueError):
+            target = 10.0
+        raw_sources = sc.get("sources") or sc.get("media") or []
+        if not isinstance(raw_sources, list) or not raw_sources:
+            warnings.append(f"Scene “{name}” has no media — skipped.")
+            continue
+        resolved = []
+        for r in raw_sources:
+            s = _recap_resolve_source(r)
+            if not s:
+                continue
+            if s.get("job_id"):
+                if s["job_id"] not in video_ids:
+                    if len(video_ids) >= _RECAP_MAX_VIDEOS:
+                        warnings.append(
+                            f"Max {_RECAP_MAX_VIDEOS} videos in context — "
+                            f"skipped {s.get('label')}"
+                        )
+                        continue
+                    video_ids.append(s["job_id"])
+                resolved.append(s)
+                all_resolved.append(s)
+            else:
+                resolved.append(s)
+                all_resolved.append(s)
+        if not resolved:
+            warnings.append(f"Scene “{name}”: no resolvable media.")
+            continue
+        beats, w = _recap_even_beats_for_scene(resolved, target, beat_sec, name, sid)
+        warnings.extend(w)
+        main_clips.extend(beats)
+        scene_summaries.append({
+            "id": sid,
+            "name": name,
+            "target_sec": round(target, 1),
+            "beat_count": len(beats),
+            "source_count": len(resolved),
+        })
+
+    flash_clips, fw = _recap_build_photo_flash(flash_cfg, all_resolved)
+    warnings.extend(fw)
+
+    ordered = list(flash_clips) + list(main_clips)
+    if not ordered:
+        raise ValueError("Recap produced no clips — check scene media and durations.")
+
+    # Shared warm grade for event recaps (userable later)
+    grade = {"preset": "warm"}
+    for c in ordered:
+        if not c.get("cutaway"):
+            c["color"] = dict(grade)
+            c["color_grade"] = dict(grade)
+
+    seed = {
+        "canvas": str(payload.get("canvas") or "9x16"),
+        "fit": "cover",
+        "fps": 30,
+        "bg": "#000000",
+        "style": {
+            "font_name": "Bebas Neue",
+            "font_size": 64,
+            "primary_color": "#FFFFFF",
+            "highlight_color": "#FFD60A",
+            "all_caps": True,
+            "group_size": 2,
+        },
+        "tracks": {
+            "main": ordered,
+            "overlay": [],
+            "effects": [],
+            "text": [],
+            "music": [],
+        },
+        "template": "recap_reel",
+        "recap": {
+            "scenes": scene_summaries,
+            "photo_flash": bool(flash_cfg.get("enabled")),
+            "beat_sec": beat_sec,
+            "video_count": len(video_ids),
+        },
+    }
+
+    total = sum(max(0.05, float(c.get("out", 0)) - float(c.get("in", 0))) for c in ordered)
+    return {
+        "ok": True,
+        "label": label,
+        "seedTimeline": seed,
+        "warnings": warnings,
+        "stats": {
+            "clip_count": len(ordered),
+            "flash_count": len(flash_clips),
+            "scene_count": len(scene_summaries),
+            "total_sec": round(total, 1),
+            "video_ids": video_ids,
+        },
+    }
+
+
+@app.route("/recap-reel/plan", methods=["POST"])
+def recap_reel_plan():
+    """Plan an event/space Recap Reel Timeline seed (does not bake an MP4).
+
+    Body: {
+      label?, canvas?, beat_sec?: 0.5-1.0,
+      photo_flash?: { enabled, duration_sec 2-5, count 8-30, include_video_stills },
+      scenes: [{ id?, name, target_sec, sources: [{job_id}|{asset_id}] }]
+    }
+    Max 5 scenes, max 5 unique videos in context.
+    """
+    data = request.get_json(force=True) or {}
+    try:
+        plan = build_recap_reel_plan(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        print(f"[recap] plan failed: {exc}", flush=True)
+        return jsonify({"error": f"Recap plan failed: {exc}"}), 500
+    return jsonify(plan)
 
 
 @app.route("/load-compilation/<job_id>", methods=["GET"])
