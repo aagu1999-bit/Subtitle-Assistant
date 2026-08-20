@@ -634,10 +634,16 @@ def _load_jobs_from_db() -> None:
         # Stop+Run / gunicorn restart (common on long >2–3 min encodes).
         if _is_stale_in_progress_status(status):
             status = "error"
-            error = (
-                error
-                or "Interrupted by server restart. Click Instant Export / Render again."
-            )
+            if "analys" in (row["status"] or "").lower() or "speaker" in (row["status"] or "").lower():
+                error = (
+                    error
+                    or "Analyze interrupted by server restart. Click Analyze speakers again."
+                )
+            else:
+                error = (
+                    error
+                    or "Interrupted by server restart. Click Instant Export / Render again."
+                )
         jobs[row["job_id"]] = {
             "status": status,
             "progress": row["progress"],
