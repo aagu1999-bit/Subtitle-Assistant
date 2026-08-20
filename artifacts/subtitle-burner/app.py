@@ -12519,7 +12519,13 @@ def _tl_build_main_track(segments: list, transitions: list,
 
 
 def _ensure_ui_sfx_assets() -> dict[str, Path]:
-    """Generate short click/whoosh/snap WAVs once (no binary assets in git)."""
+    """Generate the short click/whoosh WAVs used by the overlay SFX pass.
+
+    These stay synthesized (no binary assets needed). The camera SHUTTER is
+    not here — it is a real recording, cut from sfx/camera_shutter_burst.mp3
+    by _ensure_camera_shutter_wav(). One shutter source only, so there is
+    never a question of which one a recap is using.
+    """
     sfx_dir = CACHE_DIR / "sfx"
     sfx_dir.mkdir(parents=True, exist_ok=True)
     out: dict[str, Path] = {}
@@ -12539,21 +12545,6 @@ def _ensure_ui_sfx_assets() -> dict[str, Path]:
             "afade=t=in:st=0:d=0.035,afade=t=out:st=0.22:d=0.14,"
             "highpass=f=220,lowpass=f=7200,volume=0.72",
             False,
-        ),
-        # CapCut-ish mechanical shutter: bright click + brief noise burst
-        (
-            "shutter",
-            [
-                "-f", "lavfi", "-i", "sine=frequency=1950:duration=0.032",
-                "-f", "lavfi", "-i", "anoisesrc=d=0.085:color=white:sample_rate=44100",
-            ],
-            "[0]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            "volume=1.55,afade=t=out:st=0.01:d=0.022[c];"
-            "[1]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            "highpass=f=900,lowpass=f=10000,volume=1.25,"
-            "afade=t=out:st=0.018:d=0.06[n];"
-            "[c][n]amix=inputs=2:duration=longest:normalize=0,volume=1.2[aout]",
-            True,
         ),
     ]
     for name, src, af, use_fc in specs:
