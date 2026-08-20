@@ -9234,15 +9234,11 @@ def _recap_resolve_source(raw: dict) -> dict | None:
         path = _find_asset_path(aid)
         if not path:
             return None
-        kind = _asset_kind(path.suffix) or "image"
+        meta = _read_asset_meta(aid) or {}
+        # Stored kind wins: it was probed from content at import, so an
+        # audio-only .mp4 stays audio instead of being read as footage.
+        kind = meta.get("kind") or _asset_kind(path.suffix) or "image"
         dur = _asset_duration_cached(aid, path, kind)
-        meta = {}
-        try:
-            mp = _asset_meta_path(aid)
-            if mp.exists():
-                meta = json.loads(mp.read_text(encoding="utf-8")) or {}
-        except Exception:
-            meta = {}
         return {
             "kind": "image" if kind == "image" else kind,
             "asset_id": aid,
@@ -10547,8 +10543,8 @@ def upload_finish(upload_id: str):
         except OSError as e:
             _safe_unlink(video_path)
             return jsonify({"error": f"Could not store asset: {e}"}), 500
-        kind = _asset_kind(ext) or "image"
-        _write_asset_meta(asset_id, filename=filename, source="recap_import")
+        kind = _probe_asset_kind(dest_asset) or "image"
+        _write_asset_meta(asset_id, filename=filename, source="recap_import", kind=kind)
         # Probe once here, not on every tray refresh and every Apply.
         _asset_duration_cached(asset_id, dest_asset, kind)
         project_id = str(meta.get("project_id") or "").strip()
@@ -11646,7 +11642,7 @@ ASSET_EXT_IMAGE = ASSET_EXT_STILL | ASSET_EXT_GIF
 ASSET_EXT_AUDIO = {
     "mp3", "wav", "m4a", "aac", "ogg", "flac",
     "aif", "aiff", "aifc", "alac", "opus", "oga", "weba", "wma",
-    "m4b", "mp2", "amr", "caf", "3ga", "au", "wv", "ape",
+    "m4b", "m4r", "mp2", "amr", "caf", "3ga", "au", "wv", "ape",
 }
 
 # Canvas presets the UI offers. Keys are sent by the client.
@@ -11671,6 +11667,25 @@ TIMELINE_TRANSITIONS = {
     "circleopen": "circleopen",
     "radial": "radial",
 }
+
+
+def _probe_asset_kind(path: Path) -> str | None:
+    """Kind by CONTENT, falling back to extension.
+
+    A .mp4 / .m4v / .mov holding only an audio track is Apple MPEG-4 audio,
+    not footage. Classifying it by extension put songs on the video pile,
+    where they resolve as sources with no picture.
+    """
+    ext_kind = _asset_kind(path.suffix)
+    if ext_kind != "video":
+        return ext_kind
+    try:
+        probe = _probe_media_streams(path)
+    except Exception:
+        return ext_kind
+    if not probe.get("has_video") and probe.get("has_audio"):
+        return "audio"
+    return ext_kind
 
 
 def _asset_kind(ext: str) -> str | None:
@@ -13898,7 +13913,9 @@ def upload_asset():
     asset_id = uuid.uuid4().hex
     dest = ASSET_DIR / f"{asset_id}.{ext}"
     f.save(str(dest))
-    _write_asset_meta(asset_id, filename=f.filename, source="upload")
+    # Re-read by content: an audio-only .mp4 is a song, not footage.
+    kind = _probe_asset_kind(dest) or kind
+    _write_asset_meta(asset_id, filename=f.filename, source="upload", kind=kind)
     project_id = (request.form.get("project_id") or request.form.get("timeline_job_id") or "").strip()
     if project_id and re.fullmatch(r"[a-f0-9]{32}", project_id):
         _write_asset_meta(asset_id, project_id=project_id)
@@ -13925,10 +13942,10 @@ def list_assets():
             continue
         if p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
             continue
-        kind = _asset_kind(p.suffix)
+        meta = _read_asset_meta(p.stem)
+        kind = meta.get("kind") or _asset_kind(p.suffix)
         if not kind:
             continue
-        meta = _read_asset_meta(p.stem)
         filename = meta.get("filename") or meta.get("keyword") or None
         if not filename and meta.get("keyword"):
             filename = f"{meta['keyword']}.{p.suffix.lstrip('.')}"
@@ -14012,7 +14029,9 @@ def _ensure_asset_thumb(asset_id: str) -> Path | None:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-    kind = _asset_kind(src.suffix) or "image"
+    # Use the stored (content-probed) kind — an audio-only .mp4 has a video
+    # extension but no frame to grab.
+    kind = (_read_asset_meta(asset_id) or {}).get("kind") or _asset_kind(src.suffix) or "image"
     if kind == "audio":
         # No frame to grab. Audio shows as a waveform (/asset-waveform) and
         # never appears in the picture tray, so skip the doomed ffmpeg call
