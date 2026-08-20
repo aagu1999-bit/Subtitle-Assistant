@@ -1616,6 +1616,10 @@
     const modal = $("tlWorkspaceModal");
     const body = $("tlWorkspaceModalBody");
     if (!modal) return;
+    try {
+      const active = document.activeElement;
+      if (active && modal.contains(active) && typeof active.blur === "function") active.blur();
+    } catch (_) { /* ignore */ }
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
     restoreWorkspaceNode();
