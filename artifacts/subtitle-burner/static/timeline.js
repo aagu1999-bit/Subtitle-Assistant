@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-87-color-archive";
+  const TL_BUILD = "studio-editor-build-88-hook-faces-nspeakers";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -1920,11 +1920,15 @@
       .then((r) => r.json())
       .then((data) => {
         if (data.ready && data.stats) {
-          const faceN = data.stats.face_samples || 0;
-          const faceNote = data.stats.faces_skipped
-            ? " · faces skipped"
-            : (faceN ? `, ${faceN} faces` : "");
+          const faceStatus = data.stats.faces_status || (data.stats.faces_skipped ? "skipped" : "ok");
+          const faceHits = data.stats.face_hit_frames;
+          let faceNote = "";
+          if (faceStatus === "skipped") faceNote = " · faces skipped";
+          else if (faceStatus === "no_detections") faceNote = " · 0 faces found";
+          else if (typeof faceHits === "number") faceNote = `, ${faceHits} face frames`;
+          else if (data.stats.face_samples) faceNote = `, ${data.stats.face_samples} face samples`;
           el.textContent = `✓ ${data.stats.speaker_count} speakers${faceNote}`;
+          if (data.stats.faces_warning) el.title = String(data.stats.faces_warning);
           if (btn) btn.textContent = "Re-analyze";
         } else if (data.error) {
           el.textContent = data.error;
@@ -4993,7 +4997,19 @@
       spkBody += `<label class="tl-spk-swatch"><span>${label}</span><input type="color" data-key="__sc:${key}" value="${sc[key] || _spkColor({}, key) || "#FFD700"}"></label>`;
     });
     spkBody += `</div>`;
-    spkBody += `<label class="tl-prop tl-headline-row"><span>Headline banner</span><input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Optional lower-third / banner text"></label>`;
+    spkBody += `<label class="tl-prop tl-headline-row"><span>Viral hook</span><input type="text" data-key="__headline" value="${(hbText || "").replace(/"/g, "&quot;")}" placeholder="Opening line (TikTok-style title)"></label>`;
+    const hbFont = (typeof hb === "object" && hb && hb.font) || "Bebas Neue";
+    const hbDur = (typeof hb === "object" && hb && hb.duration_sec != null) ? Number(hb.duration_sec) : 2.5;
+    spkBody += `<div class="tl-prop-grid" style="margin-top:6px">`;
+    spkBody += `<label class="tl-prop"><span>Hook font</span><select data-key="__hook_font">`;
+    ["Bebas Neue", "Anton", "Archivo Black", "Montserrat Thin Black", "Oswald", "DM Sans"].forEach((f) => {
+      const lab = f === "Bebas Neue" ? "TikTok-style (Bebas Neue)" : f;
+      spkBody += `<option value="${f}"${f === hbFont ? " selected" : ""}>${lab}</option>`;
+    });
+    spkBody += `</select></label>`;
+    spkBody += `<label class="tl-prop"><span>Hook length (s)</span><input type="number" data-key="__hook_dur" min="1" max="5" step="0.5" value="${hbDur}"></label>`;
+    spkBody += `</div>`;
+    spkBody += `<p class="muted" style="font-size:.7rem;margin:4px 0 0;line-height:1.35">Burns on ▶ Render for the first N seconds. Split-screen = Effects when 2 people talk at once (max 2 panels).</p>`;
     spkBody += `</div>`;
     html += propSection("👥 Speakers", spkBody, false);
 
@@ -5060,10 +5076,31 @@
           tl.speaker_colors = tl.speaker_colors || {};
           if (key === "__sc0") tl.speaker_colors.SPEAKER_00 = inp.value;
           else tl.speaker_colors.SPEAKER_01 = inp.value;
-        } else if (key === "__headline") {
-          const t = inp.value.trim();
-          tl.headline_banner = t ? { text: t } : null;
-          if (tl.style) tl.style.headline_banner = t;
+        } else if (key === "__headline" || key === "__hook_font" || key === "__hook_dur") {
+          const textInp = wrap.querySelector('[data-key="__headline"]');
+          const fontInp = wrap.querySelector('[data-key="__hook_font"]');
+          const durInp = wrap.querySelector('[data-key="__hook_dur"]');
+          const t = textInp ? textInp.value.trim() : "";
+          if (!t) {
+            tl.headline_banner = null;
+            if (tl.style) {
+              tl.style.headline_banner = "";
+              tl.style.hook_title = null;
+            }
+          } else {
+            let dur = 2.5;
+            try { dur = parseFloat(durInp && durInp.value) || 2.5; } catch (e) { dur = 2.5; }
+            dur = Math.max(1, Math.min(5, dur));
+            const font = (fontInp && fontInp.value) || "Bebas Neue";
+            const hook = { text: t, font, duration_sec: dur, mode: "hook" };
+            tl.headline_banner = hook;
+            if (tl.style) {
+              tl.style.headline_banner = t;
+              tl.style.hook_title = hook;
+              tl.style.hook_font = font;
+              tl.style.hook_duration = dur;
+            }
+          }
         } else {
           if (!tl.logo) return;
           const field = key.replace("__logo_", "");

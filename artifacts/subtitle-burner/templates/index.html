@@ -409,10 +409,28 @@
 
     <!-- Speaker Subtitle Colors moved to Ingest tab -->
 
-    <!-- Headline / Vendor Tag Banner -->
-    <div class="row" style="margin-bottom:12px">
-      <label style="min-width:120px;font-weight:600;font-size:.85rem" title="Persistent text overlay at the top of the video">📍 Headline Banner</label>
-      <input type="text" id="headlineBanner" placeholder="e.g. Austin Craft Festival — @WildwoodCandles" style="flex:1;padding:8px 12px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.88rem" maxlength="120">
+    <!-- Viral hook title (opening card) -->
+    <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:8px;align-items:center">
+      <label style="min-width:120px;font-weight:600;font-size:.85rem" title="Big opening line for the first few seconds">🔥 Viral hook</label>
+      <input type="text" id="headlineBanner" placeholder="e.g. Nobody talks about THIS…" style="flex:1;min-width:180px;padding:8px 12px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.88rem" maxlength="120">
+    </div>
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap;gap:10px;align-items:center">
+      <label style="min-width:120px;font-size:.8rem;color:#94a3b8">Hook font</label>
+      <select id="hookFont" style="padding:6px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.82rem">
+        <option value="Bebas Neue" selected>TikTok-style (Bebas Neue)</option>
+        <option value="Anton">Anton</option>
+        <option value="Archivo Black">Archivo Black</option>
+        <option value="Montserrat Thin Black">Montserrat Black</option>
+        <option value="Oswald">Oswald</option>
+        <option value="DM Sans">DM Sans</option>
+      </select>
+      <label style="font-size:.8rem;color:#94a3b8">Duration
+        <input type="range" id="hookDuration" min="1" max="5" step="0.5" value="2.5" style="vertical-align:middle;width:100px">
+        <span id="hookDurationVal" class="pill">2.5s</span>
+      </label>
+      <label style="font-size:.78rem;color:#94a3b8;display:inline-flex;align-items:center;gap:4px" title="Banner stays for the whole video instead of a short open card">
+        <input type="checkbox" id="hookFullBanner"> Full-video banner
+      </label>
     </div>
 
     <!-- Brand logo — uploads as a Timeline asset and is applied on Apply → Timeline -->
@@ -966,11 +984,25 @@
       </p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button id="reframeAnalyzeBtn" class="btn btn-secondary">Analyze speakers + faces</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
+          Speakers
+          <select id="analyzeMaxSpeakers" title="How many distinct voices to look for (split-screen still shows at most 2 at once)" style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+            <option value="">Auto</option>
+            <option value="2">Up to 2</option>
+            <option value="3">Up to 3</option>
+            <option value="4">Up to 4</option>
+            <option value="6" selected>Up to 6</option>
+            <option value="8">Up to 8</option>
+          </select>
+        </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.88rem">
           <input type="checkbox" id="reframeEnabled" disabled>
           Apply 9:16 reframe on next render
         </label>
       </div>
+      <p class="muted" style="font-size:.74rem;margin:8px 0 0;line-height:1.4">
+        Split-screen is an <strong>Effects</strong> beat when two people talk at once — even if 6 voices exist in the video, each split only frames the <strong>two</strong> active talkers (faces steer the crop when Analyze finds them).
+      </p>
 
       <!-- Speaker AI Assignment Box (Shows exact faces identified) -->
       <div id="reframeSpeakerBox" style="display:none;margin-top:10px;background:#181b28;border:1px solid #2e354f;border-radius:8px;padding:10px">

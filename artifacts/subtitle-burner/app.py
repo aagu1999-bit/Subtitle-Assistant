@@ -1410,9 +1410,8 @@ def transcribe(video_path: Path, pre_clean: bool = False, job_id: str | None = N
 # subsequent render reuses them without re-running the expensive analysis.
 
 # Frames-per-second we sample the source video at for face detection.
-# Face boxes change slowly (people don't teleport) so 2 fps is plenty —
-# we interpolate between samples at burn time. Lower fps = faster analysis.
-REFRAME_FACE_SAMPLE_FPS = float(os.environ.get("REFRAME_FACE_SAMPLE_FPS", "2"))
+# Slightly denser than 2 fps so scene cuts / quick talker swaps still catch faces.
+REFRAME_FACE_SAMPLE_FPS = float(os.environ.get("REFRAME_FACE_SAMPLE_FPS", "3.5"))
 HUGGINGFACE_TOKEN_ENV = "HF_TOKEN"
 DIARIZATION_MODEL = os.environ.get(
     "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"
@@ -1887,9 +1886,10 @@ def detect_face_tracks(video_path: Path,
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     step = max(1, int(round(src_fps / sample_fps)))
 
-    # MediaPipe: good for frontal faces
+    # MediaPipe: good for frontal faces (slightly lower threshold so
+    # soft lighting / partial faces still register for split crops).
     detector = mp.solutions.face_detection.FaceDetection(
-        model_selection=1, min_detection_confidence=0.35,
+        model_selection=1, min_detection_confidence=0.28,
     )
     # OpenCV cascades: good for profile/side faces that MediaPipe misses
     cv_frontal = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
@@ -2061,6 +2061,26 @@ def analyze_reframe(
 
     overlaps = find_overlap_regions(diar)
     speakers = sorted({s["speaker"] for s in diar}, key=_speaker_sort_key)
+    face_hit_frames = sum(1 for s in faces if (s.get("faces") or []))
+    face_box_total = sum(len(s.get("faces") or []) for s in faces)
+    # Distinguish "detector never ran" from "ran but saw nobody".
+    if faces_warning:
+        faces_skipped = True
+        faces_status = "skipped"
+    elif not faces:
+        faces_skipped = True
+        faces_status = "empty"
+        faces_warning = faces_warning or "No face samples produced"
+    elif face_hit_frames == 0:
+        faces_skipped = False
+        faces_status = "no_detections"
+        faces_warning = (
+            "Face detector ran but found 0 faces — try better lighting / "
+            "frontal angles, or Re-analyze after a closer crop."
+        )
+    else:
+        faces_skipped = False
+        faces_status = "ok"
     _progress(90, "caching speaker map")
     return {
         "diarization": diar,
@@ -2070,11 +2090,14 @@ def analyze_reframe(
             "speakers": speakers,
             "speaker_count": len(speakers),
             "face_samples": len(faces),
+            "face_hit_frames": face_hit_frames,
+            "face_box_total": face_box_total,
             "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
             "diarization_device": _diarization_device_resolved,
             "speaker_breakdown": _speaker_breakdown(diar),
             "face_sample_fps": fps,
-            "faces_skipped": bool(faces_warning),
+            "faces_skipped": faces_skipped,
+            "faces_status": faces_status,
             "faces_warning": faces_warning,
         },
     }
@@ -2862,9 +2885,45 @@ def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict 
                 normalised_emoji[clean_key] = v
 
     banner_style = ""
-    if headline_banner:
-        banner_size = int(font_size * 0.6)
-        banner_style = f"Style: Banner,{font},{banner_size},{primary},{primary},{outline},&H80000000,-1,0,0,0,100,100,0,0,3,0,0,2,20,20,20,1\n"
+    # ---- Viral hook / headline (opening card) ----
+    hook_text = ""
+    hook_font = "Bebas Neue"
+    hook_dur = 2.5
+    hook_mode = "hook"  # hook = timed open card; banner = full-duration strip
+    ht = style.get("hook_title") if isinstance(style.get("hook_title"), dict) else None
+    if ht and str(ht.get("text") or "").strip():
+        hook_text = str(ht.get("text") or "").strip()[:120]
+        hook_font = str(ht.get("font") or style.get("hook_font") or "Bebas Neue").strip() or "Bebas Neue"
+        try:
+            hook_dur = float(ht.get("duration_sec") or style.get("hook_duration") or 2.5)
+        except (TypeError, ValueError):
+            hook_dur = 2.5
+        hook_mode = str(ht.get("mode") or "hook").lower()
+    else:
+        raw_banner = headline_banner if headline_banner is not None else style.get("headline_banner")
+        if isinstance(raw_banner, dict):
+            hook_text = str(raw_banner.get("text") or "").strip()[:120]
+            hook_font = str(raw_banner.get("font") or style.get("hook_font") or "Bebas Neue").strip() or "Bebas Neue"
+            try:
+                hook_dur = float(raw_banner.get("duration_sec") or 2.5)
+            except (TypeError, ValueError):
+                hook_dur = 2.5
+            hook_mode = str(raw_banner.get("mode") or "hook").lower()
+        elif raw_banner:
+            hook_text = str(raw_banner).strip()[:120]
+            hook_font = str(style.get("hook_font") or "Bebas Neue").strip() or "Bebas Neue"
+            try:
+                hook_dur = float(style.get("hook_duration") or 2.5)
+            except (TypeError, ValueError):
+                hook_dur = 2.5
+            hook_mode = str(style.get("hook_mode") or "hook").lower()
+    hook_dur = max(0.8, min(8.0, hook_dur))
+    if hook_text:
+        banner_size = max(28, int(font_size * 0.9))
+        banner_style = (
+            f"Style: Banner,{hook_font},{banner_size},{primary},{primary},"
+            f"{outline},&H80000000,-1,0,0,0,100,100,0,0,3,0,0,2,20,20,20,1\n"
+        )
 
     header = f"""[Script Info]
 Title: Generated Captions
@@ -2966,13 +3025,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
             lines.append(line)
 
-    if headline_banner:
-        banner_y = int(video_h * 0.05)
-        last_end = float(words[-1].get("end", 0)) if words else 0
-        banner_end_ts = ass_timestamp(last_end)
+    if hook_text:
+        banner_y = int(video_h * 0.08)
+        last_end = float(words[-1].get("end", 0)) if words else hook_dur
+        if hook_mode == "banner":
+            banner_end = max(hook_dur, last_end)
+        else:
+            banner_end = min(hook_dur, max(hook_dur, 0.8))
+        banner_end_ts = ass_timestamp(banner_end)
+        # Uppercase viral hooks read more like TikTok/Reels opens.
+        hook_draw = fmt(hook_text) if all_caps else hook_text
         lines.append(
             f"Dialogue: 0,0:00:00.00,{banner_end_ts},Banner,,0,0,0,,"
-            f"{{\\pos({pos_x},{banner_y})\\bord0\\shad0\\3c&H000000&\\3a&H80&}}{fmt(headline_banner)}"
+            f"{{\\pos({pos_x},{banner_y})\\bord0\\shad0\\3c&H000000&\\3a&H80&}}{hook_draw}"
         )
 
     return header + "\n".join(lines) + "\n"
@@ -4673,11 +4738,12 @@ TRANSCRIPT:
 
 
 def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
-    """Split-screen ranges taken straight from diarization.
+    """Split-screen ranges taken straight from diarization overlaps.
 
-    When two speakers talk over each other, framing both is the obvious call,
-    and the reframe analysis already computed exactly those windows — so this
-    needs no model, just the cached overlaps.
+    Manifests as Effects-lane ``split_screen`` blocks (not a separate track).
+    Even when a video has 6+ identified speakers, each overlap only frames the
+    **up to two** voices active in that window — faces (when Analyze found them)
+    steer the crop toward those talkers at burn/reframe time.
     """
     cache = UPLOAD_DIR / f"{job_id}_reframe.json"
     if not cache.exists():
@@ -4696,6 +4762,14 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
             continue
         if e - s < lo:
             continue
+        spk_list = ov.get("speakers") or []
+        if isinstance(spk_list, (list, tuple)):
+            # Cap at two concurrent talkers for the split layout.
+            spk_pair = [str(x) for x in list(spk_list)[:2]]
+        else:
+            spk_pair = []
+        mid = (s + e) / 2.0
+        face_a = _face_anchor_at(job_id, mid)
         out.append({
             "type": "split_screen",
             "start_time": s,
@@ -4703,8 +4777,13 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
             "intensity": "med",
             "direction": "in",
             "quote": "",
-            "reason": "Both speakers talking at once — frame them together.",
+            "reason": (
+                "Two people talking at once — Effects → Split-screen (max 2 panels). "
+                "Other speakers stay labelled; they get the frame when they talk alone."
+            ),
             "source": "diarization",
+            "speakers": spk_pair,
+            "face_anchor": face_a,
         })
     return out
 
@@ -12885,20 +12964,37 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     except (json.JSONDecodeError, OSError):
                         continue
             hb = tl.get("headline_banner")
+            hook_title = None
             if isinstance(hb, dict):
+                hook_title = hb
                 headline = hb.get("text") or ""
             elif isinstance(hb, str):
                 headline = hb
             else:
                 headline = (caption_style or {}).get("headline_banner") or ""
+            style_for_ass = dict(caption_style or _TL_DEFAULT_CAPTION_STYLE)
+            if hook_title:
+                style_for_ass["hook_title"] = hook_title
+            elif headline:
+                # Prefer Look hook_* knobs when banner is a plain string.
+                if (caption_style or {}).get("hook_title"):
+                    style_for_ass["hook_title"] = caption_style["hook_title"]
+                else:
+                    style_for_ass["headline_banner"] = headline
+                    if (caption_style or {}).get("hook_font"):
+                        style_for_ass["hook_font"] = caption_style["hook_font"]
+                    if (caption_style or {}).get("hook_duration") is not None:
+                        style_for_ass["hook_duration"] = caption_style["hook_duration"]
+                    if (caption_style or {}).get("hook_mode"):
+                        style_for_ass["hook_mode"] = caption_style["hook_mode"]
             caption_ass = build_ass(
                 caption_words,
-                caption_style or _TL_DEFAULT_CAPTION_STYLE,
+                style_for_ass,
                 W, H,
                 caption_emoji or {},
                 speaker_colors=speaker_colors,
                 diarization=diar,
-                headline_banner=headline,
+                headline_banner=headline if not hook_title else None,
             )
         titles_ass = _tl_build_titles_ass(tracks["text"], W, H) if tracks["text"] else None
 

@@ -462,6 +462,22 @@ document.querySelectorAll("#viralPresets .theme").forEach(btn => {
 sizeEl.oninput  = () => { sizeVal.textContent = sizeEl.value; scheduleDraftSave(); };
 owEl.oninput    = () => { owVal.textContent = owEl.value; scheduleDraftSave(); };
 posEl.oninput   = () => { posVal.textContent = posEl.value + "%"; scheduleDraftSave(); };
+(function wireHookControls() {
+  const hd = $("hookDuration");
+  const hv = $("hookDurationVal");
+  if (hd) {
+    hd.oninput = () => {
+      if (hv) hv.textContent = (parseFloat(hd.value) || 2.5).toFixed(1) + "s";
+      scheduleDraftSave();
+    };
+  }
+  ["hookFont", "headlineBanner", "hookFullBanner"].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener("input", scheduleDraftSave);
+    el.addEventListener("change", scheduleDraftSave);
+  });
+})();
 groupEl.oninput = () => {
   pushEditHistory();
   const edited = collectEditedWords({ silent: true });
@@ -1115,6 +1131,19 @@ function getStyle() {
     punchword_emphasis: $("punchwordEmphasis") ? $("punchwordEmphasis").checked : true,
     quality_boost:   $("qualityBoost") ? $("qualityBoost").checked : false,
     headline_banner: $("headlineBanner") ? $("headlineBanner").value.trim() : "",
+    hook_font: $("hookFont") ? $("hookFont").value : "Bebas Neue",
+    hook_duration: $("hookDuration") ? parseFloat($("hookDuration").value) || 2.5 : 2.5,
+    hook_mode: ($("hookFullBanner") && $("hookFullBanner").checked) ? "banner" : "hook",
+    hook_title: (function () {
+      const text = $("headlineBanner") ? $("headlineBanner").value.trim() : "";
+      if (!text) return null;
+      return {
+        text,
+        font: $("hookFont") ? $("hookFont").value : "Bebas Neue",
+        duration_sec: $("hookDuration") ? parseFloat($("hookDuration").value) || 2.5 : 2.5,
+        mode: ($("hookFullBanner") && $("hookFullBanner").checked) ? "banner" : "hook",
+      };
+    })(),
     speaker_colors: speakerColorsEnabled ? collectSpeakerColors() : {},
     reframe: {
       enabled:      $("reframeEnabled") ? $("reframeEnabled").checked : false,
@@ -2524,14 +2553,24 @@ async function refreshReframeStatus() {
     const data = await res.json();
     if (data.ready && data.stats) {
       if (reframeStatus) {
-        const faceN = data.stats.face_samples || 0;
-        const faceNote = data.stats.faces_skipped
-          ? " · faces skipped (speakers still OK)"
-          : `, ${faceN} face samples`;
+        const faceStatus = data.stats.faces_status || (data.stats.faces_skipped ? "skipped" : "ok");
+        const faceHits = data.stats.face_hit_frames;
+        let faceNote = "";
+        if (faceStatus === "skipped") {
+          faceNote = " · faces skipped (speakers still OK — check mediapipe)";
+        } else if (faceStatus === "no_detections") {
+          faceNote = " · 0 faces found (detector ran — try Re-analyze / better light)";
+        } else if (typeof faceHits === "number") {
+          faceNote = `, ${faceHits}/${data.stats.face_samples || 0} frames with faces`;
+        } else {
+          faceNote = `, ${data.stats.face_samples || 0} face samples`;
+        }
         reframeStatus.textContent =
           `✓ ${data.stats.speaker_count} speakers${faceNote}`;
         reframeStatus.style.color = "";
-      }
+        if (data.stats.faces_warning && faceStatus !== "ok" && reframeStatus) {
+          reframeStatus.title = String(data.stats.faces_warning);
+        }      }
       if (reframeEnabled) {
         reframeEnabled.disabled = false;
         reframeEnabled.checked = true; // Auto-check when analysis is ready!
@@ -2637,7 +2676,18 @@ async function startReframeAnalyze(triggerBtn, opts) {
     const res = await fetch("/analyze-reframe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify((() => {
+        const body = { job_id: jobId };
+        const sel = $("analyzeMaxSpeakers");
+        if (sel && sel.value) {
+          const n = parseInt(sel.value, 10);
+          if (n > 0) {
+            body.max_speakers = n;
+            body.min_speakers = 1;
+          }
+        }
+        return body;
+      })()),
     });
     let data = null;
     try {
@@ -7226,7 +7276,23 @@ window.loadCustomBrandPreset = function() {
     if (style.outline_color && document.getElementById("outlineColor")) document.getElementById("outlineColor").value = style.outline_color;
     if (style.outline_width !== undefined && document.getElementById("outlineWidth")) { document.getElementById("outlineWidth").value = style.outline_width; if (document.getElementById("owVal")) document.getElementById("owVal").textContent = style.outline_width; }
     
-    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = style.headline_banner;
+    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = typeof style.headline_banner === "object" ? (style.headline_banner.text || "") : style.headline_banner;
+    if (style.hook_title && typeof style.hook_title === "object") {
+      if ($("headlineBanner") && style.hook_title.text) $("headlineBanner").value = style.hook_title.text;
+      if ($("hookFont") && style.hook_title.font) $("hookFont").value = style.hook_title.font;
+      if ($("hookDuration") && style.hook_title.duration_sec != null) {
+        $("hookDuration").value = style.hook_title.duration_sec;
+        if ($("hookDurationVal")) $("hookDurationVal").textContent = Number(style.hook_title.duration_sec).toFixed(1) + "s";
+      }
+      if ($("hookFullBanner")) $("hookFullBanner").checked = style.hook_title.mode === "banner";
+    } else {
+      if ($("hookFont") && style.hook_font) $("hookFont").value = style.hook_font;
+      if ($("hookDuration") && style.hook_duration != null) {
+        $("hookDuration").value = style.hook_duration;
+        if ($("hookDurationVal")) $("hookDurationVal").textContent = Number(style.hook_duration).toFixed(1) + "s";
+      }
+      if ($("hookFullBanner") && style.hook_mode) $("hookFullBanner").checked = style.hook_mode === "banner";
+    }
     
     if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
       document.getElementById("speakerColorsEnabled").checked = true;
