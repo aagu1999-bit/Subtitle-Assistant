@@ -7864,6 +7864,8 @@
     if (seed.style) tl.style = normalizeTlStyle(seed.style);
     if (seed.ai_edit) tl.ai_edit = seed.ai_edit;
     if (seed.edit_receipt) tl.edit_receipt = seed.edit_receipt;
+    if (seed.template) tl.template = seed.template;
+    if (seed.recap) tl.recap = seed.recap;
     if (label) {
       tl.label = label;
       if ($("tlLabel")) $("tlLabel").value = label;
