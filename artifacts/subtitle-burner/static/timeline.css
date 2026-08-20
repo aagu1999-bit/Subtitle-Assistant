@@ -1149,6 +1149,16 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   gap: 4px;
   flex-wrap: wrap;
 }
+.tl-broll-checkpoint-hint {
+  font-size: .68rem;
+  color: #8b91a0;
+  line-height: 1.35;
+  margin: -2px 0 2px;
+}
+.tl-broll-checkpoint-hint em {
+  font-style: normal;
+  color: #c5c9d4;
+}
 .tl-main-cutaway {
   background: #0a0c12;
 }
@@ -1158,18 +1168,27 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   background: #12151e;
   padding: 8px;
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: 72px 1fr;
   gap: 8px;
   align-items: start;
 }
 .tl-broll-card.is-replacing { opacity: 0.55; pointer-events: none; }
 .tl-broll-thumb {
-  width: 64px;
-  height: 64px;
+  width: 72px;
+  height: 72px;
   border-radius: 8px;
   object-fit: cover;
   background: #0e1118;
   border: 1px solid #2a2f3a;
+}
+.tl-broll-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .62rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  color: #7a8296;
 }
 .tl-broll-meta {
   min-width: 0;
@@ -1184,6 +1203,48 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tl-worth-badge {
+  flex: 0 0 auto;
+  min-width: 28px;
+  text-align: center;
+  font-size: .65rem;
+  font-weight: 800;
+  padding: 2px 5px;
+  border-radius: 4px;
+  letter-spacing: .02em;
+  background: #2a3144;
+  color: #d7dbe6;
+}
+.tl-worth-hi { background: #1a3d2e; color: #8fd6b0; }
+.tl-worth-mid { background: #3a3420; color: #e6c97a; }
+.tl-worth-lo { background: #3a2428; color: #e0a0a8; }
+.tl-serp-tab,
+.tl-story-role {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: .62rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #1c2230;
+  color: #9aa3b8;
+  text-transform: lowercase;
+  vertical-align: middle;
+}
+.tl-story-role {
+  color: #b8b0d4;
+  text-transform: none;
+}
+.tl-serp-capture-btn {
+  border-color: #4a5678 !important;
+  color: #d2d8ea !important;
+}
+.tl-serp-capture-btn:hover:not(:disabled) {
+  background: #24304a !important;
+  color: #fff !important;
 }
 .tl-broll-meta .when {
   font-size: .7rem;

@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-80-polish-download";
+  const TL_BUILD = "studio-editor-build-81-checkpoint-b-serp";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -6910,32 +6910,58 @@
     const always = isAlwaysPhotoMatchSession();
     const recipe = always ? "Always · center match + Ken Burns" : null;
     let html = `<div class="tl-broll-pending-head">
-      <strong>Review B-roll (${pendingBroll.length})${recipe ? ` · ${recipe}` : ""}</strong>
+      <strong>Review B-roll · Checkpoint B (${pendingBroll.length})${recipe ? ` · ${recipe}` : ""}</strong>
       <div class="tl-broll-pending-actions">
         <button type="button" class="tl-chip-btn" data-broll-act="accept-all">${asMainDefault ? "Accept all → Overlay" : "Accept all"}</button>
         <button type="button" class="tl-chip-btn" data-broll-act="accept-all-main">Accept all → Main</button>
         <button type="button" class="tl-chip-btn tl-chip-danger" data-broll-act="skip-all">Skip all</button>
       </div>
-    </div>`;
+    </div>
+    <div class="tl-broll-checkpoint-hint">Worthiness scores from Checkpoint A. <em>Capture SERP</em> runs Playwright Chromium on the search results page (Bing fallback when Google blocks) and swaps this card’s image.</div>`;
     pendingBroll.forEach((p) => {
       const start = Number(p.start || 0);
       const dur = Math.max(0.4, (p.out != null ? Number(p.out) : 1.8) - (p.in || 0));
       const srcLabel = p.source === "gif" ? "GIF"
         : (p.source === "gemini" ? "AI photo"
         : (p.source === "speaker_still" ? "Talker still"
+        : (p.source === "serp_screenshot" ? "SERP"
         : (p.source === "photo" ? "Photo"
-        : (p.source === "badge" ? "Badge" : (p.source || "Asset")))));
+        : (p.source === "badge" ? "Badge" : (p.source || "Asset"))))));
+      const scoreRaw = p.worthiness_score != null
+        ? Number(p.worthiness_score)
+        : (p.worthiness && p.worthiness.score != null ? Number(p.worthiness.score) : null);
+      const score = Number.isFinite(scoreRaw) ? Math.round(scoreRaw) : null;
+      const tab = String(p.google_tab || (p.worthiness && p.worthiness.google_tab) || "").trim();
+      const role = String(p.story_role || (p.worthiness && p.worthiness.story_role) || "").trim();
+      const scoreCls = score == null ? ""
+        : (score >= 75 ? "tl-worth-hi" : (score >= 55 ? "tl-worth-mid" : "tl-worth-lo"));
+      const scoreHtml = score != null
+        ? `<span class="tl-worth-badge ${scoreCls}" title="Overlay worthiness (Checkpoint A)">${score}</span>`
+        : "";
+      const tabHtml = tab
+        ? `<span class="tl-serp-tab" title="Suggested search tab">${esc(tab)}</span>`
+        : "";
+      const roleHtml = role
+        ? `<span class="tl-story-role">${esc(role)}</span>`
+        : "";
+      const thumbSrc = p.asset_id
+        ? `/asset/${esc(p.asset_id)}?v=${encodeURIComponent(p._thumbV || p.asset_id)}`
+        : "";
+      const thumbHtml = thumbSrc
+        ? `<img class="tl-broll-thumb" src="${thumbSrc}" alt="" loading="lazy">`
+        : `<div class="tl-broll-thumb tl-broll-thumb-empty" title="No image yet — Capture SERP">SERP</div>`;
       html += `<div class="tl-broll-card" data-pending-id="${p.id}">
-        <img class="tl-broll-thumb" src="/asset/${esc(p.asset_id)}" alt="" loading="lazy">
+        ${thumbHtml}
         <div class="tl-broll-meta">
-          <div class="kw">${esc(p.keyword || "B-roll")}</div>
-          <div class="when">${fmtTime(start)} · ${dur.toFixed(1)}s</div>
-          <div class="src">${esc(srcLabel)}</div>
+          <div class="kw">${scoreHtml}${esc(p.keyword || "B-roll")}</div>
+          <div class="when">${fmtTime(start)} · ${dur.toFixed(1)}s${tabHtml}${roleHtml}</div>
+          <div class="src">${esc(srcLabel)}${p._serpEngine ? ` · ${esc(p._serpEngine)}` : ""}${p._serpClarity ? ` · ${esc(p._serpClarity)}` : ""}</div>
           <div class="tl-broll-btns">
             <button type="button" class="btn btn-primary" data-broll-act="accept" data-id="${p.id}">Overlay</button>
             <button type="button" class="btn btn-secondary" data-broll-act="accept-main" data-id="${p.id}">As Main</button>
             <button type="button" class="btn btn-secondary" data-broll-act="skip" data-id="${p.id}">Skip</button>
             <button type="button" class="btn btn-secondary" data-broll-act="replace" data-id="${p.id}">Replace</button>
+            <button type="button" class="tl-chip-btn tl-serp-capture-btn" data-broll-act="serp" data-id="${p.id}" title="Playwright Chromium: screenshot the search results page for this query">Capture SERP</button>
             <button type="button" class="tl-chip-btn" data-broll-act="seek" data-id="${p.id}" title="Seek preview to this moment">↗ Seek</button>
           </div>
         </div>
@@ -6953,9 +6979,65 @@
         if (act === "accept-main") return acceptPendingBrollAsMain(id);
         if (act === "skip") return skipPendingBroll(id);
         if (act === "replace") return replacePendingBroll(id, btn);
+        if (act === "serp") return capturePendingSerp(id, btn);
         if (act === "seek") return seekPendingBroll(id);
       };
     });
+  }
+
+  async function capturePendingSerp(id, btn) {
+    const p = _pendingById(id);
+    if (!p) return;
+    const query = String(p.keyword || p.query || p.quote || "").trim();
+    if (query.length < 3) {
+      alert("Need a keyword/query on this card before Capture SERP.");
+      return;
+    }
+    const tab = String(p.google_tab || (p.worthiness && p.worthiness.google_tab) || "images").trim() || "images";
+    const label = btn ? btn.textContent : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Capturing…";
+    }
+    const card = document.querySelector(`.tl-broll-card[data-pending-id="${id}"]`);
+    if (card) card.classList.add("is-replacing");
+    setSaveState(`SERP capture: “${query.slice(0, 48)}” (${tab})…`);
+    try {
+      const data = await api("/overlay/serp-capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, tab, google_tab: tab }),
+      });
+      if (!data || !data.ok || !data.asset_id) {
+        throw new Error((data && (data.error || data.hint)) || "capture failed");
+      }
+      const oldId = p.asset_id;
+      p.asset_id = data.asset_id;
+      p.source = "serp_screenshot";
+      p.provider = data.engine || "serp";
+      p.google_tab = data.tab || tab;
+      p._serpEngine = data.engine || "";
+      p._serpClarity = data.clarity || "";
+      p._thumbV = String(Date.now());
+      if (oldId && oldId !== data.asset_id) {
+        api("/delete-asset/" + oldId, { method: "POST" }).catch(() => {});
+      }
+      await loadAssets();
+      renderPendingBroll();
+      renderTracks();
+      updateStageCompositor();
+      const bits = [data.engine || "serp", data.clarity || "crop"].filter(Boolean);
+      setSaveState(`SERP ready · “${query.slice(0, 40)}” · ${bits.join(" · ")} — Accept / Skip`);
+      if (window.StudioLogger) StudioLogger.clip("serp_capture_pending", `${id}:${tab}:${data.engine || "?"}`);
+    } catch (e) {
+      alert("SERP capture failed: " + (e && e.message ? e.message : e));
+      setSaveState("SERP capture failed");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label || "Capture SERP";
+      }
+      if (card) card.classList.remove("is-replacing");
+    }
   }
 
   function _pendingById(id) {

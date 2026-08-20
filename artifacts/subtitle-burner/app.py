@@ -7079,6 +7079,8 @@ def overlay_serp_capture():
         "url": meta.get("url"),
         "clip": meta.get("clip"),
         "bytes": meta.get("bytes"),
+        "clarity": meta.get("clarity"),
+        "device_scale_factor": meta.get("device_scale_factor"),
         "overlay": {
             "asset_id": asset_id,
             "keyword": query[:80],

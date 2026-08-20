@@ -20,14 +20,21 @@ Advertised “AI browser agents” are optional wrappers — underneath they sti
 **CDP / Playwright / Puppeteer**. Prefer those primitives.
 
 ## Recommended architecture for Studio
-1. **Worthiness scorer** (Checkpoint A) — already drafting in app.py  
-   `POST /overlay/worthiness-preview` → candidates with scores + `google_tab`
+1. **Worthiness scorer** (Checkpoint A) — `POST /overlay/worthiness-preview`
+   scores cues + `google_tab`; Suggest B-roll already filters by threshold (~55) + spacing.
 2. **Provider router**
    - library first
    - SerpAPI/CSE for plain Images
-   - **Playwright SERP worker** only when `google_tab` is flights / ai_overview / maps / web card
-3. **Checkpoint B** — human Accept/Reject before place
+   - **Playwright SERP worker** when you want real search-page chrome (or Flights/Maps/AI Overview)
+3. **Checkpoint B** — Review B-roll panel in Timeline Media:
+   - shows **worthiness score** badge + suggested tab
+   - **Capture SERP** → Playwright Chromium screenshots the results page, crops (or pulls Bing full-size `murl` when thumbs are soft), swaps the card image
+   - Accept → Overlay / As Main / Skip (human gate before place)
 4. Cache by `(query, google_tab)` so re-runs don’t re-hit Google
+
+## Clarity (Playwright)
+Default capture uses `device_scale_factor=2`, opens the Images **detail pane**, and for Bing
+falls back to downloading the full-size `murl` when the SERP crop is still small.
 
 ## Env knobs
 - `OVERLAY_WORTHINESS_THRESHOLD` (default `55`)

@@ -22,7 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_VIEWPORT = {"width": 1280, "height": 900}
+# Larger viewport + device_scale_factor=2 → sharper SERP crops (thumbnail grids
+# alone look soft; we also open the Images detail pane / download murl when possible).
+DEFAULT_VIEWPORT = {"width": 1440, "height": 960}
+DEVICE_SCALE_FACTOR = 2
 
 
 def _slug(q: str) -> str:
@@ -229,8 +232,211 @@ def _crop_box_bing_images(page) -> dict | None:
             return {
                 "x": max(0, hero["x"] - pad),
                 "y": max(0, hero["y"] - pad),
-                "width": min(720, hero["width"] + 2 * pad),
-                "height": min(560, hero["height"] + 2 * pad),
+                "width": min(900, hero["width"] + 2 * pad),
+                "height": min(700, hero["height"] + 2 * pad),
+            }
+        except Exception:
+            continue
+    return None
+
+
+def _bing_image_murls(page, *, limit: int = 8) -> list[str]:
+    """Parse Bing Images tile metadata for full-size media URLs (murl)."""
+    urls: list[str] = []
+    try:
+        raw = page.eval_on_selector_all(
+            "a.iusc",
+            """(els) => els.slice(0, 24).map((el) => {
+              try {
+                const m = el.getAttribute('m');
+                if (!m) return null;
+                const j = JSON.parse(m);
+                return j.murl || j.purl || null;
+              } catch (e) { return null; }
+            }).filter(Boolean)""",
+        )
+        for u in raw or []:
+            if isinstance(u, str) and u.startswith("http") and u not in urls:
+                urls.append(u)
+            if len(urls) >= limit:
+                break
+    except Exception:
+        pass
+    return urls
+
+
+def _crop_box_bing_detail(page) -> dict | None:
+    """Large preview after clicking a Bing Images tile (much clearer than grid thumbs)."""
+    selectors = [
+        "#mainImageWindow img",
+        "#iol_im",
+        ".overlayDetail img",
+        "#detailCanvas img",
+        "div.imgContainer img",
+        "#ivc_fullimg",
+        "img.nofocus",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            n = min(loc.count(), 6)
+            boxes = []
+            for i in range(n):
+                try:
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    box = el.bounding_box()
+                    if not box:
+                        continue
+                    if box.get("width", 0) < 280 or box.get("height", 0) < 220:
+                        continue
+                    boxes.append(box)
+                except Exception:
+                    continue
+            if not boxes:
+                continue
+            hero = max(boxes, key=lambda b: b["width"] * b["height"])
+            pad = 8
+            return {
+                "x": max(0, hero["x"] - pad),
+                "y": max(0, hero["y"] - pad),
+                "width": min(1100, hero["width"] + 2 * pad),
+                "height": min(820, hero["height"] + 2 * pad),
+            }
+        except Exception:
+            continue
+    return None
+
+
+def _open_bing_image_detail(page) -> bool:
+    """Click the first solid Bing Images tile so the detail pane loads."""
+    for sel in ("a.iusc", ".imgpt a", ".imgpt img", "#mmComponent_images_1 a"):
+        try:
+            loc = page.locator(sel)
+            n = min(loc.count(), 10)
+            for i in range(n):
+                try:
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    box = el.bounding_box()
+                    if not box or box.get("width", 0) < 80:
+                        continue
+                    el.click(timeout=2500)
+                    page.wait_for_timeout(1100)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
+def _download_url_to_path(url: str, out_path: Path, *, timeout_s: float = 25.0) -> bool:
+    """Fetch a full-resolution image URL (Bing murl) when SERP thumbs are soft."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://www.bing.com/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = resp.read()
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+        if len(data) < 4000:
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Prefer PNG for Timeline; convert JPEG via Pillow when available.
+        if "png" in ctype or url.lower().endswith(".png"):
+            out_path.write_bytes(data)
+        elif "jpeg" in ctype or "jpg" in ctype or url.lower().endswith((".jpg", ".jpeg")):
+            try:
+                from io import BytesIO
+                from PIL import Image
+
+                img = Image.open(BytesIO(data)).convert("RGB")
+                img.save(out_path, format="PNG", optimize=True)
+            except Exception:
+                out_path.write_bytes(data)
+        else:
+            try:
+                from io import BytesIO
+                from PIL import Image
+
+                img = Image.open(BytesIO(data)).convert("RGB")
+                img.save(out_path, format="PNG", optimize=True)
+            except Exception:
+                out_path.write_bytes(data)
+        return out_path.exists() and out_path.stat().st_size >= 4000
+    except Exception:
+        return False
+
+
+def _open_google_image_detail(page) -> bool:
+    for sel in ("div.isv-r a", "div[data-id] a", "img.rg_i"):
+        try:
+            loc = page.locator(sel)
+            n = min(loc.count(), 8)
+            for i in range(n):
+                try:
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    box = el.bounding_box()
+                    if not box or box.get("width", 0) < 90:
+                        continue
+                    el.click(timeout=2500)
+                    page.wait_for_timeout(1000)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
+def _crop_box_google_detail(page) -> dict | None:
+    selectors = [
+        "img.sFlh5c",
+        "a.YsLeY img",
+        "#SvaFOb img",
+        "div[data-ved] img.n3VNCb",
+        "img.n3VNCb",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            n = min(loc.count(), 6)
+            boxes = []
+            for i in range(n):
+                try:
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    box = el.bounding_box()
+                    if not box or box.get("width", 0) < 260 or box.get("height", 0) < 200:
+                        continue
+                    boxes.append(box)
+                except Exception:
+                    continue
+            if not boxes:
+                continue
+            hero = max(boxes, key=lambda b: b["width"] * b["height"])
+            pad = 8
+            return {
+                "x": max(0, hero["x"] - pad),
+                "y": max(0, hero["y"] - pad),
+                "width": min(1100, hero["width"] + 2 * pad),
+                "height": min(820, hero["height"] + 2 * pad),
             }
         except Exception:
             continue
@@ -276,8 +482,15 @@ def capture_serp(
     out_path: Path,
     engine: str = "auto",
     timeout_ms: int = 45000,
+    clarity: bool = True,
 ) -> dict:
-    """Capture a cropped SERP screenshot. Returns metadata dict."""
+    """Capture a cropped SERP screenshot. Returns metadata dict.
+
+    When *clarity* is True (default):
+      - Chromium device_scale_factor=2 (sharper PNG)
+      - Images tab: open detail pane for a large preview crop
+      - Bing Images: if detail is still soft, download full-size ``murl``
+    """
     from playwright.sync_api import sync_playwright
 
     tab = (tab or "images").lower().strip()
@@ -302,6 +515,7 @@ def capture_serp(
         )
         context = browser.new_context(
             viewport=DEFAULT_VIEWPORT,
+            device_scale_factor=DEVICE_SCALE_FACTOR if clarity else 1,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -341,16 +555,34 @@ def capture_serp(
 
                 # Extra settle for images/maps
                 page.wait_for_timeout(1200)
+                clarity_mode = "grid"
+                murls: list[str] = []
+
                 if eng == "google":
                     if tab == "images":
-                        clip = _crop_box_images_google(page)
+                        if clarity:
+                            _open_google_image_detail(page)
+                            clip = _crop_box_google_detail(page) or _crop_box_images_google(page)
+                            clarity_mode = "detail" if clip else "grid"
+                        else:
+                            clip = _crop_box_images_google(page)
                     elif tab == "maps":
                         clip = _crop_box_maps_google(page)
                     else:
                         clip = _crop_box_web_google(page)
                 else:
                     if tab == "images":
-                        clip = _crop_box_bing_images(page)
+                        murls = _bing_image_murls(page) if clarity else []
+                        if clarity:
+                            opened = _open_bing_image_detail(page)
+                            clip = _crop_box_bing_detail(page) if opened else None
+                            if clip:
+                                clarity_mode = "detail"
+                            else:
+                                clip = _crop_box_bing_images(page)
+                                clarity_mode = "grid"
+                        else:
+                            clip = _crop_box_bing_images(page)
                     else:
                         clip = _crop_box_bing_web(page)
 
@@ -365,15 +597,38 @@ def capture_serp(
                 clip["height"] = max(100, min(clip["height"], vh - clip["y"]))
 
                 page.screenshot(path=str(out_path), clip=clip, type="png")
+                bytes_n = out_path.stat().st_size if out_path.exists() else 0
+
+                # Bing Images: prefer full-size murl when the SERP crop is still a soft thumb.
+                crop_soft = (
+                    float(clip.get("width") or 0) < 520
+                    or float(clip.get("height") or 0) < 360
+                    or bytes_n < 220_000
+                )
+                if (
+                    clarity
+                    and eng == "bing"
+                    and tab == "images"
+                    and murls
+                    and crop_soft
+                ):
+                    for murl in murls[:4]:
+                        if _download_url_to_path(murl, out_path):
+                            clarity_mode = "murl"
+                            bytes_n = out_path.stat().st_size
+                            break
+
                 meta = {
                     "ok": True,
                     "query": query,
                     "tab": tab,
                     "engine": eng,
                     "path": str(out_path),
-                    "clip": clip,
+                    "clip": clip if clarity_mode != "murl" else None,
                     "url": page.url,
-                    "bytes": out_path.stat().st_size if out_path.exists() else 0,
+                    "bytes": bytes_n,
+                    "clarity": clarity_mode,
+                    "device_scale_factor": DEVICE_SCALE_FACTOR if clarity else 1,
                 }
                 browser.close()
                 return meta
@@ -441,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tab", default="images", help="images|web|maps|flights|ai_overview")
     ap.add_argument("--out", help="Output PNG path")
     ap.add_argument("--engine", default="auto", help="auto|google|bing")
+    ap.add_argument("--no-clarity", action="store_true", help="Disable 2x DPR / detail / murl clarity path")
     ap.add_argument("--demo-nj", action="store_true", help="Capture 3 NJ examples")
     ap.add_argument(
         "--out-dir",
@@ -457,7 +713,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.query or not args.out:
         ap.error("--query and --out required (or use --demo-nj)")
-    meta = capture_serp(args.query, tab=args.tab, out_path=Path(args.out), engine=args.engine)
+    meta = capture_serp(
+        args.query,
+        tab=args.tab,
+        out_path=Path(args.out),
+        engine=args.engine,
+        clarity=not args.no_clarity,
+    )
     print(json.dumps(meta, indent=2))
     return 0 if meta.get("ok") else 1
 
