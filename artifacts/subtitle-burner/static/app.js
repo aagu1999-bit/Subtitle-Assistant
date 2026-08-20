@@ -1636,6 +1636,7 @@ async function _uploadChunked(file, preClean, onProgress, opts) {
       size: file.size,
       pre_clean: !!preClean,
       intent,
+      project_id: (opts && opts.projectId) || "",
     }),
   });
   let initData = null;
@@ -5362,7 +5363,33 @@ let _recapFlashKeys = [];      // "asset:ID" stills sent straight to the opener
 let _recapTraySel = new Set(); // tray selection (keys)
 let _recapTrayAnchor = -1;     // shift-click range anchor
 let _recapShowAssigned = false;
+let _recapShowLibrary = false; // false = only this recap's imports
 let _recapImportRows = [];     // [{name, pct, status, error}]
+
+/** Batch id tagging this recap's imports, so 50 event files don't get lost
+ *  in the shared asset library alongside B-roll and AI photos. Reuses the
+ *  existing asset `project_id` field, which /list-assets already filters on. */
+function _recapBatchId() {
+  let id = "";
+  try { id = localStorage.getItem("recapBatchId") || ""; } catch (e) { id = ""; }
+  if (!/^[a-f0-9]{32}$/.test(id)) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()))
+      .replace(/[^a-f0-9]/g, "").padEnd(32, "0").slice(0, 32);
+    try { localStorage.setItem("recapBatchId", id); } catch (e) { /* ignore */ }
+  }
+  return id;
+}
+
+function _recapNewBatch() {
+  if (!confirm("Start a fresh import batch? Media already imported stays on the server — it just moves out of this tray.")) return;
+  try { localStorage.removeItem("recapBatchId"); } catch (e) { /* ignore */ }
+  _recapBatchId();
+  _recapImportRows = [];
+  _recapTraySel.clear();
+  _recapFlashKeys = [];
+  _recapScenes.forEach((sc) => { sc.sourceKeys = []; });
+  _recapLoadAssets().then(() => { renderRecapImport(); renderRecapScenes(); });
+}
 
 /** Event footage often has no transcript — any job with a video file is fair game. */
 function _jobReadyForRecap(j) {
@@ -5392,11 +5419,14 @@ async function _recapLoadAssets() {
     if (typeof refreshJobsList === "function") {
       try { await refreshJobsList(); } catch (e) { /* best-effort */ }
     }
-    const res = await fetch("/list-assets");
+    const res = await fetch("/list-assets?project_id=" + encodeURIComponent(_recapBatchId()));
     const data = await res.json();
-    _recapAssets = (data.assets || []).filter((a) =>
-      a && (a.kind === "image" || a.kind === "video" || a.kind === "gif")
-    );
+    _recapAssets = (data.assets || []).filter((a) => {
+      if (!a || !(a.kind === "image" || a.kind === "video" || a.kind === "gif")) return false;
+      // Default view is THIS recap's import batch. The whole library is one
+      // toggle away for reusing a logo / photo from earlier work.
+      return _recapShowLibrary ? true : !!a.in_project;
+    });
   } catch (e) {
     _recapAssets = [];
   }
@@ -5501,7 +5531,7 @@ async function recapImportFiles(fileList) {
         await _uploadChunked(file, false, (frac) => {
           row.pct = Math.round(frac * 100);
           renderRecapImport();
-        }, { intent: "recap_asset" });
+        }, { intent: "recap_asset", projectId: _recapBatchId() });
         row.pct = 100;
         row.status = "done";
       } catch (e) {
@@ -5572,8 +5602,28 @@ function renderRecapImport() {
   toggle.style.cssText = "font-size:.72rem;padding:3px 8px";
   toggle.textContent = _recapShowAssigned ? "Hide assigned" : "Show assigned";
   toggle.onclick = () => { _recapShowAssigned = !_recapShowAssigned; renderRecapImport(); };
+  const libBtn = document.createElement("button");
+  libBtn.type = "button";
+  libBtn.className = "btn btn-secondary btn-sm";
+  libBtn.style.cssText = "font-size:.72rem;padding:3px 8px";
+  libBtn.textContent = _recapShowLibrary ? "This recap only" : "Whole library";
+  libBtn.title = "Switch between just this recap's imports and every asset on the server.";
+  libBtn.onclick = async () => {
+    _recapShowLibrary = !_recapShowLibrary;
+    await _recapLoadAssets();
+    renderRecapImport();
+  };
+  const newBatch = document.createElement("button");
+  newBatch.type = "button";
+  newBatch.className = "btn btn-secondary btn-sm";
+  newBatch.style.cssText = "font-size:.72rem;padding:3px 8px";
+  newBatch.textContent = "New recap";
+  newBatch.title = "Clear the tray and scene assignments to start a different event recap.";
+  newBatch.onclick = () => _recapNewBatch();
   head.appendChild(selAll);
   head.appendChild(toggle);
+  head.appendChild(libBtn);
+  head.appendChild(newBatch);
   host.appendChild(head);
 
   if (!shown.length) {

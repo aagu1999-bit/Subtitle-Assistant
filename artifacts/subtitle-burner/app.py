@@ -10283,6 +10283,12 @@ def upload_init():
     dest = _pending_upload_dir(upload_id)
     dest.mkdir(parents=True, exist_ok=True)
     pre_clean = str(data.get("pre_clean") or "").lower() in ("1", "true", "yes")
+    # Batch/project tag: lets a Recap import be scoped to the recap being
+    # built instead of dumping 50 files into the shared asset library next to
+    # every B-roll still and AI photo from other work.
+    batch_id = str(data.get("project_id") or "").strip()
+    if batch_id and not re.fullmatch(r"[a-f0-9]{32}", batch_id):
+        batch_id = ""
     meta = {
         "upload_id": upload_id,
         "filename": filename,
@@ -10290,6 +10296,7 @@ def upload_init():
         "size": size,
         "pre_clean": pre_clean,
         "intent": intent,
+        "project_id": batch_id,
         "chunk_size": UPLOAD_CHUNK_SIZE,
         "created_at": time.time(),
         "received": {},  # index -> bytes written
