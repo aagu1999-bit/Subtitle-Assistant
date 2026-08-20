@@ -11683,9 +11683,9 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
             f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0[sfxall]"
         )
     # Prefer hearing the accent; voice still dominates after amix.
+    filt.append("[sfxall]volume=1.25[sfxboost]")
     filt.append(
-        "[voice][sfxall]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:"
-        "weights=1 1.15[aout]"
+        "[voice][sfxboost]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
     )
     print(f"[sfx] mixing {len(labels)} hits onto {base.name}", flush=True)
     _tl_run(
