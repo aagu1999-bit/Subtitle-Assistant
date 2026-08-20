@@ -878,13 +878,58 @@ function normalizeVideoFile(f) {
   }
 }
 
+/** Does this drop look like recap material rather than one video to caption? */
+function _looksLikeRecapDrop(all) {
+  const images = all.filter((f) => /^image\//.test(f.type || "") ||
+    /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(f.name || ""));
+  const videos = all.filter(isAcceptedVideo);
+  // Any photos at all, or a pile of clips — neither fits "transcribe one video".
+  return images.length > 0 || videos.length >= 4;
+}
+
+/** Hand a drop off to the Recap importer instead of rejecting it. */
+function _divertToRecapImport(all) {
+  try { localStorage.setItem("recapMode", "1"); } catch (e) { /* ignore */ }
+  const empty = document.getElementById("emptyState");
+  const shell = document.getElementById("appShell");
+  const header = document.getElementById("appHeader");
+  if (empty) empty.classList.add("hidden");
+  if (shell) shell.classList.remove("hidden");
+  if (header) header.classList.remove("hidden");
+  setActiveTab("compilation");
+  const panel = document.getElementById("recapReelPanel");
+  if (panel && panel.scrollIntoView) panel.scrollIntoView({ block: "start" });
+  const dt = new DataTransfer();
+  all.forEach((f) => { try { dt.items.add(f); } catch (e) { /* ignore */ } });
+  if (typeof recapImportFiles === "function") recapImportFiles(dt.files);
+}
+
 function handleFiles(files) {
   const all = Array.from(files);
   const videos = all.filter(isAcceptedVideo).map(normalizeVideoFile);
+
+  // Photos and big piles of clips are recap material, not something to
+  // transcribe. Offer the right door instead of an error the user has to
+  // recover from by re-dragging everything.
+  if (_looksLikeRecapDrop(all)) {
+    const images = all.length - videos.length;
+    const ok = confirm(
+      `This looks like recap material — ${all.length} file(s)` +
+      (images > 0 ? `, including ${images} photo(s)` : "") + ".\n\n" +
+      "OK = import them for an event recap (bulk, no transcription).\n" +
+      "Cancel = " + (videos.length
+        ? `transcribe the ${videos.length} video(s) one at a time instead.`
+        : "do nothing (photos can't be transcribed).")
+    );
+    if (ok) { _divertToRecapImport(all); return; }
+    if (!videos.length) return;
+  }
+
   if (!videos.length) {
     const names = all.map(f => f.name).join(", ");
     alert(all.length
-      ? `Can't use ${names}.\n\nSupported formats: ${ACCEPTED_VIDEO_EXT.join(", ")}.`
+      ? `Can't use ${names}.\n\nSupported formats: ${ACCEPTED_VIDEO_EXT.join(", ")}.` +
+        "\n\nBuilding an event recap? Photos and clips go in via Compilation → Recap Reel."
       : "Please select video files.");
     return;
   }
@@ -6268,7 +6313,12 @@ function setActiveTab(tab) {
     editor: "Timeline",
     result: "Result",
   };
-  if (needsTranscript[tab] && !hasReadyTranscript()) {
+  // A recap seeds a real Timeline project out of imported media and never
+  // produces words, so the Timeline tab cannot demand a transcript or the
+  // recap Apply lands the user back on Ingest with their finished cut
+  // invisible behind "Timeline unlocks after Whisper finishes."
+  const exemptFromTranscript = (tab === "editor") && _recapModeActive();
+  if (needsTranscript[tab] && !hasReadyTranscript() && !exemptFromTranscript) {
     const wanted = needsTranscript[tab];
     tab = "ingest";
     const statusEl = $("statusText");

@@ -9227,7 +9227,7 @@ def _recap_resolve_source(raw: dict) -> dict | None:
         if not path:
             return None
         kind = _asset_kind(path.suffix) or "image"
-        dur = _media_duration(path) if kind in ("video", "gif", "audio") else 0.0
+        dur = _asset_duration_cached(aid, path, kind)
         meta = {}
         try:
             mp = _asset_meta_path(aid)
@@ -10476,6 +10476,8 @@ def upload_finish(upload_id: str):
             return jsonify({"error": f"Could not store asset: {e}"}), 500
         kind = _asset_kind(ext) or "image"
         _write_asset_meta(asset_id, filename=filename, source="recap_import")
+        # Probe once here, not on every tray refresh and every Apply.
+        _asset_duration_cached(asset_id, dest_asset, kind)
         project_id = str(meta.get("project_id") or "").strip()
         if project_id and re.fullmatch(r"[a-f0-9]{32}", project_id):
             _write_asset_meta(asset_id, project_id=project_id)
@@ -11605,6 +11607,26 @@ def _asset_kind(ext: str) -> str | None:
 
 def _is_gif_path(path: Path | None) -> bool:
     return bool(path) and path.suffix.lower().lstrip(".") in ASSET_EXT_GIF
+
+
+def _asset_duration_cached(asset_id: str, path: Path, kind: str) -> float:
+    """Duration for an asset, probed once and remembered in its sidecar."""
+    if kind not in ("video", "audio", "gif"):
+        return 0.0
+    meta = _read_asset_meta(asset_id) or {}
+    cached = meta.get("duration")
+    try:
+        if cached is not None and float(cached) > 0:
+            return float(cached)
+    except (TypeError, ValueError):
+        pass
+    dur = float(_media_duration(path) or 0.0)
+    if dur > 0:
+        try:
+            _write_asset_meta(asset_id, duration=round(dur, 3))
+        except Exception:
+            pass
+    return dur
 
 
 def _asset_meta_path(asset_id: str) -> Path:
@@ -13821,7 +13843,7 @@ def list_assets():
             "source": meta.get("source"),
             "project_id": aid_project,
             "in_project": bool(project_id and aid_project == project_id),
-            "duration": _media_duration(p) if kind in ("video", "audio", "gif") else 0.0,
+            "duration": _asset_duration_cached(p.stem, p, kind),
             "mtime": p.stat().st_mtime,
         })
     out.sort(key=lambda a: a["mtime"], reverse=True)
