@@ -4750,6 +4750,24 @@
       html += `<div class="tl-prop-grid">${propRange("x", "Position X", c.x, 0, 1, 0.01)}${propRange("y", "Position Y", c.y, 0, 1, 0.01)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", clipDuration(c), 0.2, 99999, 0.1)}</div>`;
     } else if (t === "music") {
+      // Pick the part of the song that plays, instead of always starting at 0.
+      if (c.asset_id && (c._max || 0) > 0.2) {
+        html += `<div class="tl-prop-row"><label>Which part of the track plays</label></div>`;
+        html += `<div id="tlMusicRegion" data-clip="${c.id}" data-max="${c._max}" ` +
+          `style="position:relative;height:76px;border-radius:8px;overflow:hidden;` +
+          `background:#0f1219 url('/asset-waveform/${c.asset_id}.png') center/100% 100% no-repeat;` +
+          `border:1px solid #2a2f3a;cursor:crosshair;user-select:none;touch-action:none">` +
+          `<div data-mr="dim-l" style="position:absolute;top:0;bottom:0;left:0;background:rgba(8,10,16,.72);pointer-events:none"></div>` +
+          `<div data-mr="dim-r" style="position:absolute;top:0;bottom:0;right:0;background:rgba(8,10,16,.72);pointer-events:none"></div>` +
+          `<div data-mr="band" style="position:absolute;top:0;bottom:0;border-left:2px solid #f59e0b;border-right:2px solid #f59e0b;` +
+          `background:rgba(245,158,11,.14);cursor:grab"></div>` +
+          `<div data-mr="h-in" style="position:absolute;top:0;bottom:0;width:12px;margin-left:-6px;cursor:ew-resize"></div>` +
+          `<div data-mr="h-out" style="position:absolute;top:0;bottom:0;width:12px;margin-left:-6px;cursor:ew-resize"></div>` +
+          `</div>`;
+        html += `<div class="tl-prop-row" style="margin-top:4px"><span data-mr="readout" class="muted" style="font-size:.74rem"></span></div>`;
+        html += `<div class="tl-prop-row"><button class="btn btn-secondary btn-sm" data-act="music-audition" type="button" style="font-size:.74rem">▶ Play selection</button>` +
+          `<button class="btn btn-secondary btn-sm" data-act="music-fit" type="button" style="font-size:.74rem;margin-left:6px" title="Trim the selection to exactly the length of this project">Fit to video</button></div>`;
+      }
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propNum("gain_db", "Volume (dB)", c.gain_db, -40, 10, 1)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       html += propCheck("duck", "Duck under voice (auto-lower during speech)", c.duck);
@@ -5149,6 +5167,149 @@
   function propTextarea(key, label, val) {
     return `<div class="tl-prop-row"><label>${label}</label><textarea data-key="${key}">${esc(val)}</textarea></div>`;
   }
+  /** Draggable in/out region over a track's waveform. */
+  function wireMusicRegion(wrap, region) {
+    const clip = findClip("music", region.dataset.clip);
+    if (!clip) return;
+    const max = parseFloat(region.dataset.max) || 0;
+    if (max <= 0) return;
+    const band = region.querySelector('[data-mr="band"]');
+    const dimL = region.querySelector('[data-mr="dim-l"]');
+    const dimR = region.querySelector('[data-mr="dim-r"]');
+    const hIn = region.querySelector('[data-mr="h-in"]');
+    const hOut = region.querySelector('[data-mr="h-out"]');
+    const readout = wrap.querySelector('[data-mr="readout"]');
+    let audio = null;
+
+    const projectDur = () => {
+      try { return totalDuration(); } catch (e) { return 0; }
+    };
+    const fmt = (v) => {
+      const m = Math.floor(v / 60), sec = v - m * 60;
+      return m ? `${m}:${sec.toFixed(1).padStart(4, "0")}` : `${sec.toFixed(1)}s`;
+    };
+    const paint = () => {
+      const a = Math.max(0, Math.min(max, clip.in || 0));
+      const b = Math.max(a + 0.05, Math.min(max, clip.out || max));
+      const l = (a / max) * 100, r = (b / max) * 100;
+      band.style.left = l + "%";
+      band.style.width = (r - l) + "%";
+      dimL.style.width = l + "%";
+      dimR.style.width = (100 - r) + "%";
+      hIn.style.left = l + "%";
+      hOut.style.left = r + "%";
+      if (readout) {
+        const len = b - a;
+        const proj = projectDur();
+        let verdict = "";
+        if (proj > 0.2) {
+          const diff = len - proj;
+          verdict = Math.abs(diff) < 0.25
+            ? ` — matches your ${fmt(proj)} video`
+            : (diff > 0
+              ? ` — ${fmt(diff)} longer than your ${fmt(proj)} video (it will cut off)`
+              : ` — ${fmt(-diff)} shorter than your ${fmt(proj)} video (silence at the end)`);
+        }
+        readout.innerHTML = `Playing <strong style="color:#fbbf24">${fmt(a)} → ${fmt(b)}</strong> ` +
+          `of ${fmt(max)}${verdict}`;
+      }
+    };
+    const syncFields = () => {
+      const inEl = wrap.querySelector('input[data-key="in"]');
+      const outEl = wrap.querySelector('input[data-key="out"]');
+      if (inEl) inEl.value = (clip.in || 0).toFixed(2);
+      if (outEl) outEl.value = (clip.out || max).toFixed(2);
+    };
+    const posToTime = (ev) => {
+      const r = region.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width)));
+      return frac * max;
+    };
+
+    let mode = null, grabOffset = 0;
+    const onDown = (ev) => {
+      const t = posToTime(ev);
+      const a = clip.in || 0, b = clip.out || max;
+      if (ev.target === hIn) mode = "in";
+      else if (ev.target === hOut) mode = "out";
+      else if (ev.target === band) { mode = "move"; grabOffset = t - a; }
+      else {
+        // Click anywhere else: move the window to start there, same length.
+        const len = b - a;
+        clip.in = Math.max(0, Math.min(max - len, t));
+        clip.out = clip.in + len;
+        mode = "move";
+        grabOffset = t - clip.in;
+      }
+      region.setPointerCapture && region.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+      paint();
+    };
+    const onMove = (ev) => {
+      if (!mode) return;
+      const t = posToTime(ev);
+      if (mode === "in") clip.in = Math.max(0, Math.min((clip.out || max) - 0.2, t));
+      else if (mode === "out") clip.out = Math.min(max, Math.max((clip.in || 0) + 0.2, t));
+      else {
+        const len = (clip.out || max) - (clip.in || 0);
+        clip.in = Math.max(0, Math.min(max - len, t - grabOffset));
+        clip.out = clip.in + len;
+      }
+      paint();
+    };
+    const onUp = () => {
+      if (!mode) return;
+      mode = null;
+      clip.in = Math.round((clip.in || 0) * 100) / 100;
+      clip.out = Math.round((clip.out || max) * 100) / 100;
+      syncFields();
+      renderTimeline();
+      scheduleSave();
+    };
+    region.addEventListener("pointerdown", onDown);
+    region.addEventListener("pointermove", onMove);
+    region.addEventListener("pointerup", onUp);
+    region.addEventListener("pointercancel", onUp);
+
+    const audition = wrap.querySelector('[data-act="music-audition"]');
+    if (audition) audition.onclick = () => {
+      if (audio && !audio.paused) {
+        audio.pause(); audio = null;
+        audition.textContent = "▶ Play selection";
+        return;
+      }
+      audio = new Audio("/asset/" + clip.asset_id);
+      audio.currentTime = clip.in || 0;
+      audio.volume = Math.max(0, Math.min(1, Math.pow(10, ((clip.gain_db != null ? clip.gain_db : -12)) / 20)));
+      audio.play().catch(() => {});
+      audition.textContent = "⏹ Stop";
+      const stopAt = clip.out || max;
+      const tick = () => {
+        if (!audio) return;
+        if (audio.currentTime >= stopAt) {
+          audio.pause(); audio = null;
+          audition.textContent = "▶ Play selection";
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    };
+
+    const fit = wrap.querySelector('[data-act="music-fit"]');
+    if (fit) fit.onclick = () => {
+      const proj = projectDur();
+      if (proj <= 0.2) { alert("Add clips to the Main track first."); return; }
+      clip.out = Math.min(max, (clip.in || 0) + proj);
+      if (clip.out - (clip.in || 0) < proj - 0.05) {
+        clip.in = Math.max(0, clip.out - proj);
+      }
+      paint(); syncFields(); renderTimeline(); scheduleSave();
+    };
+
+    paint();
+  }
+
   function propNum(key, label, val, min, max, step) {
     return `<div class="tl-prop-row"><label>${label}</label><input type="number" data-key="${key}" value="${val}" min="${min}" max="${max}" step="${step || 1}"></div>`;
   }
@@ -5173,6 +5334,13 @@
   }
 
   function wireProps(wrap, track, c) {
+    // Music clips get the draggable waveform region. This must live here and
+    // not in renderProjectProps — that panel only renders when NO clip is
+    // selected, so the wiring never fired for the clip you just clicked.
+    if (track === "music") {
+      const region = wrap.querySelector("#tlMusicRegion");
+      if (region) wireMusicRegion(wrap, region);
+    }
     wrap.querySelectorAll("[data-key]").forEach((inp) => {
       const key = inp.dataset.key;
       let histPushed = false;

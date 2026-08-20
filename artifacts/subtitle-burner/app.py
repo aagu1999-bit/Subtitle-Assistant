@@ -14013,6 +14013,11 @@ def _ensure_asset_thumb(asset_id: str) -> Path | None:
     except OSError:
         return None
     kind = _asset_kind(src.suffix) or "image"
+    if kind == "audio":
+        # No frame to grab. Audio shows as a waveform (/asset-waveform) and
+        # never appears in the picture tray, so skip the doomed ffmpeg call
+        # that was firing once per imported song.
+        return None
     if kind in ("video", "gif"):
         dur = _media_duration(src) or 0.0
         seek = 1.0 if dur > 2.0 else 0.0
