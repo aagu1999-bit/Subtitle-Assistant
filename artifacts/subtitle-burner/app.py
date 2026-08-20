@@ -9171,8 +9171,11 @@ def archive_compilation(job_id: str):
 
 # ---- Recap Reel template (event / space montages) ----
 
-_RECAP_MAX_VIDEOS = 5
 _RECAP_MAX_SCENES = 5
+# Bump when the shutter bed recipe changes (volume, spacing, one-shot) so
+# cached beds are rebuilt instead of serving the old, quieter WAV. The
+# one-shots stamp their filename (`shutter_v3.wav`); beds stamp the cache key.
+_RECAP_SHUTTER_BED_GEN = 1
 
 
 def _recap_uid() -> str:
@@ -9242,6 +9245,11 @@ def _recap_resolve_source(raw: dict) -> dict | None:
     return None
 
 
+def _recap_source_key(s: dict) -> str:
+    """Stable identity for a scene source (transcribed job or bulk-imported asset)."""
+    return str(s.get("job_id") or s.get("asset_id") or s.get("label") or "?")
+
+
 def _recap_even_beats_for_scene(
     sources: list[dict],
     target_sec: float,
@@ -9249,12 +9257,20 @@ def _recap_even_beats_for_scene(
     scene_name: str,
     scene_id: str,
 ) -> tuple[list[dict], list[str]]:
-    """Fill *target_sec* with *hang_sec* cuts, sampling sources evenly + interleaved.
+    """Fill *target_sec* with *hang_sec* cuts, giving every source an equal share.
 
     Hang controls on-screen time per cut (not scene length). Scene length only
-    sets how many cuts. Long videos get windows spaced across the full duration
-    (start → middle → end). Multiple sources are round-robin interleaved so the
+    sets how many cuts there are: n = target / hang.
+
+    Beats are split EVENLY across sources — not weighted by duration — so a
+    long video cannot swallow a scene that also contains short clips. Each
+    source's beats are sampled on an even lattice across its full span
+    (start -> middle -> end), and sources are round-robin interleaved so the
     scene passes around instead of dumping one file at a time.
+
+    When a scene holds more sources than it has beats, the surplus sources
+    simply do not appear. That is intentional: an even spread of some footage
+    beats an uneven spread of all of it. The caller surfaces the count.
     """
     warnings: list[str] = []
     hang_sec = max(0.45, min(4.0, float(hang_sec)))
@@ -9262,45 +9278,54 @@ def _recap_even_beats_for_scene(
     n = max(1, int(round(target_sec / hang_sec)))
     actual_hang = target_sec / n
 
+    # Videos may be transcribed jobs OR bulk-imported assets — both carry a
+    # duration and a path, and both are valid scene footage.
     videos = [s for s in sources if s.get("kind") == "video" and s.get("duration", 0) > 0.4]
-    images = [s for s in sources if s.get("kind") == "image"]
+    # GIFs behave like stills here (held for one beat), not like footage.
+    images = [s for s in sources if s.get("kind") in ("image", "gif")]
+    usable = videos + images
     clips: list[dict] = []
 
-    if not videos and not images:
-        warnings.append(f"Scene “{scene_name}”: no usable video/photo sources.")
+    if not usable:
+        warnings.append(f"Scene \u201c{scene_name}\u201d: no usable video/photo sources.")
         return clips, warnings
 
-    # Weighted pool: video weight = duration; each photo ≈ one hang slot.
-    weighted: list[tuple[dict, float]] = []
-    for s in videos:
-        weighted.append((s, max(0.5, float(s["duration"]))))
-    for s in images:
-        weighted.append((s, max(actual_hang, 1.0)))
-    total_w = sum(w for _, w in weighted) or 1.0
-    available = sum(float(s["duration"]) for s in videos)
-    if videos and available + 0.05 < target_sec:
+    # ---- Equal share: every source gets the same beat count (+1 to the
+    # first `rem` so the remainder is distributed rather than lost). Sources
+    # past the beat count get zero and are reported, not silently dropped.
+    per, rem = divmod(n, len(usable))
+    alloc = [per + (1 if i < rem else 0) for i in range(len(usable))]
+    unused = sum(1 for a in alloc if a == 0)
+    if unused:
         warnings.append(
-            f"Scene “{scene_name}”: only ~{available:.1f}s of video for a "
-            f"{target_sec:.0f}s budget — beats will reuse / compress coverage."
+            f"Scene \u201c{scene_name}\u201d: {len(usable)} sources but only {n} beats \u2014 "
+            f"{unused} won\u2019t appear. Lower Hang or raise the scene length to fit more."
         )
 
-    remaining = n
-    alloc: list[int] = []
-    for i, (_s, w) in enumerate(weighted):
-        if i == len(weighted) - 1:
-            alloc.append(max(1, remaining))
-        else:
-            share = max(1, int(round(n * w / total_w)))
-            share = min(share, max(1, remaining - (len(weighted) - i - 1)))
-            alloc.append(share)
-            remaining -= share
+    available = sum(float(s["duration"]) for s in videos)
+    if videos and not images and available + 0.05 < target_sec:
+        warnings.append(
+            f"Scene \u201c{scene_name}\u201d: only ~{available:.1f}s of video for a "
+            f"{target_sec:.0f}s budget \u2014 beats will reuse / compress coverage."
+        )
 
     # Precompute evenly spaced sample windows across EACH source's full span.
     queues: list[list[dict]] = []
-    for (s, _w), count in zip(weighted, alloc):
+    for src, count in zip(usable, alloc):
         q: list[dict] = []
-        if s.get("kind") == "video":
-            dur = float(s["duration"])
+        if count <= 0:
+            queues.append(q)
+            continue
+        base = {
+            "burn_captions": False,
+            "theme": scene_name,
+            "arc_role": "scene",
+            "source_label": src.get("label") or scene_name,
+            "scene_id": scene_id,
+            "source_key": _recap_source_key(src),
+        }
+        if src.get("kind") == "video":
+            dur = float(src["duration"])
             # Usable start range so every window fits hang inside the clip.
             span = max(0.0, dur - actual_hang)
             for i in range(count):
@@ -9313,36 +9338,31 @@ def _recap_even_beats_for_scene(
                 if t1 - t0 < 0.35:
                     t0 = max(0.0, dur - actual_hang)
                     t1 = dur
-                q.append({
-                    "id": _recap_uid(),
-                    "source_job_id": s["job_id"],
-                    "in": round(t0, 3),
-                    "out": round(t1, 3),
-                    "burn_captions": False,
-                    "theme": scene_name,
-                    "arc_role": "scene",
-                    "source_label": s.get("label") or scene_name,
-                    "scene_id": scene_id,
-                })
+                clip = dict(base)
+                clip.update({"id": _recap_uid(), "in": round(t0, 3), "out": round(t1, 3)})
+                # Bulk-imported footage has no transcription job behind it.
+                if src.get("job_id"):
+                    clip["source_job_id"] = src["job_id"]
+                else:
+                    clip["asset_id"] = src["asset_id"]
+                    clip["_max"] = round(dur, 3)
+                q.append(clip)
         else:
             for _i in range(count):
-                q.append({
+                clip = dict(base)
+                clip.update({
                     "id": _recap_uid(),
-                    "asset_id": s["asset_id"],
+                    "asset_id": src["asset_id"],
                     "in": 0,
                     "out": round(actual_hang, 3),
                     "_max": round(actual_hang, 3),
-                    "burn_captions": False,
                     "cutaway": True,
-                    "theme": scene_name,
-                    "arc_role": "scene",
-                    "source_label": s.get("label") or scene_name,
-                    "scene_id": scene_id,
                     "ken_burns": None,
                 })
+                q.append(clip)
         queues.append(q)
 
-    # Round-robin interleave so variety passes around sources (A→B→C→A…).
+    # Round-robin interleave so variety passes around sources (A->B->C->A...).
     pointers = [0] * len(queues)
     while len(clips) < n:
         progressed = False
@@ -9360,24 +9380,24 @@ def _recap_even_beats_for_scene(
     return clips, warnings
 
 
-def _ensure_camera_snap_wav() -> Path | None:
+def _ensure_camera_shutter_wav() -> Path | None:
     """CapCut-style mechanical shutter one-shot (cached under CACHE_DIR/sfx)."""
     assets = _ensure_ui_sfx_assets()
-    return assets.get("snap")
+    return assets.get("shutter")
 
 
-def _recap_build_snap_bed(count: int, beat: float) -> str | None:
-    """Build/reuse one Music-track WAV with shutter clicks at each still onset.
+def _recap_build_shutter_bed(count: int, beat: float) -> str | None:
+    """Build/reuse one Music-track WAV with a shutter click at each still onset.
 
     Returns asset_id for Timeline preview + Render (single music clip).
     """
-    snap = _ensure_camera_snap_wav()
-    if not snap or not snap.exists():
+    shutter = _ensure_camera_shutter_wav()
+    if not shutter or not shutter.exists():
         return None
     count = max(1, min(30, int(count)))
     beat = max(0.05, float(beat))
     dur = count * beat
-    cache_key = f"recap_snap_bed_{count}_{int(round(beat * 1000))}"
+    cache_key = f"recap_shutter_bed_v{_RECAP_SHUTTER_BED_GEN}_{count}_{int(round(beat * 1000))}"
     # Asset paths require a 32-char hex id — hash the stable cache key.
     asset_id = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
     dest = ASSET_DIR / f"{asset_id}.wav"
@@ -9387,7 +9407,7 @@ def _recap_build_snap_bed(count: int, beat: float) -> str | None:
         ASSET_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-    # Layer delayed snaps onto a silent bed of flash duration.
+    # Layer delayed shutter clicks onto a silent bed of flash duration.
     inputs: list[str] = [
         "-f", "lavfi", "-t", f"{dur:.3f}",
         "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
@@ -9398,7 +9418,7 @@ def _recap_build_snap_bed(count: int, beat: float) -> str | None:
     # Cap layers so FFmpeg stays happy; every still still gets a click when ≤24.
     step = 1 if count <= 24 else 2
     for i in range(0, count, step):
-        inputs += ["-i", str(snap)]
+        inputs += ["-i", str(shutter)]
         delay = int(round(i * beat * 1000))
         filt_parts.append(
             f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
@@ -9412,14 +9432,14 @@ def _recap_build_snap_bed(count: int, beat: float) -> str | None:
         f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.01[bed]"
     )
     if len(labels) == 1:
-        filt_parts.append(f"{labels[0]}anull[snaps]")
+        filt_parts.append(f"{labels[0]}anull[clicks]")
     else:
         filt_parts.append(
             f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:"
-            f"dropout_transition=0[snaps]"
+            f"dropout_transition=0[clicks]"
         )
     filt_parts.append(
-        "[bed][snaps]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "[bed][clicks]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
         "volume=1.15[aout]"
     )
     cmd = [
@@ -9430,13 +9450,13 @@ def _recap_build_snap_bed(count: int, beat: float) -> str | None:
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 200:
-        print(f"[recap] snap bed failed: {(proc.stderr or '')[-240:]}", flush=True)
+        print(f"[recap] shutter bed failed: {(proc.stderr or '')[-240:]}", flush=True)
         _safe_unlink(dest)
         return None
     _write_asset_meta(
         asset_id,
-        filename="camera_snap_bed.wav",
-        source="recap_snap",
+        filename="camera_shutter_bed.wav",
+        source="recap_shutter",
         kind="audio",
         cache_key=cache_key,
     )
@@ -9447,7 +9467,7 @@ def _recap_build_photo_flash(
     flash: dict,
     scene_sources: list[dict],
 ) -> tuple[list[dict], list[dict], list[str]]:
-    """Rapid stills for the open (cutaways). Optionally pull frames + snap bed."""
+    """Rapid stills for the open (cutaways). Optionally pull frames + shutter bed."""
     warnings: list[str] = []
     music: list[dict] = []
     if not flash or not flash.get("enabled"):
@@ -9463,14 +9483,35 @@ def _recap_build_photo_flash(
         count = 12
     count = max(8, min(30, count))
     include_stills = flash.get("include_video_stills") is not False
-    snap_on = flash.get("snap_sfx") is not False
+    # `shutter_sfx` is the current key; `snap_sfx` is the pre-rename alias kept
+    # so recap projects saved before the rename keep their setting.
+    if flash.get("shutter_sfx") is not None:
+        shutter_on = flash.get("shutter_sfx") is not False
+    else:
+        shutter_on = flash.get("snap_sfx") is not False
     beat = dur / count
 
     pool: list[dict] = []
-    # User-uploaded images first
-    for s in scene_sources:
-        if s.get("kind") == "image" and s.get("asset_id"):
-            pool.append({"asset_id": s["asset_id"], "label": s.get("label") or "photo"})
+    seen_assets: set[str] = set()
+
+    def _add_still(src: dict) -> None:
+        aid = src.get("asset_id")
+        if not aid or aid in seen_assets:
+            return
+        seen_assets.add(aid)
+        pool.append({"asset_id": aid, "label": src.get("label") or "photo"})
+
+    # Stills assigned directly to the flash win — this is the dedicated pool
+    # the Recap Import tray feeds ("send these photos to the opener").
+    for raw in (flash.get("sources") or []):
+        resolved = _recap_resolve_source(raw)
+        if resolved and resolved.get("kind") in ("image", "gif"):
+            _add_still(resolved)
+    # Then any photos the user put in scenes, so the old behaviour still holds
+    # for recaps built before the flash had its own pool.
+    for src in scene_sources:
+        if src.get("kind") in ("image", "gif"):
+            _add_still(src)
 
     if include_stills:
         videos = [s for s in scene_sources if s.get("kind") == "video" and s.get("path")]
@@ -9525,28 +9566,27 @@ def _recap_build_photo_flash(
             "cutaway": True,
             "theme": "Photo Flash",
             "arc_role": "flash",
-            "sfx": "snap" if snap_on else None,
             "source_label": src.get("label") or "flash",
             "ken_burns": None,
         })
 
-    if snap_on:
-        snap_aid = _recap_build_snap_bed(count, beat)
-        if snap_aid:
+    if shutter_on:
+        shutter_aid = _recap_build_shutter_bed(count, beat)
+        if shutter_aid:
             music.append({
                 "id": _recap_uid(),
-                "asset_id": snap_aid,
+                "asset_id": shutter_aid,
                 "in": 0,
                 "out": round(dur, 3),
                 "_max": round(dur, 3),
                 "start": 0,
                 "gain_db": -2,
                 "duck": False,
-                "label": "Camera snap",
-                "source": "recap_snap",
+                "label": "Camera shutter",
+                "source": "recap_shutter",
             })
         else:
-            warnings.append("Camera snap sound could not be generated — stills still apply.")
+            warnings.append("Camera shutter sound could not be generated — stills still apply.")
 
     return clips, music, warnings
 
@@ -9595,26 +9635,21 @@ def build_recap_reel_plan(payload: dict) -> dict:
             s = _recap_resolve_source(r)
             if not s:
                 continue
-            if s.get("job_id"):
-                if s["job_id"] not in video_ids:
-                    if len(video_ids) >= _RECAP_MAX_VIDEOS:
-                        warnings.append(
-                            f"Max {_RECAP_MAX_VIDEOS} videos in context — "
-                            f"skipped {s.get('label')}"
-                        )
-                        continue
-                    video_ids.append(s["job_id"])
-                resolved.append(s)
-                all_resolved.append(s)
-            else:
-                resolved.append(s)
-                all_resolved.append(s)
+            # No cap on how many videos a recap may pull from. The render
+            # encodes one segment per beat and concat-demuxes them, so cost
+            # scales with beat count (which target_sec / hang_sec bounds),
+            # not with how many distinct sources you brought.
+            if s.get("job_id") and s["job_id"] not in video_ids:
+                video_ids.append(s["job_id"])
+            resolved.append(s)
+            all_resolved.append(s)
         if not resolved:
             warnings.append(f"Scene “{name}”: no resolvable media.")
             continue
         beats, w = _recap_even_beats_for_scene(resolved, target, hang_sec, name, sid)
         warnings.extend(w)
         main_clips.extend(beats)
+        used_keys = {c.get("source_key") for c in beats if c.get("source_key")}
         scene_summaries.append({
             "id": sid,
             "name": name,
@@ -9622,6 +9657,10 @@ def build_recap_reel_plan(payload: dict) -> dict:
             "hang_sec": round(hang_sec, 2),
             "beat_count": len(beats),
             "source_count": len(resolved),
+            "used_source_count": len(used_keys),
+            "beats_per_source": (
+                round(len(beats) / len(used_keys), 2) if used_keys else 0
+            ),
         })
 
     flash_clips, flash_music, fw = _recap_build_photo_flash(flash_cfg, all_resolved)
@@ -9666,7 +9705,14 @@ def build_recap_reel_plan(payload: dict) -> dict:
             "hang_sec": hang_sec,
             "beat_sec": hang_sec,
             "video_count": len(video_ids),
-            "snap_sfx": bool(flash_cfg.get("enabled") and flash_cfg.get("snap_sfx") is not False),
+            "shutter_sfx": bool(
+            flash_cfg.get("enabled")
+            and (
+                flash_cfg.get("shutter_sfx") is not False
+                if flash_cfg.get("shutter_sfx") is not None
+                else flash_cfg.get("snap_sfx") is not False
+            )
+        ),
         },
     }
 
@@ -9694,11 +9740,18 @@ def recap_reel_plan():
     Body: {
       label?, canvas?, hang_sec?: 0.5-4.0 (alias: beat_sec),
       photo_flash?: { enabled, duration_sec 2-5, count 8-30,
-                      include_video_stills, snap_sfx },
+                      include_video_stills, shutter_sfx,
+                      sources?: [{asset_id}] },
       scenes: [{ id?, name, target_sec, sources: [{job_id}|{asset_id}] }]
     }
-    Max 5 scenes, max 5 unique videos in context.
+    Max 5 scenes. No cap on sources — a scene may pull from as many videos
+    and photos as you assign to it; beats are split evenly between them and
+    any surplus sources simply do not appear (reported in `warnings`).
+
     Hang = on-screen time per cut; scene target_sec = total section length.
+    `photo_flash.sources` is the opener's own stills pool; scene photos are
+    used as a fallback when it is empty. `shutter_sfx` toggles the camera
+    shutter bed over the opener (alias: `snap_sfx`, pre-rename).
     """
     data = request.get_json(force=True) or {}
     try:
@@ -10181,15 +10234,33 @@ def favicon():
 def upload_init():
     """Start a chunked ingest session (resumable; survives proxy timeouts).
 
-    JSON body: {filename, size, pre_clean?}
+    JSON body: {filename, size, pre_clean?, intent?}
     Returns: {upload_id, chunk_size, received[]}
+
+    `intent` picks what the finished upload becomes:
+      "transcribe"   (default) -> a transcription job, as always
+      "recap_asset"  -> a timeline asset (photo or video), NO transcription.
+                        This is the bulk-import route for template / recap
+                        work, where 50 files should land as usable media
+                        without paying for Whisper on any of them.
     """
     _prune_stale_pending_uploads()
     data = request.get_json(silent=True) or {}
+    intent = str(data.get("intent") or "transcribe").strip().lower()
+    if intent not in ("transcribe", "recap_asset"):
+        return jsonify({"error": f"Unknown intent: {intent}"}), 400
     filename = str(data.get("filename") or "").strip()
-    if not filename or not allowed_file(filename):
+    ext_ok = (
+        bool(_asset_kind(filename.rsplit(".", 1)[-1])) if ("." in filename and intent == "recap_asset")
+        else allowed_file(filename)
+    )
+    if not filename or not ext_ok:
+        allowed = (
+            sorted(ASSET_EXT_VIDEO | ASSET_EXT_IMAGE) if intent == "recap_asset"
+            else sorted(ALLOWED_EXT)
+        )
         return jsonify({
-            "error": f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXT))}",
+            "error": f"Unsupported file type. Allowed: {', '.join(allowed)}",
         }), 400
     try:
         size = int(data.get("size") or 0)
@@ -10218,6 +10289,7 @@ def upload_init():
         "ext": ext,
         "size": size,
         "pre_clean": pre_clean,
+        "intent": intent,
         "chunk_size": UPLOAD_CHUNK_SIZE,
         "created_at": time.time(),
         "received": {},  # index -> bytes written
@@ -10356,7 +10428,11 @@ def upload_finish(upload_id: str):
         }), 400
 
     ext = str(meta.get("ext") or "mp4").lower()
-    if ext not in ALLOWED_EXT:
+    intent = str(meta.get("intent") or "transcribe").lower()
+    if intent == "recap_asset":
+        if not _asset_kind(ext):
+            return jsonify({"error": "Unsupported extension"}), 400
+    elif ext not in ALLOWED_EXT:
         return jsonify({"error": "Unsupported extension"}), 400
     job_id = uuid.uuid4().hex
     video_path = UPLOAD_DIR / f"{job_id}.{ext}"
@@ -10378,6 +10454,40 @@ def upload_finish(upload_id: str):
 
     filename = str(meta.get("filename") or f"upload.{ext}")
     pre_clean = bool(meta.get("pre_clean"))
+
+    if intent == "recap_asset":
+        # Bulk template import: land it as a timeline asset, skip Whisper
+        # entirely. The chunked/resumable path above is what makes this
+        # viable for 50 large files; /upload-asset is single-shot.
+        asset_id = uuid.uuid4().hex
+        dest_asset = ASSET_DIR / f"{asset_id}.{ext}"
+        try:
+            ASSET_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(video_path), str(dest_asset))
+        except OSError as e:
+            _safe_unlink(video_path)
+            return jsonify({"error": f"Could not store asset: {e}"}), 500
+        kind = _asset_kind(ext) or "image"
+        _write_asset_meta(asset_id, filename=filename, source="recap_import")
+        project_id = str(meta.get("project_id") or "").strip()
+        if project_id and re.fullmatch(r"[a-f0-9]{32}", project_id):
+            _write_asset_meta(asset_id, project_id=project_id)
+        # Build the tray thumbnail now, while the file is hot in page cache
+        # and the user is still watching the upload list — not on scroll.
+        threading.Thread(
+            target=_ensure_asset_thumb, args=(asset_id,), daemon=True
+        ).start()
+        print(f"[upload] finish {upload_id} -> asset {asset_id} ({kind})", flush=True)
+        return jsonify({
+            "asset_id": asset_id,
+            "kind": kind,
+            "filename": filename,
+            "duration": _media_duration(dest_asset) if kind in ("video", "audio", "gif") else 0.0,
+            "thumb_url": f"/asset-thumb/{asset_id}",
+            "chunked": True,
+            "intent": intent,
+        })
+
     try:
         job_id, payload = _start_transcribe_job(
             video_path, filename, pre_clean=pre_clean,
@@ -12330,7 +12440,7 @@ def _ensure_ui_sfx_assets() -> dict[str, Path]:
         ),
         # CapCut-ish mechanical shutter: bright click + brief noise burst
         (
-            "snap",
+            "shutter",
             [
                 "-f", "lavfi", "-i", "sine=frequency=1950:duration=0.032",
                 "-f", "lavfi", "-i", "anoisesrc=d=0.085:color=white:sample_rate=44100",
@@ -12567,20 +12677,30 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
 
     duration = _tl_require_video(base, "Music mix")
 
+    # Decide ducking BEFORE building the head of the graph. `asplit` must only
+    # be emitted when something actually consumes [key] — ffmpeg fails the whole
+    # filtergraph with "Filter 'asplit' has output 0 (key) unconnected" if the
+    # sidechain branch is never wired up. Every clip having duck=False (the
+    # recap shutter bed, for one) used to take this path and lose the entire
+    # music mix, silently, because the render pass catches and continues.
+    duck = any(m.get("duck", True) for m, _ in resolved)
+
     inputs: list[str] = ["-i", str(base)]
+    _fmt = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
     if _tl_input_has_audio(base):
-        filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
-        next_i = 1
+        src_label, next_i = "[0:a]", 1
     else:
         inputs += [
             "-f", "lavfi", "-t", f"{duration:.3f}",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         ]
-        filt = ["[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
-        next_i = 2
+        src_label, next_i = "[1:a]", 2
+    if duck:
+        filt = [f"{src_label}{_fmt},asplit=2[voice][key]"]
+    else:
+        filt = [f"{src_label}{_fmt}[voice]"]
 
     music_labels = []
-    duck = False
     for m, path in resolved:
         inputs += ["-i", str(path)]
         m_in = max(0.0, float(m.get("in", 0)))
@@ -12600,8 +12720,6 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
         # Floor so music is actually audible under speech.
         gain = max(-24.0, min(0.0, gain))
         delay = int(start * 1000)
-        if m.get("duck", True):
-            duck = True
         filt.append(
             f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
             f"channel_layouts=stereo,"
@@ -13743,6 +13861,57 @@ def rename_asset(asset_id: str):
         return jsonify({"error": "Filename cannot be empty"}), 400
     _write_asset_meta(asset_id, filename=new_name)
     return jsonify({"asset_id": asset_id, "filename": new_name})
+
+
+def _asset_thumb_path(asset_id: str) -> Path:
+    return CACHE_DIR / "asset_thumbs" / f"{asset_id}.jpg"
+
+
+def _ensure_asset_thumb(asset_id: str) -> Path | None:
+    """Build (once) a 320px JPEG thumbnail for the Recap Import tray.
+
+    Video: one frame ~1s in. Image: a downscale. Measured at ~0.8s for a 3 GB
+    20-minute source, so this runs at upload-finish while the file is still
+    hot rather than making the tray stutter on scroll.
+    """
+    src = _find_asset_path(asset_id)
+    if not src:
+        return None
+    dest = _asset_thumb_path(asset_id)
+    try:
+        if dest.exists() and dest.stat().st_size > 64:
+            return dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    kind = _asset_kind(src.suffix) or "image"
+    if kind in ("video", "gif"):
+        dur = _media_duration(src) or 0.0
+        seek = 1.0 if dur > 2.0 else 0.0
+        cmd = [FFMPEG, "-y", "-ss", f"{seek:.2f}", "-i", str(src),
+               "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(dest)]
+    else:
+        cmd = [FFMPEG, "-y", "-i", str(src),
+               "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(dest)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dest.exists() or dest.stat().st_size < 64:
+        print(f"[asset] thumb failed {asset_id}: {(proc.stderr or '')[-160:]}", flush=True)
+        _safe_unlink(dest)
+        return None
+    return dest
+
+
+@app.route("/asset-thumb/<asset_id>")
+def serve_asset_thumb(asset_id: str):
+    """320px tray thumbnail. Built on demand if the upload-time build missed."""
+    if not re.fullmatch(r"[a-f0-9]{32}", asset_id or ""):
+        return jsonify({"error": "Bad asset id"}), 400
+    thumb = _ensure_asset_thumb(asset_id)
+    if not thumb:
+        return jsonify({"error": "No thumbnail"}), 404
+    resp = send_from_directory(thumb.parent, thumb.name)
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
 
 
 @app.route("/asset/<asset_id>")

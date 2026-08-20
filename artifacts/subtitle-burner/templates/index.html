@@ -1232,11 +1232,13 @@
   <section id="recapReelPanel" class="panel" style="margin-top:0;border-color:#f59e0b">
     <h2>🏙 Recap Reel <span class="muted" style="font-size:.78rem;font-weight:normal">(event / space montage)</span></h2>
     <p class="muted panel-desc">
-      Up to <strong>5 videos</strong> in context. Tag media into <strong>scenes</strong>, set each scene’s
-      <strong>total length</strong>, and set <strong>Hang</strong> for how long each cut stays on screen
-      (scene length ÷ hang ≈ number of cuts). Long sources are sampled evenly — start, middle, and end —
-      and passed around between videos. Optional <strong>Photo Flash</strong> cold-open with CapCut-style
-      camera snaps (8–30 stills in 2–5s).
+      Assign <strong>as many videos and photos as you like</strong> into <strong>scenes</strong>, set each
+      scene’s <strong>total length</strong>, and set <strong>Hang</strong> for how long each cut stays on
+      screen (scene length ÷ hang = number of cuts). Beats are split <strong>evenly between every source
+      in a scene</strong>, so one long video can’t swallow it; each source is sampled across its full span
+      — start, middle, and end. If a scene holds more sources than it has beats, the surplus simply
+      doesn’t appear and the scene card tells you so. Optional <strong>Photo Flash</strong> cold-open
+      (8–30 stills in 2–5s) with a CapCut-style <strong>camera shutter</strong> sound.
     </p>
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <input type="text" id="recapLabel" placeholder="Recap name (optional)" maxlength="80"
@@ -1261,7 +1263,17 @@
       </label>
       <button type="button" id="recapRefreshMediaBtn" class="btn btn-secondary">↻ Refresh media</button>
     </div>
-    <div id="recapMediaPool" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;max-height:120px;overflow:auto"></div>
+    <div id="recapImport" style="margin-bottom:12px;padding:10px 12px;background:#0f1219;border:1px solid #2a2f3a;border-radius:10px">
+      <div id="recapDropZone" tabindex="0" role="button"
+        style="padding:16px;border:2px dashed #2a2f3a;border-radius:10px;background:#12151f;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
+        <div style="font-size:.92rem;color:#e8eaee;font-weight:600">⬆ Drop photos &amp; videos here</div>
+        <div class="muted" style="font-size:.76rem;margin-top:3px">
+          or click to browse · imports in bulk, <strong>no transcription</strong> · resumable for large files
+        </div>
+      </div>
+      <input type="file" id="recapFilePicker" multiple accept="video/*,image/*" style="display:none">
+      <div id="recapImportBody" style="margin-top:10px"></div>
+    </div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap">
       <strong style="font-size:.88rem;color:#fbbf24">Scenes</strong>
       <button type="button" id="recapAddSceneBtn" class="btn btn-secondary btn-sm">+ Add scene</button>
@@ -1284,8 +1296,9 @@
         <label style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#94a3b8">
           <input type="checkbox" id="recapFlashVideoStills" checked> Include stills from videos
         </label>
-        <label style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#fbbf24" title="CapCut-style shutter click on each still (Timeline preview + Render)">
-          <input type="checkbox" id="recapFlashSnap" checked> Camera snap sound
+        <label id="recapShutterLabel" style="font-size:.8rem;display:flex;align-items:center;gap:6px;color:#fbbf24;opacity:.45" title="Camera shutter click on each still of the Photo Flash opener (Timeline preview + Render). Needs Photo Flash enabled — it only plays over the stills, not the scenes.">
+          <input type="checkbox" id="recapFlashShutter" checked disabled> Camera shutter sound
+          <span id="recapShutterHint" class="muted" style="font-size:.72rem">— enable Photo Flash to use</span>
         </label>
       </div>
     </details>
@@ -1294,6 +1307,7 @@
         style="background:linear-gradient(135deg,#f59e0b,#ea580c);color:#fff">🎬 Apply Recap → Timeline</button>
       <span id="recapStatus" class="muted" style="font-size:.84rem"></span>
     </div>
+    <div id="recapWarnings" style="margin-top:6px"></div>
   </section>
   <section id="multiInterviewPanel" class="panel" style="margin-top:14px;border-color:#3b82f6">
     <h2>🎙 Multi-interview reel</h2>

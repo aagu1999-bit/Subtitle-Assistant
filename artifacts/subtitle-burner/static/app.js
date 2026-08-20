@@ -1626,7 +1626,8 @@ function _putChunk(uploadId, index, blob, attempt) {
   });
 }
 
-async function _uploadChunked(file, preClean, onProgress) {
+async function _uploadChunked(file, preClean, onProgress, opts) {
+  const intent = (opts && opts.intent) || "transcribe";
   const initRes = await fetch("/upload/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1634,6 +1635,7 @@ async function _uploadChunked(file, preClean, onProgress) {
       filename: file.name || "video.mp4",
       size: file.size,
       pre_clean: !!preClean,
+      intent,
     }),
   });
   let initData = null;
@@ -5345,15 +5347,22 @@ const _origRefreshJobsList = refreshJobsList;
 refreshJobsList = async function () {
   const r = await _origRefreshJobsList.apply(this, arguments);
   try { renderMultiInterviewJobs(); } catch (e) { /* ignore */ }
-  try { if (typeof refreshRecapMediaPool === "function") refreshRecapMediaPool(); } catch (e) { /* ignore */ }
+  try { if (typeof renderRecapImport === "function") renderRecapImport(); } catch (e) { /* ignore */ }
+  try { if (typeof renderRecapScenes === "function") renderRecapScenes(); } catch (e) { /* ignore */ }
   return r;
 };
 
 // ---- Recap Reel (event / space montage template) ----
+// Scenes are capped (5); SOURCES ARE NOT. A scene splits its beats evenly
+// between every source assigned to it, so one long video can't swallow it.
 const RECAP_MAX_SCENES = 5;
-const RECAP_MAX_VIDEOS = 5;
 let _recapScenes = [];
 let _recapAssets = [];
+let _recapFlashKeys = [];      // "asset:ID" stills sent straight to the opener
+let _recapTraySel = new Set(); // tray selection (keys)
+let _recapTrayAnchor = -1;     // shift-click range anchor
+let _recapShowAssigned = false;
+let _recapImportRows = [];     // [{name, pct, status, error}]
 
 /** Event footage often has no transcript — any job with a video file is fair game. */
 function _jobReadyForRecap(j) {
@@ -5393,52 +5402,277 @@ async function _recapLoadAssets() {
   }
 }
 
-function refreshRecapMediaPool() {
-  const host = $("recapMediaPool");
-  if (!host) return;
-  host.innerHTML = "";
-  const jobs = Object.values(jobsById || {}).filter(_jobReadyForRecap);
-  const vids = jobs.slice(0, 24);
-  if (!vids.length && !_recapAssets.length) {
-    host.innerHTML = `<span class="muted" style="font-size:.8rem">Upload videos on Ingest (and optional photos in Media) first.</span>`;
-    return;
-  }
-  const hint = document.createElement("div");
-  hint.className = "muted";
-  hint.style.cssText = "width:100%;font-size:.74rem;margin-bottom:2px";
-  hint.textContent = "Click a chip to toggle it on the selected scene (or use scene checkboxes below). Max " + RECAP_MAX_VIDEOS + " videos.";
-  host.appendChild(hint);
-  vids.forEach((j) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "btn btn-secondary btn-sm";
-    chip.style.cssText = "font-size:.72rem;padding:4px 8px";
-    chip.textContent = "🎬 " + (j.filename || j.job_id.slice(0, 8));
-    chip.title = "Add/remove on focused scene";
-    chip.onclick = () => _recapToggleSourceOnFocused("job:" + j.job_id);
-    host.appendChild(chip);
+/** Every usable source, transcribed job or bulk-imported asset, one shape. */
+function _recapAllItems() {
+  const items = [];
+  Object.values(jobsById || {}).filter(_jobReadyForRecap).forEach((j) => {
+    items.push({
+      key: "job:" + j.job_id,
+      kind: "video",
+      label: j.filename || j.job_id.slice(0, 8),
+      thumb: null,
+      transcribed: true,
+    });
   });
-  (_recapAssets || []).filter((a) => a.kind === "image").slice(0, 30).forEach((a) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "btn btn-secondary btn-sm";
-    chip.style.cssText = "font-size:.72rem;padding:4px 8px";
-    chip.textContent = "🖼 " + (a.filename || a.asset_id.slice(0, 8));
-    chip.onclick = () => _recapToggleSourceOnFocused("asset:" + a.asset_id);
-    host.appendChild(chip);
+  (_recapAssets || []).forEach((a) => {
+    items.push({
+      key: "asset:" + a.asset_id,
+      kind: a.kind === "video" ? "video" : "image",
+      label: a.filename || a.asset_id.slice(0, 8),
+      thumb: "/asset-thumb/" + a.asset_id,
+      transcribed: false,
+    });
+  });
+  return items;
+}
+
+/** key -> where it's assigned ("Flash" | scene name), or null. */
+function _recapAssignmentMap() {
+  const map = new Map();
+  _recapFlashKeys.forEach((k) => map.set(k, "⚡ Flash"));
+  _recapScenes.forEach((sc, i) => {
+    (sc.sourceKeys || []).forEach((k) => map.set(k, sc.name || "Scene " + (i + 1)));
+  });
+  return map;
+}
+
+function _recapUnassign(key) {
+  _recapFlashKeys = _recapFlashKeys.filter((k) => k !== key);
+  _recapScenes.forEach((sc) => {
+    sc.sourceKeys = (sc.sourceKeys || []).filter((k) => k !== key);
   });
 }
 
-let _recapFocusSceneIdx = 0;
-function _recapToggleSourceOnFocused(key) {
+/** Move the tray selection into a scene index, or "flash". */
+function _recapAssignSelection(target) {
+  if (!_recapTraySel.size) {
+    alert("Select media in the tray first (click, or shift-click for a range).");
+    return;
+  }
   _recapEnsureScenes();
-  const i = Math.max(0, Math.min(_recapScenes.length - 1, _recapFocusSceneIdx));
-  const sc = _recapScenes[i];
-  const set = new Set(sc.sourceKeys || []);
-  if (set.has(key)) set.delete(key);
-  else set.add(key);
-  sc.sourceKeys = Array.from(set);
+  const keys = Array.from(_recapTraySel);
+  if (target === "flash") {
+    const skipped = keys.filter((k) => {
+      const it = _recapAllItems().find((x) => x.key === k);
+      return !it || it.kind !== "image" || !k.startsWith("asset:");
+    });
+    keys.forEach((k) => {
+      const it = _recapAllItems().find((x) => x.key === k);
+      if (!it || it.kind !== "image" || !k.startsWith("asset:")) return;
+      _recapUnassign(k);
+      _recapFlashKeys.push(k);
+    });
+    if (skipped.length) {
+      alert(
+        skipped.length + " item(s) skipped — the Photo Flash opener takes photos only. " +
+        "Video goes in a scene (tick “Include stills from videos” to pull frames from it)."
+      );
+    }
+  } else {
+    const sc = _recapScenes[target];
+    if (!sc) return;
+    const set = new Set(sc.sourceKeys || []);
+    keys.forEach((k) => { _recapUnassign(k); set.add(k); });
+    sc.sourceKeys = Array.from(set);
+  }
+  _recapTraySel.clear();
+  _recapTrayAnchor = -1;
+  renderRecapImport();
   renderRecapScenes();
+}
+
+// ---- Bulk import: chunked, resumable, NO transcription ----
+async function recapImportFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const startIdx = _recapImportRows.length;
+  files.forEach((f) => _recapImportRows.push({ name: f.name, pct: 0, status: "queued" }));
+  renderRecapImport();
+
+  let cursor = 0;
+  const CONCURRENCY = 3;
+  const worker = async () => {
+    while (cursor < files.length) {
+      const i = cursor++;
+      const file = files[i];
+      const row = _recapImportRows[startIdx + i];
+      row.status = "uploading";
+      try {
+        await _uploadChunked(file, false, (frac) => {
+          row.pct = Math.round(frac * 100);
+          renderRecapImport();
+        }, { intent: "recap_asset" });
+        row.pct = 100;
+        row.status = "done";
+      } catch (e) {
+        row.status = "error";
+        row.error = (e && e.message) || String(e);
+      }
+      renderRecapImport();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+  await _recapLoadAssets();
+  renderRecapImport();
+  renderRecapScenes();
+}
+
+function renderRecapImport() {
+  const host = $("recapImportBody");
+  if (!host) return;
+  host.innerHTML = "";
+
+  // Upload progress rows (only while something is in flight / recently failed)
+  const active = _recapImportRows.filter((r) => r.status !== "done");
+  if (_recapImportRows.length) {
+    const done = _recapImportRows.filter((r) => r.status === "done").length;
+    const bar = document.createElement("div");
+    bar.style.cssText = "margin-bottom:8px;font-size:.76rem";
+    bar.innerHTML = `<span class="muted">Imported ${done}/${_recapImportRows.length}</span>`;
+    host.appendChild(bar);
+    active.slice(0, 8).forEach((r) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:8px;font-size:.74rem;margin-bottom:3px";
+      const nm = document.createElement("span");
+      nm.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c8cdd3";
+      nm.textContent = r.name;
+      const st = document.createElement("span");
+      st.className = "muted";
+      st.textContent = r.status === "error" ? ("✕ " + (r.error || "failed")) : (r.pct + "%");
+      if (r.status === "error") st.style.color = "#f87171";
+      row.appendChild(nm);
+      row.appendChild(st);
+      host.appendChild(row);
+    });
+  }
+
+  // Tray
+  const items = _recapAllItems();
+  const assigned = _recapAssignmentMap();
+  const shown = _recapShowAssigned ? items : items.filter((it) => !assigned.has(it.key));
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0";
+  head.innerHTML =
+    `<strong style="font-size:.84rem;color:#fbbf24">` +
+    (_recapShowAssigned ? "All media" : "Unassigned") +
+    ` (${shown.length})</strong>`;
+  const selAll = document.createElement("button");
+  selAll.type = "button";
+  selAll.className = "btn btn-secondary btn-sm";
+  selAll.style.cssText = "font-size:.72rem;padding:3px 8px";
+  selAll.textContent = _recapTraySel.size === shown.length && shown.length ? "Clear selection" : "Select all";
+  selAll.onclick = () => {
+    if (_recapTraySel.size === shown.length && shown.length) _recapTraySel.clear();
+    else shown.forEach((it) => _recapTraySel.add(it.key));
+    renderRecapImport();
+  };
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "btn btn-secondary btn-sm";
+  toggle.style.cssText = "font-size:.72rem;padding:3px 8px";
+  toggle.textContent = _recapShowAssigned ? "Hide assigned" : "Show assigned";
+  toggle.onclick = () => { _recapShowAssigned = !_recapShowAssigned; renderRecapImport(); };
+  head.appendChild(selAll);
+  head.appendChild(toggle);
+  host.appendChild(head);
+
+  if (!shown.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.fontSize = ".78rem";
+    empty.textContent = items.length
+      ? "Everything is assigned. “Show assigned” to move things around."
+      : "Drop photos and videos above — they import without transcription.";
+    host.appendChild(empty);
+  } else {
+    const grid = document.createElement("div");
+    grid.style.cssText =
+      "display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:6px;max-height:220px;overflow:auto;padding:2px";
+    shown.forEach((it, i) => {
+      const tile = document.createElement("button");
+      tile.type = "button";
+      const sel = _recapTraySel.has(it.key);
+      const where = assigned.get(it.key);
+      tile.style.cssText =
+        "position:relative;padding:0;height:64px;border-radius:8px;overflow:hidden;cursor:pointer;" +
+        "background:#1a1e2a;border:2px solid " + (sel ? "#f59e0b" : "#2a2f3a") + ";";
+      tile.title = it.label + (where ? ` — in ${where}` : "");
+      if (it.thumb) {
+        const img = document.createElement("img");
+        img.src = it.thumb;
+        img.loading = "lazy";
+        img.style.cssText = "width:100%;height:100%;object-fit:cover;display:block";
+        img.onerror = () => { img.remove(); };
+        tile.appendChild(img);
+      }
+      const cap = document.createElement("span");
+      cap.style.cssText =
+        "position:absolute;left:0;right:0;bottom:0;padding:2px 4px;font-size:.62rem;line-height:1.2;" +
+        "background:rgba(10,12,18,.82);color:#c8cdd3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+      cap.textContent = (it.kind === "video" ? "🎬 " : "🖼 ") + it.label;
+      tile.appendChild(cap);
+      if (where) {
+        const badge = document.createElement("span");
+        badge.style.cssText =
+          "position:absolute;top:2px;right:2px;padding:1px 4px;border-radius:5px;font-size:.6rem;" +
+          "background:rgba(245,158,11,.9);color:#1a1206;font-weight:600";
+        badge.textContent = where.replace("⚡ ", "⚡");
+        tile.appendChild(badge);
+      }
+      tile.onclick = (ev) => {
+        if (ev.shiftKey && _recapTrayAnchor >= 0) {
+          const [a, b] = [_recapTrayAnchor, i].sort((x, y) => x - y);
+          for (let k = a; k <= b; k++) _recapTraySel.add(shown[k].key);
+        } else {
+          if (_recapTraySel.has(it.key)) _recapTraySel.delete(it.key);
+          else _recapTraySel.add(it.key);
+          _recapTrayAnchor = i;
+        }
+        renderRecapImport();
+      };
+      grid.appendChild(tile);
+    });
+    host.appendChild(grid);
+  }
+
+  // Assignment buttons
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px";
+  const lab = document.createElement("span");
+  lab.className = "muted";
+  lab.style.fontSize = ".76rem";
+  lab.textContent = _recapTraySel.size ? `Send ${_recapTraySel.size} selected →` : "Select media, then send →";
+  actions.appendChild(lab);
+  _recapEnsureScenes();
+  _recapScenes.forEach((sc, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn btn-secondary btn-sm";
+    b.style.cssText = "font-size:.72rem;padding:3px 8px";
+    b.textContent = sc.name || "Scene " + (i + 1);
+    b.disabled = !_recapTraySel.size;
+    b.onclick = () => _recapAssignSelection(i);
+    actions.appendChild(b);
+  });
+  const fb = document.createElement("button");
+  fb.type = "button";
+  fb.className = "btn btn-secondary btn-sm";
+  fb.style.cssText = "font-size:.72rem;padding:3px 8px;border-color:#f59e0b;color:#fbbf24";
+  fb.textContent = "⚡ Photo Flash";
+  fb.disabled = !_recapTraySel.size;
+  fb.title = "Photos only — these become the stills the camera shutter fires over.";
+  fb.onclick = () => _recapAssignSelection("flash");
+  actions.appendChild(fb);
+  host.appendChild(actions);
+
+  // Flash pool summary
+  const flashLine = document.createElement("div");
+  flashLine.className = "muted";
+  flashLine.style.cssText = "font-size:.74rem;margin-top:6px";
+  flashLine.textContent = _recapFlashKeys.length
+    ? `⚡ Photo Flash pool: ${_recapFlashKeys.length} photo(s) assigned.`
+    : "⚡ Photo Flash pool is empty — it will fall back to photos you put in scenes.";
+  host.appendChild(flashLine);
 }
 
 function renderRecapScenes() {
@@ -5446,14 +5680,13 @@ function renderRecapScenes() {
   if (!host) return;
   _recapEnsureScenes();
   host.innerHTML = "";
-  const jobOpts = Object.values(jobsById || {}).filter(_jobReadyForRecap);
-  const imgOpts = (_recapAssets || []).filter((a) => a.kind === "image");
+  const items = _recapAllItems();
+  const byKey = new Map(items.map((it) => [it.key, it]));
+  const hang = parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1;
 
   _recapScenes.forEach((sc, idx) => {
     const card = document.createElement("div");
-    card.style.cssText = "padding:12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px;" +
-      (idx === _recapFocusSceneIdx ? "border-color:#f59e0b;" : "");
-    card.onmousedown = () => { _recapFocusSceneIdx = idx; };
+    card.style.cssText = "padding:12px;background:#12151f;border:1px solid #2a2f3a;border-radius:10px;";
 
     const head = document.createElement("div");
     head.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px";
@@ -5463,7 +5696,7 @@ function renderRecapScenes() {
     nameInp.maxLength = 60;
     nameInp.style.cssText = "flex:1;min-width:120px;padding:6px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.86rem";
     nameInp.oninput = () => { sc.name = nameInp.value; };
-    nameInp.onfocus = () => { _recapFocusSceneIdx = idx; };
+    nameInp.onchange = () => renderRecapImport();
     const durLab = document.createElement("label");
     durLab.className = "muted";
     durLab.style.cssText = "font-size:.8rem;display:flex;align-items:center;gap:6px";
@@ -5479,6 +5712,7 @@ function renderRecapScenes() {
     durInp.oninput = () => {
       const v = parseFloat(durInp.value);
       sc.target_sec = Number.isFinite(v) ? Math.max(2, Math.min(120, v)) : 10;
+      renderRecapScenes();
     };
     const sec = document.createElement("span");
     sec.className = "muted";
@@ -5492,8 +5726,8 @@ function renderRecapScenes() {
     rm.onclick = () => {
       if (_recapScenes.length <= 1) return;
       _recapScenes.splice(idx, 1);
-      if (_recapFocusSceneIdx >= _recapScenes.length) _recapFocusSceneIdx = _recapScenes.length - 1;
       renderRecapScenes();
+      renderRecapImport();
     };
     head.appendChild(nameInp);
     durLab.appendChild(durInp);
@@ -5502,45 +5736,51 @@ function renderRecapScenes() {
     head.appendChild(rm);
     card.appendChild(head);
 
-    const media = document.createElement("div");
-    media.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:110px;overflow:auto";
-    const keys = new Set(sc.sourceKeys || []);
-    jobOpts.forEach((j) => {
-      const key = "job:" + j.job_id;
-      const row = document.createElement("label");
-      row.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.78rem;color:#c8cdd3;cursor:pointer";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = keys.has(key);
-      cb.onchange = () => {
-        const s = new Set(sc.sourceKeys || []);
-        if (cb.checked) s.add(key); else s.delete(key);
-        sc.sourceKeys = Array.from(s);
-        _recapFocusSceneIdx = idx;
-      };
-      row.appendChild(cb);
-      row.appendChild(document.createTextNode((j.filename || j.job_id).slice(0, 48)));
-      media.appendChild(row);
-    });
-    imgOpts.forEach((a) => {
-      const key = "asset:" + a.asset_id;
-      const row = document.createElement("label");
-      row.style.cssText = "display:flex;align-items:center;gap:6px;font-size:.78rem;color:#94a3b8;cursor:pointer";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = keys.has(key);
-      cb.onchange = () => {
-        const s = new Set(sc.sourceKeys || []);
-        if (cb.checked) s.add(key); else s.delete(key);
-        sc.sourceKeys = Array.from(s);
-      };
-      row.appendChild(cb);
-      row.appendChild(document.createTextNode("🖼 " + (a.filename || a.asset_id).slice(0, 40)));
-      media.appendChild(row);
-    });
-    if (!jobOpts.length && !imgOpts.length) {
-      media.innerHTML = `<span class="muted" style="font-size:.76rem">No media yet.</span>`;
+    // ---- Live beat math: what this scene will actually produce ----
+    const keys = (sc.sourceKeys || []).filter((k) => byKey.has(k));
+    const n = Math.max(1, Math.round((sc.target_sec || 10) / hang));
+    const used = Math.min(keys.length, n);
+    const math = document.createElement("div");
+    math.style.cssText = "font-size:.74rem;margin-bottom:8px;color:#94a3b8";
+    if (!keys.length) {
+      math.innerHTML = `<span style="color:#f87171">No media assigned</span> — ${n} beats waiting.`;
+    } else if (keys.length > n) {
+      const dropped = keys.length - n;
+      math.innerHTML =
+        `${keys.length} sources · ${n} beats (${(sc.target_sec || 10)}s ÷ ${hang}s hang) · ` +
+        `<strong style="color:#fbbf24">${used} appear, 1 beat each — ${dropped} won’t fit.</strong> ` +
+        `Lower Hang or raise scene length to include them.`;
+    } else {
+      const per = Math.floor(n / keys.length);
+      const rem = n % keys.length;
+      const spread = rem ? `${per}–${per + 1}` : String(per);
+      math.innerHTML =
+        `${keys.length} sources · ${n} beats (${(sc.target_sec || 10)}s ÷ ${hang}s hang) · ` +
+        `<strong style="color:#4ade80">all ${keys.length} appear, ${spread} beat(s) each.</strong>`;
     }
+    card.appendChild(math);
+
+    // ---- Assigned media chips ----
+    const media = document.createElement("div");
+    media.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;max-height:120px;overflow:auto";
+    if (!keys.length) {
+      media.innerHTML = `<span class="muted" style="font-size:.76rem">Select media in the tray above and send it here.</span>`;
+    }
+    keys.forEach((k) => {
+      const it = byKey.get(k);
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "btn btn-secondary btn-sm";
+      chip.style.cssText = "font-size:.7rem;padding:3px 7px";
+      chip.textContent = (it.kind === "video" ? "🎬 " : "🖼 ") + it.label.slice(0, 28) + " ✕";
+      chip.title = "Remove from this scene";
+      chip.onclick = () => {
+        sc.sourceKeys = (sc.sourceKeys || []).filter((x) => x !== k);
+        renderRecapScenes();
+        renderRecapImport();
+      };
+      media.appendChild(chip);
+    });
     card.appendChild(media);
     host.appendChild(card);
   });
@@ -5549,22 +5789,11 @@ function renderRecapScenes() {
 function _recapCollectPayload() {
   _recapEnsureScenes();
   const scenes = [];
-  let videoCount = 0;
-  const seenVid = new Set();
   _recapScenes.forEach((sc) => {
     const sources = [];
     (sc.sourceKeys || []).forEach((key) => {
-      if (key.startsWith("job:")) {
-        const jid = key.slice(4);
-        if (!seenVid.has(jid)) {
-          if (videoCount >= RECAP_MAX_VIDEOS) return;
-          seenVid.add(jid);
-          videoCount += 1;
-        }
-        sources.push({ job_id: jid });
-      } else if (key.startsWith("asset:")) {
-        sources.push({ asset_id: key.slice(6) });
-      }
+      if (key.startsWith("job:")) sources.push({ job_id: key.slice(4) });
+      else if (key.startsWith("asset:")) sources.push({ asset_id: key.slice(6) });
     });
     if (!sources.length) return;
     scenes.push({
@@ -5579,16 +5808,33 @@ function _recapCollectPayload() {
     label: ($("recapLabel") && $("recapLabel").value.trim()) || "Recap Reel",
     canvas: ($("recapCanvas") && $("recapCanvas").value) || "9x16",
     hang_sec: parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1,
-    beat_sec: parseFloat(($("recapHangSec") && $("recapHangSec").value) || "1") || 1,
     photo_flash: {
       enabled: flashOn,
       duration_sec: parseFloat(($("recapFlashDur") && $("recapFlashDur").value) || "3") || 3,
       count: parseInt(($("recapFlashCount") && $("recapFlashCount").value) || "12", 10) || 12,
       include_video_stills: !($("recapFlashVideoStills") && !$("recapFlashVideoStills").checked),
-      snap_sfx: !($("recapFlashSnap") && !$("recapFlashSnap").checked),
+      // The camera shutter sound. Fires over the Photo Flash stills only —
+      // it is not a scene effect.
+      shutter_sfx: !($("recapFlashShutter") && !$("recapFlashShutter").checked),
+      sources: _recapFlashKeys
+        .filter((k) => k.startsWith("asset:"))
+        .map((k) => ({ asset_id: k.slice(6) })),
     },
     scenes,
   };
+}
+
+/** Keep the shutter box honest: it can only do anything when Flash is on. */
+function _recapSyncShutterGate() {
+  const flash = $("recapFlashEnabled");
+  const shutter = $("recapFlashShutter");
+  const label = $("recapShutterLabel");
+  const hint = $("recapShutterHint");
+  if (!flash || !shutter) return;
+  const on = !!flash.checked;
+  shutter.disabled = !on;
+  if (label) label.style.opacity = on ? "1" : ".45";
+  if (hint) hint.textContent = on ? "" : "— enable Photo Flash to use";
 }
 
 async function runRecapApply() {
@@ -5596,7 +5842,7 @@ async function runRecapApply() {
   const btn = $("recapApplyBtn");
   const payload = _recapCollectPayload();
   if (!payload.scenes.length) {
-    alert("Add at least one scene with video or photo checked.");
+    alert("Assign media to at least one scene first.");
     return;
   }
   if (btn) btn.disabled = true;
@@ -5629,12 +5875,29 @@ async function runRecapApply() {
     const st = data.stats || {};
     let msg = `Seeded ${st.clip_count || 0} beats (~${st.total_sec || "?"}s)`;
     if (st.hang_sec) msg += ` · hang ${st.hang_sec}s`;
-    if (st.flash_count) msg += ` · flash ${st.flash_count}`;
-    if ((data.warnings || []).length) {
-      msg += " · " + data.warnings[0];
-      console.warn("[recap]", data.warnings);
+    if (st.flash_count) msg += ` · flash ${st.flash_count} stills`;
+    if (payload.photo_flash.enabled && payload.photo_flash.shutter_sfx) {
+      const gotShutter = (data.seedTimeline.tracks.music || []).some(
+        (m) => m.source === "recap_shutter");
+      msg += gotShutter ? " · 🔊 shutter" : " · ⚠ no shutter";
     }
-    if (status) status.textContent = msg;
+    if (status) {
+      status.textContent = msg;
+      // Surface EVERY warning, not just the first — a scene warning used to
+      // bury "shutter sound could not be generated" and it read as silence
+      // with no explanation.
+      const warn = $("recapWarnings");
+      if (warn) {
+        warn.innerHTML = "";
+        (data.warnings || []).forEach((w) => {
+          const li = document.createElement("div");
+          li.style.cssText = "font-size:.76rem;color:#fbbf24;margin-top:3px";
+          li.textContent = "⚠ " + w;
+          warn.appendChild(li);
+        });
+      }
+      if ((data.warnings || []).length) console.warn("[recap]", data.warnings);
+    }
     if (typeof setActiveTab === "function") setActiveTab("editor");
   } catch (e) {
     if (status) status.textContent = "Recap failed: " + (e.message || e);
@@ -5648,8 +5911,9 @@ async function initRecapReelPanel() {
   if (!$("recapReelPanel")) return;
   _recapEnsureScenes();
   await _recapLoadAssets();
-  refreshRecapMediaPool();
+  renderRecapImport();
   renderRecapScenes();
+
   const addBtn = $("recapAddSceneBtn");
   if (addBtn) {
     addBtn.onclick = () => {
@@ -5658,18 +5922,52 @@ async function initRecapReelPanel() {
         return;
       }
       _recapScenes.push(_recapNewScene(_recapScenes.length + 1));
-      _recapFocusSceneIdx = _recapScenes.length - 1;
       renderRecapScenes();
+      renderRecapImport();
     };
   }
   const refreshBtn = $("recapRefreshMediaBtn");
   if (refreshBtn) {
     refreshBtn.onclick = async () => {
       await _recapLoadAssets();
-      refreshRecapMediaPool();
+      renderRecapImport();
       renderRecapScenes();
     };
   }
+
+  // ---- Bulk import drop zone ----
+  const drop = $("recapDropZone");
+  const picker = $("recapFilePicker");
+  if (drop && picker) {
+    drop.onclick = () => picker.click();
+    picker.onchange = () => {
+      recapImportFiles(picker.files);
+      picker.value = "";
+    };
+    ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.style.borderColor = "#f59e0b";
+      drop.style.background = "#1c1a12";
+    }));
+    ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.style.borderColor = "#2a2f3a";
+      drop.style.background = "#12151f";
+    }));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const dt = e.dataTransfer;
+      if (dt && dt.files && dt.files.length) recapImportFiles(dt.files);
+    });
+  }
+
+  const hangSel = $("recapHangSec");
+  if (hangSel) hangSel.onchange = () => renderRecapScenes();
+
+  const flashEn = $("recapFlashEnabled");
+  if (flashEn) flashEn.onchange = () => _recapSyncShutterGate();
+  _recapSyncShutterGate();
+
   const applyBtn = $("recapApplyBtn");
   if (applyBtn) applyBtn.onclick = () => runRecapApply();
   const fd = $("recapFlashDur");
