@@ -1,0 +1,53 @@
+[
+  {
+    "ok": true,
+    "query": "Juneteenth festival crowd Newark New Jersey celebration people",
+    "tab": "images",
+    "engine": "bing",
+    "path": "static/mockups/google-overlays/live/serp-juneteenth-crowd-newark.png",
+    "clip": {
+      "x": 231,
+      "y": 196,
+      "width": 258,
+      "height": 200
+    },
+    "url": "https://www.bing.com/images/search?q=Juneteenth+festival+crowd+Newark+New+Jersey+celebration+people&first=1&cw=1280&ch=900",
+    "bytes": 83806,
+    "id": "juneteenth-crowd-newark",
+    "why": "Crowd energy \u2014 faces, flags, celebration scale. Better \u201cyou are there\u201d overlay than a flyer when the spoken beat is about the people/festival vibe."
+  },
+  {
+    "ok": true,
+    "query": "LeBron James Philadelphia 76ers trade rumors",
+    "tab": "images",
+    "engine": "bing",
+    "path": "static/mockups/google-overlays/live/serp-lebron-philly.png",
+    "clip": {
+      "x": 251,
+      "y": 196,
+      "width": 348,
+      "height": 204
+    },
+    "url": "https://www.bing.com/images/search?q=LeBron+James+Philadelphia+76ers+trade+rumors&first=1&cw=1280&ch=900",
+    "bytes": 126139,
+    "id": "lebron-philly",
+    "why": "Proof/news beat \u2014 a recognizable athlete + Philly context reads instantly on screen when someone says \u201cLeBron going to Philly.\u201d"
+  },
+  {
+    "ok": true,
+    "query": "Life After restaurant Edgewater New Jersey",
+    "tab": "images",
+    "engine": "bing",
+    "path": "static/mockups/google-overlays/live/serp-life-after-edgewater.png",
+    "clip": {
+      "x": 600,
+      "y": 196,
+      "width": 293,
+      "height": 224
+    },
+    "url": "https://www.bing.com/images/search?q=Life+After+restaurant+Edgewater+New+Jersey&first=1&cw=1280&ch=900",
+    "bytes": 101001,
+    "id": "life-after-edgewater",
+    "why": "Place proof \u2014 concrete venue name + town. Overlay should show the restaurant (storefront/interior/plate) so the viewer knows which spot is meant."
+  }
+]
