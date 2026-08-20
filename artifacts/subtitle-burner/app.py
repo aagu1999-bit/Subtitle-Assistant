@@ -6870,6 +6870,12 @@ def fetch_auto_overlays():
             "layout": pos["layout"],
             # Ken Burns is opt-in in the Timeline inspector / Effects lane.
             "ken_burns": None,
+            "quote": co.get("quote") or "",
+            "reason": co.get("reason") or "",
+            "story_role": co.get("story_role"),
+            "google_tab": co.get("google_tab"),
+            "worthiness_score": co.get("worthiness_score"),
+            "worthiness": co.get("worthiness"),
         })
 
     return jsonify({
@@ -6888,6 +6894,21 @@ def fetch_auto_overlays():
         "providers": providers,
         "photo_ready": _broll_any_photo_provider() or speaker_ready,
         "gemini_image_ready": _gemini_image_ready(),
+        "worthiness": {
+            "threshold": int(os.environ.get("OVERLAY_WORTHINESS_THRESHOLD", "55") or 55),
+            "min_gap_s": 18.0,
+            "candidates": [
+                {
+                    "text": c.get("text"),
+                    "start": c.get("start"),
+                    "score": c.get("worthiness_score"),
+                    "google_tab": c.get("google_tab"),
+                    "story_role": c.get("story_role"),
+                    "worthiness": c.get("worthiness"),
+                }
+                for c in callouts
+            ],
+        },
         "stats": {
             "photo": used_photo,
             "badge": used_badge,
@@ -6902,6 +6923,98 @@ def fetch_auto_overlays():
                  "Analyze speakers (faces) for talker screenshots, or set "
                  "SERPAPI_API_KEY / PEXELS_API_KEY / GEMINI_API_KEY."
         ),
+    })
+
+
+@app.route("/overlay/worthiness-preview", methods=["POST"])
+def overlay_worthiness_preview():
+    """Checkpoint A: score overlay candidates without fetching images.
+
+    Body: { job_id?, words?, start?, end?, budget?, semantic?, threshold? }
+    Returns ranked worthy candidates + rejected list with reasons.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    words = data.get("words")
+    if (not words) and job_id and job_id in jobs:
+        words = jobs[job_id].get("words") or []
+    if not words:
+        return jsonify({"error": "Need words or a transcribed job_id"}), 400
+    try:
+        budget = max(1, min(12, int(data.get("budget") or 4)))
+    except (TypeError, ValueError):
+        budget = 4
+    try:
+        win_start = float(data["start"]) if data.get("start") is not None else 0.0
+    except (TypeError, ValueError):
+        win_start = 0.0
+    try:
+        win_end = float(data["end"]) if data.get("end") is not None else None
+    except (TypeError, ValueError):
+        win_end = None
+    if win_end is None:
+        try:
+            win_end = float((words[-1] or {}).get("end") or 90)
+        except (TypeError, ValueError, IndexError):
+            win_end = 90.0
+    semantic = data.get("semantic", True) is not False
+    try:
+        threshold = int(data["threshold"]) if data.get("threshold") is not None else None
+    except (TypeError, ValueError):
+        threshold = None
+
+    raw_budget = min(12, budget * 2)
+    if semantic:
+        raw = _semantic_broll_callouts(words, win_start, win_end, raw_budget)
+    else:
+        raw = _keyword_callouts_for_window(words, win_start, win_end, raw_budget)
+
+    # Score everyone for the rejected list too
+    all_scored = []
+    for c in raw:
+        meta = _score_overlay_worthiness(
+            c, window_start=win_start, window_end=win_end,
+            story_role=c.get("story_role"),
+        )
+        row = dict(c)
+        row["worthiness"] = meta
+        row["worthiness_score"] = meta["score"]
+        row["google_tab"] = meta["google_tab"]
+        all_scored.append(row)
+
+    kept = _rank_overlay_candidates(
+        raw,
+        window_start=win_start,
+        window_end=win_end,
+        budget=budget,
+        threshold=threshold,
+    )
+    kept_keys = {
+        (round(float(k.get("start") or 0), 2), str(k.get("text") or "").lower())
+        for k in kept
+    }
+    rejected = [
+        r for r in all_scored
+        if (round(float(r.get("start") or 0), 2), str(r.get("text") or "").lower())
+        not in kept_keys
+    ]
+    thr = threshold
+    if thr is None:
+        try:
+            thr = int(os.environ.get("OVERLAY_WORTHINESS_THRESHOLD", "55") or 55)
+        except (TypeError, ValueError):
+            thr = 55
+
+    return jsonify({
+        "ok": True,
+        "threshold": thr,
+        "min_gap_s": 18.0,
+        "window": {"start": win_start, "end": win_end},
+        "candidates": kept,
+        "rejected": rejected,
+        "candidate_count": len(kept),
+        "rejected_count": len(rejected),
+        "formula": "concrete/proof/place + story_role − abstract − spacing; threshold default 55",
     })
 
 
@@ -13756,6 +13869,224 @@ _VISUAL_KEYWORDS = {
 }
 
 
+# ---- Overlay worthiness (Checkpoint A) ------------------------------------
+# Score candidates BEFORE fetching stock/Google assets. Threshold + spacing
+# keep talking-head edits from spraying B-roll on every noun.
+
+_OVERLAY_ABSTRACT = {
+    "feel", "feeling", "felt", "stress", "stressed", "energy", "vibe", "vibes",
+    "thing", "things", "stuff", "basically", "literally", "actually", "really",
+    "honestly", "whatever", "something", "someone", "everything", "nothing",
+    "moment", "journey", "mindset", "passion", "grateful", "blessed",
+}
+_OVERLAY_PROOF = {
+    "flight", "flights", "airport", "ticket", "price", "cost", "dollar", "dollars",
+    "percent", "score", "rating", "approved", "vote", "headline", "article",
+    "news", "report", "chart", "map", "route", "schedule", "calendar", "event",
+    "festival", "concert", "restaurant", "hotel", "product", "app", "website",
+}
+_OVERLAY_PLACE = {
+    "city", "park", "street", "beach", "boardwalk", "venue", "stadium", "airport",
+    "restaurant", "hotel", "market", "store", "shop", "club", "bar", "museum",
+}
+
+
+def _overlay_google_tab_for_query(text: str, reason: str = "") -> str:
+    """Suggest which Google surface fits a cue (SERP screenshot router hint)."""
+    blob = f"{text} {reason}".lower()
+    if re.search(r"\b(flight|flights|ewr|jfk|lga|lax|airport|nonstop)\b", blob):
+        return "flights"
+    if re.search(r"\b(restaurant|cafe|hotel|address|near me|directions|map)\b", blob):
+        return "maps"
+    if re.search(r"\b(headline|article|approved|news|report|announced)\b", blob):
+        return "web"
+    if re.search(r"\b(overview|summary|explained|what is|how does)\b", blob):
+        return "ai_overview"
+    if re.search(r"\b(festival|concert|crowd|skyline|photo|looks like|wearing)\b", blob):
+        return "images"
+    return "images"
+
+
+def _score_overlay_worthiness(
+    callout: dict,
+    *,
+    window_start: float,
+    window_end: float,
+    story_role: str | None = None,
+) -> dict:
+    """Return score 0–100 + reasons for whether a cue deserves an overlay.
+
+    Rubric (matches product brainstorm):
+      + concrete entity / proof / place
+      + story joint (hook / turn / closer)
+      + visualizable search query
+      − abstract feeling / filler
+      − too early pile-up / weak quote
+    """
+    text = str(callout.get("text") or callout.get("search_query") or "").strip()
+    quote = str(callout.get("quote") or "").strip()
+    reason = str(callout.get("reason") or "").strip()
+    try:
+        start = float(callout.get("start") or callout.get("start_time") or window_start)
+    except (TypeError, ValueError):
+        start = float(window_start)
+
+    toks = [t for t in re.sub(r"[^a-z0-9\s]+", " ", text.lower()).split() if t]
+    reasons_pos: list[str] = []
+    reasons_neg: list[str] = []
+    score = 35  # baseline: needs evidence to rise
+
+    # Concrete visual query length
+    if 3 <= len(toks) <= 10:
+        score += 12
+        reasons_pos.append("concrete multi-word visual query")
+    elif len(toks) <= 1:
+        score -= 18
+        reasons_neg.append("single-token / weak query")
+
+    proof_hits = [t for t in toks if t in _OVERLAY_PROOF]
+    place_hits = [t for t in toks if t in _OVERLAY_PLACE or t in _VISUAL_KEYWORDS]
+    abstract_hits = [t for t in toks if t in _OVERLAY_ABSTRACT]
+
+    if proof_hits:
+        score += 18
+        reasons_pos.append(f"proof/entity ({', '.join(proof_hits[:3])})")
+    if place_hits:
+        score += 10
+        reasons_pos.append(f"place/visual noun ({', '.join(place_hits[:3])})")
+    if abstract_hits and not proof_hits:
+        score -= 22
+        reasons_neg.append(f"abstract/filler ({', '.join(abstract_hits[:3])})")
+
+    # Numbers / money / dates in query or quote → proof overlay
+    if re.search(r"(\$\d|\d+%|\b\d{4}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b)", f"{text} {quote}", re.I):
+        score += 14
+        reasons_pos.append("numeric/date proof")
+
+    role = (story_role or callout.get("story_role") or "").strip().lower()
+    if role in ("hook", "opener"):
+        score += 12
+        reasons_pos.append("hook / opener beat")
+    elif role in ("closer", "payoff", "button"):
+        score += 10
+        reasons_pos.append("closer / payoff beat")
+    elif role in ("turn", "conflict", "proof"):
+        score += 8
+        reasons_pos.append(f"story joint ({role})")
+
+    rel = 0.0
+    span = max(0.5, float(window_end) - float(window_start))
+    if span > 0:
+        rel = (start - float(window_start)) / span
+    if rel <= 0.12:
+        # Early is fine for ONE hook image; don't over-reward pile-up here.
+        score += 4
+        reasons_pos.append("early-window candidate")
+    elif 0.35 <= rel <= 0.85:
+        score += 6
+        reasons_pos.append("mid/body placement room")
+
+    if quote and len(quote.split()) >= 3:
+        score += 6
+        reasons_pos.append("anchored to a real quote")
+    elif not quote and callout.get("source") == "semantic":
+        score -= 4
+        reasons_neg.append("no quote anchor")
+
+    if reason and len(reason) > 12:
+        score += 4
+
+    # LLM may already send a self-score 0–1 or 0–100
+    raw_self = callout.get("worthiness") or callout.get("worthiness_score")
+    try:
+        self_s = float(raw_self)
+        if self_s <= 1.0:
+            self_s *= 100.0
+        # Blend lightly so heuristics still dominate v1
+        score = int(round(0.7 * score + 0.3 * self_s))
+        reasons_pos.append(f"model self-score {self_s:.0f}")
+    except (TypeError, ValueError):
+        pass
+
+    score = max(0, min(100, int(score)))
+    google_tab = callout.get("google_tab") or _overlay_google_tab_for_query(text, reason)
+    worthy = score >= int(os.environ.get("OVERLAY_WORTHINESS_THRESHOLD", "55") or 55)
+
+    return {
+        "score": score,
+        "worthy": worthy,
+        "google_tab": google_tab,
+        "reasons_for": reasons_pos[:6],
+        "reasons_against": reasons_neg[:6],
+        "start": round(start, 3),
+        "text": text[:80],
+        "quote": quote[:160],
+        "story_role": role or None,
+    }
+
+
+def _rank_overlay_candidates(
+    callouts: list,
+    *,
+    window_start: float,
+    window_end: float,
+    budget: int,
+    min_gap_s: float = 18.0,
+    threshold: int | None = None,
+) -> list:
+    """Score → filter by threshold → enforce spacing → keep top *budget*.
+
+    Returns callouts enriched with worthiness fields. Unworthy cues are dropped
+    (Checkpoint A). Spacing stops "every noun gets a sticker."
+    """
+    if threshold is None:
+        try:
+            threshold = int(os.environ.get("OVERLAY_WORTHINESS_THRESHOLD", "55") or 55)
+        except (TypeError, ValueError):
+            threshold = 55
+    budget = max(0, min(12, int(budget or 0)))
+    if budget <= 0 or not callouts:
+        return []
+
+    scored = []
+    for c in callouts:
+        if not isinstance(c, dict):
+            continue
+        meta = _score_overlay_worthiness(
+            c, window_start=window_start, window_end=window_end,
+            story_role=c.get("story_role"),
+        )
+        row = dict(c)
+        row["worthiness"] = meta
+        row["worthiness_score"] = meta["score"]
+        row["google_tab"] = meta["google_tab"]
+        scored.append(row)
+
+    scored.sort(key=lambda r: (-int(r.get("worthiness_score") or 0), float(r.get("start") or 0)))
+
+    kept: list[dict] = []
+    for row in scored:
+        score = int(row.get("worthiness_score") or 0)
+        if score < threshold:
+            continue
+        st = float(row.get("start") or 0)
+        if any(abs(st - float(k.get("start") or 0)) < min_gap_s for k in kept):
+            # Too close to a stronger (already kept) overlay
+            w = row.get("worthiness") or {}
+            against = list(w.get("reasons_against") or [])
+            against.append(f"too close to another overlay (<{min_gap_s:.0f}s)")
+            w["reasons_against"] = against
+            w["worthy"] = False
+            row["worthiness"] = w
+            continue
+        kept.append(row)
+        if len(kept) >= budget:
+            break
+
+    kept.sort(key=lambda r: float(r.get("start") or 0))
+    return kept
+
+
 def _keyword_callouts_for_window(words: list, t_in: float, t_out: float,
                                  budget: int) -> list:
     """Pick visual keywords inside [t_in, t_out] from the STT transcript only.
@@ -13827,16 +14158,20 @@ def _semantic_broll_callouts(words: list, t_in: float, t_out: float,
 
 Window: {t_in:.1f}s → {t_out:.1f}s ({span:.0f}s). Transcript has [mm:ss] stamps relative to the FULL video.
 
-Rules:
-- Read each sentence's MEANING. Do NOT search single ambiguous tokens (names, "Jersey", brand handles).
-- Prefer concrete visual concepts: "local nightlife events flyer collage", "urban park meetup", "phone calendar app", "crowd at outdoor market".
+Worthiness rules (ONLY propose overlays that pass):
+- Viewer must NEED to see it to believe/understand the line (proof, place, product, event, number).
+- Prefer story joints: hook, turn/proof, closer — not every mid-sentence noun.
+- Skip abstract feelings, filler, and anything already obvious on camera.
+- Prefer concrete visual concepts: "local nightlife events flyer collage", "urban park meetup", "phone calendar app".
 - When the beat is about people / reactions / the speakers themselves, use a people-oriented query
-  (e.g. "two people talking over coffee", "confident founder portrait") — our pipeline will match
-  likeness to who is on camera or use a talker screenshot.
+  (e.g. "two people talking over coffee") — our pipeline may use a talker screenshot.
 - Never invent moments that aren't in the transcript.
-- Place at most {budget} overlays, spread across the window (not all in the first 15s).
-- start_time must fall on the emphasized words; duration 1.6–2.8s.
-- search_query is what we type into a stock photo API (3–8 words, no quotes).
+- Propose up to {min(budget * 2, 10)} candidates (we will score + thin to ~{budget}).
+- start_time on the emphasized words; duration 1.6–2.8s.
+- search_query is what we type into stock/Google (3–8 words, no quotes).
+- google_tab one of: images | web | flights | maps | ai_overview
+- story_role one of: hook | proof | turn | body | closer | null
+- worthiness 0–100 (your confidence this beat deserves an overlay)
 
 Return STRICT JSON:
 {{
@@ -13846,7 +14181,10 @@ Return STRICT JSON:
       "duration": 2.0,
       "search_query": "city nightlife event crowd evening",
       "quote": "exact words near this beat",
-      "reason": "why this visual matches the sentence meaning"
+      "reason": "why this visual matches the sentence meaning",
+      "story_role": "proof",
+      "google_tab": "images",
+      "worthiness": 78
     }}
   ]
 }}
@@ -13886,15 +14224,26 @@ Transcript:
             dur = 2.0
         st = max(float(t_in), min(float(t_out) - 0.3, st))
         dur = max(1.4, min(2.8, dur))
-        out.append({
+        role = str(item.get("story_role") or "").strip().lower() or None
+        if role in ("null", "none", "n/a"):
+            role = None
+        tab = str(item.get("google_tab") or "").strip().lower() or None
+        if tab not in ("images", "web", "flights", "maps", "ai_overview"):
+            tab = None
+        entry = {
             "text": q[:80],
             "start": round(st, 3),
             "duration": round(dur, 3),
             "quote": str(item.get("quote") or "")[:160],
             "reason": str(item.get("reason") or "")[:200],
             "source": "semantic",
-        })
-        if len(out) >= budget:
+            "story_role": role,
+            "google_tab": tab,
+        }
+        if item.get("worthiness") is not None:
+            entry["worthiness"] = item.get("worthiness")
+        out.append(entry)
+        if len(out) >= max(budget * 2, budget):
             break
 
     if not out:
@@ -13904,11 +14253,27 @@ Transcript:
 
 
 def _broll_callouts_for_window(words: list, t_in: float, t_out: float,
-                               budget: int, *, semantic: bool = True) -> list:
-    """Public picker: semantic LLM when possible, else keyword allow-list."""
+                               budget: int, *, semantic: bool = True,
+                               rank: bool = True) -> list:
+    """Public picker: semantic LLM when possible, else keyword allow-list.
+
+    When *rank* is True (default), apply worthiness scoring + spacing so only
+    Checkpoint-A-worthy cues survive (see ``_rank_overlay_candidates``).
+    """
+    # Pull a wider candidate pool, then thin with the scorer.
+    raw_budget = max(budget, min(12, budget * 2)) if rank else budget
     if semantic:
-        return _semantic_broll_callouts(words, t_in, t_out, budget)
-    return _keyword_callouts_for_window(words, t_in, t_out, budget)
+        raw = _semantic_broll_callouts(words, t_in, t_out, raw_budget)
+    else:
+        raw = _keyword_callouts_for_window(words, t_in, t_out, raw_budget)
+    if not rank:
+        return raw[:budget]
+    return _rank_overlay_candidates(
+        raw,
+        window_start=t_in,
+        window_end=t_out,
+        budget=budget,
+    )
 
 
 def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
