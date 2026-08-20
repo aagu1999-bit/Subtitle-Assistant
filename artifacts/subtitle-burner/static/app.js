@@ -5298,9 +5298,10 @@ refreshJobsList = async function () {
   return r;
 };
 
-// ---- Past compilations: list, load-back-into-queue ----
+// ---- Past compilations: list, load-back-into-queue, archive/unhide ----
 const pastCompilesListEl = $("pastCompilesList");
 const pastCompilesCountEl = $("pastCompilesCount");
+const pastCompilesShowArchivedEl = $("pastCompilesShowArchived");
 
 function _fmtCompileDate(ts) {
   if (!ts) return "";
@@ -5310,6 +5311,19 @@ function _fmtCompileDate(ts) {
     month: "short", day: "numeric",
     hour: "numeric", minute: "2-digit",
   });
+}
+
+async function setCompilationArchived(jobId, archived) {
+  const res = await fetch(`/archive-compilation/${jobId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ archived: !!archived }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    throw new Error((data && data.error) || `HTTP ${res.status}`);
+  }
+  return data;
 }
 
 async function refreshPastCompiles() {
@@ -5323,32 +5337,43 @@ async function refreshPastCompiles() {
     pastCompilesListEl.innerHTML = `<div class="muted" style="padding:12px">Couldn't load: ${e.message}</div>`;
     return;
   }
+  const showArchived = !!(pastCompilesShowArchivedEl && pastCompilesShowArchivedEl.checked);
+  const archivedCount = comps.filter((c) => c.archived).length;
+  const visible = comps.filter((c) => showArchived || !c.archived);
   if (pastCompilesCountEl) {
-    pastCompilesCountEl.textContent = comps.length
-      ? `${comps.length} saved`
-      : "";
+    const bits = [];
+    if (visible.length) bits.push(`${visible.length} shown`);
+    else bits.push(showArchived ? "none" : "none active");
+    if (archivedCount) bits.push(`${archivedCount} archived`);
+    pastCompilesCountEl.textContent = bits.join(" · ");
   }
   pastCompilesListEl.innerHTML = "";
-  if (!comps.length) {
+  if (!visible.length) {
     const hint = document.createElement("div");
     hint.className = "muted";
     hint.style.cssText = "text-align:center;padding:20px 12px;font-size:.88rem";
-    hint.textContent = "No past compilations yet. After your first Compile, it'll show up here so you can edit and re-render.";
+    hint.textContent = comps.length && !showArchived
+      ? "All compilations are archived. Enable “Show archived” to restore one."
+      : "No past compilations yet. After your first Compile, it'll show up here so you can edit and re-render.";
     pastCompilesListEl.appendChild(hint);
     return;
   }
-  comps.forEach(c => {
+  visible.forEach(c => {
     const card = document.createElement("div");
     card.className = "past-compile-card";
+    if (c.archived) {
+      card.style.opacity = "0.72";
+      card.style.borderStyle = "dashed";
+    }
     const head = document.createElement("div");
     head.className = "past-compile-head";
     const label = document.createElement("strong");
-    label.textContent = c.label || c.filename || "compilation";
+    label.textContent = (c.label || c.filename || "compilation") + (c.archived ? " (archived)" : "");
     head.appendChild(label);
     const meta = document.createElement("span");
     meta.className = "muted";
     meta.style.fontSize = ".78rem";
-    meta.textContent = `${c.segment_count} clip${c.segment_count === 1 ? "" : "s"} · ${c.total_duration.toFixed(1)}s · ${_fmtCompileDate(c.created_at)}`;
+    meta.textContent = `${c.segment_count} clip${c.segment_count === 1 ? "" : "s"} · ${Number(c.total_duration || 0).toFixed(1)}s · ${_fmtCompileDate(c.created_at)}`;
     head.appendChild(meta);
     card.appendChild(head);
 
@@ -5370,8 +5395,33 @@ async function refreshPastCompiles() {
     };
     actions.appendChild(openBtn);
 
+    const archBtn = document.createElement("button");
+    archBtn.type = "button";
+    archBtn.className = "btn btn-secondary";
+    archBtn.textContent = c.archived ? "Unarchive" : "Archive";
+    archBtn.title = c.archived
+      ? "Show this compilation in the list again"
+      : "Hide from this list (keeps files & sources)";
+    archBtn.onclick = async () => {
+      archBtn.disabled = true;
+      try {
+        await setCompilationArchived(c.job_id, !c.archived);
+        await refreshPastCompiles();
+      } catch (e) {
+        alert("Archive failed: " + (e.message || e));
+        archBtn.disabled = false;
+      }
+    };
+    actions.appendChild(archBtn);
+
     card.appendChild(actions);
     pastCompilesListEl.appendChild(card);
+  });
+}
+
+if (pastCompilesShowArchivedEl) {
+  pastCompilesShowArchivedEl.addEventListener("change", () => {
+    refreshPastCompiles().catch(() => {});
   });
 }
 

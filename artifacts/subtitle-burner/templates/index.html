@@ -1247,13 +1247,18 @@
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
   </section>
   <section id="pastCompilesPanel" class="panel" style="margin-top:14px;border-color:#2a2f3a">
-    <h2 style="display:flex;align-items:center;justify-content:space-between">
+    <h2 style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
       <span>📋 Past compilations</span>
       <span id="pastCompilesCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
     </h2>
     <p class="muted panel-desc">
       Reload a previous compilation's clip list into the queue above to tweak it and render a new version.
+      Archive hides entries from this list (sources and files stay on disk).
     </p>
+    <label class="muted" style="display:inline-flex;align-items:center;gap:6px;font-size:.82rem;margin-bottom:8px;cursor:pointer">
+      <input type="checkbox" id="pastCompilesShowArchived" />
+      Show archived
+    </label>
     <div id="pastCompilesList" style="display:flex;flex-direction:column;gap:8px"></div>
   </section>
   </div>
@@ -1296,6 +1301,8 @@
           <span class="muted tl-workflow-hint" title="Typical Captions-style path">Media → edit Main → Preview cut → Render</span>
           <button id="tlStitchMainBtn" class="btn btn-secondary tl-toolbar-secondary" type="button"
             title="Bake the whole Main track into one combined source (word cuts applied). Then Preview cut / Render.">🎞 Stitch Main</button>
+          <button id="tlMatchGradesBtn" class="btn btn-secondary tl-toolbar-secondary" type="button"
+            title="Apply one shared color grade across all Main clips (keeps intentional B/W). Useful for multi-interview reels.">🎨 Match grades</button>
           <button id="tlPlaySeqBtn" class="btn btn-secondary tl-tipbtn" type="button"
             aria-describedby="tlPreviewTip">
             ▶ Preview cut

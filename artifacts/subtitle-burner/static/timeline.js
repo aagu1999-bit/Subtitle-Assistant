@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-86-fix-render-video";
+  const TL_BUILD = "studio-editor-build-87-color-archive";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -3011,6 +3011,78 @@
     }
     return `${icon} overlay ${fmtTime(clipDuration(c))}${ovBadge}`;
   }
+
+  /** Color preset string from a Main clip's color / color_grade fields. */
+  function clipColorPreset(clip) {
+    const c = clip && (clip.color || clip.color_grade);
+    if (!c) return "none";
+    if (typeof c === "string") return String(c || "none");
+    return String(c.preset || "none");
+  }
+
+  /** Intentional stylized looks we should not wipe when matching grades. */
+  function isSpecialColorGrade(preset) {
+    return String(preset || "").toLowerCase() === "bw";
+  }
+
+  function normalizeColorGradeObj(grade) {
+    if (!grade) return { preset: "neutral" };
+    if (typeof grade === "string") {
+      const p = grade || "neutral";
+      return { preset: p === "none" ? "neutral" : p };
+    }
+    const preset = String(grade.preset || "neutral");
+    return { preset: preset === "none" ? "neutral" : preset };
+  }
+
+  /**
+   * Keep multi-interview / multi-source Main clips on one shared grade.
+   * Prefers an existing non-B/W grade; otherwise neutral. Leaves intentional
+   * B/W alone (comedy / stylized beats) unless overwriteSpecial is set.
+   */
+  function unifyMainColorGrades(opts) {
+    opts = opts || {};
+    if (!tl || !tl.tracks || !tl.tracks.main || !tl.tracks.main.length) return false;
+    const mains = tl.tracks.main.filter((c) => c && !c.cutaway);
+    if (mains.length < 2) return false;
+    const srcIds = new Set(mains.map((c) => c.source_job_id).filter(Boolean));
+    if (!opts.force && srcIds.size < 2 && !opts.always) return false;
+
+    let shared = null;
+    for (const c of mains) {
+      const p = clipColorPreset(c);
+      if (p && p !== "none" && !isSpecialColorGrade(p)) {
+        shared = normalizeColorGradeObj(c.color || c.color_grade);
+        break;
+      }
+    }
+    if (!shared) shared = { preset: "neutral" };
+
+    let changed = 0;
+    mains.forEach((c) => {
+      const p = clipColorPreset(c);
+      if (isSpecialColorGrade(p) && !opts.overwriteSpecial) return;
+      const next = { preset: shared.preset };
+      const prev = clipColorPreset(c);
+      if (prev === next.preset && (c.color || c.color_grade)) return;
+      c.color = next;
+      c.color_grade = next;
+      changed += 1;
+    });
+    return changed > 0;
+  }
+
+  window.unifyTimelineColorGrades = function (opts) {
+    if (!tl) return false;
+    pushHistory();
+    const ok = unifyMainColorGrades(Object.assign({ force: true, always: true }, opts || {}));
+    if (ok) {
+      renderTimeline();
+      scheduleSave();
+      setSaveState("Matched Main color grades across clips");
+    }
+    return ok;
+  };
 
   /** Multi-line tooltip (native title="") with the details clipLabel has no
    * room to show — trim points, which FX are on, quote/reason, etc. */
@@ -7647,6 +7719,9 @@
         // AI packs use short keys — normalize; if still empty, Caption look.
         if (tl.style) tl.style = normalizeTlStyle(tl.style);
         seedStyleFromCaptionLook(opts.seedTimeline.source_job_id || seedJobId);
+        if (unifyMainColorGrades({ always: true })) {
+          setSaveState("Matched color grade across Main clips");
+        }
         await loadSources();
         await refreshMaxTrims();
         renderTimeline();
@@ -7691,6 +7766,10 @@
           }
         }
         seedStyleFromCaptionLook(clips[0] && (clips[0].source_job_id || clips[0].job_id));
+        // Multi-interview / multi-source: one shared grade (leave intentional B/W).
+        if (unifyMainColorGrades({ always: clips.length >= 2 })) {
+          setSaveState("Matched color grade across Main clips");
+        }
         renderTimeline();
         scheduleSave();
         return;
@@ -7997,6 +8076,8 @@
         cuts: [],
       };
       // Prefer grade / camera FX from the first Main clip that has them.
+      // If several sources disagree, unify to one shared non-B/W look first.
+      unifyMainColorGrades({ force: true, always: true });
       const firstFx = tl.tracks.main.find((c) => c.color || c.color_grade);
       if (firstFx) {
         merged.color = firstFx.color || firstFx.color_grade;
@@ -8687,6 +8768,19 @@
     if (stitchBtn && !stitchBtn._wired) {
       stitchBtn._wired = true;
       stitchBtn.onclick = () => stitchMainTrack();
+    }
+    const matchGradesBtn = $("tlMatchGradesBtn");
+    if (matchGradesBtn && !matchGradesBtn._wired) {
+      matchGradesBtn._wired = true;
+      matchGradesBtn.onclick = () => {
+        if (!tl || !tl.tracks.main.length) {
+          alert("Add Main clips first, then Match grades.");
+          return;
+        }
+        if (!window.unifyTimelineColorGrades()) {
+          setSaveState("Main grades already matched (or only intentional B/W differs)");
+        }
+      };
     }
     const delBtn = $("tlDeleteBtn");
     if (delBtn && !delBtn._wired) {

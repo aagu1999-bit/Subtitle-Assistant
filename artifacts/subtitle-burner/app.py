@@ -9054,9 +9054,39 @@ def list_compilations():
             "segment_count": len(clips),
             "total_duration": total,
             "source_job_ids": list({c.get("source_job_id") for c in clips if c.get("source_job_id")}),
+            "archived": bool(recipe.get("archived")),
         })
     out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
     return jsonify({"compilations": out})
+
+
+@app.route("/archive-compilation/<job_id>", methods=["POST"])
+def archive_compilation(job_id: str):
+    """Hide or unhide a past compilation without deleting sources or the bake.
+
+    Body: { archived?: bool } — default true (archive). Sets compile_recipe.archived.
+    Does not delete the job, MP4, or any source interviews.
+    """
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    recipe = jobs[job_id].get("compile_recipe")
+    if not isinstance(recipe, dict):
+        return jsonify({"error": "This job is not a compilation."}), 400
+    data = request.get_json(silent=True) or {}
+    if "archived" in data:
+        archived = bool(data.get("archived"))
+    else:
+        archived = True
+    recipe = dict(recipe)
+    recipe["archived"] = archived
+    jobs[job_id]["compile_recipe"] = recipe
+    _db_save_job(job_id)
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "archived": archived,
+        "label": recipe.get("label") or jobs[job_id].get("filename"),
+    })
 
 
 @app.route("/load-compilation/<job_id>", methods=["GET"])
@@ -15178,6 +15208,7 @@ Rules:
 - For "this / selected / current clip", set "target":"selected" (and track if needed).
 - Prefer 1-8 ops. If unclear or out of scope, ops: [] + honest message.
 - Colors #RRGGBB. Canvas: 9x16, 16x9, 1x1, 4x5. Fit: cover|contain. Color presets: none,neutral,warm,cool,vivid,bw.
+- Multi-interview / multiple Main shots: prefer ONE shared grade (neutral or warm) on every Main index. Do not mix warm/cool/vivid across interviews for comedy. Only use bw when the user explicitly asks for black-and-white / stylized B&W.
 - Caption color requests → set_caption_style. Host/Guest → set_speaker_colors.
 - Overlay motion → enable_ken_burns track:"overlay". PiP / full-bleed → set_overlay_layout.
 - Music volume/duck → set_music. CapCut clip looks → apply_clip_style.
