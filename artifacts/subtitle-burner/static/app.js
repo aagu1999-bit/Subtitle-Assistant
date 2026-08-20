@@ -6314,8 +6314,9 @@ window._bgMusicUploaded = false;
       if (j.error) throw new Error(j.error);
       window._bgMusicUploaded = true;
       uploadBtn.textContent = "✓ Uploaded";
-      if (statusEl) statusEl.textContent = `Ready: ${j.path}`;
+      if (statusEl) statusEl.textContent = `Ready: ${j.path} — also used on Timeline ▶ Render`;
       if (window.StudioLogger) StudioLogger.action("bgMusicUpload", "success", j.path);
+      // Hint Timeline: Caption Look bed will mix on Timeline Render via fallback.
     } catch (e) {
       uploadBtn.textContent = "⬆ Upload music";
       uploadBtn.disabled = false;

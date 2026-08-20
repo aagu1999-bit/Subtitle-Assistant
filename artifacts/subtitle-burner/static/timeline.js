@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const TL_BUILD = "studio-editor-build-84-sfx-lib-search";
+  const TL_BUILD = "studio-editor-build-85-music-diarize-logo";
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
@@ -2558,7 +2558,7 @@
     const max = asset.duration || 60;
     const mc = {
       id: uid(), asset_id: asset.asset_id, in: 0, out: max, _max: max,
-      start: 0, gain_db: -18, duck: true,
+      start: 0, gain_db: -12, duck: true,
     };
     reanchor(mc);
     tl.tracks.music.push(mc);
@@ -6242,19 +6242,85 @@
     if (tl && tl.job_id) fd.append("project_id", tl.job_id);
     setSaveState("Uploading asset…");
     try {
-      await api("/upload-asset", { method: "POST", body: fd });
+      const res = await api("/upload-asset", { method: "POST", body: fd });
       await loadAssets();
-      setSaveState("Saved ✓");
+      // Audio uploads → Music lane automatically (with duck on).
+      if (res && res.asset_id && (res.kind === "audio" || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name || ""))) {
+        const asset = (assets || []).find((a) => a.asset_id === res.asset_id) || {
+          asset_id: res.asset_id,
+          kind: "audio",
+          duration: res.duration || 60,
+          filename: res.filename || file.name,
+        };
+        await addMusicClip(asset);
+        setSaveState("Music on 🎵 Music lane (duck on) — ▶ Render to hear it");
+      } else {
+        setSaveState("Saved ✓");
+      }
       try {
         if (typeof window.refreshSoundSheetIfOpen === "function") {
           window.refreshSoundSheetIfOpen();
         }
       } catch (e) {}
+      return res;
     } catch (e) {
       alert("Asset upload failed: " + e.message);
       setSaveState("");
+      return null;
     }
   }
+
+  /** Open Logo / Project props; if no logo yet, prompt Media upload. */
+  function openLogoProjectPanel() {
+    selected = null;
+    logoSelected = false;
+    renderProps();
+    // Prefer project props panel (Logo section lives there).
+    if (typeof openWorkspacePanel === "function" && isWorkspaceFocusDesktop()) {
+      openWorkspacePanel("🏷 Logo / Project", { mode: "props" });
+    } else if (typeof window.openMobileTimelinePanel === "function" && document.body.classList.contains("is-phone")) {
+      try { window.openMobileTimelinePanel("props"); } catch (_) { /* optional */ }
+    }
+    const lg = tl && tl.logo;
+    if (lg && lg.asset_id) {
+      logoSelected = true;
+      updateStageCompositor();
+      setSaveState("Logo selected — drag handles on preview, or tweak in Project props");
+      return;
+    }
+    if (window._brandLogoAssetId) {
+      tl.logo = {
+        asset_id: window._brandLogoAssetId,
+        x: 0.04, y: 0.04, w: 0.18, h: 0.1, opacity: 0.9,
+      };
+      logoSelected = true;
+      scheduleSave();
+      updateStageCompositor();
+      renderProps();
+      setSaveState("Brand logo placed — drag on preview to position");
+      return;
+    }
+    const imgs = (assets || []).filter((a) => a.kind === "image" || a.kind === "gif");
+    if (imgs.length) {
+      setLeftTab("media", { pin: true });
+      if (typeof openWorkspacePanel === "function" && isWorkspaceFocusDesktop()) {
+        openWorkspacePanel("📚 Pick a logo image", { mode: "left" });
+      }
+      setSaveState("Upload/pick an image in Media, then open 🏷 Logo again — or use Project props → Logo");
+      return;
+    }
+    const go = confirm("No logo yet. Upload a PNG/JPG now to place as watermark?");
+    if (go) {
+      setLeftTab("media", { pin: true });
+      window._pendingLogoFromUpload = true;
+      const input = $("tlAssetFile");
+      if (input) {
+        input.accept = "image/png,image/jpeg,image/webp,image/gif";
+        input.click();
+      }
+    }
+  }
+  window.openLogoProjectPanel = openLogoProjectPanel;
 
   // If Replit served a stale index.html (new JS, old DOM), inject Polish UI
   // so the feature still appears without requiring a perfect hard-refresh.
@@ -6667,11 +6733,7 @@
         // Click / scrub ruler + empty lanes to seek playhead (output time).
         wireTimelineSeek();
 
-        on("tlProjectBtn", "onclick", () => {
-          // Logo / project panel — clear selection so renderProps shows project settings.
-          selected = null;
-          renderTimeline();
-        });
+        on("tlProjectBtn", "onclick", () => openLogoProjectPanel());
 
         const timeline = $("tlTimeline");
         if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
@@ -6716,9 +6778,23 @@
         on("tlAssetFile", "onchange", async (e) => {
           const f = e.target.files && e.target.files[0];
           if (!f) return;
-          await uploadAsset(f);
+          const wantLogo = !!window._pendingLogoFromUpload;
+          window._pendingLogoFromUpload = false;
+          const res = await uploadAsset(f);
           e.target.value = "";
+          e.target.accept = "video/*,image/*,audio/*";
           setLeftTab("media", { pin: true });
+          if (wantLogo && res && res.asset_id && tl) {
+            tl.logo = {
+              asset_id: res.asset_id,
+              x: 0.04, y: 0.04, w: 0.18, h: 0.1, opacity: 0.9,
+            };
+            logoSelected = true;
+            scheduleSave();
+            updateStageCompositor();
+            renderProps();
+            setSaveState("Logo placed — drag on preview");
+          }
         });
         setLeftTab("media", { pin: true });
         setSaveState(TL_BUILD);
@@ -8115,6 +8191,8 @@
     { label: "Suggest B-roll", prompt: "Suggest photo B-roll near the playhead for review" },
     { label: "Accept all B-roll", prompt: "Accept all pending B-roll suggestions onto Overlay" },
     { label: "Run Polish", prompt: "Run polish cut on the Main source with fast pacing and PiP B-roll" },
+    { label: "Hook / body / closer", prompt: "Help me shape Main as hook → body → conclusion. Ask what feeling I want, then suggest concrete timeline edits (reorder, zooms, cuts, B-roll)." },
+    { label: "Make Main punchier", prompt: "Analyze the Main clips and propose edits so the open hooks hard, the middle stays clear, and we land a strong closer. Ask one clarifying question if needed, then apply safe ops." },
     { label: "What can you do?", prompt: "What can you change on this timeline, and what can't you do?" },
   ];
 

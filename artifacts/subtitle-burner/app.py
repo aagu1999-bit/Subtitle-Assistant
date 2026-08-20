@@ -1704,6 +1704,63 @@ def _load_wav_waveform(audio_path: Path):
     return waveform, sr
 
 
+def _diarization_annotation(diar_out):
+    """Normalize pyannote 3.x Annotation vs 4.x DiarizeOutput → Annotation.
+
+    Newer community-1 / pyannote.audio 4.x returns DiarizeOutput with
+    ``.speaker_diarization``; calling ``.itertracks`` on the wrapper raises
+    AttributeError (what users hear as Analyze failed).
+    """
+    if diar_out is None:
+        raise RuntimeError("Diarization pipeline returned empty output")
+    if hasattr(diar_out, "itertracks"):
+        return diar_out
+    for attr in ("speaker_diarization", "exclusive_speaker_diarization", "annotation"):
+        ann = getattr(diar_out, attr, None)
+        if ann is not None and hasattr(ann, "itertracks"):
+            return ann
+    # Some builds expose serialize() with a plain list
+    if hasattr(diar_out, "serialize"):
+        try:
+            payload = diar_out.serialize() or {}
+            rows = payload.get("diarization") or payload.get("exclusive_diarization") or []
+            if isinstance(rows, list) and rows:
+                return rows  # handled specially by caller
+        except Exception:
+            pass
+    raise RuntimeError(
+        f"Unrecognized diarization output type: {type(diar_out).__name__}. "
+        "Update Studio or pin pyannote.audio; expected Annotation or DiarizeOutput."
+    )
+
+
+def _segments_from_diar_annotation(ann) -> list[dict]:
+    """Convert Annotation (or serialized list) → [{start,end,speaker}]."""
+    segments: list[dict] = []
+    if isinstance(ann, list):
+        for row in ann:
+            if not isinstance(row, dict):
+                continue
+            try:
+                segments.append({
+                    "start": round(float(row.get("start", 0)), 3),
+                    "end": round(float(row.get("end", 0)), 3),
+                    "speaker": str(row.get("speaker") or "SPEAKER_00"),
+                })
+            except (TypeError, ValueError):
+                continue
+        segments.sort(key=lambda s: s["start"])
+        return segments
+    for turn, _, speaker in ann.itertracks(yield_label=True):
+        segments.append({
+            "start": round(float(turn.start), 3),
+            "end": round(float(turn.end), 3),
+            "speaker": str(speaker),
+        })
+    segments.sort(key=lambda s: s["start"])
+    return segments
+
+
 def diarize_audio(
     video_path: Path,
     *,
@@ -1765,15 +1822,8 @@ def diarize_audio(
             f"model={DIARIZATION_MODEL}",
             flush=True,
         )
-        segments = []
-        for turn, _, speaker in diar.itertracks(yield_label=True):
-            segments.append({
-                "start": round(float(turn.start), 3),
-                "end": round(float(turn.end), 3),
-                "speaker": str(speaker),
-            })
-        segments.sort(key=lambda s: s["start"])
-        return segments
+        ann = _diarization_annotation(diar)
+        return _segments_from_diar_annotation(ann)
     finally:
         _safe_unlink(audio_path)
 
@@ -5344,9 +5394,17 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
                 mixed_output = OUTPUT_DIR / f"{job_id}_mixed.mp4"
                 
                 if duck:
-                    filter_complex = f"[1:a]volume={vol}dB[mus]; [0:a][mus]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[outa]"
+                    # Duck MUSIC under speech (sidechain key = voice).
+                    filter_complex = (
+                        f"[1:a]volume={vol}dB[mus];"
+                        f"[mus][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=350:makeup=1[musicduck];"
+                        f"[0:a][musicduck]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+                    )
                 else:
-                    filter_complex = f"[1:a]volume={vol}dB[mus]; [0:a][mus]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+                    filter_complex = (
+                        f"[1:a]volume={vol}dB[mus];"
+                        f"[0:a][mus]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+                    )
                     
                 cmd = [
                     FFMPEG, "-y",
@@ -11705,6 +11763,13 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     """
     resolved = []
     for m in music_clips:
+        # Direct path (Caption Look / Instant Export bg music fallback)
+        raw = m.get("_path") or m.get("path")
+        if raw:
+            path = Path(str(raw))
+            if path.exists():
+                resolved.append((m, path))
+                continue
         path = _timeline_clip_source(m)
         if path:
             resolved.append((m, path))
@@ -11714,43 +11779,65 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
                 "Music passthrough")
         return
 
-    inputs = ["-i", str(base)]
-    filt = ["[0:a]asplit=2[voice][key]"]
+    inputs: list[str] = ["-i", str(base)]
+    if _tl_input_has_audio(base):
+        filt = ["[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
+        next_i = 1
+    else:
+        inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        filt = ["[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]"]
+        next_i = 2
+
     music_labels = []
     duck = False
-    for idx, (m, path) in enumerate(resolved, start=1):
+    for m, path in resolved:
         inputs += ["-i", str(path)]
         m_in = max(0.0, float(m.get("in", 0)))
-        m_out = float(m.get("out", m_in + 30))
-        if m_out <= m_in:
+        try:
+            m_out = float(m.get("out", m_in + 30))
+        except (TypeError, ValueError):
             m_out = m_in + 30
+        if m_out <= m_in:
+            # Probe real duration when out was missing / zero.
+            dur = _media_duration(path)
+            m_out = m_in + (dur if dur > 0.5 else 60.0)
         start = max(0.0, float(m.get("start", 0)))
-        gain = float(m.get("gain_db", -18))
+        try:
+            gain = float(m.get("gain_db", -12))
+        except (TypeError, ValueError):
+            gain = -12.0
+        # Floor so music is actually audible under speech.
+        gain = max(-24.0, min(0.0, gain))
         delay = int(start * 1000)
-        if m.get("duck"):
+        if m.get("duck", True):
             duck = True
         filt.append(
-            f"[{idx}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
+            f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
             f"channel_layouts=stereo,"
             f"atrim=start={m_in:.3f}:end={m_out:.3f},"
             f"asetpts=PTS-STARTPTS,volume={gain:.2f}dB,"
-            f"adelay={delay}|{delay}[m{idx}]"
+            f"adelay={delay}|{delay},apad[m{next_i}]"
         )
-        music_labels.append(f"[m{idx}]")
+        music_labels.append(f"[m{next_i}]")
+        next_i += 1
 
     if len(music_labels) == 1:
         filt.append(f"{music_labels[0]}anull[musicall]")
     else:
         filt.append(f"{''.join(music_labels)}amix=inputs={len(music_labels)}:"
-                    f"duration=longest:normalize=0[musicall]")
+                    f"duration=longest:normalize=0:dropout_transition=0[musicall]")
 
     if duck:
-        filt.append("[musicall][key]sidechaincompress=threshold=0.03:ratio=8:"
-                    "attack=20:release=400[musicfinal]")
+        # Compress MUSIC keyed by speech (not the other way around).
+        filt.append(
+            "[musicall][key]sidechaincompress=threshold=0.02:ratio=6:"
+            "attack=15:release=350:makeup=1[musicfinal]"
+        )
     else:
         filt.append("[musicall]anull[musicfinal]")
 
-    filt.append("[voice][musicfinal]amix=inputs=2:duration=first:normalize=0[aout]")
+    filt.append("[voice][musicfinal]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]")
+    print(f"[music] mixing {len(music_labels)} bed(s) duck={duck}", flush=True)
 
     _tl_run(
         [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
@@ -12561,11 +12648,38 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             base = logod
 
         # ---- Pass 2: background music ----
-        if tracks["music"]:
+        music_clips = list(tracks.get("music") or [])
+        if not music_clips:
+            # Caption Look / Instant Export upload lands as {source}_bgmusic.* —
+            # pick it up so Timeline ▶ Render still hears the bed.
+            for c in main_clips:
+                sjid = c.get("source_job_id")
+                if not sjid:
+                    continue
+                bg_files = sorted(UPLOAD_DIR.glob(f"{sjid}_bgmusic.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                bg_files = [p for p in bg_files if p.is_file() and p.suffix.lower() not in (".json",)]
+                if bg_files:
+                    style_bg = (tl.get("style") or {}).get("bg_music") or {}
+                    try:
+                        vol = float(style_bg.get("volume_db", -12))
+                    except (TypeError, ValueError):
+                        vol = -12.0
+                    duck = style_bg.get("duck", True) is not False
+                    music_clips = [{
+                        "_path": str(bg_files[0]),
+                        "in": 0,
+                        "out": 0,  # probe in mixer
+                        "start": 0,
+                        "gain_db": vol,
+                        "duck": duck,
+                    }]
+                    print(f"[timeline] using Caption Look bg music {bg_files[0].name}", flush=True)
+                    break
+        if music_clips:
             _stage("mixing music", 55)
             mixed = UPLOAD_DIR / f"{job_id}_tlmusic.mp4"
             work.append(mixed)
-            _tl_mix_music(base, tracks["music"], mixed)
+            _tl_mix_music(base, music_clips, mixed)
             base = mixed
 
         # ---- Pass 3: overlays / B-roll / PiP ----
@@ -14886,6 +15000,10 @@ PURPOSE
 - You are NOT a general assistant, NOT a video generator, and you cannot finish export.
 - After ops apply, the user still clicks ▶ Render / Instant Export to bake the MP4.
 - If they ask what you can do / how something works, return ops: [] and explain clearly in message.
+- STORY / FEEL requests (hook → body → conclusion, "make Main feel punchy", "tighten the open"):
+  brainstorm in message (ask 1–2 clarifying questions if needed), then emit concrete ops you CAN apply
+  now (reorder_shot, apply_recommended_cuts, enable_punch_zoom, set_color_grade, suggest_broll,
+  run_polish, set_caption_style, set_music). Do not pretend you rewrote the transcript.
 
 HARD LIMITS (say no in message, ops: [])
 - Cannot invent ops outside the allowlist.
