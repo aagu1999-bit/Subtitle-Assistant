@@ -1852,3 +1852,47 @@ header.app-header {
 /* Card grid is the affordance now; the picker is opened programmatically. */
 .tpl-hidden-pick { position: absolute; width: 0; height: 0; overflow: hidden; opacity: 0; }
 .tpl-hidden-pick input { position: absolute; width: 0; height: 0; opacity: 0; }
+
+
+/* ---- Template setup window ------------------------------------------ */
+.tpl-setup { position: fixed; inset: 0; z-index: 400; display: flex;
+  align-items: center; justify-content: center; padding: 16px; }
+.tpl-setup[hidden] { display: none; }
+.tpl-setup-scrim { position: absolute; inset: 0; background: rgba(6,8,12,.82); }
+.tpl-setup-box {
+  position: relative; z-index: 1; width: 100%; max-width: 560px;
+  max-height: 90dvh; overflow: auto; padding: 18px 20px 16px;
+  background: #12151f; border: 1px solid #2a2f3a; border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.6); box-sizing: border-box;
+}
+.tpl-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tpl-setup-head h2 { margin: 0; font-size: 1.15rem; }
+.tpl-setup-x { background: none; border: 0; color: #94a3b8; font-size: 1.1rem; cursor: pointer; padding: 4px 6px; }
+.tpl-setup-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+.tpl-setup-status { margin-top: 10px; font-size: .8rem; }
+.tpl-field { margin-top: 14px; }
+.tpl-field > label { display: block; font-size: .82rem; color: #c8cdd3; margin-bottom: 5px; }
+.tpl-field input[type="text"], .tpl-field input[type="number"],
+.tpl-field select, .tpl-field textarea {
+  width: 100%; padding: 8px 10px; background: #1a1e2a; border: 1px solid #2a2f3a;
+  color: #e8eaee; border-radius: 8px; font-size: .88rem; box-sizing: border-box;
+}
+.tpl-field textarea { min-height: 68px; resize: vertical; line-height: 1.4; }
+.tpl-field .hint { font-size: .72rem; color: #94a3b8; margin-top: 4px; line-height: 1.35; }
+.tpl-drop {
+  margin-top: 6px; padding: 16px; text-align: center; cursor: pointer;
+  background: #0f1219; border: 2px dashed #2a2f3a; border-radius: 10px;
+}
+.tpl-drop:hover { border-color: #f59e0b; }
+.tpl-files { list-style: none; margin: 8px 0 0; padding: 0; }
+.tpl-files li {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
+  background: #161a24; border: 1px solid #2a2f3a; border-radius: 8px; font-size: .8rem;
+}
+.tpl-files .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-files .ord { color: #fbbf24; font-weight: 700; font-size: .74rem; }
+.tpl-files button { background: none; border: 0; color: #94a3b8; cursor: pointer; padding: 2px 4px; }
+@media (max-width: 560px) {
+  .tpl-setup { padding: 0; }
+  .tpl-setup-box { max-width: 100%; max-height: 100dvh; border-radius: 0; border: 0; }
+}

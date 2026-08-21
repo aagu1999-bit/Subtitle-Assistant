@@ -101,6 +101,26 @@
   </div>
 </div>
 
+<!-- Template setup window. A card opens this; media is chosen INSIDE it so
+     the template stays in charge instead of firing a bare file picker and
+     abandoning the user on Ingest. -->
+<div id="tplSetup" class="tpl-setup" hidden>
+  <div class="tpl-setup-scrim" data-tpl-close="1"></div>
+  <div class="tpl-setup-box" role="dialog" aria-modal="true" aria-labelledby="tplSetupTitle">
+    <div class="tpl-setup-head">
+      <h2 id="tplSetupTitle">Template</h2>
+      <button type="button" class="tpl-setup-x" data-tpl-close="1" aria-label="Close">✕</button>
+    </div>
+    <p id="tplSetupLead" class="muted"></p>
+    <div id="tplSetupBody"></div>
+    <div id="tplSetupStatus" class="tpl-setup-status muted" hidden></div>
+    <div class="tpl-setup-foot">
+      <button type="button" class="btn btn-secondary" data-tpl-close="1">Cancel</button>
+      <button type="button" class="btn btn-primary" id="tplSetupGo">Build →</button>
+    </div>
+  </div>
+</div>
+
 <!-- Early empty-state wiring: runs even if app.js later throws. -->
 <script>
 (function () {
@@ -146,7 +166,7 @@
     recap:      { needsMedia: false, tab: "compilation", panel: "recapReelPanel", recapMode: true },
     tocamera:   { needsMedia: true,  tab: "editor",      panel: null },
     interviews: { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true },
-    session:    { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true },
+    session:    { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true, distinct: true },
     shorts:     { needsMedia: true,  tab: "highlights",  panel: null }
   };
 
@@ -166,8 +186,14 @@
     if (route.recapMode) { try { localStorage.setItem("recapMode", "1"); } catch (e) {} }
 
     if (route.needsMedia) {
-      // Remember the destination so the app can land there once the upload
-      // has a transcript, instead of dumping the user on Ingest to guess.
+      // The template's own setup window owns the upload. Firing a bare file
+      // picker here is what used to strand people on Ingest with Instant
+      // Export as the loudest button on screen.
+      if (typeof window.openTemplateSetup === "function" && window.openTemplateSetup(id)) {
+        return;
+      }
+      // Fallback only if app.js failed to load: remember where they were
+      // going so they are not left with nothing.
       try { localStorage.setItem("pendingTemplate", id); } catch (e) {}
       var picker = document.getElementById("emptyFile");
       if (picker) {

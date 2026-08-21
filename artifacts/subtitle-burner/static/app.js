@@ -8340,3 +8340,369 @@ if (autoFetchOverlaysBtn) {
   });
 }
 
+// ---- Template setup windows -----------------------------------------
+// A card opens one of these. Media is chosen INSIDE the window and the
+// upload runs here with progress, so the template stays in charge from tap
+// to Timeline. Previously a card fired a bare file picker and left the user
+// on Ingest with Instant Export as the loudest button on screen.
+const TEMPLATE_SETUPS = {
+  tocamera: {
+    title: "🎤 To camera",
+    lead: "One take, cut down and captioned. Add the video, say what it's for.",
+    multi: false,
+    fields: [
+      { key: "brief", type: "textarea", label: "What do you want out of this video?",
+        placeholder: "e.g. keep the story about the first event, cut the rambling intro, land on the invite",
+        hint: "This guides the cut, not just the captions. Leave blank for a straight tidy-up." },
+      { key: "target_sec", type: "number", label: "Target length (seconds)", value: 60, min: 15, max: 600 },
+      { key: "tighten", type: "check", label: "Remove long pauses and filler", value: true },
+    ],
+  },
+  interviews: {
+    title: "🎙 Interviews",
+    lead: "Different people, one reel. Add each interview and set who's who.",
+    multi: true,
+    fields: [
+      { key: "brief", type: "textarea", label: "What's the piece about?",
+        placeholder: "e.g. what the neighbourhood wants from the new development",
+        hint: "Used to pick which answers earn their place." },
+      { key: "arrange", type: "select", label: "Arrange by", value: "topic",
+        options: [["topic", "Topic — group similar answers"], ["order", "The order I added them"]] },
+      { key: "target_sec", type: "number", label: "Target length (seconds)", value: 90, min: 20, max: 900 },
+    ],
+    perFile: { key: "speaker", label: "Who is this?", placeholder: "Name" },
+  },
+  session: {
+    title: "📹 Session",
+    lead: "One sitting recorded across several takes. Add them in the order they happened.",
+    multi: true,
+    fields: [
+      { key: "brief", type: "textarea", label: "What should the finished piece cover?",
+        placeholder: "e.g. the walkthrough from arrival to the rooftop, skip the retakes",
+        hint: "Used to drop duplicate takes and keep the through-line." },
+      { key: "arrange", type: "select", label: "Order", value: "chronological",
+        options: [["chronological", "Chronological — as recorded"], ["order", "The order I added them"]] },
+      { key: "drop_retakes", type: "check", label: "Drop obvious retakes of the same line", value: true },
+      { key: "target_sec", type: "number", label: "Target length (seconds)", value: 120, min: 20, max: 1800 },
+    ],
+  },
+  shorts: {
+    title: "⚡ Shorts",
+    lead: "One video, many clips. Add the video and say how many you want.",
+    multi: false,
+    fields: [
+      { key: "brief", type: "textarea", label: "What makes a good clip here?",
+        placeholder: "e.g. moments where she explains why the venue matters",
+        hint: "Optional. Guides which moments get picked." },
+      { key: "count", type: "number", label: "How many clips", value: 5, min: 1, max: 20 },
+      { key: "clip_sec", type: "number", label: "Roughly how long each (seconds)", value: 30, min: 10, max: 180 },
+    ],
+  },
+};
+
+let _tplSetupKey = null;
+let _tplSetupFiles = [];
+let _tplSetupBusy = false;
+
+function _tplCfgKey(key) { return "templateConfig:" + key; }
+
+function _tplLoadCfg(key) {
+  try { return JSON.parse(localStorage.getItem(_tplCfgKey(key)) || "{}") || {}; }
+  catch (e) { return {}; }
+}
+function _tplSaveCfg(key, cfg) {
+  try { localStorage.setItem(_tplCfgKey(key), JSON.stringify(cfg)); } catch (e) { /* ignore */ }
+}
+
+function openTemplateSetup(key) {
+  const spec = TEMPLATE_SETUPS[key];
+  if (!spec) return false;
+  _tplSetupKey = key;
+  _tplSetupFiles = [];
+  _tplSetupBusy = false;
+  const box = $("tplSetup");
+  if (!box) return false;
+  $("tplSetupTitle").textContent = spec.title;
+  $("tplSetupLead").textContent = spec.lead;
+  const status = $("tplSetupStatus");
+  if (status) { status.hidden = true; status.textContent = ""; }
+  const go = $("tplSetupGo");
+  if (go) { go.disabled = false; go.textContent = "Build →"; }
+  _tplRenderSetupBody();
+  box.hidden = false;
+  return true;
+}
+
+function closeTemplateSetup() {
+  if (_tplSetupBusy) {
+    if (!confirm("An upload is still running. Close anyway?")) return;
+  }
+  const box = $("tplSetup");
+  if (box) box.hidden = true;
+  _tplSetupKey = null;
+  _tplSetupFiles = [];
+  _tplSetupBusy = false;
+}
+
+function _tplRenderSetupBody() {
+  const spec = TEMPLATE_SETUPS[_tplSetupKey];
+  const host = $("tplSetupBody");
+  if (!spec || !host) return;
+  const cfg = _tplLoadCfg(_tplSetupKey);
+
+  let html = `<div class="tpl-field"><label>${spec.multi ? "Your videos" : "Your video"}</label>` +
+    `<div class="tpl-drop" id="tplSetupDrop">` +
+    `<div style="font-size:1.3rem">🎬</div>` +
+    `<div style="font-size:.86rem;color:#e8eaee;font-weight:600">` +
+    (spec.multi ? "Choose videos" : "Choose a video") + `</div>` +
+    `<div class="hint">They'll be transcribed here — you won't be sent anywhere to do it.</div>` +
+    `</div><ul class="tpl-files" id="tplSetupFiles"></ul></div>`;
+
+  spec.fields.forEach((f) => {
+    const val = cfg[f.key] != null ? cfg[f.key] : f.value;
+    html += `<div class="tpl-field"><label for="tplf_${f.key}">${f.label}</label>`;
+    if (f.type === "textarea") {
+      html += `<textarea id="tplf_${f.key}" data-tplf="${f.key}" placeholder="${f.placeholder || ""}">${val != null ? String(val) : ""}</textarea>`;
+    } else if (f.type === "number") {
+      html += `<input type="number" id="tplf_${f.key}" data-tplf="${f.key}" value="${val}" min="${f.min}" max="${f.max}">`;
+    } else if (f.type === "select") {
+      html += `<select id="tplf_${f.key}" data-tplf="${f.key}">` +
+        f.options.map(([v, t]) => `<option value="${v}"${v === val ? " selected" : ""}>${t}</option>`).join("") +
+        `</select>`;
+    } else if (f.type === "check") {
+      html += `<label class="tl-prop-inline" style="font-size:.84rem;color:#c8cdd3">` +
+        `<input type="checkbox" data-tplf="${f.key}"${val ? " checked" : ""}> ${f.label}</label>`;
+    }
+    if (f.hint) html += `<div class="hint">${f.hint}</div>`;
+    html += `</div>`;
+  });
+  host.innerHTML = html;
+  _tplRenderFileList();
+
+  const drop = $("tplSetupDrop");
+  if (drop) {
+    drop.onclick = () => {
+      const inp = document.createElement("input");
+      inp.type = "file";
+      inp.accept = "video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v";
+      inp.multiple = !!spec.multi;
+      inp.onchange = () => {
+        const picked = Array.from(inp.files || []);
+        _tplSetupFiles = spec.multi ? _tplSetupFiles.concat(picked) : picked.slice(0, 1);
+        _tplRenderFileList();
+      };
+      inp.click();
+    };
+  }
+}
+
+function _tplRenderFileList() {
+  const spec = TEMPLATE_SETUPS[_tplSetupKey];
+  const host = $("tplSetupFiles");
+  if (!host || !spec) return;
+  host.innerHTML = "";
+  _tplSetupFiles.forEach((f, i) => {
+    const li = document.createElement("li");
+    const ord = document.createElement("span");
+    ord.className = "ord";
+    ord.textContent = String(i + 1);
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = f.name;
+    li.appendChild(ord);
+    li.appendChild(nm);
+    if (spec.perFile) {
+      const sp = document.createElement("input");
+      sp.type = "text";
+      sp.placeholder = spec.perFile.placeholder || "";
+      sp.dataset.tplSpeaker = String(i);
+      sp.style.cssText = "width:110px;padding:3px 6px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px;font-size:.76rem";
+      li.appendChild(sp);
+    }
+    if (spec.multi && i > 0) {
+      const up = document.createElement("button");
+      up.type = "button";
+      up.title = "Move earlier";
+      up.textContent = "↑";
+      up.onclick = () => {
+        const t = _tplSetupFiles[i - 1];
+        _tplSetupFiles[i - 1] = _tplSetupFiles[i];
+        _tplSetupFiles[i] = t;
+        _tplRenderFileList();
+      };
+      li.appendChild(up);
+    }
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.title = "Remove";
+    rm.textContent = "✕";
+    rm.onclick = () => { _tplSetupFiles.splice(i, 1); _tplRenderFileList(); };
+    li.appendChild(rm);
+    host.appendChild(li);
+  });
+  if (!_tplSetupFiles.length) {
+    host.innerHTML = `<li style="opacity:.6">Nothing added yet</li>`;
+  }
+}
+
+function _tplCollectConfig() {
+  const cfg = {};
+  document.querySelectorAll("#tplSetupBody [data-tplf]").forEach((el) => {
+    const k = el.dataset.tplf;
+    cfg[k] = el.type === "checkbox" ? !!el.checked
+      : (el.type === "number" ? (parseFloat(el.value) || 0) : el.value);
+  });
+  const speakers = [];
+  document.querySelectorAll("#tplSetupFiles [data-tpl-speaker]").forEach((el) => {
+    speakers[parseInt(el.dataset.tplSpeaker, 10)] = el.value.trim();
+  });
+  if (speakers.length) cfg.speakers = speakers;
+  return cfg;
+}
+
+function _tplStatus(msg) {
+  const el = $("tplSetupStatus");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = msg;
+}
+
+/** Upload + transcribe inside the window, then hand off to the destination. */
+async function runTemplateBuild() {
+  const key = _tplSetupKey;
+  const spec = TEMPLATE_SETUPS[key];
+  if (!spec) return;
+  if (!_tplSetupFiles.length) {
+    alert(spec.multi ? "Add at least one video first." : "Add a video first.");
+    return;
+  }
+  const cfg = _tplCollectConfig();
+  cfg._files = _tplSetupFiles.map((f) => f.name);
+  _tplSaveCfg(key, cfg);
+
+  const go = $("tplSetupGo");
+  _tplSetupBusy = true;
+  if (go) { go.disabled = true; go.textContent = "Building…"; }
+
+  const jobIds = [];
+  try {
+    for (let i = 0; i < _tplSetupFiles.length; i++) {
+      const f = _tplSetupFiles[i];
+      _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${f.name}`);
+      const res = await _uploadChunked(f, false, (frac) => {
+        _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${f.name} · ${Math.round(frac * 100)}%`);
+      }, { intent: "transcribe" });
+      if (res && res.job_id) {
+        jobIds.push(res.job_id);
+        try {
+          const ids = JSON.parse(localStorage.getItem("subtitleBurner:jobIds") || "[]");
+          if (Array.isArray(ids) && ids.indexOf(res.job_id) < 0) {
+            ids.unshift(res.job_id);
+            localStorage.setItem("subtitleBurner:jobIds", JSON.stringify(ids));
+          }
+          localStorage.setItem("subtitleBurner:lastJobId", res.job_id);
+        } catch (e) { /* ignore */ }
+      }
+    }
+    // Wait for transcripts so the user lands on a tool that can actually work.
+    for (let i = 0; i < jobIds.length; i++) {
+      _tplStatus(`Transcribing ${i + 1} of ${jobIds.length}…`);
+      await _tplWaitForWords(jobIds[i]);
+    }
+    cfg.job_ids = jobIds;
+    _tplSaveCfg(key, cfg);
+    _tplStatus("Ready — opening your edit.");
+    _tplSetupBusy = false;
+    closeTemplateSetup();
+    _tplHandOff(key, cfg);
+  } catch (e) {
+    _tplSetupBusy = false;
+    if (go) { go.disabled = false; go.textContent = "Build →"; }
+    _tplStatus("Failed: " + ((e && e.message) || e));
+  }
+}
+
+function _tplWaitForWords(jobId, timeoutMs) {
+  const limit = timeoutMs || 30 * 60 * 1000;
+  const t0 = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      if (Date.now() - t0 > limit) return reject(new Error("Transcription timed out"));
+      let s = null;
+      try {
+        const r = await fetch("/status/" + jobId);
+        if (r.status === 404) {
+          // The job vanished (server restart, cleared storage). Say so now
+          // rather than spinning until the timeout.
+          return reject(new Error("That upload is no longer on the server — add it again."));
+        }
+        s = await r.json();
+      } catch (e) { /* transient network — keep polling */ }
+      if (s && s.status === "error") return reject(new Error(s.error || "Transcription failed"));
+      if (s && (s.has_words || (Array.isArray(s.words) && s.words.length) ||
+                s.status === "awaiting_edit" || s.status === "done")) return resolve(s);
+      setTimeout(tick, 2500);
+    };
+    tick();
+  });
+}
+
+/** Where a finished setup goes. Never to Export — the way out is the edit. */
+function _tplHandOff(key, cfg) {
+  const route = (window.TEMPLATE_ROUTES || {})[key] || {};
+  const jobId = (cfg.job_ids || [])[0] || null;
+  try { localStorage.removeItem("pendingTemplate"); } catch (e) { /* ignore */ }
+  if (typeof refreshJobsList === "function") { try { refreshJobsList(); } catch (e) { /* ignore */ } }
+  // Seed the AI Edit brief where the backend already understands it.
+  if (cfg.brief) {
+    const el = $("aiEditPurpose");
+    if (el) el.value = cfg.brief;
+  }
+  // Make the built job the ACTIVE one before switching tabs. The Timeline and
+  // Shorts tabs are transcript-gated; arriving without currentJobId set sends
+  // the user straight back to Ingest, which is the exact stranding this whole
+  // setup window exists to stop.
+  if (jobId && typeof switchToJob === "function") {
+    // switchToJob loads the words, which is what lets the transcript-gated
+    // tabs actually open. openTimelineEditor does NOT switch tabs on its own,
+    // so calling it alone left the user sitting on Ingest.
+    Promise.resolve()
+      .then(() => switchToJob(jobId, { force: true, tab: route.tab || "editor" }))
+      .then(() => {
+        // switchToJob only honours transcript/branding/highlights/editor as a
+        // landing tab and silently falls back to Ingest for anything else —
+        // "compilation" included. Set it explicitly once the words are loaded
+        // and the gates will pass.
+        if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
+        if (route.tab === "editor" && typeof window.openTimelineEditor === "function") {
+          return window.openTimelineEditor(jobId);
+        }
+      })
+      .catch(() => {
+        if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
+      });
+  } else if (typeof setActiveTab === "function") {
+    setActiveTab(route.tab || "editor");
+  }
+  if (route.panel) {
+    const el = document.getElementById(route.panel);
+    if (el && el.scrollIntoView) setTimeout(() => el.scrollIntoView({ block: "start" }), 300);
+  }
+}
+
+// Wire the window once.
+(function wireTemplateSetup() {
+  const box = $("tplSetup");
+  if (!box) return;
+  box.addEventListener("click", (ev) => {
+    if (ev.target && ev.target.dataset && ev.target.dataset.tplClose) closeTemplateSetup();
+  });
+  const go = $("tplSetupGo");
+  if (go) go.onclick = () => runTemplateBuild();
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && box && !box.hidden) closeTemplateSetup();
+  });
+})();
+
+window.openTemplateSetup = openTemplateSetup;
+window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
