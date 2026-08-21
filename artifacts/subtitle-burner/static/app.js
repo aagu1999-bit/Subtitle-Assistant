@@ -5399,6 +5399,7 @@ const _origRefreshJobsList = refreshJobsList;
 refreshJobsList = async function () {
   const r = await _origRefreshJobsList.apply(this, arguments);
   try { renderMultiInterviewJobs(); } catch (e) { /* ignore */ }
+  try { _deliverPendingTemplate(); } catch (e) { /* ignore */ }
   try { if (typeof renderRecapImport === "function") renderRecapImport(); } catch (e) { /* ignore */ }
   try { if (typeof renderRecapScenes === "function") renderRecapScenes(); } catch (e) { /* ignore */ }
   return r;
@@ -6455,6 +6456,23 @@ const tabContents = document.querySelectorAll("[data-tab-group]");
 const tabResultBtn = $("tabResult");
 const compileBadge = $("compileBadge");
 const emptyDropBtn = $("emptyDropBtn");
+
+/** Land on the template the user picked on Home, once media is ready.
+ *  Without this a card that needs footage would open the picker and then
+ *  strand the user on Ingest with no idea where their template went. */
+function _deliverPendingTemplate() {
+  let want = "";
+  try { want = localStorage.getItem("pendingTemplate") || ""; } catch (e) { return; }
+  if (!want) return;
+  const route = (window.TEMPLATE_ROUTES || {})[want];
+  if (!route || !hasReadyTranscript()) return;
+  try { localStorage.removeItem("pendingTemplate"); } catch (e) { /* ignore */ }
+  if (typeof setActiveTab === "function") setActiveTab(route.tab);
+  if (route.panel) {
+    const el = document.getElementById(route.panel);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "start" });
+  }
+}
 
 function hasReadyTranscript() {
   return !!(currentJobId && Array.isArray(currentWords) && currentWords.length);

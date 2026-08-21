@@ -85,47 +85,106 @@
   <div class="empty-hero">
     <div class="empty-logo">🎬</div>
     <h1>Subtitle Burner</h1>
-    <p class="empty-tagline">Two ways in — pick what you're making.<br>Captioning one video, or building an event recap from a pile of photos and clips.</p>
-    <!-- Input INSIDE the label is the most reliable picker pattern across
-         browsers (for= alone can fail if app.js never finishes wiring). -->
-    <label id="emptyDropBtn" class="btn btn-primary btn-lg empty-pick-btn" style="cursor:pointer;position:relative;overflow:hidden">
-      Choose a video to start
-      <input type="file" id="emptyFile" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" multiple
-             style="position:absolute;inset:0;opacity:0;cursor:pointer;font-size:100px">
-    </label>
-    <p id="emptyPickStatus" class="muted" style="margin-top:14px">Transcribe &amp; caption · or drag &amp; drop a video anywhere on this page</p>
-    <div style="margin-top:22px;padding-top:18px;border-top:1px solid #2a2f3a">
-      <button type="button" id="emptyRecapBtn" class="btn btn-secondary btn-lg"
-        style="border-color:#f59e0b;color:#fbbf24">🏙 Build an event recap</button>
-      <p class="muted" style="margin-top:10px;font-size:.84rem">
-        Bulk-import up to 50 photos &amp; videos — <strong>no transcription</strong>, no one-at-a-time uploads
-      </p>
+    <p class="empty-tagline">What are you making?</p>
+
+    <!-- Template gallery. Cards are STRUCTURES; each one's settings live on
+         the screen it opens, so adding templates never bloats this grid.
+         Only cards with working machinery behind them appear — a card that
+         leads nowhere teaches people not to trust the grid. -->
+    <div id="templateGrid" class="tpl-grid">
+      <button type="button" class="tpl-card" data-tpl="recap">
+        <span class="tpl-glyph">🏙</span>
+        <span class="tpl-name">Recap</span>
+        <span class="tpl-cap">Photos &amp; clips into an event reel</span>
+      </button>
+      <button type="button" class="tpl-card" data-tpl="tocamera">
+        <span class="tpl-glyph">🎤</span>
+        <span class="tpl-name">To camera</span>
+        <span class="tpl-cap">One take, cut down and captioned</span>
+      </button>
+      <button type="button" class="tpl-card" data-tpl="interviews">
+        <span class="tpl-glyph">🎙</span>
+        <span class="tpl-name">Interviews</span>
+        <span class="tpl-cap">Several people, one reel</span>
+      </button>
+      <button type="button" class="tpl-card" data-tpl="session">
+        <span class="tpl-glyph">📹</span>
+        <span class="tpl-name">Session</span>
+        <span class="tpl-cap">One sitting, recorded across takes</span>
+      </button>
+      <button type="button" class="tpl-card" data-tpl="shorts">
+        <span class="tpl-glyph">⚡</span>
+        <span class="tpl-name">Shorts</span>
+        <span class="tpl-cap">One video, many clips</span>
+      </button>
     </div>
+
+    <!-- Hidden picker shared by every card that needs footage first. -->
+    <label id="emptyDropBtn" class="tpl-hidden-pick">
+      <input type="file" id="emptyFile" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" multiple>
+    </label>
+    <p id="emptyPickStatus" class="muted" style="margin-top:16px">Or drag &amp; drop a video anywhere on this page</p>
   </div>
 </div>
+
 <!-- Early empty-state wiring: runs even if app.js later throws. -->
 <script>
 (function () {
-  // Recap route: reveal the app shell straight onto the Compilation tab.
-  // Deliberately does NOT require a transcribed video — the recap flow
-  // imports media that is never sent to Whisper, so gating it behind
-  // "drop a video first" left it with no front door at all.
-  var recapBtn = document.getElementById("emptyRecapBtn");
-  if (recapBtn) {
-    recapBtn.addEventListener("click", function () {
-      // Persist the choice: the jobs poll decides shell visibility from this.
-      try { localStorage.setItem("recapMode", "1"); } catch (e) {}
-      var empty = document.getElementById("emptyState");
-      var shell = document.getElementById("appShell");
-      var header = document.getElementById("appHeader");
-      if (empty) empty.classList.add("hidden");
-      if (shell) shell.classList.remove("hidden");
-      if (header) header.classList.remove("hidden");
-      if (typeof window.setActiveTab === "function") {
-        try { window.setActiveTab("compilation"); } catch (e) { /* fall through */ }
+  // ---- Template gallery routing -------------------------------------
+  // Every card leads somewhere real. Cards whose template needs footage open
+  // the picker and remember where to go once Whisper is done; Recap needs no
+  // transcription at all, so it opens its panel immediately.
+  var TEMPLATE_ROUTES = {
+    recap:      { needsMedia: false, tab: "compilation", panel: "recapReelPanel", recapMode: true },
+    tocamera:   { needsMedia: true,  tab: "editor",      panel: null },
+    interviews: { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true },
+    session:    { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true },
+    shorts:     { needsMedia: true,  tab: "highlights",  panel: null }
+  };
+
+  function revealShell() {
+    var empty = document.getElementById("emptyState");
+    var shell = document.getElementById("appShell");
+    var header = document.getElementById("appHeader");
+    if (empty) empty.classList.add("hidden");
+    if (shell) shell.classList.remove("hidden");
+    if (header) header.classList.remove("hidden");
+  }
+
+  function gotoTemplate(id) {
+    var route = TEMPLATE_ROUTES[id];
+    if (!route) return;
+    try { localStorage.setItem("activeTemplate", id); } catch (e) {}
+    if (route.recapMode) { try { localStorage.setItem("recapMode", "1"); } catch (e) {} }
+
+    if (route.needsMedia) {
+      // Remember the destination so the app can land there once the upload
+      // has a transcript, instead of dumping the user on Ingest to guess.
+      try { localStorage.setItem("pendingTemplate", id); } catch (e) {}
+      var picker = document.getElementById("emptyFile");
+      if (picker) {
+        picker.multiple = !!route.multi;
+        picker.click();
       }
-      var panel = document.getElementById("recapReelPanel");
+      return;
+    }
+    revealShell();
+    if (typeof window.setActiveTab === "function") {
+      try { window.setActiveTab(route.tab); } catch (e) { /* fall through */ }
+    }
+    if (route.panel) {
+      var panel = document.getElementById(route.panel);
       if (panel && panel.scrollIntoView) panel.scrollIntoView({ block: "start" });
+    }
+  }
+  window.gotoTemplate = gotoTemplate;
+  window.TEMPLATE_ROUTES = TEMPLATE_ROUTES;
+
+  var grid = document.getElementById("templateGrid");
+  if (grid) {
+    grid.addEventListener("click", function (ev) {
+      var card = ev.target.closest ? ev.target.closest("[data-tpl]") : null;
+      if (card && !card.disabled) gotoTemplate(card.dataset.tpl);
     });
   }
 
