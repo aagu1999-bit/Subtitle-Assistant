@@ -590,50 +590,28 @@
   // Templates are STRUCTURES — what shape is this video — not caption looks.
   // Every card routes somewhere real; only templates with working machinery
   // behind them are listed.
-  const HOME_PACKS = [
-    { key: "recap", name: "Recap", glyph: "🏙", blurb: "Photos & clips into an event reel", tone: "linear-gradient(160deg,#3a2a12,#141008)" },
-    { key: "tocamera", name: "To camera", glyph: "🎤", blurb: "One take, cut down & captioned", tone: "linear-gradient(160deg,#2a2438,#101018)" },
-    { key: "interviews", name: "Interviews", glyph: "🎙", blurb: "Several people, one reel", tone: "linear-gradient(160deg,#1f2e28,#0e1214)" },
-    { key: "session", name: "Session", glyph: "📹", blurb: "One sitting, several takes", tone: "linear-gradient(160deg,#243248,#0f141c)" },
-    { key: "shorts", name: "Shorts", glyph: "⚡", blurb: "One video, many clips", tone: "linear-gradient(160deg,#352628,#120e12)" },
-  ];
-
-  let _homePackKey = null;
 
   function syncMobileHomeVisibility(tab) {
     const shell = document.getElementById("mobileHomeShell");
     const templates = document.getElementById("mobileHomeTemplates");
-    const onHome = isPhone() && (!tab || tab === "ingest");
+    // The gallery is not a phone feature — desktop lands on Ingest with no
+    // way to pick a template otherwise.
+    const onHome = (!tab || tab === "ingest");
     if (shell) shell.hidden = !onHome;
     if (templates) templates.hidden = !onHome;
   }
 
+  /** The gallery is owned by the shared renderer so phone and desktop can
+   *  never show different cards again. */
   function renderMobileHomeGallery() {
     const host = document.getElementById("mobileHomeGallery");
     if (!host) return;
-    host.innerHTML = HOME_PACKS.map((p) => {
-      const on = _homePackKey === p.key ? " on" : "";
-      return `<button type="button" class="mobile-home-card${on}" data-pack="${p.key}">` +
-        `<div class="art" style="background:${p.tone}"><div class="cap">` +
-        `<span class="glyph">${p.glyph}</span><br>${p.blurb}</div></div>` +
-        `<div class="name">${p.name}</div></button>`;
-    }).join("");
+    if (typeof window.renderTemplateGrid === "function") window.renderTemplateGrid(host);
   }
 
   /** Tapping a card GOES somewhere. Recap opens its panel with no upload;
    *  the rest open the picker and remember where the user was heading. */
-  function selectHomePack(key) {
-    _homePackKey = key;
-    renderMobileHomeGallery();
-    if (typeof window.gotoTemplate === "function") {
-      window.gotoTemplate(key);
-      return;
-    }
-    // gotoTemplate lives in the early inline wiring; if that ever fails to
-    // load, at least land the user on the upload step rather than nowhere.
-    const label = document.querySelector('label[for="file"]');
-    if (label) label.click();
-  }
+
 
   function syncMobileHomeContinue() {
     const btn = document.getElementById("mobileHomeContinue");
@@ -655,7 +633,6 @@
       const el = document.getElementById("readyActions");
       return el && !el.classList.contains("hidden");
     })();
-    if (_homePackKey) selectHomePack(_homePackKey);
     if (ready) {
       const openTl = document.getElementById("readyOpenTimelineBtn");
       if (openTl) openTl.click();
@@ -706,14 +683,7 @@
     // gallery lists structures now, and there is nothing to filter.
     const chips = document.getElementById("mobileHomeChips");
     if (chips) chips.remove();
-    const gallery = document.getElementById("mobileHomeGallery");
-    if (gallery) {
-      gallery.addEventListener("click", (e) => {
-        const card = e.target && e.target.closest && e.target.closest("[data-pack]");
-        if (!card) return;
-        selectHomePack(card.dataset.pack);
-      });
-    }
+    // Gallery clicks are handled by the shared renderer (renderTemplateGrid).
 
     const ready = document.getElementById("readyActions");
     const fname = document.getElementById("filename");

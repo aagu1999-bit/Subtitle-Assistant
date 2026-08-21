@@ -91,33 +91,7 @@
          the screen it opens, so adding templates never bloats this grid.
          Only cards with working machinery behind them appear — a card that
          leads nowhere teaches people not to trust the grid. -->
-    <div id="templateGrid" class="tpl-grid">
-      <button type="button" class="tpl-card" data-tpl="recap">
-        <span class="tpl-glyph">🏙</span>
-        <span class="tpl-name">Recap</span>
-        <span class="tpl-cap">Photos &amp; clips into an event reel</span>
-      </button>
-      <button type="button" class="tpl-card" data-tpl="tocamera">
-        <span class="tpl-glyph">🎤</span>
-        <span class="tpl-name">To camera</span>
-        <span class="tpl-cap">One take, cut down and captioned</span>
-      </button>
-      <button type="button" class="tpl-card" data-tpl="interviews">
-        <span class="tpl-glyph">🎙</span>
-        <span class="tpl-name">Interviews</span>
-        <span class="tpl-cap">Several people, one reel</span>
-      </button>
-      <button type="button" class="tpl-card" data-tpl="session">
-        <span class="tpl-glyph">📹</span>
-        <span class="tpl-name">Session</span>
-        <span class="tpl-cap">One sitting, recorded across takes</span>
-      </button>
-      <button type="button" class="tpl-card" data-tpl="shorts">
-        <span class="tpl-glyph">⚡</span>
-        <span class="tpl-name">Shorts</span>
-        <span class="tpl-cap">One video, many clips</span>
-      </button>
-    </div>
+    <div id="templateGrid" class="tpl-grid"></div>
 
     <!-- Hidden picker shared by every card that needs footage first. -->
     <label id="emptyDropBtn" class="tpl-hidden-pick">
@@ -134,6 +108,40 @@
   // Every card leads somewhere real. Cards whose template needs footage open
   // the picker and remember where to go once Whisper is done; Recap needs no
   // transcription at all, so it opens its panel immediately.
+  // Single source of truth for the gallery. Both the welcome screen and the
+  // Studio home render from this, so the two can never drift apart again —
+  // they did, and the phone spent a week showing caption packs that went
+  // nowhere while the welcome screen showed real templates.
+  var STUDIO_TEMPLATES = [
+    { key: "recap",      glyph: "🏙", name: "Recap",      cap: "Photos & clips into an event reel" },
+    { key: "tocamera",   glyph: "🎤", name: "To camera",  cap: "One take, cut down & captioned" },
+    { key: "interviews", glyph: "🎙", name: "Interviews", cap: "Several people, one reel" },
+    { key: "session",    glyph: "📹", name: "Session",    cap: "One sitting, several takes" },
+    { key: "shorts",     glyph: "⚡", name: "Shorts",     cap: "One video, many clips" }
+  ];
+  window.STUDIO_TEMPLATES = STUDIO_TEMPLATES;
+
+  /** Paint the gallery into any host element. Same markup and CSS on phone
+   *  and desktop — one component, not two lookalikes. */
+  function renderTemplateGrid(host) {
+    if (!host) return;
+    host.classList.add("tpl-grid");
+    host.innerHTML = STUDIO_TEMPLATES.map(function (t) {
+      return '<button type="button" class="tpl-card" data-tpl="' + t.key + '">' +
+        '<span class="tpl-glyph">' + t.glyph + '</span>' +
+        '<span class="tpl-name">' + t.name + '</span>' +
+        '<span class="tpl-cap">' + t.cap + '</span></button>';
+    }).join("");
+    if (!host.dataset.tplWired) {
+      host.dataset.tplWired = "1";
+      host.addEventListener("click", function (ev) {
+        var card = ev.target.closest ? ev.target.closest("[data-tpl]") : null;
+        if (card && !card.disabled) gotoTemplate(card.dataset.tpl);
+      });
+    }
+  }
+  window.renderTemplateGrid = renderTemplateGrid;
+
   var TEMPLATE_ROUTES = {
     recap:      { needsMedia: false, tab: "compilation", panel: "recapReelPanel", recapMode: true },
     tocamera:   { needsMedia: true,  tab: "editor",      panel: null },
@@ -180,13 +188,8 @@
   window.gotoTemplate = gotoTemplate;
   window.TEMPLATE_ROUTES = TEMPLATE_ROUTES;
 
-  var grid = document.getElementById("templateGrid");
-  if (grid) {
-    grid.addEventListener("click", function (ev) {
-      var card = ev.target.closest ? ev.target.closest("[data-tpl]") : null;
-      if (card && !card.disabled) gotoTemplate(card.dataset.tpl);
-    });
-  }
+  renderTemplateGrid(document.getElementById("templateGrid"));
+  renderTemplateGrid(document.getElementById("mobileHomeGallery"));
 
   var input = document.getElementById("emptyFile");
   var status = document.getElementById("emptyPickStatus");
@@ -302,7 +305,7 @@
             </p>
           </section>
 
-          <div id="mobileHomeTemplates" class="mobile-home-templates phone-only">
+          <div id="mobileHomeTemplates" class="mobile-home-templates">
             <div class="mobile-home-chips" id="mobileHomeChips" role="tablist" aria-label="Template filters">
               <button type="button" class="mobile-home-chip on" data-filter="all">Trending</button>
               <button type="button" class="mobile-home-chip" data-filter="photo">Photo</button>
@@ -310,7 +313,7 @@
               <button type="button" class="mobile-home-chip" data-filter="polished">Polished</button>
               <button type="button" class="mobile-home-chip" data-filter="minimal">Minimal</button>
             </div>
-            <div class="mobile-home-gallery" id="mobileHomeGallery"></div>
+            <div id="mobileHomeGallery"></div>
             <p class="mobile-home-foot muted">Recap needs no transcription. The others ask for your footage first, then take you to the right tool.</p>
           </div>
 
