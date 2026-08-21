@@ -4672,7 +4672,7 @@
       return;
     }
     const t = selected.track;
-    let html = `<h3>${({ main: "🎬 Main clip", overlay: "🖼 Overlay", effects: "✨ Effect", text: "🔤 Title", music: "🎵 Music" })[t]}</h3>`;
+    let html = `<h3>${({ main: "🎬 Main clip", overlay: "🖼 Overlay", effects: "✨ Effect", text: "🔤 Title", music: "🎵 Audio (music / VO)" })[t]}</h3>`;
     if (tl && tl.edit_receipt) {
       const r = tl.edit_receipt;
       const kindLabel = r.kind === "polish" ? "Polish" : "AI Edit";
@@ -4770,11 +4770,26 @@
       }
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propNum("gain_db", "Volume (dB)", c.gain_db, -40, 10, 1)}</div>`;
       html += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
-      html += propCheck("duck", "Duck under voice (auto-lower during speech)", c.duck);
+      html += propSelect("audio_role", "This clip is", c.audio_role || "music",
+        [["music", "🎵 Music"], ["voiceover", "🎙 Voiceover"]]);
+      html += propSelect("duck", "Ducking", _duckValue(c), [["under", "Ducks under speech"], ["over", "Ducks everything else"], ["none", "Independent"]]);
+      html += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">` +
+        `Music and a voiceover play together — put both on this lane. Set the voiceover to ` +
+        `<strong>Ducks everything else</strong> and the music to <strong>Ducks under speech</strong> ` +
+        `and the bed drops while the voice talks.</p>`;
     } else if (t === "overlay") {
       let ovBody = "";
       ovBody += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity != null ? c.opacity : 1, 0, 1, 0.05)}</div>`;
       ovBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
+      ovBody += propCheck("audio", "Include this clip's audio", !!c.audio);
+      if (c.audio) {
+        ovBody += `<div class="tl-prop-grid">` +
+          propNum("audio_gain_db", "Its volume (dB)", c.audio_gain_db != null ? c.audio_gain_db : -6, -40, 0, 1) +
+          propSelect("audio_duck", "Ducking", c.audio_duck || "over", [["under", "Ducks under speech"], ["over", "Ducks everything else"], ["none", "Independent"]]) +
+          `</div>`;
+        ovBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 8px">` +
+          `Both soundtracks play at once. Baked on <strong>▶ Render</strong>, not in preview scrub.</p>`;
+      }
       ovBody += `<label class="tl-prop-sectlabel">Layout presets</label>`;
       ovBody += `<div class="tl-layout-presets">`;
       Object.keys(OVERLAY_LAYOUTS).forEach((id) => {
@@ -5097,6 +5112,12 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
+        } else if (key === "audio" || key === "audio_role") {
+          // Toggling overlay audio reveals/hides its volume + ducking controls.
+          const cl = findClip(selected.track, selected.id);
+          if (cl) cl[key] = (inp.type === "checkbox") ? !!inp.checked : inp.value;
+          renderProps();
+          scheduleSave();
         } else if (key === "__sfx_overlays") {
           tl.sfx_overlays = !!inp.checked;
         } else if (key && key.startsWith("__sc:")) {
@@ -5308,6 +5329,13 @@
     };
 
     paint();
+  }
+
+  /** Older clips stored duck as a boolean; map it onto the three-way form. */
+  function _duckValue(c) {
+    const raw = c.duck;
+    if (typeof raw === "string") return raw;
+    return raw === false ? "none" : "under";
   }
 
   function propNum(key, label, val, min, max, step) {
@@ -6547,7 +6575,7 @@
           filename: res.filename || file.name,
         };
         await addMusicClip(asset);
-        setSaveState("Music on 🎵 Music lane (duck on) — ▶ Render to hear it");
+        setSaveState("Added to the 🎵 Audio lane (ducks under speech) — ▶ Render to hear it");
       } else {
         setSaveState("Saved ✓");
       }

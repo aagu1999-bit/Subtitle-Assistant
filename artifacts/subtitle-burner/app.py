@@ -12782,15 +12782,41 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
     )
 
 
-def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
-    """Mix background music tracks into *base*'s audio (video stream preserved).
+def _tl_duck_mode(clip: dict) -> str:
+    """Normalize a clip's ducking intent to "under" | "over" | "none".
 
-    Each clip is trimmed, gain-staged and time-shifted to its start. If any
-    clip requests ducking, all music is side-chain compressed against the main
-    voice so speech stays on top.
+    Legacy clips stored a boolean: True meant "duck under the voice". The
+    three-way form lets a voiceover duck the music instead of only ever the
+    other way round.
+    """
+    raw = clip.get("duck", True)
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        if v in ("under", "over", "none"):
+            return v
+        return "under" if v in ("1", "true", "yes") else "none"
+    return "under" if raw else "none"
+
+
+def _tl_mix_audio(base: Path, audio_clips: list, out_path: Path) -> None:
+    """Mix music / voiceover / overlay audio into *base* (video preserved).
+
+    Every clip is trimmed, gain-staged and time-shifted to its start, then all
+    of them play together — music and a voiceover at the same time is just two
+    clips on the lane.
+
+    Ducking is per clip and works in both directions:
+
+      "over"  — this clip stays at full level AND joins the key signal, so
+                anything set to "under" drops beneath it. A voiceover set to
+                "over" pushes the music down while it speaks.
+      "under" — side-chain compressed against the key (main dialogue plus any
+                "over" clips). The classic music-under-speech behaviour.
+      "none"  — untouched. Short stingers like the recap shutter bed want this;
+                compressing them just makes them flap.
     """
     resolved = []
-    for m in music_clips:
+    for m in audio_clips:
         # Direct path (Caption Look / Instant Export bg music fallback)
         raw = m.get("_path") or m.get("path")
         if raw:
@@ -12804,19 +12830,16 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     if not resolved:
         # Nothing usable — just pass the base through.
         _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
-                "Music passthrough")
+                "Audio passthrough")
         return
 
-    duration = _tl_require_video(base, "Music mix")
+    duration = _tl_require_video(base, "Audio mix")
 
-    # Decide ducking BEFORE building the head of the graph. `asplit` must only
-    # be emitted when something actually consumes [key] — ffmpeg fails the whole
-    # filtergraph with "Filter 'asplit' has output 0 (key) unconnected" if the
-    # sidechain branch is never wired up. Every clip having duck=False (the
-    # recap shutter bed, for one) used to take this path and lose the entire
-    # music mix, silently, because the render pass catches and continues.
-    duck = any(m.get("duck", True) for m, _ in resolved)
-
+    modes = [_tl_duck_mode(m) for m, _ in resolved]
+    has_under = "under" in modes
+    # The key only needs building when something ducks against it. `asplit`
+    # must never be emitted with an unconsumed output — ffmpeg fails the whole
+    # filtergraph with "Filter 'asplit' has output 0 (key) unconnected".
     inputs: list[str] = ["-i", str(base)]
     # The base is concat-demuxed from one segment per beat, and still frames
     # contribute no real samples — so its audio timeline has gaps and its
@@ -12837,13 +12860,16 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         ]
         src_label, next_i = "[1:a]", 2
-    if duck:
-        filt = [f"{src_label}{_fmt},asplit=2[voice][key]"]
+    if has_under:
+        filt = [f"{src_label}{_fmt},asplit=2[voice][vkey]"]
     else:
         filt = [f"{src_label}{_fmt}[voice]"]
 
-    music_labels = []
-    for m, path in resolved:
+    out_labels = ["[voice]"]      # everything that reaches the listener
+    key_labels = ["[vkey]"] if has_under else []
+    under_labels: list[str] = []
+
+    for (m, path), mode in zip(resolved, modes):
         inputs += ["-i", str(path)]
         m_in = max(0.0, float(m.get("in", 0)))
         try:
@@ -12859,42 +12885,64 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
             gain = float(m.get("gain_db", -12))
         except (TypeError, ValueError):
             gain = -12.0
-        # Floor so music is actually audible under speech.
+        # Floor so a bed stays audible under speech.
         gain = max(-24.0, min(0.0, gain))
         delay = int(start * 1000)
+        lab = f"a{next_i}"
         filt.append(
             f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
             f"channel_layouts=stereo,"
             f"atrim=start={m_in:.3f}:end={m_out:.3f},"
             f"asetpts=PTS-STARTPTS,volume={gain:.2f}dB,"
-            f"adelay={delay}|{delay},apad=whole_dur={duration:.3f}[m{next_i}]"
+            f"adelay={delay}|{delay},apad=whole_dur={duration:.3f}[{lab}]"
         )
-        music_labels.append(f"[m{next_i}]")
+        if mode == "over" and has_under:
+            # Heard AND used as the key that pushes "under" clips down.
+            filt.append(f"[{lab}]asplit=2[{lab}o][{lab}k]")
+            out_labels.append(f"[{lab}o]")
+            key_labels.append(f"[{lab}k]")
+        elif mode == "under":
+            under_labels.append(f"[{lab}]")
+        else:
+            out_labels.append(f"[{lab}]")
         next_i += 1
 
-    if len(music_labels) == 1:
-        filt.append(f"{music_labels[0]}anull[musicall]")
-    else:
-        filt.append(f"{''.join(music_labels)}amix=inputs={len(music_labels)}:"
-                    f"duration=longest:normalize=0:dropout_transition=0[musicall]")
-
-    if duck:
-        # Compress MUSIC keyed by speech (not the other way around).
+    if under_labels:
+        if len(key_labels) == 1:
+            filt.append(f"{key_labels[0]}anull[key]")
+        else:
+            filt.append(
+                f"{''.join(key_labels)}amix=inputs={len(key_labels)}:"
+                "duration=longest:normalize=0:dropout_transition=0[key]"
+            )
+        if len(under_labels) == 1:
+            filt.append(f"{under_labels[0]}anull[unders]")
+        else:
+            filt.append(
+                f"{''.join(under_labels)}amix=inputs={len(under_labels)}:"
+                "duration=longest:normalize=0:dropout_transition=0[unders]"
+            )
         filt.append(
-            "[musicall][key]sidechaincompress=threshold=0.02:ratio=6:"
-            "attack=15:release=350:makeup=1[musicfinal]"
+            "[unders][key]sidechaincompress=threshold=0.02:ratio=6:"
+            "attack=15:release=350:makeup=1[ducked]"
         )
-    else:
-        filt.append("[musicall]anull[musicfinal]")
+        out_labels.append("[ducked]")
 
-    filt.append(
-        "[voice][musicfinal]amix=inputs=2:duration=longest:dropout_transition=0:"
-        "normalize=0[aout]"
+    if len(out_labels) == 1:
+        filt.append(f"{out_labels[0]}anull[aout]")
+    else:
+        filt.append(
+            f"{''.join(out_labels)}amix=inputs={len(out_labels)}:"
+            "duration=longest:dropout_transition=0:normalize=0[aout]"
+        )
+    print(
+        f"[audio] mixing {len(resolved)} clip(s): "
+        f"{modes.count('over')} over / {modes.count('under')} under / "
+        f"{modes.count('none')} independent", flush=True,
     )
-    print(f"[music] mixing {len(music_labels)} bed(s) duck={duck}", flush=True)
 
     _tl_mux_filtered_audio(
-        base, inputs, ";".join(filt), out_path, "Music mix", duration,
+        base, inputs, ";".join(filt), out_path, "Audio mix", duration,
     )
 
 
@@ -13699,8 +13747,20 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _tl_apply_logo(base, tl["logo"], W, H, logod)
             base = logod
 
-        # ---- Pass 2: background music ----
+        # ---- Pass 2: audio bed — music, voiceover, and overlay sound ----
         music_clips = list(tracks.get("music") or [])
+        # Overlay clips are silent by default: most B-roll audio is noise, and
+        # un-muting existing projects would change them without asking. When a
+        # clip opts in, its sound joins the SAME mix as music/VO so one ducking
+        # model covers everything instead of two competing passes.
+        for _ov in (tracks.get("overlay") or []):
+            if not isinstance(_ov, dict) or not _ov.get("audio"):
+                continue
+            _src = dict(_ov)
+            _src["gain_db"] = _ov.get("audio_gain_db", -6)
+            _src["duck"] = _ov.get("audio_duck", "over")
+            _src["label"] = _ov.get("label") or "Overlay audio"
+            music_clips.append(_src)
         if not music_clips:
             # Caption Look / Instant Export upload lands as {source}_bgmusic.* —
             # pick it up so Timeline ▶ Render still hears the bed.
@@ -13728,16 +13788,16 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     print(f"[timeline] using Caption Look bg music {bg_files[0].name}", flush=True)
                     break
         if music_clips:
-            _stage("mixing music", 55)
+            _stage("mixing audio", 55)
             mixed = UPLOAD_DIR / f"{job_id}_tlmusic.mp4"
             work.append(mixed)
             try:
-                _tl_mix_music(base, music_clips, mixed)
+                _tl_mix_audio(base, music_clips, mixed)
                 base = mixed
             except Exception as music_err:
                 # Never fail the whole Timeline Render over a music-bed mux
                 # hiccup — keep the pre-music picture and continue.
-                print(f"[timeline] Music mix skipped: {music_err}", flush=True)
+                print(f"[timeline] Audio mix skipped: {music_err}", flush=True)
                 _safe_unlink(mixed)
 
         # ---- Pass 3: overlays / B-roll / PiP ----
