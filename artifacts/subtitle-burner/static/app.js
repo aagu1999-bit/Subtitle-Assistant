@@ -6474,6 +6474,40 @@ function _deliverPendingTemplate() {
   }
 }
 
+/** The most recent upload that actually has a transcript behind it. */
+function _latestReadyJobId() {
+  const ids = (typeof _loadJobIds === "function") ? _loadJobIds() : [];
+  for (const id of ids) {
+    const m = jobsById[id];
+    if (!m) continue;
+    if (m.video_available === false) continue;
+    if (m.has_words || m.status === "awaiting_edit" || m.status === "done") return id;
+  }
+  return null;
+}
+
+/** Back to the gallery. Reachable from every screen — the app used to be a
+ *  one-way door: once the shell appeared there was no route back to Home. */
+function goHome() {
+  try { localStorage.removeItem("pendingTemplate"); } catch (e) { /* ignore */ }
+  const empty = $("emptyState");
+  const shell = $("appShell");
+  const header = $("appHeader");
+  const hasWork = (typeof _loadJobIds === "function" ? _loadJobIds().length : 0) > 0;
+  if (hasWork) {
+    // With work in progress, Home is the Studio gallery inside the shell —
+    // so the jobs list and everything else stays one tap away.
+    if (typeof setActiveTab === "function") setActiveTab("ingest");
+    const g = document.getElementById("mobileHomeTemplates") || document.getElementById("templateGrid");
+    if (g && g.scrollIntoView) g.scrollIntoView({ block: "start", behavior: "smooth" });
+    return;
+  }
+  if (shell) shell.classList.add("hidden");
+  if (header) header.classList.add("hidden");
+  if (empty) empty.classList.remove("hidden");
+}
+window.goHome = goHome;
+
 function hasReadyTranscript() {
   return !!(currentJobId && Array.isArray(currentWords) && currentWords.length);
 }
@@ -6534,6 +6568,14 @@ function setActiveTab(tab) {
   // invisible behind "Timeline unlocks after Whisper finishes."
   const exemptFromTranscript = (tab === "editor") && _recapModeActive();
   if (needsTranscript[tab] && !hasReadyTranscript() && !exemptFromTranscript) {
+    // If footage IS already transcribed, don't lock the door — open the tab
+    // on the most recent ready video. Being told "unlocks after Whisper" while
+    // seven transcribed videos sit in the list is the locked-door feeling.
+    const candidate = _latestReadyJobId();
+    if (candidate && typeof switchToJob === "function") {
+      switchToJob(candidate, { force: true, tab });
+      return;
+    }
     const wanted = needsTranscript[tab];
     tab = "ingest";
     const statusEl = $("statusText");
@@ -8689,6 +8731,12 @@ function _tplHandOff(key, cfg) {
     if (el && el.scrollIntoView) setTimeout(() => el.scrollIntoView({ block: "start" }), 300);
   }
 }
+
+// Back to the gallery, from the header.
+(function wireHomeButton() {
+  const b = document.getElementById("backHomeBtn");
+  if (b) b.onclick = () => goHome();
+})();
 
 // Wire the window once.
 (function wireTemplateSetup() {
