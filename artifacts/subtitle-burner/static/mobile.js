@@ -587,16 +587,18 @@
     }
   }
 
+  // Templates are STRUCTURES — what shape is this video — not caption looks.
+  // Every card routes somewhere real; only templates with working machinery
+  // behind them are listed.
   const HOME_PACKS = [
-    { key: "capcut_always", name: "Always · Photo", filter: "photo", blurb: "Photo Match", tone: "linear-gradient(160deg,#2a2438,#101018)" },
-    { key: "capcut_reels", name: "Pulse Reel", filter: "bold", blurb: "High energy", tone: "linear-gradient(160deg,#243248,#0f141c)" },
-    { key: "podcast_interview", name: "Clarity", filter: "polished", blurb: "Talking head", tone: "linear-gradient(160deg,#1f2e28,#0e1214)" },
-    { key: "product_spotlight", name: "Velocity", filter: "bold", blurb: "Product pop", tone: "linear-gradient(160deg,#352628,#120e12)" },
-    { key: "cinematic_vlog", name: "Film", filter: "minimal", blurb: "Cinematic", tone: "linear-gradient(160deg,#2b3348,#12161f)" },
+    { key: "recap", name: "Recap", glyph: "🏙", blurb: "Photos & clips into an event reel", tone: "linear-gradient(160deg,#3a2a12,#141008)" },
+    { key: "tocamera", name: "To camera", glyph: "🎤", blurb: "One take, cut down & captioned", tone: "linear-gradient(160deg,#2a2438,#101018)" },
+    { key: "interviews", name: "Interviews", glyph: "🎙", blurb: "Several people, one reel", tone: "linear-gradient(160deg,#1f2e28,#0e1214)" },
+    { key: "session", name: "Session", glyph: "📹", blurb: "One sitting, several takes", tone: "linear-gradient(160deg,#243248,#0f141c)" },
+    { key: "shorts", name: "Shorts", glyph: "⚡", blurb: "One video, many clips", tone: "linear-gradient(160deg,#352628,#120e12)" },
   ];
 
   let _homePackKey = null;
-  let _homeFilter = "all";
 
   function syncMobileHomeVisibility(tab) {
     const shell = document.getElementById("mobileHomeShell");
@@ -609,30 +611,28 @@
   function renderMobileHomeGallery() {
     const host = document.getElementById("mobileHomeGallery");
     if (!host) return;
-    const packs = HOME_PACKS.filter((p) => _homeFilter === "all" || p.filter === _homeFilter);
-    const list = packs.length ? packs : HOME_PACKS;
-    host.innerHTML = list.map((p) => {
+    host.innerHTML = HOME_PACKS.map((p) => {
       const on = _homePackKey === p.key ? " on" : "";
       return `<button type="button" class="mobile-home-card${on}" data-pack="${p.key}">` +
-        `<div class="art" style="background:${p.tone}"><div class="cap">${p.blurb}<br><span>${p.name}</span></div></div>` +
+        `<div class="art" style="background:${p.tone}"><div class="cap">` +
+        `<span class="glyph">${p.glyph}</span><br>${p.blurb}</div></div>` +
         `<div class="name">${p.name}</div></button>`;
     }).join("");
   }
 
+  /** Tapping a card GOES somewhere. Recap opens its panel with no upload;
+   *  the rest open the picker and remember where the user was heading. */
   function selectHomePack(key) {
     _homePackKey = key;
     renderMobileHomeGallery();
-    if (typeof window.applyCapcutTemplateToUi === "function") {
-      window.applyCapcutTemplateToUi(key);
-    } else if (typeof applyCapcutTemplateToUi === "function") {
-      applyCapcutTemplateToUi(key);
+    if (typeof window.gotoTemplate === "function") {
+      window.gotoTemplate(key);
+      return;
     }
-    const styleBtn = document.getElementById("mobileHomeStyleBtn");
-    if (styleBtn) {
-      const pack = HOME_PACKS.find((p) => p.key === key);
-      styleBtn.textContent = pack ? pack.name : "Add style";
-    }
-    syncMobileHomeContinue();
+    // gotoTemplate lives in the early inline wiring; if that ever fails to
+    // load, at least land the user on the upload step rather than nowhere.
+    const label = document.querySelector('label[for="file"]');
+    if (label) label.click();
   }
 
   function syncMobileHomeContinue() {
@@ -702,18 +702,10 @@
         if (host) host.scrollIntoView({ behavior: "smooth", block: "start" });
       };
     }
+    // Style-filter chips were removed along with the caption packs — the
+    // gallery lists structures now, and there is nothing to filter.
     const chips = document.getElementById("mobileHomeChips");
-    if (chips) {
-      chips.addEventListener("click", (e) => {
-        const btn = e.target && e.target.closest && e.target.closest("[data-filter]");
-        if (!btn) return;
-        _homeFilter = btn.dataset.filter || "all";
-        chips.querySelectorAll(".mobile-home-chip").forEach((c) => {
-          c.classList.toggle("on", c === btn);
-        });
-        renderMobileHomeGallery();
-      });
-    }
+    if (chips) chips.remove();
     const gallery = document.getElementById("mobileHomeGallery");
     if (gallery) {
       gallery.addEventListener("click", (e) => {
