@@ -8446,6 +8446,20 @@ let _tplSetupKey = null;
 let _tplSetupFiles = [];
 let _tplSetupBusy = false;
 
+/** Clips already in the app with a transcript behind them. */
+function _tplExistingClips() {
+  const ids = (typeof _loadJobIds === "function") ? _loadJobIds() : [];
+  const out = [];
+  ids.forEach((id) => {
+    const m = jobsById[id];
+    if (!m || m.video_available === false) return;
+    if (!(m.has_words || m.status === "awaiting_edit" || m.status === "done")) return;
+    if (m.is_timeline) return;
+    out.push({ job_id: id, name: m.filename || id.slice(0, 8) });
+  });
+  return out;
+}
+
 function _tplCfgKey(key) { return "templateConfig:" + key; }
 
 function _tplLoadCfg(key) {
@@ -8492,13 +8506,23 @@ function _tplRenderSetupBody() {
   if (!spec || !host) return;
   const cfg = _tplLoadCfg(_tplSetupKey);
 
+  const ready = _tplExistingClips();
   let html = `<div class="tpl-field"><label>${spec.multi ? "Your videos" : "Your video"}</label>` +
     `<div class="tpl-drop" id="tplSetupDrop">` +
     `<div style="font-size:1.3rem">🎬</div>` +
     `<div style="font-size:.86rem;color:#e8eaee;font-weight:600">` +
     (spec.multi ? "Choose videos" : "Choose a video") + `</div>` +
     `<div class="hint">They'll be transcribed here — you won't be sent anywhere to do it.</div>` +
-    `</div><ul class="tpl-files" id="tplSetupFiles"></ul></div>`;
+    `</div>`;
+  // Footage already in the app should never have to be uploaded twice. These
+  // are transcribed already, so picking one skips the wait entirely.
+  if (ready.length) {
+    html += `<button type="button" class="btn btn-secondary btn-sm" id="tplUseExisting" ` +
+      `style="margin-top:7px;font-size:.78rem;width:100%">` +
+      `\u21bb Use a clip already in the app (${ready.length})</button>` +
+      `<div id="tplExistingList" hidden style="margin-top:6px"></div>`;
+  }
+  html += `<ul class="tpl-files" id="tplSetupFiles"></ul></div>`;
 
   spec.fields.forEach((f) => {
     const val = cfg[f.key] != null ? cfg[f.key] : f.value;
@@ -8521,6 +8545,36 @@ function _tplRenderSetupBody() {
   host.innerHTML = html;
   _tplRenderFileList();
 
+  const useEx = $("tplUseExisting");
+  if (useEx) {
+    useEx.onclick = () => {
+      const box = $("tplExistingList");
+      if (!box) return;
+      const open = box.hasAttribute("hidden");
+      if (!open) { box.setAttribute("hidden", ""); return; }
+      box.removeAttribute("hidden");
+      box.innerHTML = "";
+      _tplExistingClips().forEach((c) => {
+        const already = _tplSetupFiles.some((f) => f.kind === "job" && f.job_id === c.job_id);
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "btn btn-secondary btn-sm";
+        row.style.cssText = "display:flex;width:100%;text-align:left;gap:8px;margin-bottom:4px;font-size:.78rem;padding:6px 8px";
+        row.disabled = already;
+        row.innerHTML = `<span>${already ? "\u2713" : "\uff0b"}</span>` +
+          `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_recapEsc(c.name)}</span>` +
+          `<span class="muted" style="font-size:.7rem">transcribed</span>`;
+        row.onclick = () => {
+          const item = { kind: "job", job_id: c.job_id, name: c.name };
+          _tplSetupFiles = spec.multi ? _tplSetupFiles.concat([item]) : [item];
+          _tplRenderFileList();
+          box.setAttribute("hidden", "");
+        };
+        box.appendChild(row);
+      });
+    };
+  }
+
   const drop = $("tplSetupDrop");
   if (drop) {
     drop.onclick = () => {
@@ -8530,7 +8584,8 @@ function _tplRenderSetupBody() {
       inp.multiple = !!spec.multi;
       inp.onchange = () => {
         const picked = Array.from(inp.files || []);
-        _tplSetupFiles = spec.multi ? _tplSetupFiles.concat(picked) : picked.slice(0, 1);
+        const wrapped = picked.map((f) => ({ kind: "file", file: f, name: f.name }));
+        _tplSetupFiles = spec.multi ? _tplSetupFiles.concat(wrapped) : wrapped.slice(0, 1);
         _tplRenderFileList();
       };
       inp.click();
@@ -8553,6 +8608,14 @@ function _tplRenderFileList() {
     nm.textContent = f.name;
     li.appendChild(ord);
     li.appendChild(nm);
+    if (f.kind === "job") {
+      const badge = document.createElement("span");
+      badge.textContent = "in app";
+      badge.style.cssText = "font-size:.62rem;color:#4ade80;border:1px solid #2f5245;" +
+        "border-radius:20px;padding:1px 6px;white-space:nowrap";
+      badge.title = "Already transcribed — no upload needed";
+      li.appendChild(badge);
+    }
     if (spec.perFile) {
       const sp = document.createElement("input");
       sp.type = "text";
@@ -8629,10 +8692,17 @@ async function runTemplateBuild() {
   const jobIds = [];
   try {
     for (let i = 0; i < _tplSetupFiles.length; i++) {
-      const f = _tplSetupFiles[i];
-      _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${f.name}`);
+      const item = _tplSetupFiles[i];
+      // Library picks are already on the server with a transcript — nothing
+      // to upload, nothing to wait for.
+      if (item.kind === "job") {
+        jobIds.push(item.job_id);
+        continue;
+      }
+      const f = item.file;
+      _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${item.name}`);
       const res = await _uploadChunked(f, false, (frac) => {
-        _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${f.name} · ${Math.round(frac * 100)}%`);
+        _tplStatus(`Uploading ${i + 1} of ${_tplSetupFiles.length} — ${item.name} · ${Math.round(frac * 100)}%`);
       }, { intent: "transcribe" });
       if (res && res.job_id) {
         jobIds.push(res.job_id);
