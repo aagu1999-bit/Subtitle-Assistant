@@ -727,18 +727,36 @@
   // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
   // The renderer snaps to the peak on the hit and eases out on a cubic, so the
   // preview has to use the same numbers or the move previews wrong.
-  const PUNCH_PEAK = { low: 1.15, med: 1.25, high: 1.40, strong: 1.40 };
-  const PUNCH_DECAY = 0.45;
+  const PUNCH_PEAK = { low: 1.08, med: 1.12, high: 1.18, strong: 1.18 };
+  const PUNCH_IN_FRAMES = 5;
+  const PUNCH_OUT_FRAMES = 8;
+  const PUNCH_HOLD = 0.30;
+  const PUNCH_FPS = 30;   // the frame counts above are expressed at 30fps
 
-  function punchScaleAt(cfg, tRel) {
+  // Mirrors _tl_punch_zoom_filter in app.py: rise, hold, release, both ramps
+  // cubic. Preview and render have to share these numbers or a move previews
+  // differently from how it burns in.
+  function punchScaleAt(cfg, tRel, dur) {
     const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
     const amp = peak - 1;
     if (amp <= 0) return 1;
     const hit = Math.max(0, Number(cfg.hit) || 0);
-    if (tRel < hit) return 1;
-    const decay = Math.max(0.05, Number(cfg.decay) || PUNCH_DECAY);
-    const u = Math.min(1, Math.max(0, (tRel - hit) / decay));
-    return 1 + amp * Math.pow(1 - u, 3);
+    const n = tRel - hit;
+    if (n < 0) return 1;
+
+    let tIn = Math.max(1, Number(cfg.in_frames) || PUNCH_IN_FRAMES) / PUNCH_FPS;
+    let tOut = Math.max(1, Number(cfg.out_frames) || PUNCH_OUT_FRAMES) / PUNCH_FPS;
+    let total = (dur && dur > 0) ? Math.max(0.01, dur - hit) : tIn + PUNCH_HOLD + tOut;
+    if (total < tIn + tOut) {
+      const squeeze = total / (tIn + tOut);
+      tIn *= squeeze; tOut *= squeeze;
+    }
+    const holdEnd = Math.max(tIn, total - tOut);
+
+    if (n < tIn) return 1 + amp * (1 - Math.pow(1 - n / tIn, 3));
+    if (n < holdEnd) return 1 + amp;
+    if (n < total) return 1 + amp * Math.pow(1 - (n - holdEnd) / tOut, 3);
+    return 1;
   }
 
   // Runs every frame so the punch actually animates; it used to be a constant
@@ -757,7 +775,7 @@
       // zoompan pushes toward the anchor; transform-origin is the CSS
       // equivalent, so the preview pushes toward the same point.
       v.style.transformOrigin = `${(ax * 100).toFixed(2)}% ${(ay * 100).toFixed(2)}%`;
-      v.style.transform = `scale(${punchScaleAt(pz, ot - start).toFixed(4)})`;
+      v.style.transform = `scale(${punchScaleAt(pz, ot - start, clipDuration(c)).toFixed(4)})`;
       return;
     }
     v.style.transform = "";
@@ -1180,7 +1198,7 @@
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">⚡ Punch Zoom</label>`;
       html += propCheck("punch_zoom.enabled", "Enable Punch Zoom on this clip", pz.enabled);
       if (pz.enabled) {
-        html += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.15x)"], ["med", "Medium (1.25x)"], ["strong", "Strong (1.40x)"]])}</div>`;
+        html += `<div class="tl-prop-grid">${propSelect("punch_zoom.intensity", "Strength", pz.intensity || "med", [["low", "Low (1.08x)"], ["med", "Medium (1.12x)"], ["strong", "Strong (1.18x)"]])}</div>`;
       }
 
       // --- Split-screen (per clip) ---

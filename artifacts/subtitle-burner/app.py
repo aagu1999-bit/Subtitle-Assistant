@@ -2122,7 +2122,7 @@ def build_audio_filter_chain(audio: dict) -> str | None:
         filters.append("equalizer=f=8000:width_type=o:width=2:g=-2")
     if audio.get("loudness_norm"):
         # -14 LUFS is the Instagram / social-media loudness target
-        filters.append("loudnorm=I=-14:TP=-1:LRA=7")
+        filters.append("loudnorm=I=-14:TP=-1.5:LRA=7")
     if filters:
         # Final brick-wall limiter prevents the stacked filters from clipping
         # peaks above 0 dBFS. -0.3 dBTP headroom keeps lossy encoders safe.
@@ -3237,6 +3237,10 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
     return out
 
 
+# Fraction of a face box's height that the eye line sits above its centre.
+EYE_LINE_OFFSET = 0.15
+
+
 def _face_anchor_at(job_id: str, t: float) -> dict | None:
     """Normalised (x, y) of the most prominent face nearest time *t*.
 
@@ -3257,7 +3261,15 @@ def _face_anchor_at(job_id: str, t: float) -> dict | None:
     # Biggest face wins — the speaker is normally nearest the camera.
     face = max(found, key=lambda f: float(f.get("w", 0)) * float(f.get("h", 0)))
     try:
-        return {"x": round(float(face["cx"]), 4), "y": round(float(face["cy"]), 4)}
+        # Aim at the eye line, not the middle of the box. A face bbox centre
+        # sits around the nose, so pushing to it drifts low and crops the
+        # forehead; eyes sit roughly 15% of the box height above centre, and
+        # that is where a camera operator would punch in.
+        cy = float(face["cy"]) - EYE_LINE_OFFSET * float(face.get("h", 0) or 0)
+        return {
+            "x": round(float(face["cx"]), 4),
+            "y": round(min(1.0, max(0.0, cy)), 4),
+        }
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -5476,24 +5488,32 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
     )
 
 
-_PUNCH_PEAK = {"low": 1.15, "med": 1.25, "high": 1.40, "strong": 1.40}
-PUNCH_DECAY_SECONDS = 0.45
+# Peaks follow the blank-wall rulebook: a punch-in tops out around 118%.
+# Earlier values went to 140%, which reads as a jump cut rather than emphasis.
+_PUNCH_PEAK = {"low": 1.08, "med": 1.12, "high": 1.18, "strong": 1.18}
+# Frames, at the project fps: snap in, sit at the peak, release more slowly
+# than it arrived. The asymmetry is what makes it feel like a camera operator
+# rather than a keyframe.
+PUNCH_IN_FRAMES = 5
+PUNCH_OUT_FRAMES = 8
+PUNCH_HOLD_SECONDS = 0.30   # used only when the clip length isn't known
 
 
 def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
-                          fps: int = 30) -> str:
-    """Build an animated punch zoom: hit the peak on the beat, ease back out.
+                          fps: int = 30, dur: float | None = None) -> str:
+    """Build an animated punch zoom: snap in, hold, release.
 
     Returns "" when disabled.
 
-    The zoom snaps to its peak at `hit` seconds and decays to 1.0 over `decay`
-    seconds on a cubic ease-out, so the move lands hard and settles softly. A
-    linear decay reads mechanical, which is the whole difference between a
-    punch and a slow zoom.
+    The move has three phases rather than one decay. It rises to the peak over
+    PUNCH_IN_FRAMES, sits there, then releases over the slower
+    PUNCH_OUT_FRAMES. A single decay sags away from the peak immediately, so
+    the emphasis never lands on anything; holding is what reads as a choice.
+    Both ramps are cubic — a linear ramp is the difference between a punch and
+    a slow zoom.
 
-    `anchor` is a normalised (x, y) to zoom toward — pass the speaker's face
-    from the reframe analysis and the push lands on them rather than on the
-    middle of the frame. Defaults to centre.
+    `anchor` is a normalised (x, y) to zoom toward. Pass the speaker's eye line
+    and the push lands on them rather than on the middle of the frame.
 
     crop can't do this: its w/h expressions are evaluated once at
     configuration, so the window size cannot change per frame. zoompan
@@ -5501,19 +5521,32 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     """
     if not punch_cfg or not punch_cfg.get("enabled"):
         return ""
-    peak = _PUNCH_PEAK.get(punch_cfg.get("intensity", "med"), 1.25)
+    peak = _PUNCH_PEAK.get(punch_cfg.get("intensity", "med"), 1.12)
     amp = peak - 1.0
     if amp <= 0:
         return ""
 
+    rate = max(1, fps)
     try:
         hit = max(0.0, float(punch_cfg.get("hit", 0.0)))
     except (TypeError, ValueError):
         hit = 0.0
-    try:
-        decay = max(0.05, float(punch_cfg.get("decay", PUNCH_DECAY_SECONDS)))
-    except (TypeError, ValueError):
-        decay = PUNCH_DECAY_SECONDS
+
+    f_in = float(punch_cfg.get("in_frames", PUNCH_IN_FRAMES))
+    f_out = float(punch_cfg.get("out_frames", PUNCH_OUT_FRAMES))
+    f_in, f_out = max(1.0, f_in), max(1.0, f_out)
+
+    # Span the effect's own length when it is known, so the hold stretches to
+    # fit the line being emphasised instead of being a fixed guess.
+    if dur and dur > 0:
+        f_total = max(1.0, (dur - hit) * rate)
+    else:
+        f_total = f_in + PUNCH_HOLD_SECONDS * rate + f_out
+    if f_total < f_in + f_out:
+        # Too short to hold: keep the in/out proportions and drop the sustain.
+        squeeze = f_total / (f_in + f_out)
+        f_in, f_out = f_in * squeeze, f_out * squeeze
+    f_hold_end = max(f_in, f_total - f_out)
 
     anchor = punch_cfg.get("anchor") or {}
     try:
@@ -5522,14 +5555,17 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     except (TypeError, ValueError):
         ax = ay = 0.5
 
-    f0 = hit * max(1, fps)
-    fd = max(1.0, decay * max(1, fps))
-    # Progress through the decay, clamped so the frames before the hit read 0
-    # and everything after the settle reads 1.
-    u = f"min(1,max(0,(in-{f0:.3f})/{fd:.3f}))"
-    # gte() holds the zoom at 1.0 until the hit; without it the clamp above
-    # would park the frame at full zoom for the whole run-up.
-    z = f"1+{amp:.4f}*pow(1-{u},3)*gte(in,{f0:.3f})"
+    f0 = hit * rate
+    n = f"(in-{f0:.3f})"                      # frames since the hit
+    rise = f"(1-pow(1-{n}/{f_in:.3f},3))"      # cubic ease-out up to the peak
+    fall = f"pow(1-({n}-{f_hold_end:.3f})/{f_out:.3f},3)"
+    z = (
+        f"1+{amp:.4f}*"
+        f"if(lt({n},0),0,"
+        f"if(lt({n},{f_in:.3f}),{rise},"
+        f"if(lt({n},{f_hold_end:.3f}),1,"
+        f"if(lt({n},{f_total:.3f}),{fall},0))))"
+    )
     return (
         f"zoompan=z='{z}':"
         f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
@@ -5571,7 +5607,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     kb = _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
         vf += "," + kb
-    pz = _tl_punch_zoom_filter(punch, W, H, fps)
+    pz = _tl_punch_zoom_filter(punch, W, H, fps, dur)
     if pz:
         vf += "," + pz
     cf = _tl_color_filter(color)
