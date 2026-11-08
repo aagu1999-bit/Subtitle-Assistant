@@ -12676,18 +12676,16 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
     Returns "" when disabled. The zoom ramps over the clip's frame count so the
     move always finishes on time regardless of clip length. Centered crop.
     """
-    if not ken or not ken.get("enabled"):
+    tracks = kenburns_tracks(ken, dur)
+    if not tracks:
         return ""
-    amount = _KENBURNS_INTENSITY.get(ken.get("intensity", "med"), 0.22)
-    direction = ken.get("direction", "in")
-    frames = max(2, int(dur * fps))
-    inc = amount / frames
-    maxz = 1.0 + amount
-    if direction == "out":
-        # Start zoomed in (first frame, zoom var still 1.0), then ease back out.
-        zexpr = f"if(lte(zoom,1.0),{maxz:.4f},max(zoom-{inc:.6f},1.0))"
-    else:  # in
-        zexpr = f"min(zoom+{inc:.6f},{maxz:.4f})"
+    track, ease = tracks
+    # zoompan counts frames, so local seconds are in/fps -- the same shape the
+    # browser evaluates directly.
+    zexpr = keyframes.to_ffmpeg_expr(track, f"(in/{max(1, int(fps))})", ease)
+    if zexpr is None:
+        return ""
+
     return (
         f"zoompan=z='{zexpr}':d=1:"
         f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
@@ -13542,6 +13540,39 @@ def overlay_motion_tracks(motion) -> dict:
     if sy:
         tracks["y"] = [[0.0, float(sy)], [slide, 0.0]]
     return tracks
+
+
+_KENBURNS_EASE = "linear"
+
+
+def kenburns_tracks(ken, dur: float) -> tuple[list, str] | None:
+    """A Ken Burns config as a (scale track, ease) pair, in local seconds.
+
+    The old renderer did not animate against the clock at all. Its zoompan
+    expression added a fixed increment to its OWN PREVIOUS OUTPUT every
+    frame, so it could not be seeked and its shape depended on how many
+    frames had already gone by. That accumulation happens to be linear --
+    one increment ahead of where a clock would put it, a constant 0.0018 at
+    the default intensity -- so the push-in is effectively unchanged here.
+
+    The pull-out is not. It was written as
+        if(lte(zoom,1.0), maxz, max(zoom-inc, 1.0))
+    which leans on the first frame's zoom being 1.0 to jump to full zoom --
+    and then fires again the moment the ease-out actually reaches 1.0,
+    throwing it back to maxz and starting over. On any clip long enough to
+    finish it snaps, repeatedly. A track cannot express that and should not.
+
+    Mirrors kenburnsTracks() in static/keyframes-motion.js.
+    """
+    if not ken or not ken.get("enabled"):
+        return None
+    amount = _KENBURNS_INTENSITY.get(ken.get("intensity", "med"), 0.22)
+    span = max(0.05, float(dur or 0.05))
+    if str(ken.get("direction", "in")) == "out":
+        track = [[0.0, 1.0 + amount], [span, 1.0]]
+    else:
+        track = [[0.0, 1.0], [span, 1.0 + amount]]
+    return track, _KENBURNS_EASE
 
 
 # The frame counts above are expressed at this rate. They always were -- the

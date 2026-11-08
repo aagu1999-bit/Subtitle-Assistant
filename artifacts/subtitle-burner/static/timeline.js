@@ -3923,14 +3923,14 @@
   }
 
   // Mirrors _KENBURNS_INTENSITY in app.py — slow zoom ramp over the clip.
-  const KENBURNS_AMOUNT = { low: 0.12, med: 0.22, high: 0.35 };
-
+  // The amounts and the ramp moved to static/keyframes-motion.js, which
+  // builds the keyframe track app.py compiles into the zoompan expression.
+  // The copy that used to live here was linear while the renderer
+  // accumulated its own previous output -- same name, two curves, and the
+  // renderer's pull-out snapped back to full zoom every time it landed.
   function kenBurnsScaleAt(kb, tRel, dur) {
-    if (!kb || !kb.enabled) return 1;
-    const amount = KENBURNS_AMOUNT[kb.intensity] || KENBURNS_AMOUNT.med;
-    const u = Math.min(1, Math.max(0, tRel / Math.max(0.05, dur)));
-    if ((kb.direction || "in") === "out") return (1 + amount) - amount * u;
-    return 1 + amount * u;
+    if (!window.KeyframeMotion) return 1;
+    return window.KeyframeMotion.kenBurnsScaleAt(kb, tRel, dur);
   }
 
   // The direction table moved to static/keyframes-motion.js, which is where

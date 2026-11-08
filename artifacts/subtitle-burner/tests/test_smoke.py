@@ -1087,9 +1087,13 @@ def test_the_backlog_filters_do_not_leak_other_rows(app_mod, temp_db, monkeypatc
 def _eval_zoompan_z(expr: str, frames, recursive=False):
     """Evaluate a zoompan z-expression the way ffmpeg would.
 
-    `in` is the input frame index. `zoom` is the PREVIOUS frame's output zoom,
-    which ffmpeg initialises to 1.0 -- that recursion is why Ken Burns is not
-    a function of time and has to be simulated rather than sampled.
+    `in` is the input frame index.
+
+    The `recursive` flag models `zoom` as the previous frame's output. REAL
+    FFMPEG DOES NOT DO THAT with d=1 -- it resets `zoom` to 1.0 for every
+    input frame, which is why the old accumulating Ken Burns produced no
+    motion at all. The flag is kept only so that claim stays testable; never
+    trust it as a model of what will render.
     """
     py = (expr.replace("if(", "IF(").replace("lte(", "LTE(")
               .replace("lt(", "LT(").replace("gte(", "GTE("))
@@ -1122,77 +1126,89 @@ def _node_eval(block_from: str, block_to: str, body: str):
     return res.stdout.strip()
 
 
-def test_ken_burns_today_accumulates_instead_of_following_the_clock(app_mod):
-    """Characterisation. The push-in ramps by a fixed increment per frame.
+def test_ken_burns_follows_the_clock_now(app_mod):
+    """It used to add a fixed increment to its own previous output.
 
-    There is no `t` and no `in` in the expression -- it adds to its own
-    previous value, so it cannot be seeked and its shape depends on how many
-    frames have already gone by. Pinned here so the migration to a keyframe
-    track is a visible diff rather than a claim.
+    That is not a function of time: it could not be seeked, and its shape
+    depended on how many frames had already gone by. The accumulation was
+    linear, just one increment ahead of a clock -- 0.0018 at the default
+    intensity -- so the push-in is visually unchanged by this.
     """
     f = app_mod._tl_kenburns_filter(
         {"enabled": True, "intensity": "med", "direction": "in"},
         1080, 1920, fps=30, dur=4.0)
     expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    assert "zoom" in expr, "the ramp is built on its own previous value"
-    assert not re.search(r"\bt\b", expr), "Ken Burns does not consult the clock"
-    assert not re.search(r"\bin\b", expr), "nor the frame counter"
+    assert re.search(r"\bin\b", expr), "must consult the frame counter"
+    assert not re.search(r"\bzoom\b", expr), (
+        "must not read its own previous output -- that is the accumulator")
 
-    vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 119], recursive=True)
-    # amount 0.22 over 120 frames => +0.0018333 per frame, capped at 1.22.
-    assert vals[0] == pytest.approx(1.0018, abs=5e-4)
-    assert vals[-1] == pytest.approx(1.22, abs=5e-3), f"never arrives: {vals}"
-    assert vals == sorted(vals), f"a push-in must not go backwards: {vals}"
+    vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 120])
+    assert vals[0] == pytest.approx(1.0, abs=1e-4), "starts at rest"
+    assert vals[-1] == pytest.approx(1.22, abs=1e-4), "arrives at its target"
+    gaps = [round(b - a, 4) for a, b in zip(vals, vals[1:])]
+    assert len(set(gaps)) == 1, f"a Ken Burns drift must be even: {gaps}"
 
 
-def test_ken_burns_pull_out_snaps_back_when_it_lands(app_mod):
-    """Characterisation of a BUG, pinned so fixing it is deliberate.
+def test_ken_burns_pull_out_lands_and_stays(app_mod):
+    """The defect this migration fixes, and the only visible change in it.
 
-    The pull-out is `if(lte(zoom,1.0), maxz, max(zoom-inc,1.0))`. It leans on
-    the first frame's zoom being 1.0 to jump to full zoom -- but the moment
-    the ease-out actually reaches 1.0, that same test fires again and throws
-    it straight back to maxz. On any clip long enough to finish, it snaps.
+    The old pull-out was if(lte(zoom,1.0), maxz, max(zoom-inc, 1.0)). It
+    leaned on the first frame's zoom being 1.0 to jump to full zoom -- then
+    fired again the moment the ease-out reached 1.0, throwing it back to
+    full zoom and starting over. On any clip long enough to finish, it
+    snapped, repeatedly, mid-shot.
     """
     f = app_mod._tl_kenburns_filter(
         {"enabled": True, "intensity": "med", "direction": "out"},
-        1080, 1920, fps=30, dur=1.0)   # short clip: the ramp completes early
+        1080, 1920, fps=30, dur=1.0)
     expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    vals = _eval_zoompan_z(expr, list(range(0, 60)), recursive=True)
+    vals = _eval_zoompan_z(expr, list(range(0, 60)))
 
-    assert vals[0] == pytest.approx(1.22, abs=1e-3), "should start zoomed in"
-    assert min(vals) == pytest.approx(1.0, abs=1e-6), "should reach rest"
-    # The defect: after settling it climbs again instead of staying put.
+    assert vals[0] == pytest.approx(1.22, abs=1e-4), "starts zoomed in"
+    assert vals[-1] == pytest.approx(1.0, abs=1e-4), "ends at rest"
+    assert vals == sorted(vals, reverse=True), (
+        f"a pull-out must never climb again: {vals}")
     landed = vals.index(min(vals))
-    assert max(vals[landed:]) > 1.2, (
-        "the pull-out no longer snaps back -- if this is intentional, this "
-        "characterisation test is what should be updated")
+    assert max(vals[landed:]) == pytest.approx(1.0, abs=1e-4), (
+        "it snaps back to full zoom after landing -- the old bug is back")
 
 
-def test_ken_burns_preview_and_render_do_not_agree_today(app_mod):
-    """Characterisation. Same name, two different curves.
+def test_ken_burns_previews_the_way_it_renders(app_mod):
+    """Same name, one curve. Compared at frame boundaries, both directions.
 
-    The renderer accumulates a fixed increment per frame; the preview is
-    `1 + amount * (tRel/dur)`, plain linear. They only coincide at the ends.
+    The preview was 1 + amount*(tRel/dur) while the renderer accumulated,
+    and nothing compared them -- Ken Burns had exactly one test, that an
+    empty dict yields "".
     """
-    out = _node_eval(
-        "const KENBURNS_AMOUNT", "  // The direction table moved",
-        'const o=[];for(const u of [0,0.25,0.5,0.75,1]) '
-        'o.push(kenBurnsScaleAt({enabled:true,intensity:"med",direction:"in"},'
-        ' u*4, 4).toFixed(6)); console.log(o.join(" "));')
-    js_vals = [float(v) for v in out.split()]
-    assert js_vals == [pytest.approx(1 + 0.22 * u, abs=1e-6)
-                       for u in (0, 0.25, 0.5, 0.75, 1)], "preview is linear"
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
 
-    f = app_mod._tl_kenburns_filter(
-        {"enabled": True, "intensity": "med", "direction": "in"},
-        1080, 1920, fps=30, dur=4.0)
-    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    py_vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 119], recursive=True)
+    for direction in ("in", "out"):
+        kb = {"enabled": True, "intensity": "med", "direction": direction}
+        for fps in (24, 30, 60):
+            frames = [0, 5, int(fps), int(2 * fps), int(3.5 * fps), int(4 * fps)]
+            f = app_mod._tl_kenburns_filter(kb, 1080, 1920, fps=fps, dur=4.0)
+            expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+            py_vals = _eval_zoompan_z(expr, frames)
 
-    gaps = [abs(a - b) for a, b in zip(js_vals, py_vals)]
-    assert max(gaps) > 1e-3, (
-        "preview and render now agree on Ken Burns -- delete this "
-        "characterisation test and keep the parity one")
+            script = (
+                "globalThis.window=globalThis;\n"
+                "globalThis.Keyframes=require(%r);\n"
+                % str(BURNER / "static" / "keyframes.js")
+                + "const M=require(%r);\n" % str(BURNER / "static" / "keyframes-motion.js")
+                + "const o=[];for(const t of %s)" % json.dumps([n / fps for n in frames])
+                + " o.push(M.kenBurnsScaleAt(%s,t,4.0).toFixed(9));" % json.dumps(kb)
+                + "console.log(o.join(' '));"
+            )
+            js_vals = [float(v) for v in subprocess.run(
+                [node, "-e", script], capture_output=True, text=True,
+                check=True).stdout.split()]
+
+            for n, a, b in zip(frames, js_vals, py_vals):
+                assert abs(a - b) < 1e-4, (
+                    f"{direction} at {fps}fps frame {n}: "
+                    f"preview {a}, render {b}")
 
 
 def test_the_punch_zoom_agrees_with_its_preview_at_any_fps(app_mod):
@@ -1467,3 +1483,69 @@ def test_the_keyframe_module_reaches_the_browser():
     # It has to come first, or timeline.js reads window.Keyframes as undefined.
     assert html.index("filename='keyframes.js'") < html.index("filename='timeline.js'"), \
         "keyframes.js must load before timeline.js"
+
+
+@needs_ffmpeg
+def test_ken_burns_really_moves_in_the_render(app_mod, tmp_path):
+    """The only check that would have caught what was actually wrong.
+
+    The old Ken Burns was a recursive zoompan expression: it added a fixed
+    increment to its own previous output. That reads as a ramp if you
+    simulate it, which is what the characterisation test did -- but real
+    ffmpeg with d=1 resets `zoom` to 1.0 on every input frame, so the
+    recursion never accumulated. Rendered, the push-in sat at 1.0 and the
+    pull-out sat at 1.22. Ken Burns produced no motion at all, and every
+    test in this suite passed while it did.
+
+    So this one renders and measures pixels.
+    """
+    if not _have("cv2") or not _have("numpy"):
+        pytest.skip("cv2/numpy not installed")
+    import cv2
+
+    still = tmp_path / "still.png"
+    src = tmp_path / "src.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "smptebars=size=540x960:duration=0.1:rate=1",
+                    "-frames:v", "1", str(still)], check=True)
+    # A static source, so anything that changes on screen is the zoom.
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-loop", "1", "-i", str(still),
+                    "-t", "2", "-r", "30", "-pix_fmt", "yuv420p", str(src)],
+                   check=True)
+
+    def bar_width(path):
+        """Leftmost colour bar in pixels. Magnifying crops it, so it narrows."""
+        im = cv2.imread(str(path))
+        row = im[480].astype(int)
+        first, w = row[3], 0
+        for px in row:
+            if abs(px - first).sum() < 40:
+                w += 1
+            else:
+                break
+        return w
+
+    def widths(kb):
+        out = tmp_path / f"kb_{kb['direction']}.mp4"
+        vf = app_mod._tl_kenburns_filter(kb, 540, 960, fps=30, dur=2.0)
+        assert vf, "filter must be built"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(src),
+                        "-vf", vf, str(out)], check=True)
+        got = []
+        for t in ("0.03", "0.7", "1.3", "1.9"):
+            png = tmp_path / f"f_{kb['direction']}_{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", t, "-i", str(out),
+                            "-frames:v", "1", str(png)], check=True)
+            got.append(bar_width(png))
+        return got
+
+    push = widths({"enabled": True, "intensity": "med", "direction": "in"})
+    assert len(set(push)) > 2, f"the push-in does not move: {push}"
+    assert push == sorted(push, reverse=True), (
+        f"a push-in must magnify steadily, narrowing the bar: {push}")
+
+    pull = widths({"enabled": True, "intensity": "med", "direction": "out"})
+    assert len(set(pull)) > 2, f"the pull-out does not move: {pull}"
+    assert pull == sorted(pull), (
+        f"a pull-out must widen steadily back to rest: {pull}")
+    assert pull[-1] > push[-1], "the two directions end at the same place"

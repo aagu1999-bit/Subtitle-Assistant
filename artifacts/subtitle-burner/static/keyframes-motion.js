@@ -101,7 +101,32 @@
     return v === null ? 1 : v;
   }
 
+  // ---- Ken Burns ------------------------------------------------------
+  // Mirrors _KENBURNS_INTENSITY / kenburns_tracks() in app.py.
+  var KENBURNS_AMOUNT = { low: 0.12, med: 0.22, high: 0.35 };
+  var KENBURNS_EASE = "linear";
+
+  function kenburnsTracks(kb, dur) {
+    if (!kb || !kb.enabled) return null;
+    var amount = KENBURNS_AMOUNT[kb.intensity] || KENBURNS_AMOUNT.med;
+    var span = Math.max(0.05, Number(dur) || 0.05);
+    var track = (kb.direction || "in") === "out"
+      ? [[0, 1 + amount], [span, 1]]
+      : [[0, 1], [span, 1 + amount]];
+    return { track: track, ease: KENBURNS_EASE };
+  }
+
+  function kenBurnsScaleAt(kb, tRel, dur) {
+    var t = kenburnsTracks(kb, dur);
+    if (!t) return 1;
+    var v = root.Keyframes.evalTrack(t.track, tRel, t.ease);
+    return v === null ? 1 : v;
+  }
+
   root.KeyframeMotion = {
+    KENBURNS_AMOUNT: KENBURNS_AMOUNT,
+    kenburnsTracks: kenburnsTracks,
+    kenBurnsScaleAt: kenBurnsScaleAt,
     SWIPE_FROM: SWIPE_FROM,
     MOTION_EASE: MOTION_EASE,
     motionTracks: motionTracks,
