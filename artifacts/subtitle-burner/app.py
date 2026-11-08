@@ -31,6 +31,10 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import logging
 from logging.handlers import RotatingFileHandler
 
+# The one definition of "this number changes over time". static/keyframes.js
+# is the browser's reader of the same spec; the suite compares them.
+import keyframes
+
 # ---- Local env auto-load ----
 # Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
 # always boots with the same set of API keys regardless of which terminal
@@ -13543,6 +13547,39 @@ _OVERLAY_SWIPE_FROM = {
 }
 
 
+# The swipe's ease. A track running 1 -> 0 shaped by out_cubic is exactly
+# pow(1-u,3), the curve this effect always had, so moving it onto keyframes
+# changes no output -- verified to 1e-12 before the migration was written.
+_OVERLAY_MOTION_EASE = "out_cubic"
+
+
+def overlay_motion_tracks(motion) -> dict:
+    """A motion block as keyframe tracks: offsets in CANVAS FRACTIONS.
+
+    Fractions rather than pixels because the preview positions boxes in
+    percentages and the renderer in pixels. Keeping the shared number
+    unitless means both multiply by their own canvas and cannot disagree
+    about the one thing they both compute.
+
+    Mirrors motionTracks() in static/keyframes-motion.js.
+    """
+    if not isinstance(motion, dict):
+        return {}
+    sx, sy = _OVERLAY_SWIPE_FROM.get(str(motion.get("type") or "none"), (0, 0))
+    if not (sx or sy):
+        return {}
+    try:
+        slide = max(0.05, float(motion.get("in", 0.35)))
+    except (TypeError, ValueError):
+        slide = 0.35
+    tracks = {}
+    if sx:
+        tracks["x"] = [[0.0, float(sx)], [slide, 0.0]]
+    if sy:
+        tracks["y"] = [[0.0, float(sy)], [slide, 0.0]]
+    return tracks
+
+
 def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
                             W: int, H: int) -> tuple[str, str]:
     """(x, y) expressions for an overlay that slides into place.
@@ -13556,23 +13593,20 @@ def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
     canvas dimension, which puts the photo properly off-frame whatever its box
     size, instead of peeking in at the edge.
     """
-    if not isinstance(motion, dict):
+    tracks = overlay_motion_tracks(motion)
+    if not tracks:
         return str(x), str(y)
-    kind = str(motion.get("type") or "none")
-    sx, sy = _OVERLAY_SWIPE_FROM.get(kind, (0, 0))
-    if not (sx or sy):
-        return str(x), str(y)
-    try:
-        slide = max(0.05, float(motion.get("in", 0.35)))
-    except (TypeError, ValueError):
-        slide = 0.35
 
-    # u runs 0->1 across the slide; pow(1-u,3) is the remaining offset, so the
-    # photo starts a full dimension away and decelerates into position.
-    u = f"min(1,max(0,(t-{start:.3f})/{slide:.3f}))"
-    remaining = f"pow(1-{u},3)"
-    x_expr = f"{x}+({sx * W})*{remaining}" if sx else str(x)
-    y_expr = f"{y}+({sy * H})*{remaining}" if sy else str(y)
+    # overlay's clock is absolute t, so local seconds are t minus the clip's
+    # own start. keyframes.to_ffmpeg_expr takes it from there.
+    local = f"(t-{start:.3f})"
+    x_expr, y_expr = str(x), str(y)
+    if "x" in tracks:
+        off = keyframes.to_ffmpeg_expr(tracks["x"], local, _OVERLAY_MOTION_EASE)
+        x_expr = f"{x}+({W})*({off})"
+    if "y" in tracks:
+        off = keyframes.to_ffmpeg_expr(tracks["y"], local, _OVERLAY_MOTION_EASE)
+        y_expr = f"{y}+({H})*({off})"
     return x_expr, y_expr
 
 

@@ -3968,25 +3968,20 @@
     return 1 + amount * u;
   }
 
-  // Which way a swipe comes FROM. "swipe_left" is the gesture: the photo
-  // enters from the right and travels left, the way a carousel moves under
-  // your thumb. Mirrors _OVERLAY_SWIPE_FROM in app.py.
-  const OVERLAY_SWIPE_FROM = {
-    swipe_left: [1, 0], swipe_right: [-1, 0],
-    swipe_up: [0, 1], swipe_down: [0, -1],
-  };
+  // The direction table moved to static/keyframes-motion.js, which is where
+  // named effects become keyframe tracks for both the preview and the render.
 
   // Offset as a fraction of the stage, so it drops straight into the percent
   // positions the overlay box already uses.
+  //
+  // The cubic that used to live here is gone: the curve is now a keyframe
+  // track, and app.py compiles the same track into the ffmpeg expression.
+  // Two hand-written copies of one ease is how this app ended up with a Ken
+  // Burns that accumulates server-side and is linear in the browser.
   function overlayMotionOffset(item, localT) {
     const m = item && item.motion;
-    if (!m) return { dx: 0, dy: 0 };
-    const dir = OVERLAY_SWIPE_FROM[m.type];
-    if (!dir) return { dx: 0, dy: 0 };
-    const slide = Math.max(0.05, Number(m.in) || 0.35);
-    const u = Math.min(1, Math.max(0, localT / slide));
-    const remaining = Math.pow(1 - u, 3);
-    return { dx: dir[0] * remaining, dy: dir[1] * remaining };
+    if (!m || !window.KeyframeMotion) return { dx: 0, dy: 0 };
+    return window.KeyframeMotion.motionOffsetAt(m, localT);
   }
 
   // Runs every frame so punch + Ken Burns animate; compose both scales.

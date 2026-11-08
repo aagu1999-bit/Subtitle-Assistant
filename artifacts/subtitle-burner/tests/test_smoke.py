@@ -737,8 +737,13 @@ def test_a_swipe_comes_from_the_side_it_is_named_for(app_mod):
     import re
 
     def at(expr, t):
+        # The compiled track is a nested if()/lt() chain, which Python cannot
+        # parse as calls under those names.
         py = re.sub(r"\bt\b", repr(float(t)), expr)
-        return eval(py, {"min": min, "max": max, "pow": pow})
+        py = py.replace("if(", "IF(").replace("lt(", "LT(")
+        return eval(py, {"IF": lambda c, a, b: a if c else b,
+                         "LT": lambda a, b: a < b,
+                         "min": min, "max": max, "pow": pow})
 
     x, y = app_mod._tl_overlay_motion_expr(
         {"type": "swipe_left", "in": 0.4}, 300, 200, 1.0, 1080, 1920)
@@ -907,50 +912,51 @@ def test_a_failed_fetch_is_explained_not_swallowed(app_mod, temp_db, monkeypatch
 def test_the_preview_and_the_render_swipe_on_the_same_curve(app_mod):
     """Two implementations of one motion is how preview and render drift.
 
-    It happened with the punch zoom (the preview kept its own 1.40 peaks) and
-    with the caption font. This compares the browser's easing against the
-    renderer's expression at the same instants rather than trusting that two
-    copies of a cubic stay equal.
+    Both sides now go through the keyframe engine, so this compares the whole
+    real path -- motion block to tracks to a number -- rather than two
+    hand-written cubics that happen to match today.
     """
-    import re
-    import shutil
-    import subprocess as sp
-
     node = shutil.which("node")
     if not node:
         pytest.skip("node not on PATH")
 
-    js_src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
-    start = js_src.index("const OVERLAY_SWIPE_FROM")
-    end = js_src.index("// Runs every frame so punch + Ken Burns animate")
-    block = js_src[start:end]
-    block = re.sub(r"^\s*const ", "var ", block, flags=re.M)
-    block = re.sub(r"^\s*function ", "function ", block, flags=re.M)
-
+    motion = {"type": "swipe_left", "in": 0.35}
     times = [0, 0.0875, 0.175, 0.2625, 0.35, 0.5]
+
     script = (
-        block
-        + "const out=[];"
-        + f"for (const lt of {times}) "
-        + 'out.push(overlayMotionOffset({motion:{type:"swipe_left",in:0.35}}, lt).dx.toFixed(6));'
+        "const K=require(%r);const M=require(%r);\n"
+        % (str(BURNER / "static" / "keyframes.js"),
+           str(BURNER / "static" / "keyframes-motion.js"))
+        + "globalThis.Keyframes=K;\n"
+        + "const out=[];for(const t of %s)" % json.dumps(times)
+        + " out.push(M.motionOffsetAt(%s,t).dx.toFixed(9));" % json.dumps(motion)
         + "console.log(out.join(' '));"
     )
-    js = sp.run([node, "-e", script], capture_output=True, text=True, check=True)
-    js_vals = [float(v) for v in js.stdout.split()]
+    js_vals = [float(v) for v in subprocess.run(
+        [node, "-e", script], capture_output=True, text=True,
+        check=True).stdout.split()]
 
+    # The renderer compiles the same tracks into an overlay x expression.
     W = 1000
-    expr, _ = app_mod._tl_overlay_motion_expr(
-        {"type": "swipe_left", "in": 0.35}, 0, 0, 0.0, W, 2000)
+    expr, _ = app_mod._tl_overlay_motion_expr(motion, 0, 0, 0.0, W, 2000)
+    py_expr = expr.replace("if(", "IF(").replace("lt(", "LT(")
     py_vals = [
-        eval(re.sub(r"\bt\b", repr(float(t)), expr),
-             {"min": min, "max": max, "pow": pow}) / W
+        eval(py_expr, {"IF": lambda c, a, b: a if c else b,
+                       "LT": lambda a, b: a < b, "pow": pow,
+                       "t": float(t)}) / W
         for t in times
     ]
 
     for t, a, b in zip(times, js_vals, py_vals):
-        assert abs(a - b) < 1e-6, (
+        assert abs(a - b) < 1e-9, (
             f"at {t}s the preview offsets by {a} and the render by {b}")
     assert js_vals[0] == 1.0 and js_vals[-1] == 0.0, "the curve does not run 1->0"
+
+    # And the migration must not have changed the shape: pow(1-u,3).
+    for t, got in zip(times, js_vals):
+        u = min(1.0, max(0.0, t / 0.35))
+        assert abs(got - (1 - u) ** 3) < 1e-9, (
+            f"the swipe curve changed at {t}s: {got} vs {(1 - u) ** 3}")
 
 
 def test_the_hold_intensities_survive_the_punch_retune(app_mod):
@@ -1169,7 +1175,7 @@ def test_ken_burns_preview_and_render_do_not_agree_today(app_mod):
     `1 + amount * (tRel/dur)`, plain linear. They only coincide at the ends.
     """
     out = _node_eval(
-        "const KENBURNS_AMOUNT", "const OVERLAY_SWIPE_FROM",
+        "const KENBURNS_AMOUNT", "  // The direction table moved",
         'const o=[];for(const u of [0,0.25,0.5,0.75,1]) '
         'o.push(kenBurnsScaleAt({enabled:true,intensity:"med",direction:"in"},'
         ' u*4, 4).toFixed(6)); console.log(o.join(" "));')
@@ -1236,7 +1242,14 @@ def test_the_overlay_frame_writes_position_as_time_advances():
     node = shutil.which("node")
     if not node:
         pytest.skip("node not on PATH")
-    script = block + """
+    # The real modules, not stubs: this has to exercise the path the browser
+    # takes, including the engine that now owns the curve.
+    script = (
+        "globalThis.window = globalThis;\n"
+        "globalThis.Keyframes = require(%r);\n" % str(BURNER / "static" / "keyframes.js")
+        + "globalThis.KeyframeMotion = require(%r);\n"
+          % str(BURNER / "static" / "keyframes-motion.js")
+    ) + block + """
       var item = {x: 0.2, y: 0.2, opacity: 1, fade_in: 0, fade_out: 0,
                   motion: {type: "swipe_left", in: 1.2}};
       var o = {item: item, start: 0.5, dur: 4,
