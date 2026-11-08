@@ -1292,3 +1292,144 @@ def test_the_frame_loop_owns_overlay_position_not_the_rebuild():
                    js_src.index("ovEntries.push(entry)")]
     assert "wrap," in entry and "item," in entry, (
         "the frame writer needs the wrapper element and the clip")
+
+
+# --- The keyframe engine ------------------------------------------------
+# One spec, three readers: eval_track (Python), evalTrack (JS, per frame) and
+# to_ffmpeg_expr (compiled into a filter). They are checked against each other
+# over random tracks, because every drift this app has had came from two
+# hand-written copies of one curve that nobody compared.
+
+def _kf():
+    import keyframes
+    return keyframes
+
+
+def _random_tracks(n=40, seed=20261108):
+    import random
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        count = rng.choice([1, 2, 2, 3, 4, 5])
+        ts, t = [], rng.uniform(0, 0.4)
+        for _ in range(count):
+            ts.append(round(t, 4))
+            t += rng.uniform(0.05, 1.5)
+        vals = [round(rng.uniform(-2, 3), 4) for _ in ts]
+        out.append(list(map(list, zip(ts, vals))))
+    return out
+
+
+def test_the_keyframe_curve_is_the_same_in_both_languages():
+    """Python and the browser must read one spec identically.
+
+    This is the check that did not exist for Ken Burns, which accumulates in
+    the renderer and is linear in the preview under the same name.
+    """
+    kf = _kf()
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+
+    tracks = _random_tracks()
+    times = [0.0, 0.11, 0.37, 0.8, 1.25, 2.0, 3.5]
+    cases = [(tr, e) for tr in tracks for e in kf.EASINGS]
+
+    script = (
+        "const K=require(%r);\n" % str(BURNER / "static" / "keyframes.js")
+        + "const cases=%s, times=%s;\n" % (json.dumps(cases), json.dumps(times))
+        + "const out=[];for(const [tr,e] of cases){for(const t of times){"
+        + "const v=K.evalTrack(tr,t,e);out.push(v===null?'null':v.toFixed(9));}}"
+        + "console.log(out.join(' '));"
+    )
+    js_vals = subprocess.run([node, "-e", script], capture_output=True,
+                             text=True, check=True).stdout.split()
+
+    i = 0
+    for track, ease in cases:
+        for t in times:
+            py = kf.eval_track(track, t, ease)
+            js = js_vals[i]; i += 1
+            if py is None:
+                assert js == "null"
+                continue
+            assert abs(float(js) - py) < 1e-9, (
+                f"{ease} at {t}s on {track}: python {py}, browser {js}")
+    assert i == len(cases) * len(times), "every case must be compared"
+
+
+def test_the_compiled_expression_matches_the_evaluator(app_mod):
+    """to_ffmpeg_expr is what actually renders, so it has to agree too.
+
+    The expression is evaluated the way ffmpeg would, in local seconds, so a
+    track that previews correctly cannot burn in differently.
+    """
+    kf = _kf()
+    env = {"lt": lambda a, b: a < b, "pow": pow, "min": min, "max": max,
+           "if": None}
+    for track in _random_tracks(n=25, seed=7):
+        for ease in kf.EASINGS:
+            expr = kf.to_ffmpeg_expr(track, "T", ease)
+            if expr is None:
+                assert not kf.normalize_track(track)
+                continue
+            py_expr = expr.replace("if(", "IF(").replace("lt(", "LT(")
+            for t in (0.0, 0.2, 0.55, 1.0, 1.9, 4.0):
+                got = eval(py_expr, {"IF": lambda c, a, b: a if c else b,
+                                     "LT": env["lt"], "pow": pow,
+                                     "T": float(t)})
+                want = kf.eval_track(track, t, ease)
+                assert abs(got - want) < 1e-6, (
+                    f"{ease} at {t}s: expression {got}, evaluator {want}\n"
+                    f"track={track}\nexpr={expr}")
+
+
+def test_a_track_holds_its_ends_and_survives_rubbish():
+    """Saved timelines are free-form JSON written by a model and by hand."""
+    kf = _kf()
+    tr = [[1.0, 10.0], [2.0, 20.0]]
+    assert kf.eval_track(tr, 0.0) == 10.0, "holds the first value before it"
+    assert kf.eval_track(tr, 9.9) == 20.0, "holds the last value after it"
+    assert kf.eval_track(tr, 1.5) == pytest.approx(15.0), "interpolates"
+    assert kf.eval_track([], 1.0) is None, "empty is not zero"
+
+    messy = [[2.0, 20.0], ["1.0", "10.0"], None, [3.0], ["x", 1], [0.5, 5.0]]
+    assert kf.normalize_track(messy) == [(0.5, 5.0), (1.0, 10.0), (2.0, 20.0)]
+    assert kf.eval_track(messy, 1.5) == pytest.approx(15.0), "sorted, not raw"
+
+    # A constant track compiles to a bare number, not a one-armed if().
+    assert kf.to_ffmpeg_expr([[0.0, 1.5]]) == "1.5"
+    assert kf.to_ffmpeg_expr([]) is None
+
+
+def test_the_time_base_is_local_seconds_whatever_the_filter_counts():
+    """The one decision that lets a single spec drive three clocks.
+
+    Overlay x/y are expressions over absolute t; zoompan only sees the frame
+    counter. Both ask for local seconds and get the same curve.
+    """
+    kf = _kf()
+    track = [[0.0, 0.0], [1.0, 100.0]]
+
+    overlay = kf.to_ffmpeg_expr(track, "(t-4.2)")
+    at_half = eval(overlay.replace("if(", "IF(").replace("lt(", "LT("),
+                   {"IF": lambda c, a, b: a if c else b,
+                    "LT": lambda a, b: a < b, "pow": pow, "t": 4.7})
+    assert at_half == pytest.approx(50.0), "overlay clock is absolute t"
+
+    # `in` is a Python keyword, so rename it the way _eval_zoompan_z does.
+    zoom = kf.to_ffmpeg_expr(track, "(in/30)")
+    assert "in/30" in zoom, "the frame counter must reach the expression"
+    py = re.sub(r"\bin\b", "N", zoom.replace("if(", "IF(").replace("lt(", "LT("))
+    at_15 = eval(py, {"IF": lambda c, a, b: a if c else b,
+                      "LT": lambda a, b: a < b, "pow": pow, "N": 15})
+    assert at_15 == pytest.approx(50.0), "zoompan clock is the frame counter"
+
+
+def test_the_keyframe_module_reaches_the_browser():
+    """A module the page never loads is not an engine, it is a file."""
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "filename='keyframes.js'" in html, "keyframes.js is not on the page"
+    # It has to come first, or timeline.js reads window.Keyframes as undefined.
+    assert html.index("filename='keyframes.js'") < html.index("filename='timeline.js'"), \
+        "keyframes.js must load before timeline.js"
