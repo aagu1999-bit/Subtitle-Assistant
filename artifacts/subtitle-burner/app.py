@@ -1005,6 +1005,36 @@ threading.Thread(target=_get_whisper_model, daemon=True).start()
 _FFPROBE_DEEP = ["-analyzeduration", "200M", "-probesize", "200M"]
 
 
+def _probe_video_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) of the first video stream, or None.
+
+    Cropping two speaker boxes out of one frame needs real pixels: the
+    boxes arrive as fractions of the frame and a panel has an aspect ratio
+    to respect, and neither sum works in normalised coordinates.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0:s=x",
+             str(path)],
+            stderr=subprocess.STDOUT, text=True, timeout=30,
+        ).strip().splitlines()
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    for line in out:
+        bits = line.strip().split("x")
+        if len(bits) >= 2:
+            try:
+                w, h = int(bits[0]), int(bits[1])
+            except ValueError:
+                continue
+            if w > 0 and h > 0:
+                return w, h
+    return None
+
+
 def _probe_media_streams(path: Path) -> dict:
     """Return stream/format info from a deep ffprobe.
 
@@ -5008,6 +5038,11 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
             ),
             "source": "diarization",
             "speakers": spk_pair,
+            # Without this the applied clip has no second media, and the
+            # renderer quietly falls through to an ordinary segment -- so
+            # every split-screen Analyze has ever suggested rendered as
+            # nothing at all.
+            "mode": "speakers",
             "face_anchor": face_a,
         })
     return out
@@ -5137,7 +5172,7 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
             t = s + hi                   # too long to be an accent: trim
         intensity = str(e.get("intensity", "med")).lower()
         direction = str(e.get("direction", "in")).lower()
-        cleaned.append({
+        row = {
             "type": kind,
             "start_time": round(s, 3),
             "end_time": round(t, 3),
@@ -5146,7 +5181,31 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
             "quote": str(e.get("quote", ""))[:300],
             "reason": str(e.get("reason", ""))[:500],
             "source": str(e.get("source", "gemini")),
-        })
+        }
+        # A fourth silent sink. This builds a fresh dict from a fixed field
+        # list, so anything _overlap_split_suggestions attached -- which
+        # speaker to frame, where their face is, that this is a both-people
+        # split at all -- was dropped on the way out and the suggestion
+        # arrived at the client as a bare split_screen with no second media.
+        # Allowlisted rather than spread: the rest of a model-authored row is
+        # not to be trusted into the timeline.
+        mode = str(e.get("mode") or "").strip().lower()
+        if mode in ("speakers",):
+            row["mode"] = mode
+        spk = [str(x) for x in (e.get("speakers") or [])
+               if isinstance(x, (str, int))][:2]
+        if spk:
+            row["speakers"] = spk
+        anch = e.get("face_anchor")
+        if isinstance(anch, dict):
+            try:
+                row["face_anchor"] = {
+                    "x": min(1.0, max(0.0, float(anch.get("x", 0.5)))),
+                    "y": min(1.0, max(0.0, float(anch.get("y", 0.5)))),
+                }
+            except (TypeError, ValueError):
+                pass
+        cleaned.append(row)
 
     # Earliest first, then drop anything that collides with a kept effect —
     # two camera moves running at once read as a glitch, not as emphasis.
@@ -13176,6 +13235,157 @@ def _tl_declick_af(dur: float, d: float = 0.02) -> str:
     return f"afade=t=in:st=0:d={d:.3f},afade=t=out:st={max(0.0, dur - d):.3f}:d={d:.3f}"
 
 
+def _tl_speaker_split_boxes(source_job_id: str | None,
+                             speakers: list | None = None,
+                             ) -> list[tuple[float, float, float, float]] | None:
+    """Two face boxes from ONE clip, for a both-people-at-once split.
+
+    _tl_split_segment stacks two DIFFERENT sources. "Split when two people
+    talk" is not that: there is one camera, one file, and two faces inside
+    the same frame. What it needs is two crop boxes, which
+    _assign_speakers_to_faces already computes -- per speaker, counting
+    only the windows where that speaker talks alone.
+
+    Returns the boxes left-to-right by their position in the source frame.
+    Ordering by who talks first would let the two halves swap sides between
+    one split and the next, which reads as a jump cut rather than an edit.
+
+    None when there is no analysis, fewer than two speakers located, or the
+    two boxes sit on top of each other -- the last case being a detector
+    that only ever saw one person, where a two-up would show the same face
+    twice.
+    """
+    rd = _load_reframe_cache(source_job_id)
+    if not rd:
+        return None
+    diar = rd.get("diarization") or []
+    if not diar or not (rd.get("faces") or []):
+        return None
+    _positions, bboxes = _speaker_face_map(source_job_id, rd)
+    wanted = [str(x) for x in (speakers or []) if str(x) in bboxes]
+    if len(wanted) < 2:
+        # Fall back to first appearance in the diarization, which is the
+        # same ordering _assign_speakers_to_faces uses for its own tie-break.
+        wanted = []
+        for seg in diar:
+            spk = str(seg.get("speaker") or "")
+            if spk in bboxes and spk not in wanted:
+                wanted.append(spk)
+    if len(wanted) < 2:
+        return None
+    boxes = [tuple(float(v) for v in bboxes[spk]) for spk in wanted[:2]]
+    boxes.sort(key=lambda b: b[0])
+
+    # Both boxes have to be places a face was actually seen.
+    #
+    # _assign_speakers_to_faces INVENTS a separation when every speaker
+    # lands on the same cluster: it nudges them +/-0.15 along x so two
+    # stills do not come back identical. That is a fair hedge for a
+    # screenshot and a bad one here -- it would crop the same person twice,
+    # offset, which looks like a rendering fault rather than an edit. And
+    # because the nudge is 0.3 wide, checking that the two boxes differ
+    # cannot catch it; the fabricated pair are the furthest apart of all.
+    #
+    # So verify against the raw samples instead. A real box sits on top of
+    # a detection; a nudged one sits 0.15 away from every one of them.
+    seen = [float(f.get("cx", -1))
+            for sample in (rd.get("faces") or [])
+            for f in (sample.get("faces") or [])]
+    if not seen:
+        return None
+    for box in boxes:
+        if not any(abs(cx - box[0]) < 0.08 for cx in seen):
+            return None
+    if abs(boxes[0][0] - boxes[1][0]) < 0.06:
+        return None
+    return boxes
+
+
+def _tl_speaker_crop_px(box, src_w: int, src_h: int, pw: int, ph: int,
+                        pad: float = 3.2, lift: float = 0.38):
+    """A head-and-shoulders crop around *box*, already in the panel's aspect.
+
+    Giving the crop the panel's aspect ratio up front means the scale that
+    follows does not throw part of it away. *pad* is how much taller than
+    the face to take, *lift* where the face sits vertically -- above centre,
+    because a crop centred on a face puts the chin in the middle and wastes
+    the frame on chest.
+
+    Returns even (w, h, x, y) in pixels, inside the frame.
+    """
+    cx, cy, _fw, fh = (float(v) for v in box)
+    face_h = max(8.0, fh * src_h)
+    crop_h = min(float(src_h), face_h * pad)
+    crop_w = crop_h * (float(pw) / float(ph))
+    if crop_w > src_w:
+        crop_w = float(src_w)
+        crop_h = min(float(src_h), crop_w * float(ph) / float(pw))
+    x = cx * src_w - crop_w / 2.0
+    y = cy * src_h - crop_h * lift
+    x = max(0.0, min(float(src_w) - crop_w, x))
+    y = max(0.0, min(float(src_h) - crop_h, y))
+
+    def _even(v: float) -> int:
+        n = int(v)
+        return n - (n % 2)
+
+    return max(2, _even(crop_w)), max(2, _even(crop_h)), _even(x), _even(y)
+
+
+def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
+                               boxes: list, layout: str,
+                               W: int, H: int, fps: int, out_path: Path,
+                               color: dict | None = None) -> float:
+    """Both speakers side by side, cropped out of the SAME clip.
+
+    One input, split into two streams, each cropped to its speaker's box
+    and scaled into its panel. Audio comes from the single source, so there
+    is nothing to sync -- which is the quiet advantage over a two-source
+    split, where the second panel's audio has to be thrown away.
+    """
+    if layout == "auto":
+        layout = "stack" if H >= W else "side"
+    if layout == "side":
+        pw, ph, stack = W // 2, H, "hstack"
+    else:
+        pw, ph, stack = W, H // 2, "vstack"
+    pw -= pw % 2
+    ph -= ph % 2
+
+    size = _probe_video_size(src)
+    if not size:
+        raise RuntimeError(f"Could not read frame size for split: {src}")
+    src_w, src_h = size
+
+    parts = ["[0:v:0]split=2[sa][sb]"]
+    for i, (label, box) in enumerate(zip(("sa", "sb"), boxes[:2])):
+        cw, ch, cxp, cyp = _tl_speaker_crop_px(box, src_w, src_h, pw, ph)
+        parts.append(
+            f"[{label}]crop={cw}:{ch}:{cxp}:{cyp},"
+            f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+            f"crop={pw}:{ph},setsar=1,fps={fps}[p{i}]"
+        )
+    cf = _tl_color_filter(color)
+    post = ("," + cf) if cf else ""
+    parts.append(f"[p0][p1]{stack}=inputs=2{post},format=yuv420p[v]")
+    fc = ";".join(parts)
+
+    has_audio = _has_audio_stream(src)
+    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+    if not has_audio:
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+            "-map", "[v]", "-map", "0:a:0" if has_audio else "1:a:0",
+            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2"]
+    if has_audio:
+        cmd += ["-af", _tl_declick_af(dur)]
+    cmd += ["-shortest", str(out_path)]
+    _tl_run(cmd, "Speaker split-screen")
+    return dur
+
+
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                       dur: float, layout: str, W: int, H: int, fps: int,
                       out_path: Path, color: dict | None = None,
@@ -14803,6 +15013,13 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "in": float(fx.get("in") or 0),
                 "layout": fx.get("layout") or "auto",
                 "placement": fx.get("placement") or "second_bottom",
+                # mode "speakers" means both panels come from the clip
+                # underneath, so no second media is needed or wanted. It
+                # rides the free-form effects JSON, which _normalize_timeline
+                # spreads with `row = dict(fx)` -- no whitelist to update.
+                "mode": str(fx.get("mode") or "").strip().lower(),
+                "speakers": [str(x) for x in (fx.get("speakers") or [])
+                             if isinstance(x, (str, int))],
             }
     return ken, punch, color, split
 
@@ -14915,9 +15132,22 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     color = fx_color if fx_color else clip_color
                     split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
                     split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
+                    # Both-speakers split: one source, two crop boxes. Only
+                    # when no second media was picked, so an explicit choice
+                    # always wins over the automatic one.
+                    spk_boxes = None
+                    if (split and split.get("enabled") and not split_src
+                            and split.get("mode") == "speakers"):
+                        spk_boxes = _tl_speaker_split_boxes(
+                            c.get("source_job_id"), split.get("speakers"))
 
                     seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
-                    if split_src:
+                    if spk_boxes:
+                        dur = _tl_split_speakers_segment(
+                            src, sub_ks, sub_dur, spk_boxes,
+                            (split or {}).get("layout", "auto"),
+                            W, H, fps, seg_path, color=color)
+                    elif split_src:
                         # Second-source in-point advances with source time on A
                         # for video; stills/GIFs stay pinned at 0 (looped).
                         base_in = max(0.0, float((split or {}).get("in", 0)))

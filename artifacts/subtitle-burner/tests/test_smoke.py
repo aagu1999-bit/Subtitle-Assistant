@@ -2905,3 +2905,315 @@ def test_the_matte_guard_still_refuses_a_too_new_mediapipe(app_mod, monkeypatch)
     ok, why = app_mod._segment_deps_available()
     assert ok is False
     assert "selfie_segmentation" in why, why
+
+
+# ---------------------------------------------------------------------------
+# "Split the screen when two people talk" -- which has never rendered.
+#
+# _tl_split_segment stacks two DIFFERENT sources. Two people talking over
+# each other is not that shape: one camera, one file, two faces inside the
+# same frame. So an Analyze-suggested split_screen landed as a clip with no
+# second media, _timeline_clip_source returned None, and the renderer fell
+# straight through to an ordinary segment. The suggestion rendered as
+# nothing at all, silently, which is why nobody filed it as broken.
+#
+# The boxes it needs were already being computed. Getting them to the
+# renderer meant going through four places that each drop unknown fields:
+# _sanitize_effect_suggestions (builds a fresh dict), addEffectClip (fixed
+# field list), applyEffectSuggestion (explicit opts) and
+# _tl_props_from_lane_effects. _normalize_timeline and serialize() spread,
+# so those two were already fine.
+# ---------------------------------------------------------------------------
+
+_BOX_LEFT = (0.25, 0.50, 0.10, 0.15)    # cx, cy, w, h
+_BOX_RIGHT = (0.75, 0.50, 0.10, 0.15)
+
+
+def _write_two_box_analysis(app_mod, job_id, *, boxes=(_BOX_LEFT, _BOX_RIGHT),
+                            overlaps=None):
+    """A cache whose two speakers sit at known, far-apart screen positions.
+
+    Each sample holds only the talking speaker's face, so
+    _assign_speakers_to_faces lands each one on their own box exactly.
+    """
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 4.0},
+            {"speaker": "SPEAKER_01", "start": 4.0, "end": 8.0}]
+    samples = []
+    t = 0.25
+    while t < 8.0:
+        box = boxes[0] if t < 4.0 else boxes[1]
+        samples.append({"t": round(t, 2), "faces": [
+            {"cx": box[0], "cy": box[1], "w": box[2], "h": box[3], "score": 0.9},
+        ]})
+        t += 0.5
+    path = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    payload = {"faces": samples, "diarization": diar, "duration": 8.0}
+    if overlaps is not None:
+        payload["overlaps"] = overlaps
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    return path
+
+
+def test_speaker_split_boxes_come_back_left_to_right(app_mod):
+    """Frame order, not speaking order.
+
+    Ordering by who talks first would let the two halves swap sides between
+    one split and the next, which reads as a jump cut rather than an edit.
+    So the box with the smaller cx is always first -- including when the
+    `speakers` list names them the other way round.
+    """
+    job_id = "pytest_split_lr"
+    path = _write_two_box_analysis(app_mod, job_id)
+    try:
+        boxes = app_mod._tl_speaker_split_boxes(job_id)
+        assert boxes and len(boxes) == 2, boxes
+        assert boxes[0][0] < boxes[1][0], boxes
+        assert boxes[0][0] == pytest.approx(_BOX_LEFT[0], abs=0.02)
+        assert boxes[1][0] == pytest.approx(_BOX_RIGHT[0], abs=0.02)
+
+        # Named in reverse: same frame order out.
+        rev = app_mod._tl_speaker_split_boxes(job_id, ["SPEAKER_01", "SPEAKER_00"])
+        assert rev[0][0] < rev[1][0], rev
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_a_split_is_refused_when_it_would_show_one_face_twice(app_mod):
+    """Two speakers, one detected position: not a two-up.
+
+    The detector routinely sees only the person facing the camera. Showing
+    the same crop in both panels looks like a rendering fault, so the split
+    is declined and the shot plays uncut instead.
+    """
+    job_id = "pytest_split_same"
+    path = _write_two_box_analysis(
+        app_mod, job_id, boxes=(_BOX_LEFT, (0.27, 0.50, 0.10, 0.15)))
+    try:
+        assert app_mod._tl_speaker_split_boxes(job_id) is None
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_a_split_is_refused_without_an_analysis(app_mod):
+    assert app_mod._tl_speaker_split_boxes("pytest_no_analysis_at_all") is None
+    assert app_mod._tl_speaker_split_boxes(None) is None
+
+
+def test_the_speaker_crop_fits_the_panel_and_stays_in_frame(app_mod):
+    """The crop carries the panel's aspect so the scale after it loses nothing.
+
+    And a face near an edge must clamp inward rather than ask ffmpeg for
+    pixels that are not there, which fails the whole render.
+    """
+    # Portrait canvas, stacked: each panel is 1080x960.
+    w, h, x, y = app_mod._tl_speaker_crop_px(
+        (0.5, 0.5, 0.10, 0.15), 1280, 720, 1080, 960)
+    assert w % 2 == 0 and h % 2 == 0 and x % 2 == 0 and y % 2 == 0
+    assert 0 <= x and x + w <= 1280
+    assert 0 <= y and y + h <= 720
+    assert w / h == pytest.approx(1080 / 960, rel=0.02), (w, h)
+    # Taller than the face, so it is a head-and-shoulders crop not a mugshot.
+    assert h > 0.15 * 720 * 2
+
+    # Hard against the left edge and the top.
+    w2, h2, x2, y2 = app_mod._tl_speaker_crop_px(
+        (0.02, 0.02, 0.10, 0.15), 1280, 720, 1080, 960)
+    assert x2 == 0 and y2 == 0
+    assert x2 + w2 <= 1280 and y2 + h2 <= 720
+
+
+def test_the_split_suggestion_asks_for_the_mode_that_renders(app_mod):
+    """_overlap_split_suggestions must emit mode "speakers".
+
+    Without it the applied clip has no second media and no boxes, and the
+    renderer falls through -- the exact silent no-op this fixes.
+    """
+    job_id = "pytest_split_sugg"
+    path = _write_two_box_analysis(app_mod, job_id, overlaps=[
+        {"start": 3.0, "end": 5.5, "speakers": ["SPEAKER_00", "SPEAKER_01"]},
+    ])
+    try:
+        out = app_mod._overlap_split_suggestions(job_id, 8.0)
+        assert out, "an overlap longer than the floor should suggest a split"
+        assert out[0]["type"] == "split_screen"
+        assert out[0]["mode"] == "speakers", out[0]
+        assert out[0]["speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_sanitiser_keeps_what_makes_a_split_a_split(app_mod):
+    """It builds a fresh dict from a fixed field list -- a fourth silent sink.
+
+    mode, speakers and face_anchor were all dropped on the way to the
+    client, so the suggestion arrived stripped of everything that told the
+    renderer what to do with it.
+    """
+    raw = [{
+        "type": "split_screen", "start_time": 3.0, "end_time": 5.5,
+        "mode": "speakers", "speakers": ["SPEAKER_00", "SPEAKER_01"],
+        "face_anchor": {"x": 0.3, "y": 0.4},
+    }]
+    out = app_mod._sanitize_effect_suggestions(raw, 10.0)
+    assert out and out[0]["mode"] == "speakers", out
+    assert out[0]["speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert out[0]["face_anchor"]["x"] == pytest.approx(0.3)
+
+    # Allowlisted, not spread: a model-authored row cannot smuggle fields in.
+    sneaky = app_mod._sanitize_effect_suggestions(
+        [{"type": "punch_zoom", "start_time": 0.0, "end_time": 1.0,
+          "mode": "rm -rf", "asset_id": "../../etc/passwd",
+          "source_job_id": "whatever"}], 10.0)
+    assert "asset_id" not in sneaky[0] and "source_job_id" not in sneaky[0]
+    assert "mode" not in sneaky[0], sneaky[0]
+
+
+def test_the_renderer_reads_mode_and_speakers_off_the_lane(app_mod):
+    """_tl_props_from_lane_effects is the last place they can be dropped."""
+    _ken, _punch, _color, split = app_mod._tl_props_from_lane_effects([
+        {"type": "split_screen", "start": 1.0, "out": 2.0,
+         "mode": "speakers", "speakers": ["SPEAKER_01", "SPEAKER_00"],
+         "layout": "stack"},
+    ])
+    assert split and split["enabled"] is True
+    assert split["mode"] == "speakers", split
+    assert split["speakers"] == ["SPEAKER_01", "SPEAKER_00"], split
+
+
+@needs_ffmpeg
+def test_the_two_up_really_contains_both_boxes(app_mod, tmp_path):
+    """Pixels, not a filter string.
+
+    The source is red on the left half and blue on the right, with a face
+    box in each. A correct two-up puts red in one panel and blue in the
+    other; a crop that ignored the boxes would put the same colour in both,
+    and reading the filter graph would not tell the difference.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import cv2
+
+    src = tmp_path / "halves.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=red:s=640x720:d=2:r=30",
+         "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=2:r=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+         "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+        check=True)
+
+    out = tmp_path / "twoup.mp4"
+    # 9:16 canvas -> "auto" means stacked, so panel 0 is the TOP half.
+    dur = app_mod._tl_split_speakers_segment(
+        src, 0.0, 1.5, [_BOX_LEFT, _BOX_RIGHT], "auto",
+        1080, 1920, 30, out)
+    assert dur == pytest.approx(1.5)
+    assert out.exists() and out.stat().st_size > 1000
+
+    png = tmp_path / "f.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", "0.5", "-i", str(out),
+                    "-frames:v", "1", str(png)], check=True)
+    img = cv2.imread(str(png))
+    assert img is not None and img.shape[0] == 1920 and img.shape[1] == 1080
+
+    # BGR. Sample the middle of each panel.
+    top = img[480, 540]
+    bottom = img[1440, 540]
+    assert top[2] > 150 and top[0] < 80, f"top panel is not the red half: {top}"
+    assert bottom[0] > 150 and bottom[2] < 80, f"bottom panel is not the blue half: {bottom}"
+
+
+@needs_ffmpeg
+def test_a_speakers_split_survives_the_whole_render_chain(app_mod, tmp_path):
+    """Through render_timeline_job, because the chain is where it died.
+
+    Every piece of this worked in isolation before: the boxes were computed,
+    the suggestion was made, the clip was added. What failed was the
+    handover -- four field lists in a row, each dropping what it did not
+    recognise -- so the only test that could have caught it is one that
+    starts from a timeline and ends at pixels.
+    """
+    for mod in ("cv2", "flask"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import uuid
+
+    sid, rid = uuid.uuid4().hex, uuid.uuid4().hex
+    made = []
+    try:
+        src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=red:s=640x720:d=4:r=30",
+             "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=4:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+             "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+             "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+            check=True)
+        made.append(src)
+        made.append(_write_two_box_analysis(app_mod, sid))
+
+        base = {"status": "done", "progress": 100, "output": None, "error": None,
+                "audio": None, "emoji_rules": {}, "created_at": 0.0,
+                "words": None, "style": {}}
+        app_mod.jobs[sid] = {**base, "filename": "halves.mp4"}
+        app_mod.jobs[rid] = {**base, "filename": "split.mp4"}
+
+        timeline = {
+            "canvas": "9x16", "fps": 30, "fit": "cover", "bg": "#000000",
+            "tracks": {
+                "main": [{"id": "m1", "source_job_id": sid,
+                          "in": 0.0, "out": 2.0, "burn_captions": False}],
+                # No source_job_id and no asset_id: before this change the
+                # renderer saw nothing to split with and produced the plain
+                # shot, which is what the suggestion had always done.
+                "effects": [{"id": "f1", "type": "split_screen",
+                             "start": 0.2, "out": 1.4, "mode": "speakers",
+                             "speakers": ["SPEAKER_00", "SPEAKER_01"],
+                             "layout": "auto"}],
+                "overlay": [], "text": [], "music": [],
+            },
+        }
+        app_mod.render_timeline_job(rid, timeline)
+        assert app_mod.jobs[rid]["status"] == "done", app_mod.jobs[rid].get("error")
+
+        out = app_mod.OUTPUT_DIR / f"{rid}.mp4"
+        made.append(out)
+        assert out.exists() and out.stat().st_size > 10_000
+
+        def frame(t):
+            png = tmp_path / f"c{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(t),
+                            "-i", str(out), "-frames:v", "1", str(png)],
+                           check=True)
+            return cv2.imread(str(png))
+
+        inside = frame(0.8)
+        assert inside is not None, "no frame inside the split window"
+        top, bottom = inside[480, 540], inside[1440, 540]
+        assert top[2] > 150 and top[0] < 80, f"top panel: {top}"
+        assert bottom[0] > 150 and bottom[2] < 80, f"bottom panel: {bottom}"
+
+        # Outside the window the shot is uncut, so both samples read the
+        # same half of the 9:16 crop rather than two different colours.
+        outside = frame(1.85)
+        if outside is not None:
+            o_top, o_bottom = outside[480, 540], outside[1440, 540]
+            split_like = (o_top[2] > 150 and o_top[0] < 80
+                          and o_bottom[0] > 150 and o_bottom[2] < 80)
+            assert not split_like, "the split leaked past its own window"
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod._SPEAKER_FACE_CACHE.pop(sid, None)
+        app_mod.jobs.pop(sid, None)
+        app_mod.jobs.pop(rid, None)
