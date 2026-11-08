@@ -16,18 +16,19 @@ gunicorn>=21.0.0
 # OpenCV has no X11 deps and mediapipe will use it transparently via the
 # shared `cv2` module name.
 pyannote.audio>=3.1.0
-# Pinned below 0.10.15: MediaPipe removed the legacy `mp.solutions` API, and
+# Pinned below 0.10.22: MediaPipe removed the legacy `mp.solutions` API, and
 # this app is written against it (mp.solutions.face_detection for the reframe
 # analysis, mp.solutions.selfie_segmentation for the person matte). An
 # unpinned install resolves to a release where `mediapipe.solutions` does not
 # exist, so both raise AttributeError the first time they run.
-mediapipe>=0.10.5,<0.10.15
+mediapipe>=0.10.5,<0.10.22
 opencv-python-headless>=4.10.0
 
-# Tighter word timestamps (optional). Whisper infers word times from decoder
-# attention and they drift; WhisperX aligns them against a phoneme model, and
-# every caption highlight and effect in this app is anchored to a word time.
-# Off unless WHISPERX_ALIGN=1, and it falls back to Whisper's own timings if
-# the import or the alignment fails. Pulls torch, so pyannote already covers
-# most of the download if the reframe feature is installed.
+# Tighter word timestamps. Whisper infers word times from decoder attention
+# and they drift; WhisperX aligns them against a phoneme model, and every
+# caption highlight and effect in this app is anchored to a word time.
+# On by default; set WHISPERX_ALIGN=0 to skip it. Falls back to Whisper's own
+# timings whenever the import, the model load or the alignment fails, so a
+# missing install costs accuracy rather than breaking transcription. Pulls
+# torch, which pyannote already requires if the reframe feature is installed.
 whisperx>=3.1.0
