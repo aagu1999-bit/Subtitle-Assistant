@@ -539,6 +539,26 @@ def _db_init() -> None:
             for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe", "timeline"):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
+            # What the model proposed and what actually shipped. A table rather
+            # than a column because one job has many suggestions, and the row
+            # that matters is `edited`: the gap between the two is a labelled
+            # example of how the suggestion was wrong, which was previously
+            # thrown away on every video.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS suggestions (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id      TEXT,
+                    kind        TEXT,
+                    proposed    TEXT,
+                    outcome     TEXT,
+                    final       TEXT,
+                    created_at  REAL,
+                    resolved_at REAL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_suggestions_job ON suggestions(job_id)"
+            )
             conn.commit()
 
 
@@ -7972,6 +7992,14 @@ def suggest_effects():
             anchor = _face_anchor_at(job_id, fx["start_time"])
             if anchor:
                 fx["anchor"] = anchor
+    # Record each proposal here rather than client-side: this is where the
+    # proposal happens, it costs no extra round trip, and the row exists even
+    # if the tab closes without a decision. The id travels with the effect so a
+    # later accept, correction or dismissal resolves that same row.
+    for fx in cleaned:
+        row_id = _record_suggestion(job_id, "effect", fx, "proposed")
+        if row_id:
+            fx["suggestion_id"] = row_id
     if not cleaned and gemini_error:
         return jsonify({"error": gemini_error}), 500
     return jsonify({
@@ -7979,6 +8007,131 @@ def suggest_effects():
         "duration": total,
         "warning": gemini_error,   # partial results still worth returning
     })
+
+
+# ---- Suggestion feedback -------------------------------------------------
+# Every accept, correction and dismissal of an AI suggestion was discarded.
+# The `edited` rows are the valuable ones: the delta between what the model
+# proposed and what the editor actually shipped. Collect now; using the data is
+# deliberately out of scope until there is enough of it to look at.
+
+_SUGGESTION_OUTCOMES = ("proposed", "accepted", "edited", "rejected")
+
+
+def _record_suggestion(job_id: str, kind: str, proposed, outcome: str,
+                       final=None, suggestion_id: int | None = None) -> int | None:
+    """Insert a suggestion row, or resolve one already recorded.
+
+    Returns the row id so the client can attach it to the clip it created and
+    report the correction that follows. Never raises: losing a telemetry row
+    must not cost the user their edit.
+    """
+    if outcome not in _SUGGESTION_OUTCOMES:
+        return None
+    now = time.time()
+    proposed_json = json.dumps(proposed) if proposed is not None else None
+    final_json = json.dumps(final) if final is not None else None
+    try:
+        with _db_lock:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                if suggestion_id:
+                    # Resolving an existing row: keep the original proposal,
+                    # which is the half of the pair that matters.
+                    cur = conn.execute(
+                        """
+                        UPDATE suggestions
+                           SET outcome = ?,
+                               final = COALESCE(?, final),
+                               resolved_at = ?
+                         WHERE id = ?
+                        """,
+                        (outcome, final_json, now, suggestion_id),
+                    )
+                    if cur.rowcount:
+                        conn.commit()
+                        return suggestion_id
+                    # No such row: the id came from a project saved before the
+                    # table existed, or from another database. Fall through and
+                    # insert, because losing the correction is worse than
+                    # losing the link to the original proposal.
+                cur = conn.execute(
+                    """
+                    INSERT INTO suggestions
+                        (job_id, kind, proposed, outcome, final, created_at, resolved_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job_id, kind, proposed_json, outcome, final_json, now,
+                     now if outcome != "proposed" else None),
+                )
+                conn.commit()
+                return cur.lastrowid
+    except sqlite3.Error as exc:
+        print(f"[suggestions] could not record {outcome}: {exc}")
+        return None
+
+
+@app.route("/suggestion-feedback", methods=["POST"])
+def suggestion_feedback():
+    """Record what became of an AI suggestion.
+
+    Body: {job_id, kind, outcome, proposed, final?, suggestion_id?}
+    With a suggestion_id the existing row is resolved in place, so one
+    proposal that is applied and then corrected stays one row with both
+    halves of the pair.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    outcome = str(data.get("outcome") or "")
+    if outcome not in _SUGGESTION_OUTCOMES:
+        return jsonify({"error": f"outcome must be one of {_SUGGESTION_OUTCOMES}"}), 400
+    kind = str(data.get("kind") or "effect")
+    if kind not in ("clip", "effect"):
+        return jsonify({"error": "kind must be 'clip' or 'effect'"}), 400
+    try:
+        suggestion_id = int(data["suggestion_id"]) if data.get("suggestion_id") else None
+    except (TypeError, ValueError):
+        suggestion_id = None
+    row_id = _record_suggestion(
+        str(data.get("job_id") or ""), kind, data.get("proposed"),
+        outcome, data.get("final"), suggestion_id,
+    )
+    if row_id is None:
+        # The edit itself already happened client-side; say so rather than
+        # failing the interaction over a telemetry write.
+        return jsonify({"ok": False, "error": "could not record"}), 200
+    return jsonify({"ok": True, "suggestion_id": row_id})
+
+
+@app.route("/suggestion-feedback/<job_id>")
+def suggestion_feedback_list(job_id: str):
+    """Read back what was recorded for a job, newest first.
+
+    Exists so the data can be inspected without a sqlite3 shell.
+    """
+    try:
+        with _db_lock:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT id, kind, outcome, proposed, final, created_at, resolved_at
+                      FROM suggestions WHERE job_id = ?
+                     ORDER BY id DESC LIMIT 200
+                    """,
+                    (job_id,),
+                ).fetchall()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    out = []
+    for r in rows:
+        item = dict(r)
+        for key in ("proposed", "final"):
+            if item.get(key):
+                try:
+                    item[key] = json.loads(item[key])
+                except (ValueError, TypeError):
+                    pass
+        out.append(item)
+    return jsonify({"suggestions": out})
 
 
 @app.route("/clip-from-job", methods=["POST"])
@@ -13701,8 +13854,17 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "hit": float(fx.get("hit") or 0),
                 "decay": float(fx.get("decay") or 0.45),
             }
-            if isinstance(fx.get("anchor"), dict):
-                punch["anchor"] = fx["anchor"]
+            # `aim` is the push's target point. It used to be read from
+            # `anchor`, which on a lane clip means "which Main clip do I hang
+            # off" and is rewritten to a clip id on every reflow -- so this
+            # isinstance guard quietly discarded it and every AI-aimed push
+            # rendered dead centre. The old key is still honoured when it
+            # really does hold a point.
+            _aim = fx.get("aim")
+            if not isinstance(_aim, dict):
+                _aim = fx.get("anchor")
+            if isinstance(_aim, dict):
+                punch["anchor"] = _aim
         elif ftype == "color":
             color = {
                 "preset": fx.get("preset") or "none",
@@ -15221,8 +15383,11 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "intensity": fx.get("intensity") or "med",
             "direction": fx.get("direction") or "in",
         }
+        # Store the aim point under `aim`: these entries land on the Effects
+        # lane, where `anchor` records which Main clip the item hangs off and
+        # is rewritten on every reflow.
         if isinstance(fx.get("anchor"), dict):
-            entry["anchor"] = fx["anchor"]
+            entry["aim"] = fx["anchor"]
         if fx.get("quote"):
             entry["quote"] = fx["quote"]
         if fx.get("reason"):

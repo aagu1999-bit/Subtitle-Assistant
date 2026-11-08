@@ -574,7 +574,11 @@ def test_the_punch_aim_does_not_collide_with_lane_anchoring():
         "the aim point is being stored in `anchor`, which reanchor() overwrites"
     )
     # reanchor must still own `anchor`; this is what makes the collision real.
-    assert "c.anchor = tl.tracks.main[idx].id" in js
+    # Spelling differs between branches, so match the behaviour: the lane
+    # anchor is assigned a Main clip's id.
+    assert re.search(r"c\.anchor\s*=\s*(clip\.id|tl\.tracks\.main\[[^\]]+\]\.id)", js), (
+        "reanchor no longer writes a clip id to `anchor`; re-check the collision"
+    )
 
 
 def test_the_renderer_reads_the_aim_field(app_mod):
