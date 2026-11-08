@@ -3948,8 +3948,13 @@
       _bgMatteUrl = obj;
       setBackgroundNote("");
     }).catch(() => {
-      unmask("Cut-out preview unavailable — showing you over the picture "
-           + "instead. The render still cuts you out properly.");
+      // Do NOT promise the render will manage it. When the server cannot
+      // segment at all -- a mediapipe without solutions, say -- the render
+      // cannot either, and that sentence is what sent someone to click
+      // Render and hit the failure.
+      unmask("Cut-out unavailable on this server, so the background cannot "
+           + "be placed behind you. The render will skip it and keep the "
+           + "rest of your edit.");
     });
   }
 

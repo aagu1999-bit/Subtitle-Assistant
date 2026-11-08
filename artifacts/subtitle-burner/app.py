@@ -1513,6 +1513,24 @@ def _segment_deps_available() -> tuple[bool, str]:
         return False, f"mediapipe failed to import: {e}"
     except Exception as e:
         return False, f"mediapipe import raised {type(e).__name__}: {e}"
+    # Importing is not enough. MediaPipe REMOVED mp.solutions in 0.10.22, so
+    # on a newer install the import succeeds, this function used to say yes,
+    # and the caller then died on the attribute -- which is how a deploy that
+    # ignored the pin turned an optional background into
+    # "Render failed: module 'mediapipe' has no attribute 'solutions'".
+    #
+    # Check the API actually used, not that a name resolves. This is the same
+    # mistake the repo has already recorded once: the library dropped what the
+    # app is built on and nothing noticed.
+    if not hasattr(mediapipe, "solutions") or not hasattr(
+            getattr(mediapipe, "solutions", None), "selfie_segmentation"):
+        ver = getattr(mediapipe, "__version__", "unknown")
+        return False, (
+            f"this mediapipe ({ver}) has no solutions.selfie_segmentation -- "
+            "it was removed in 0.10.22. The app pins mediapipe<0.10.22; the "
+            "server needs its dependencies reinstalled so the pin takes "
+            "effect."
+        )
     try:
         import cv2  # noqa: F401
     except ImportError as e:
@@ -12947,6 +12965,11 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     return dur
 
 
+# Why the most recent render dropped its background, if it did. Read by
+# render_timeline_job so the finished job can say so instead of the layer
+# just being absent.
+_tl_background_skipped: list = []
+
 MATTE_DIR = CACHE_DIR / "mattes"
 
 # Where the alpha remap puts its knee. Selfie segmentation comes back
@@ -13040,9 +13063,14 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
          # a cut-out, and compression artefacts there are visible.
          "-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray", str(out)],
         stdin=subprocess.PIPE)
-    seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    seg = None
     written = 0
     try:
+        # Inside the try: constructing this is exactly where a mediapipe that
+        # dropped the API blows up, and a matte that cannot be made must cost
+        # the background, never the whole render.
+        seg = mp.solutions.selfie_segmentation.SelfieSegmentation(
+            model_selection=1)
         while True:
             got, frame = cap.read()
             if not got:
@@ -13060,7 +13088,8 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
     except Exception as exc:
         print(f"[matte] failed after {written} frames: {exc}", flush=True)
     finally:
-        seg.close()
+        if seg is not None:
+            seg.close()
         cap.release()
         try:
             proc.stdin.close()
@@ -13097,10 +13126,15 @@ def _tl_composite_background(base: Path, bg: dict, W: int, H: int,
     src = _tl_bg_source(bg)
     if not src:
         return False
-    matte = _tl_matte_video(base, W, H, fps, dur)
+    ok, why = _segment_deps_available()
+    matte = _tl_matte_video(base, W, H, fps, dur) if ok else None
     if not matte:
-        print("[background] no matte available -- leaving the video alone",
-              flush=True)
+        # An optional layer must never cost the export. Say what happened so
+        # the background silently not being there is explained rather than
+        # mysterious.
+        reason = why if not ok else "the subject could not be separated"
+        print(f"[background] skipped -- {reason}", flush=True)
+        _tl_background_skipped.append(reason)
         return False
 
     # ASSET_EXT_STILL holds bare extensions ("png"), suffix carries the dot.
@@ -14674,10 +14708,16 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         if tl.get("background"):
             _stage("placing the background", 45)
             bgd = UPLOAD_DIR / f"{job_id}_tlbg.mp4"
+            _tl_background_skipped.clear()
             if _tl_composite_background(base, tl["background"], W, H, bgd,
                                         fps=fps, dur=_total_dur):
                 work.append(bgd)
                 base = bgd
+            elif _tl_background_skipped:
+                # The export still happens. The background is the thing that
+                # did not, and the user is told which.
+                jobs[job_id]["background_note"] = (
+                    "The background was skipped: " + _tl_background_skipped[-1])
 
         # ---- Persistent logo / watermark (whole-video overlay) ----
         if tl.get("logo"):

@@ -2103,3 +2103,92 @@ def test_the_cutout_preview_never_masks_with_a_matte_it_has_not_checked():
     assert "maskImage = `url(/segment-preview" not in js, (
         "masking straight from the endpoint URL skips the check entirely")
     assert "revokeObjectURL" in fn, "blob urls leak without this"
+
+
+# --- A broken dependency must cost the background, not the render -------
+
+def test_the_deps_check_verifies_the_api_not_just_the_import(app_mod, monkeypatch):
+    """MediaPipe REMOVED mp.solutions in 0.10.22.
+
+    The old check only did `import mediapipe` and said yes, so on a newer
+    install the caller died on the attribute instead -- which is how a
+    deploy that ignored the pin turned an optional background into
+    "Render failed: module 'mediapipe' has no attribute 'solutions'".
+
+    The existing test that mediapipe exposes solutions checks the LOCAL
+    install, which is pinned correctly, so it can never catch a server that
+    is not. This one can.
+    """
+    import types
+    fake = types.ModuleType("mediapipe")
+    fake.__version__ = "0.10.31"          # imports fine, has no solutions
+    monkeypatch.setitem(sys.modules, "mediapipe", fake)
+
+    ok, msg = app_mod._segment_deps_available()
+    assert ok is False, "a mediapipe without solutions must not pass the check"
+    assert "0.10.31" in msg, "say which version is installed"
+    assert "0.10.22" in msg, "say what the pin is"
+    assert "reinstall" in msg.lower(), "say what fixes it"
+
+
+def test_a_matte_that_cannot_be_built_returns_none_rather_than_raising(
+        app_mod, tmp_path, monkeypatch):
+    """The segmenter used to be constructed outside the try, so the error
+    escaped every fallback and killed the export."""
+    import types
+    src = tmp_path / "x.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x64:d=0.3:r=10", "-pix_fmt", "yuv420p",
+                    str(src)], check=True)
+
+    real = sys.modules.get("mediapipe")
+    broken = types.ModuleType("mediapipe")
+    broken.__version__ = "0.10.31"
+    monkeypatch.setitem(sys.modules, "mediapipe", broken)
+    try:
+        got = app_mod._tl_matte_video(src, 64, 64, 10, dur=0.3)
+    except Exception as exc:                       # noqa: BLE001
+        pytest.fail(f"a broken mediapipe must not raise out of here: {exc!r}")
+    assert got is None
+    assert real is not None or True
+
+
+def test_a_render_with_no_segmentation_still_finishes(app_mod, tmp_path,
+                                                      monkeypatch):
+    """An optional layer must never cost the export.
+
+    Before this, a background on a server whose mediapipe had dropped the
+    API failed the whole render -- captions, cuts, effects and all.
+    """
+    import uuid
+    monkeypatch.setattr(app_mod, "_segment_deps_available",
+                        lambda: (False, "mediapipe 0.10.31 has no solutions"))
+    # A real picture, so it gets past the source lookup and reaches the
+    # segmentation check -- a missing asset bails earlier and for a
+    # different reason.
+    aid = uuid.uuid4().hex
+    app_mod.ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    pic = app_mod.ASSET_DIR / f"{aid}.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=red:s=32x32:d=0.1:r=1", "-frames:v", "1",
+                    str(pic)], check=True)
+    out = tmp_path / "out.mp4"
+    try:
+        ok = app_mod._tl_composite_background(
+            tmp_path / "base.mp4", {"asset_id": aid}, 540, 960, out)
+    finally:
+        pic.unlink(missing_ok=True)
+    assert ok is False, "it must decline, not raise"
+    assert not out.exists(), "and leave no broken file behind"
+    assert app_mod._tl_background_skipped, "the reason must be recorded"
+    assert "solutions" in app_mod._tl_background_skipped[-1]
+
+
+def test_the_preview_does_not_promise_a_cutout_the_render_cannot_do():
+    """The fallback used to say "The render still cuts you out properly",
+    which is false when the server cannot segment at all -- and that
+    sentence is what sent someone to click Render and hit the failure."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert "The render still cuts you out properly" not in js
+    assert "The render will skip it" in js, (
+        "say what the render will actually do")
