@@ -139,7 +139,12 @@ CAPCUT_TEMPLATES = {
 # Timeline UI and AI Edit packs historically used short aliases (font, size,
 # primary, …); _normalize_caption_style merges those into this shape.
 _DEFAULT_CAPTION_STYLE = {
-    "font_name": "Montserrat Thin Black",
+    # Anton, to match the titles, which already default to it on both the
+    # creator and renderer sides. Changing this default does NOT repoint saved
+    # jobs: those carry their own style.font_name. And the Montserrat option
+    # keeps its value -- "Montserrat Thin Black" is the real family name inside
+    # Montserrat-Black.ttf, which is what libass matches on.
+    "font_name": "Anton",
     "font_size": 64,
     "primary_color": "#FFFFFF",
     "highlight_color": "#FFD60A",
@@ -2472,15 +2477,15 @@ def _headline_banner_text(value) -> str:
 
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
     style = _normalize_caption_style(style)
-    font = style.get("font_name", "Montserrat Thin Black")
-    font_size = int(style.get("font_size", 72))
+    font = style.get("font_name", _DEFAULT_CAPTION_STYLE["font_name"])
+    font_size = int(style.get("font_size", _DEFAULT_CAPTION_STYLE["font_size"]))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
     highlight = hex_to_ass_color(style.get("highlight_color", "#FFD60A"))
     accent = hex_to_ass_color(style.get("accent_color", "#FF6B35"))
     outline = hex_to_ass_color(style.get("outline_color", "#000000"))
-    outline_w = int(style.get("outline_width", 3))
+    outline_w = int(style.get("outline_width", _DEFAULT_CAPTION_STYLE["outline_width"]))
     shadow = int(style.get("shadow", 1))
-    pos_y_pct = float(style.get("position_y", 85))
+    pos_y_pct = float(style.get("position_y", _DEFAULT_CAPTION_STYLE["position_y"]))
     all_caps = bool(style.get("all_caps", True))
     group_size = int(style.get("group_size", 3))
     smoothing_on = style.get("smooth_timings", True)
@@ -5942,6 +5947,7 @@ def index():
         broll_photo_ready=broll_photo_ready,
         broll_providers=broll_providers,
         asset_version=asset_version,
+        caption_defaults=_DEFAULT_CAPTION_STYLE,
     )
     # Never let the browser cache the HTML shell. The ?v=asset_version on the
     # CSS/JS only busts those files if the *page* itself is fresh — a cached
@@ -7639,7 +7645,7 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
             continue
 
         font = c.get("font", "Anton")
-        size = int(c.get("size", 64))
+        size = int(c.get("size", _TITLE_DEFAULTS["size"]))
         primary = hex_to_ass_color(c.get("color", "#FFFFFF"))
         outline_col = hex_to_ass_color(c.get("outline_color", "#000000"))
         has_box = bool(c.get("bg_enabled"))
@@ -7647,7 +7653,7 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
         if has_box:
             # Apply box opacity (0..1) to the BackColour alpha byte.
             try:
-                op = min(1.0, max(0.0, float(c.get("bg_opacity", 0.6))))
+                op = min(1.0, max(0.0, float(c.get("bg_opacity", _TITLE_DEFAULTS["bg_opacity"]))))
             except (TypeError, ValueError):
                 op = 0.6
             alpha = int((1.0 - op) * 255)
@@ -7667,7 +7673,7 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
         )
 
         px = int(W * float(c.get("x", 0.5)))
-        py = int(H * float(c.get("y", 0.85)))
+        py = int(H * float(c.get("y", _TITLE_DEFAULTS["y"])))
         anim = c.get("anim", "fade")
         if anim == "slideup":
             pos = f"\\move({px},{py + 60},{px},{py},0,400)"
@@ -7702,6 +7708,12 @@ def _tl_build_titles_ass(text_clips: list, W: int, H: int) -> str:
     )
     return header + "\n".join(events) + "\n"
 
+
+# What the timeline's own addTitle() writes (static/timeline.js). The renderer
+# used to carry different numbers here -- 64 / 0.85 / 0.6 against the creator's
+# 56 / 0.82 / 0.55 -- so a title that arrived without those keys rendered
+# unlike every title made in the UI.
+_TITLE_DEFAULTS = {"size": 56, "y": 0.82, "bg_opacity": 0.55, "font": "Anton"}
 
 _TL_DEFAULT_CAPTION_STYLE = _DEFAULT_CAPTION_STYLE
 
