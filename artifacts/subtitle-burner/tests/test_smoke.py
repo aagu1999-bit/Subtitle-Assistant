@@ -10,7 +10,9 @@ Run with:  python -m pytest artifacts/subtitle-burner/tests -v
 """
 import importlib.util
 import json
+import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -225,3 +227,150 @@ def test_transcribe_returns_well_formed_words(app_mod, clip):
     for w in words:
         assert {"word", "start", "end"} <= set(w)
         assert w["end"] >= w["start"]
+
+
+# --- the headline banner must reach build_ass as a string ----------------
+# The batch-clip path wrote a dict. A dict is truthy, so it sailed past the
+# `if headline_banner:` guard and into fmt(), which either raised on .upper()
+# or formatted the dict's repr into an ASS line -- where `{` and `}` open and
+# close an override block, so the whole line is discarded.
+
+def test_headline_banner_normalises_to_a_string(app_mod):
+    norm = app_mod._headline_banner_text
+    assert norm({"enabled": True, "text": "Featured"}) == "Featured"
+    assert norm({"enabled": False, "text": "Featured"}) == ""
+    assert norm("Featured") == "Featured"
+    assert norm("") == "" and norm(None) == ""
+
+
+def test_headline_banner_dict_renders_as_its_text(app_mod):
+    """A job saved with the dict shape still burns the right words."""
+    words = [{"word": "hello", "start": 0.0, "end": 0.4}]
+    style = dict(app_mod._TL_DEFAULT_CAPTION_STYLE,
+                 headline_banner={"enabled": True, "text": "Featured"})
+    banner = app_mod._headline_banner_text(style["headline_banner"])
+    ass = app_mod.build_ass(words, style, 1080, 1920, headline_banner=banner)
+    assert "FEATURED" in ass.upper(), "banner text missing from the ASS"
+    assert "enabled" not in ass, "the dict's repr leaked into the ASS"
+
+
+# --- fonts: the dropdown and fonts/ must agree --------------------------
+# The browser registers @font-face by matching the dropdown value against a
+# FILENAME; libass matches the same value against the family name INSIDE the
+# TTF. The two disagreed for the app's default, so the preview silently
+# measured a system face while the render used Montserrat.
+
+_UNBUNDLED_FONTS = {"Integral CF", "The Bold Font"}  # commercial, see fonts/README.md
+
+
+def _font_options() -> list[str]:
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    block = html.split('<select id="font">')[1].split("</select>")[0]
+    return re.findall(r'value="([^"]+)"', block)
+
+
+def _font_aliases() -> dict:
+    """Read FONT_FILE_ALIASES out of app.js so there is one source for them."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    block = js.split("const FONT_FILE_ALIASES = {")[1].split("}")[0]
+    return dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', block))
+
+
+def _resolves_to_file(family: str, files: list[str], aliases: dict) -> str | None:
+    """The same rule _registerSubtitleFonts applies, alias first."""
+    alias = aliases.get(family)
+    if alias and alias in files:
+        return alias
+    norm = lambda s: re.sub(r"[-_\s]+", "", s.lower())
+    target = norm(family)
+    for f in files:
+        stem = norm(f.rsplit(".", 1)[0])
+        if stem == target or target in stem or stem in target:
+            return f
+    return None
+
+
+def test_every_offered_font_is_bundled_or_known_unbundled():
+    """Offering a font with no file renders it in a silent system substitute."""
+    files = [p.name for p in (BURNER / "fonts").glob("*")
+             if p.suffix.lower() in (".ttf", ".otf")]
+    assert files, "no fonts on disk"
+    aliases = _font_aliases()
+    unresolved = [f for f in _font_options()
+                  if not _resolves_to_file(f, files, aliases)]
+    assert set(unresolved) <= _UNBUNDLED_FONTS, (
+        f"offered but not bundled and not declared unbundled: {unresolved}"
+    )
+
+
+def test_the_default_font_resolves_to_a_file():
+    """It did not, which is how preview and render came to disagree."""
+    files = [p.name for p in (BURNER / "fonts").glob("*")
+             if p.suffix.lower() in (".ttf", ".otf")]
+    default = "Montserrat Thin Black"
+    assert _resolves_to_file(default, files, _font_aliases()), (
+        f"{default} registers no @font-face, so the preview falls back"
+    )
+
+
+def test_aliased_font_names_are_the_family_inside_the_ttf():
+    """Why the UI value must not be 'corrected' to match the filename.
+
+    libass resolves the ASS Style's font by the name recorded in the TTF, not
+    by filename. Renaming "Montserrat Thin Black" to "Montserrat Black" would
+    fix the browser lookup and break the render -- so the alias map fixes the
+    browser side only. This asserts that premise rather than trusting it.
+    """
+    for family, filename in _font_aliases().items():
+        path = BURNER / "fonts" / filename
+        assert path.exists(), f"alias points at a missing file: {filename}"
+        assert family in _ttf_family_names(path), (
+            f"{family!r} is not a family name inside {filename}; "
+            f"found {_ttf_family_names(path)}"
+        )
+
+
+def _ttf_family_names(path: Path) -> set[str]:
+    """Family/full names from a TrueType `name` table (ids 1, 4 and 16)."""
+    data = path.read_bytes()
+    num_tables = struct.unpack(">H", data[4:6])[0]
+    offset = None
+    for i in range(num_tables):
+        rec = 12 + 16 * i
+        if data[rec:rec + 4] == b"name":
+            offset = struct.unpack(">I", data[rec + 8:rec + 12])[0]
+    assert offset is not None, f"{path.name} has no name table"
+    _, count, str_off = struct.unpack(">HHH", data[offset:offset + 6])
+    names = set()
+    for i in range(count):
+        rec = offset + 6 + 12 * i
+        pid, _, _, nid, ln, so = struct.unpack(">HHHHHH", data[rec:rec + 12])
+        if nid not in (1, 4, 16):
+            continue
+        raw = data[offset + str_off + so:offset + str_off + so + ln]
+        try:
+            names.add(raw.decode("utf-16-be") if pid == 3 else raw.decode("latin-1"))
+        except UnicodeDecodeError:
+            continue
+    return names
+
+
+def test_font_faces_are_installed_before_the_explicit_load():
+    """Source-order guard: there is no JS test harness, and order is the bug.
+
+    document.fonts.load() resolves immediately -- fetching nothing -- if the
+    @font-face rules are not in the document yet. That left every subtitle
+    font unfetched and the preview measuring a system face, which is exactly
+    what the explicit load is there to prevent. Verified in a browser; this
+    keeps the two lines from being reordered again.
+    """
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    body = js.split("async function _registerSubtitleFonts()")[1].split("\n}\n")[0]
+    assert "document.head.appendChild(styleEl)" in body, (
+        "the @font-face rules are never installed at all")
+    appended = body.index("document.head.appendChild(styleEl)")
+    loaded = body.index("document.fonts.load(`16px")  # the call, not the comment
+    assert appended < loaded, (
+        "document.fonts.load() runs before the @font-face rules are installed; "
+        "it will resolve against an unknown family and fetch nothing"
+    )
