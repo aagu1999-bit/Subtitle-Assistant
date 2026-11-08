@@ -669,16 +669,18 @@ def _segment_deps_available() -> tuple[bool, str]:
     return True, ""
 
 
-def segment_person_at(video_path: Path, t: float) -> bytes:
-    """PNG of the person matte at time *t*: white subject on black.
+def segment_person_at(video_path: Path, t: float) -> tuple[bytes, float]:
+    """(PNG matte, subject coverage) at time *t*: white subject on black.
 
     MediaPipe's selfie segmentation is built for exactly this shot — one
     person, fixed camera — and runs on CPU, so a matte costs a frame decode
     rather than a model download. It is already a dependency for face
     detection; this just uses the other solution in the same package.
 
-    Returns PNG bytes so the caller can eyeball the edges (hair and sleeves
-    are where this class of model gives up) before anything depends on it.
+    Coverage is the fraction of the frame the model called subject. It comes
+    back alongside the image because an empty matte and a failed matte are the
+    same black PNG to the eye, and the caller should be able to tell the
+    difference without guessing.
     """
     import cv2
     import numpy as np
@@ -708,11 +710,13 @@ def segment_person_at(video_path: Path, t: float) -> bytes:
     if res is None or res.segmentation_mask is None:
         raise RuntimeError("Segmentation returned no mask for this frame.")
 
-    matte = (np.clip(res.segmentation_mask, 0.0, 1.0) * 255).astype("uint8")
+    mask = np.clip(res.segmentation_mask, 0.0, 1.0)
+    coverage = float((mask > 0.5).mean())
+    matte = (mask * 255).astype("uint8")
     ok, buf = cv2.imencode(".png", matte)
     if not ok:
         raise RuntimeError("Could not encode the matte as PNG.")
-    return buf.tobytes()
+    return buf.tobytes(), coverage
 
 
 # ---- Interview reframe: speaker diarization + face tracking ----
@@ -4245,12 +4249,19 @@ def segment_preview(job_id: str):
     except (TypeError, ValueError):
         t = 0.0
     try:
-        png = segment_person_at(video_path, t)
+        png, coverage = segment_person_at(video_path, t)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     resp = make_response(png)
     resp.headers["Content-Type"] = "image/png"
     resp.headers["Cache-Control"] = "no-store"
+    # A frame with no subject and a frame the model gave up on are the same
+    # black PNG to look at, so report what it actually found.
+    resp.headers["X-Subject-Coverage"] = f"{coverage:.4f}"
+    resp.headers["X-Segment-Note"] = (
+        "no subject found in this frame" if coverage < 0.005
+        else f"subject covers {coverage * 100:.1f}% of the frame"
+    )
     return resp
 
 
