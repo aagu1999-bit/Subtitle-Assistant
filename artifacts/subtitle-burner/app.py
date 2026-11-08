@@ -1500,6 +1500,45 @@ def _refine_word_alignment(audio_path: Path, words: list[dict]) -> list[dict]:
         return words
 
 
+# MediaPipe removed the legacy `mp.solutions` API in this release, and this
+# app is written against it. The pin lives in pyproject.toml and
+# requirements.txt; this constant is here so the runtime message names the
+# same version the pin does.
+_MEDIAPIPE_SOLUTIONS_REMOVED_IN = "0.10.22"
+
+
+def _mediapipe_solutions_api(attr: str) -> tuple[bool, str]:
+    """(ok, msg) for whether mediapipe.solutions.<attr> is really there.
+
+    Importing is not enough, and that distinction has now cost this repo
+    twice. On mediapipe 0.10.22+ the import succeeds, a guard that stops
+    there says yes, and the caller dies on the attribute -- which is how a
+    deploy that ignored the pin turned an optional background into
+    "Render failed: module 'mediapipe' has no attribute 'solutions'".
+
+    One function so there is a single place that knows about the removal:
+    the matte needs solutions.selfie_segmentation and the face tracker
+    needs solutions.face_detection, and the two guards had drifted -- the
+    matte's was fixed and Analyze's still trusted the bare import.
+    """
+    try:
+        import mediapipe
+    except ImportError as e:
+        return False, f"mediapipe failed to import: {e}"
+    except Exception as e:
+        return False, f"mediapipe import raised {type(e).__name__}: {e}"
+    sols = getattr(mediapipe, "solutions", None)
+    if sols is None or not hasattr(sols, attr):
+        ver = getattr(mediapipe, "__version__", "unknown")
+        return False, (
+            f"this mediapipe ({ver}) has no solutions.{attr} -- it was "
+            f"removed in {_MEDIAPIPE_SOLUTIONS_REMOVED_IN}. The app pins "
+            f"mediapipe<{_MEDIAPIPE_SOLUTIONS_REMOVED_IN}; the server needs "
+            "its dependencies reinstalled so the pin takes effect."
+        )
+    return True, ""
+
+
 def _segment_deps_available() -> tuple[bool, str]:
     """Return (ok, msg) for the person-matte path.
 
@@ -1507,30 +1546,9 @@ def _segment_deps_available() -> tuple[bool, str]:
     OpenCV but no pyannote, no torch and no Hugging Face token, so it can work
     on installs where the full reframe pipeline can't.
     """
-    try:
-        import mediapipe  # noqa: F401
-    except ImportError as e:
-        return False, f"mediapipe failed to import: {e}"
-    except Exception as e:
-        return False, f"mediapipe import raised {type(e).__name__}: {e}"
-    # Importing is not enough. MediaPipe REMOVED mp.solutions in 0.10.22, so
-    # on a newer install the import succeeds, this function used to say yes,
-    # and the caller then died on the attribute -- which is how a deploy that
-    # ignored the pin turned an optional background into
-    # "Render failed: module 'mediapipe' has no attribute 'solutions'".
-    #
-    # Check the API actually used, not that a name resolves. This is the same
-    # mistake the repo has already recorded once: the library dropped what the
-    # app is built on and nothing noticed.
-    if not hasattr(mediapipe, "solutions") or not hasattr(
-            getattr(mediapipe, "solutions", None), "selfie_segmentation"):
-        ver = getattr(mediapipe, "__version__", "unknown")
-        return False, (
-            f"this mediapipe ({ver}) has no solutions.selfie_segmentation -- "
-            "it was removed in 0.10.22. The app pins mediapipe<0.10.22; the "
-            "server needs its dependencies reinstalled so the pin takes "
-            "effect."
-        )
+    ok, why = _mediapipe_solutions_api("selfie_segmentation")
+    if not ok:
+        return False, why
     try:
         import cv2  # noqa: F401
     except ImportError as e:
@@ -1816,16 +1834,18 @@ def _probe_analyze_deps() -> dict:
     except Exception as e:
         out["pyannote"] = f"{type(e).__name__}: {e}"
 
-    try:
-        import mediapipe  # noqa: F401
-        out["mediapipe"] = "ok"
-        out["faces_ok"] = True
-    except ImportError as e:
-        out["mediapipe"] = f"import failed: {e}"
-        out["faces_error"] = out["mediapipe"]
-    except Exception as e:
-        out["mediapipe"] = f"{type(e).__name__}: {e}"
-        out["faces_error"] = out["mediapipe"]
+    # detect_face_tracks goes through mp.solutions.face_detection, so that
+    # is what has to exist -- not just the module. A bare import check said
+    # yes on mediapipe 0.10.22+, the endpoint then promised the user "faces
+    # will run", and the tracker died on the attribute a minute later. The
+    # failure was already caught downstream, so this costs a message rather
+    # than a crash, but the message was the wrong one: it blamed a missing
+    # attribute instead of naming the pin and the remedy.
+    faces_ok, faces_why = _mediapipe_solutions_api("face_detection")
+    out["mediapipe"] = "ok" if faces_ok else faces_why
+    out["faces_ok"] = faces_ok
+    if not faces_ok:
+        out["faces_error"] = faces_why
 
     if out["pyannote"] != "ok":
         out["error"] = f"pyannote.audio unavailable ({out['pyannote']})"

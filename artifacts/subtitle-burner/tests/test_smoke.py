@@ -2824,3 +2824,84 @@ def test_speaker_stamping_survives_a_missing_analysis(app_mod):
     # And no source job at all (a generated clip, a title card).
     assert app_mod._stamp_caption_words_from_source(
         words, [{"src_in": 0.0, "src_out": 2.0}], [0.0]) == 0
+
+
+# ---------------------------------------------------------------------------
+# A broken mediapipe must cost faces, not Analyze -- and must say so.
+#
+# The matte's guard was fixed to check mp.solutions rather than trust the
+# import. Analyze's guard was not, and it is the one the UI reads to tell
+# the user what is about to run: on mediapipe 0.10.22+ it answered
+# faces_ok=True, the endpoint promised "face/reframe crops will run", and
+# the tracker died on the attribute a minute later. The failure was caught
+# downstream, so this was a wrong message rather than a crash -- but a
+# wrong message is what sent someone to click Render last time.
+# ---------------------------------------------------------------------------
+
+class _NoSolutions:
+    """mediapipe as it is from 0.10.22: imports fine, API gone."""
+    __version__ = "0.10.26"
+
+
+class _OnlyFaces:
+    """A hypothetical install with one half of the API but not the other."""
+    __version__ = "0.10.21"
+
+    class solutions:  # noqa: N801
+        face_detection = object()
+
+
+def test_the_api_check_names_the_pin_not_the_attribute(app_mod, monkeypatch):
+    """The message has to point at the remedy, not the symptom."""
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    ok, why = app_mod._mediapipe_solutions_api("face_detection")
+    assert not ok
+    assert "face_detection" in why
+    assert "0.10.22" in why, why          # the version that removed it
+    assert "0.10.26" in why, why          # what is actually installed
+    assert "reinstall" in why.lower(), why  # what to do about it
+
+
+def test_the_api_check_is_per_feature(app_mod, monkeypatch):
+    """selfie_segmentation and face_detection are asked for separately.
+
+    One guard answering for both is how they drifted in the first place.
+    """
+    monkeypatch.setitem(sys.modules, "mediapipe", _OnlyFaces())
+    assert app_mod._mediapipe_solutions_api("face_detection")[0] is True
+    assert app_mod._mediapipe_solutions_api("selfie_segmentation")[0] is False
+
+
+def test_analyze_reports_faces_unavailable_on_a_too_new_mediapipe(app_mod, monkeypatch):
+    """faces_ok must be False, and diarization must be unaffected.
+
+    This is the test that would have caught the guard drift: the old probe
+    returned faces_ok=True here, because `import mediapipe` worked.
+    """
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    deps = app_mod._probe_analyze_deps()
+    assert deps["faces_ok"] is False
+    assert "0.10.22" in (deps["faces_error"] or ""), deps["faces_error"]
+    # The diarization half is independent and must not be dragged down:
+    # "no mediapipe" is not a reason to refuse speaker labels.
+    assert "mediapipe" not in (deps["error"] or "").lower(), deps["error"]
+
+
+def test_analyze_still_runs_for_speakers_without_faces(app_mod, monkeypatch):
+    """_reframe_deps_available is what gates the endpoint. Faces are optional."""
+    monkeypatch.setattr(app_mod, "_probe_analyze_deps", lambda: {
+        "diarization_ok": True, "faces_ok": False,
+        "hf_token": True, "pyannote": "ok",
+        "mediapipe": "no solutions.face_detection",
+        "error": None, "faces_error": "no solutions.face_detection",
+    })
+    ok, msg = app_mod._reframe_deps_available()
+    assert ok is True, msg
+
+
+def test_the_matte_guard_still_refuses_a_too_new_mediapipe(app_mod, monkeypatch):
+    """Sharing the check must not have loosened the matte's guard."""
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    ok, why = app_mod._segment_deps_available()
+    assert ok is False
+    assert "selfie_segmentation" in why, why

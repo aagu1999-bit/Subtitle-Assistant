@@ -1934,7 +1934,14 @@
           const faceStatus = data.stats.faces_status || (data.stats.faces_skipped ? "skipped" : "ok");
           const faceHits = data.stats.face_hit_frames;
           let faceNote = "";
-          if (faceStatus === "skipped") faceNote = " · faces skipped";
+          if (faceStatus === "skipped") {
+            // Same reasoning as the Ingest panel: show the reason, since it
+            // now names the version and the remedy rather than a symptom.
+            const why = String(data.stats.faces_warning || "").trim();
+            faceNote = why
+              ? ` · faces skipped — ${why.length > 110 ? why.slice(0, 107) + "…" : why}`
+              : " · faces skipped";
+          }
           else if (faceStatus === "no_detections") faceNote = " · 0 faces found";
           else if (typeof faceHits === "number") faceNote = `, ${faceHits} face frames`;
           else if (data.stats.face_samples) faceNote = `, ${data.stats.face_samples} face samples`;
