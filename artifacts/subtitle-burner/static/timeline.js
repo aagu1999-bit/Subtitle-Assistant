@@ -3844,18 +3844,52 @@
     }
   }
 
-  function syncOverlayKenBurns(ot) {
-    for (const o of ovEntries) {
-      if (!o.el) continue;
-      const tRel = Math.max(0, ot - o.start);
-      const scale = kenBurnsScaleAt(o.ken_burns, tRel, o.dur || 1);
-      o.el.style.transformOrigin = "50% 50%";
-      if (Math.abs(scale - 1) > 0.001) {
-        o.el.style.transform = `scale(${scale.toFixed(4)})`;
-      } else {
-        o.el.style.transform = "";
+  // Everything about one overlay that changes with the clock: where it sits,
+  // how opaque it is, and how far its Ken Burns has pushed.
+  //
+  // This used to be split. Position and opacity were computed inside
+  // updateStageCompositor, which only re-runs when a clip enters or leaves
+  // the visible set -- and during a swipe or a fade nothing does. So the box
+  // stayed wherever the last rebuild put it, which for a swipe is a full
+  // canvas off-frame. The render moved and the preview did not.
+  //
+  // It survived a test because the test stepped the playhead with
+  // `video.currentTime = t`, and a "seeked" listener forces a rebuild. Four
+  // seeks looked like animation. Anything checking this has to PLAY.
+  function applyOverlayFrame(o, ot) {
+    const item = o.item;
+    if (!item) return;
+    const localT = Math.max(0, ot - o.start);
+    const dur = o.dur || 1;
+
+    if (o.wrap) {
+      // Mirrors _tl_overlay_motion_expr in app.py: same cubic ease, same
+      // full-dimension offset.
+      const mo = overlayMotionOffset(item, localT);
+      o.wrap.style.left = ((item.x != null ? item.x : 0.5) + mo.dx) * 100 + "%";
+      o.wrap.style.top = ((item.y != null ? item.y : 0.1) + mo.dy) * 100 + "%";
+
+      const fadeIn = Number(item.fade_in) || 0;
+      const fadeOut = Number(item.fade_out) || 0;
+      let fadeMul = 1;
+      if (fadeIn > 0 && localT < fadeIn) fadeMul = Math.max(0, localT / fadeIn);
+      if (fadeOut > 0 && localT > dur - fadeOut) {
+        fadeMul = Math.min(fadeMul, Math.max(0, (dur - localT) / fadeOut));
       }
+      const baseOp = item.opacity != null ? item.opacity : 1.0;
+      o.wrap.style.opacity = baseOp * fadeMul;
     }
+
+    if (o.el) {
+      const scale = kenBurnsScaleAt(o.ken_burns, localT, dur);
+      o.el.style.transformOrigin = "50% 50%";
+      o.el.style.transform =
+        Math.abs(scale - 1) > 0.001 ? `scale(${scale.toFixed(4)})` : "";
+    }
+  }
+
+  function syncOverlayKenBurns(ot) {
+    for (const o of ovEntries) applyOverlayFrame(o, ot);
   }
 
   // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
@@ -4269,19 +4303,11 @@
           else if (item.src) media.src = item.src;
         }
         const localT = Math.max(0, ot - start);
-        const fadeIn = Number(item.fade_in) || 0;
-        const fadeOut = Number(item.fade_out) || 0;
-        let fadeMul = 1;
-        if (fadeIn > 0 && localT < fadeIn) fadeMul = Math.max(0, localT / fadeIn);
-        if (fadeOut > 0 && localT > dur - fadeOut) fadeMul = Math.min(fadeMul, Math.max(0, (dur - localT) / fadeOut));
-        const baseOp = item.opacity != null ? item.opacity : 1.0;
-        // Mirrors _tl_overlay_motion_expr in app.py: same cubic ease, same
-        // full-dimension offset. Preview and render have to share the curve or
-        // a swipe previews differently from how it burns in.
-        const mo = overlayMotionOffset(item, localT);
+        // Position and opacity are written by applyOverlayFrame, which also
+        // runs every frame. Doing it in one function is the point: when the
+        // rebuild computed them and the frame loop did not, a swipe sat
+        // frozen wherever the last rebuild left it.
         wrap.style.position = "absolute";
-        wrap.style.left = ((item.x != null ? item.x : 0.5) + mo.dx) * 100 + "%";
-        wrap.style.top = ((item.y != null ? item.y : 0.1) + mo.dy) * 100 + "%";
         wrap.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
         if (item.h != null) {
           wrap.style.height = (item.h * 100) + "%";
@@ -4289,7 +4315,6 @@
         } else {
           wrap.style.aspectRatio = "16 / 9";
         }
-        wrap.style.opacity = baseOp * fadeMul;
         wrap.style.overflow = "hidden";
         wrap.style.pointerEvents = "auto";
         wrap.style.cursor = "move";
@@ -4311,20 +4336,21 @@
         });
 
         layer.appendChild(wrap);
-        ovEntries.push({
+        const entry = {
           el: media,
+          // The wrapper carries position and opacity; the media inside it
+          // carries the Ken Burns scale. The frame loop needs both.
+          wrap,
+          item,
           start,
           srcIn: item.in || 0,
           dur,
           ken_burns: item.ken_burns || null,
           isVideo: media.tagName === "VIDEO",
-        });
-        // Apply this frame's Ken Burns immediately so rebuild doesn't flash at 1x.
-        const kbScale = kenBurnsScaleAt(item.ken_burns, localT, dur);
-        media.style.transformOrigin = "50% 50%";
-        if (Math.abs(kbScale - 1) > 0.001) {
-          media.style.transform = `scale(${kbScale.toFixed(4)})`;
-        }
+        };
+        ovEntries.push(entry);
+        // Apply this frame immediately so a rebuild doesn't flash at rest.
+        applyOverlayFrame(entry, ot);
       }
     });
 

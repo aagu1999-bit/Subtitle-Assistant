@@ -1214,3 +1214,81 @@ def test_the_punch_zoom_agrees_with_its_preview_at_any_fps(app_mod):
     for t, a, b in zip(times, js_vals, py_vals):
         assert abs(a - b) < 1e-3, (
             f"at {t}s the preview scales {a} and the render {b}")
+
+
+# --- The preview has to animate during PLAYBACK, not only on a seek ------
+
+def test_the_overlay_frame_writes_position_as_time_advances():
+    """applyOverlayFrame is the per-frame writer. Run it and watch the box.
+
+    Before this existed, position and opacity were computed only inside
+    updateStageCompositor, which re-runs when a clip enters or leaves the
+    visible set. During a swipe nothing does, so a swiping overlay sat a
+    full canvas off-frame -- 119.895% -- for its entire life in the preview
+    while the render slid it in.
+    """
+    js_src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    block = js_src[js_src.index("  function applyOverlayFrame"):
+                   js_src.index("  // Runs every frame so punch")]
+    block = re.sub(r"^\s*const ", "var ", block, flags=re.M)
+    block = re.sub(r"^\s*function ", "function ", block, flags=re.M)
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    script = block + """
+      var item = {x: 0.2, y: 0.2, opacity: 1, fade_in: 0, fade_out: 0,
+                  motion: {type: "swipe_left", in: 1.2}};
+      var o = {item: item, start: 0.5, dur: 4,
+               wrap: {style: {}}, el: {style: {}}, ken_burns: null};
+      var out = [];
+      for (var t of [0.5, 0.8, 1.1, 1.4, 1.7, 2.5]) {
+        applyOverlayFrame(o, t);
+        out.push(o.wrap.style.left);
+      }
+      console.log(out.join(" "));
+    """
+    vals = [float(v.replace("%", "")) for v in
+            subprocess.run([node, "-e", script], capture_output=True,
+                           text=True, check=True).stdout.split()]
+
+    assert vals[0] == pytest.approx(120.0, abs=0.1), "starts a canvas off-frame"
+    assert vals == sorted(vals, reverse=True), f"must travel one way: {vals}"
+    assert vals[-1] == pytest.approx(20.0, abs=0.01), "must settle at rest"
+    assert len(set(round(v, 3) for v in vals)) > 4, (
+        f"the box barely moves: {vals} -- this is the frozen-swipe bug")
+
+
+def test_the_frame_loop_owns_overlay_position_not_the_rebuild():
+    """One writer per property, or the two drift and only one animates.
+
+    The bug was not a wrong curve -- overlayMotionOffset was correct and had
+    a passing parity test. It was that nothing called it between rebuilds.
+    """
+    js_src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+
+    frame = js_src[js_src.index("  function previewFrame()"):
+                   js_src.index("  function previewFrame()") + 1400]
+    assert "syncOverlayKenBurns(ot)" in frame, "the frame loop must drive overlays"
+
+    sync = js_src[js_src.index("  function syncOverlayKenBurns"):
+                  js_src.index("  function syncOverlayKenBurns") + 220]
+    assert "applyOverlayFrame" in sync, "per-frame pass must call the writer"
+
+    # The rebuild may set size and chrome, but not the animated properties.
+    # Scoped to the placed-overlay loop: the pending-B-roll ghost below it is
+    # a static preview of a suggestion nobody has accepted, so a constant
+    # position there is correct.
+    rebuild = js_src[js_src.index("    tl.tracks.overlay.forEach(item => {"):
+                     js_src.index("    // Ghost pending B-roll suggestions")]
+    for prop in ("wrap.style.left", "wrap.style.top", "wrap.style.opacity"):
+        assert prop not in rebuild, (
+            f"{prop} is written during the rebuild again; it will freeze "
+            "between rebuilds exactly as the swipe did")
+
+    # And the entry has to carry the wrapper, or the writer has nothing to move.
+    assert re.search(r"ovEntries\.push\(", js_src), "ovEntries still populated"
+    entry = js_src[js_src.index("const entry = {"):
+                   js_src.index("ovEntries.push(entry)")]
+    assert "wrap," in entry and "item," in entry, (
+        "the frame writer needs the wrapper element and the clip")
