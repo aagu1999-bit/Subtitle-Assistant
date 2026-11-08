@@ -1549,3 +1549,101 @@ def test_ken_burns_really_moves_in_the_render(app_mod, tmp_path):
     assert pull == sorted(pull), (
         f"a pull-out must widen steadily back to rest: {pull}")
     assert pull[-1] > push[-1], "the two directions end at the same place"
+
+
+# --- The layer behind the subject ---------------------------------------
+
+def test_the_background_survives_a_save_on_both_sides():
+    """Two silent data sinks sit between the UI and the renderer.
+
+    serialize() whitelists top-level keys and drops the rest on the next
+    debounced save; _normalize_timeline decides what the server keeps. A
+    field missing from either appears to work until a reload.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+
+    # There are THREE of these, not one, and they are near-identical:
+    # serialize() for the save, snapshotState() for undo, and
+    # _normalize_timeline server-side. A field missing from serialize()
+    # vanishes on save; missing from snapshotState() it survives the save
+    # and then disappears the first time anyone presses undo.
+    for fn in ("  function serialize() {", "  function snapshotState() {"):
+        block = js[js.index(fn):js.index(fn) + 900]
+        assert re.search(r"background:\s*tl\.background", block), (
+            f"{fn.strip()} drops the background -- it will vanish, and only "
+            "after a save or an undo, which is why this is checked statically")
+
+    py = (BURNER / "app.py").read_text(encoding="utf-8")
+    assert 'tl["background"]' in py, "_normalize_timeline drops the background"
+
+
+def test_a_background_needs_something_to_point_at(app_mod, temp_db):
+    """A background with no picture is not a background."""
+    norm = app_mod._normalize_timeline
+    assert norm({"background": {"asset_id": "abc"}})["background"] == {"asset_id": "abc"}
+    assert norm({"background": {"source_job_id": "job1"}})["background"] is not None
+    for junk in ({}, {"fit": "cover"}, "beach", 7, None):
+        assert norm({"background": junk})["background"] is None, junk
+
+
+@needs_ffmpeg
+def test_the_background_really_sits_behind_the_subject(app_mod, tmp_path, monkeypatch):
+    """The capability no combination of the 32 existing ops could express.
+
+    Every other compositing pass starts from [0:v:0] of the baked video and
+    lays things on top, so "a picture behind me" was not a missing op -- it
+    was a missing z-order. This renders it and reads the pixels: the subject
+    must survive, and what was around it must become the picture.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import cv2
+
+    # A stand-in subject: an orange block on black, with a matte to match.
+    subject = tmp_path / "subject.mp4"
+    matte = tmp_path / "matte.mp4"
+    bg_png = tmp_path / "bg.png"
+    out = tmp_path / "out.mp4"
+    box = "drawbox=x=170:y=300:w=200:h=360:color=%s@1:t=fill"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=540x960:d=1:r=30", "-vf", box % "orange",
+                    "-pix_fmt", "yuv420p", str(subject)], check=True)
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=540x960:d=1:r=30", "-vf", box % "white",
+                    "-pix_fmt", "gray", str(matte)], check=True)
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "smptebars=s=540x960:d=0.1:r=1", "-frames:v", "1",
+                    str(bg_png)], check=True)
+
+    # Skip the segmentation model: this test is about the compositing, and
+    # the matte's own quality is a separate question answered by eye.
+    monkeypatch.setattr(app_mod, "_tl_matte_video",
+                        lambda *a, **k: matte)
+    monkeypatch.setattr(app_mod, "_tl_bg_source", lambda bg: bg_png)
+
+    assert app_mod._tl_composite_background(
+        subject, {"asset_id": "x", "fit": "cover"}, 540, 960, out,
+        fps=30, dur=1.0), "the composite reported failure"
+
+    frame = tmp_path / "f.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", "0.5", "-i", str(out),
+                    "-frames:v", "1", str(frame)], check=True)
+    im = cv2.imread(str(frame))
+
+    inside = im[480, 270]          # middle of the subject block
+    outside = im[40, 40]           # well clear of it
+    assert inside[2] > 180 and inside[1] > 100 and inside[0] < 80, (
+        f"the subject was not kept: BGR {inside}")
+    assert outside.sum() > 150, (
+        f"behind the subject is still black -- the background did not land: {outside}")
+
+
+def test_a_background_without_a_matte_leaves_the_video_alone(app_mod, tmp_path,
+                                                             monkeypatch):
+    """A matte that cannot be made must cost the effect, never the export."""
+    monkeypatch.setattr(app_mod, "_tl_matte_video", lambda *a, **k: None)
+    monkeypatch.setattr(app_mod, "_tl_bg_source", lambda bg: tmp_path / "nope.png")
+    out = tmp_path / "out.mp4"
+    assert app_mod._tl_composite_background(
+        tmp_path / "base.mp4", {"asset_id": "x"}, 540, 960, out) is False
+    assert not out.exists(), "a failed background must not leave a broken file"

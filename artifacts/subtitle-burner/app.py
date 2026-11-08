@@ -12947,6 +12947,161 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     return dur
 
 
+MATTE_DIR = CACHE_DIR / "mattes"
+
+
+def _tl_matte_video(src: Path, W: int, H: int, fps: int,
+                    dur: float | None = None) -> Path | None:
+    """A greyscale matte video for the person in *src*. Cached.
+
+    White where the subject is, black where the background is, which is what
+    alphamerge wants. segment_person_at has been in the repo for months doing
+    exactly this for a single frame behind /segment-preview; this runs it over
+    the clip.
+
+    Costs about 7ms a frame at 1080x1920 on CPU -- roughly 12 seconds of work
+    for a 60-second clip -- so it is cached by content and never recomputed
+    for the same source.
+
+    Returns None when the deps are missing or nothing can be read, so the
+    caller can fall back to no background rather than fail the render. A
+    missing matte must cost the effect, never the export.
+    """
+    ok, _ = _segment_deps_available()
+    if not ok or not src or not Path(src).exists():
+        return None
+    try:
+        st = Path(src).stat()
+        key = hashlib.md5(
+            f"{src}|{st.st_mtime_ns}|{st.st_size}|{W}x{H}|{fps}|{dur}".encode()
+        ).hexdigest()[:16]
+    except OSError:
+        return None
+    MATTE_DIR.mkdir(parents=True, exist_ok=True)
+    out = MATTE_DIR / f"{key}.mp4"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+
+    try:
+        import cv2
+        import numpy as np
+        import mediapipe as mp
+    except Exception as exc:
+        print(f"[matte] deps unavailable: {exc}", flush=True)
+        return None
+
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        return None
+    limit = int(dur * fps) if dur and dur > 0 else 0
+    proc = subprocess.Popen(
+        [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{W}x{H}",
+         "-r", str(fps), "-i", "pipe:0",
+         # Near-lossless: a soft matte edge is the difference between hair and
+         # a cut-out, and compression artefacts there are visible.
+         "-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray", str(out)],
+        stdin=subprocess.PIPE)
+    seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    written = 0
+    try:
+        while True:
+            got, frame = cap.read()
+            if not got:
+                break
+            if limit and written >= limit:
+                break
+            frame = cv2.resize(frame, (W, H))
+            res = seg.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if res is None or res.segmentation_mask is None:
+                mask = np.zeros((H, W), dtype="float32")
+            else:
+                mask = np.clip(res.segmentation_mask, 0.0, 1.0)
+            proc.stdin.write((mask * 255).astype("uint8").tobytes())
+            written += 1
+    except Exception as exc:
+        print(f"[matte] failed after {written} frames: {exc}", flush=True)
+    finally:
+        seg.close()
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.wait()
+    if not written or not out.exists() or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        return None
+    print(f"[matte] {written} frames -> {out.name}", flush=True)
+    return out
+
+
+def _tl_composite_background(base: Path, bg: dict, W: int, H: int,
+                             out_path: Path, fps: int = 30,
+                             dur: float | None = None) -> bool:
+    """Put an image or clip BEHIND the subject.
+
+    Every other compositing pass in this file starts from [0:v:0] of the baked
+    video and lays things on top -- which is why "a picture behind me" could
+    not be expressed by any combination of the existing ops, however the
+    request was phrased. This is the one pass where the main video is not the
+    bottom layer.
+
+        [bg]            the picture, filled to the canvas
+        [fg]            the main video with the matte as its alpha
+        [bg][fg]        overlay
+
+    Returns False and writes nothing when there is no usable background or no
+    matte, so the caller keeps the un-composited video.
+    """
+    if not isinstance(bg, dict):
+        return False
+    src = _tl_bg_source(bg)
+    if not src:
+        return False
+    matte = _tl_matte_video(base, W, H, fps, dur)
+    if not matte:
+        print("[background] no matte available -- leaving the video alone",
+              flush=True)
+        return False
+
+    # ASSET_EXT_STILL holds bare extensions ("png"), suffix carries the dot.
+    is_image = Path(src).suffix.lower().lstrip(".") in ASSET_EXT_STILL
+    fit = str(bg.get("fit") or "cover").lower()
+    inputs = (["-loop", "1", "-t", f"{float(dur or 60):.3f}", "-i", str(src)]
+              if is_image else ["-i", str(src)])
+    filt = (
+        f"[0:v]{_tl_overlay_scale_filter(W, H, fit)},fps={fps}[bg];"
+        f"[1:v][2:v]alphamerge[fg];"
+        f"[bg][fg]overlay=0:0:format=auto[out]"
+    )
+    try:
+        _tl_run(
+            [FFMPEG, "-y", *inputs, "-i", str(base), "-i", str(matte),
+             "-filter_complex", filt, "-map", "[out]", "-map", "1:a?",
+             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(out_path)],
+            "Background composite",
+        )
+        return True
+    except RuntimeError as exc:
+        print(f"[background] composite failed: {exc}", flush=True)
+        return False
+
+
+def _tl_bg_source(bg: dict) -> Path | None:
+    """Where the background picture actually lives on disk."""
+    aid = str(bg.get("asset_id") or "").strip()
+    if aid:
+        hits = sorted(ASSET_DIR.glob(f"{aid}.*"))
+        for h in hits:
+            if h.suffix.lower() != ".json":
+                return h
+    jid = str(bg.get("source_job_id") or "").strip()
+    if jid:
+        return find_video_path(jid)
+    return None
+
+
 def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> None:
     """Overlay a persistent logo/watermark across the whole video."""
     path = _find_asset_path(logo.get("asset_id", "")) if logo else None
@@ -14068,6 +14223,13 @@ def _normalize_timeline(timeline: dict) -> dict:
     # Persistent logo / watermark (applies across the whole render).
     logo = tl.get("logo")
     tl["logo"] = logo if (isinstance(logo, dict) and logo.get("asset_id")) else None
+    # Background: the layer behind the subject. Same shape as the logo -- it
+    # needs something to point at, or it is not a background.
+    bg_layer = tl.get("background")
+    tl["background"] = bg_layer if (
+        isinstance(bg_layer, dict)
+        and (bg_layer.get("asset_id") or bg_layer.get("source_job_id"))
+    ) else None
     # Branding kit — keep these through save/render (were previously stripped).
     sc = tl.get("speaker_colors")
     if isinstance(sc, dict):
@@ -14463,6 +14625,19 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                             break
                     except (TypeError, ValueError):
                         continue
+
+        # ---- Background: the one pass where the video is NOT the bottom ----
+        # Everything else here composites onto the baked main track. This
+        # replaces what is behind the subject, so it has to run while `base`
+        # is still just the cut video -- before the logo, the overlays and the
+        # captions, all of which belong in front of the new background.
+        if tl.get("background"):
+            _stage("placing the background", 45)
+            bgd = UPLOAD_DIR / f"{job_id}_tlbg.mp4"
+            if _tl_composite_background(base, tl["background"], W, H, bgd,
+                                        fps=fps, dur=total_dur):
+                work.append(bgd)
+                base = bgd
 
         # ---- Persistent logo / watermark (whole-video overlay) ----
         if tl.get("logo"):

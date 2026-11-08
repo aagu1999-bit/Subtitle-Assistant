@@ -140,6 +140,10 @@
       fps: tl.fps,
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
+      // The layer behind the subject. This whitelist is a silent data sink --
+      // anything not named here survives in memory and vanishes on the next
+      // debounced save, so a new field appears to work until a reload.
+      background: tl.background || null,
       style: tl.style || null,
       audio: tl.audio || null,
       ai_edit: tl.ai_edit || null,
@@ -875,6 +879,7 @@
       fps: tl.fps,
       bg: tl.bg || "#000000",
       logo: tl.logo || null,
+      background: tl.background || null,
       style: tl.style || null,
       audio: tl.audio || null,
       sfx_overlays: tl.sfx_overlays !== false,
