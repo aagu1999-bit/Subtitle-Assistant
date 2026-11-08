@@ -17102,6 +17102,35 @@ def _co_editor_op_names() -> set:
     return out
 
 
+def _co_editor_asset_choices(limit: int = 12) -> list:
+    """Recent uploads the model may refer to by id, newest first.
+
+    Only stills: a background is a picture. The label is what the user called
+    the file, which is the only handle they would recognise.
+    """
+    out = []
+    try:
+        files = [p for p in ASSET_DIR.glob("*")
+                 if p.is_file() and not p.name.endswith(".meta.json")
+                 and p.suffix.lower().lstrip(".") in ASSET_EXT_STILL]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[:limit]:
+            meta = {}
+            try:
+                mp = _asset_meta_path(p.stem)
+                if mp.exists():
+                    meta = json.loads(mp.read_text(encoding="utf-8")) or {}
+            except Exception:
+                meta = {}
+            out.append({
+                "asset_id": p.stem,
+                "name": str(meta.get("filename") or meta.get("keyword") or p.name),
+            })
+    except OSError:
+        return []
+    return out
+
+
 def _resolve_set_background(op: dict) -> tuple[dict | None, str]:
     """Turn a described background into a real picture behind the subject.
 
@@ -17309,6 +17338,20 @@ def co_editor():
             "word_emphasis", "hook_broll", "cinematic", "clarity",
         ],
         "overlay_layouts": ["pip_tr", "pip_tl", "pip_br", "pip_bl", "full", "center", "lower"],
+        # What is behind the subject right now. Without this the model cannot
+        # tell whether there is anything to clear, so "remove the background"
+        # was a guess.
+        "background": (
+            {"asset_id": (timeline.get("background") or {}).get("asset_id"),
+             "fit": (timeline.get("background") or {}).get("fit")}
+            if isinstance(timeline.get("background"), dict) else None
+        ),
+        # The user's own pictures. The refusal for an unfetchable keyword tells
+        # them to "name photos you have already uploaded" -- which was
+        # impossible, because this list was never shown and the ids are 32-hex
+        # strings nobody types. Naming them here is what makes that advice true.
+        "your_photos": _co_editor_asset_choices(),
+        "stock_photos_available": _broll_any_photo_provider(),
     }
 
     _op_examples = ",\n".join(
@@ -17403,6 +17446,17 @@ Rules:
   "full" covers the frame, "pip" sits it in a box over the video.
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
+- set_background puts a picture BEHIND the person, cutting them out of their
+  real background. "photo" is either a subject to search for ("bali beach")
+  or the asset_id of one of their own pictures -- those are listed under
+  "your_photos" with the names they gave them, so if they say "use my beach
+  photo", match it there by name and pass that asset_id. Only search for a
+  subject when nothing in your_photos fits AND stock_photos_available is
+  true; if it is false, say so rather than trying.
+- "background" in the summary is what is behind them right now. If it is
+  null there is nothing to clear, and saying so is more use than emitting an
+  op that changes nothing.
+- {{"op": "set_background", "clear": true}} removes it.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)

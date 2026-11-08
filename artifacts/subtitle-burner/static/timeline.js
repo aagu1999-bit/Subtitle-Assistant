@@ -5124,6 +5124,28 @@
     }
     html += propSection("🏷 Logo / watermark", logoBody, !!lg.asset_id);
 
+    // The layer behind the subject. It was prompt-only when it shipped, with
+    // no control and nothing on screen to say whether one was set -- so
+    // "clear the background" and "nothing happened" were indistinguishable.
+    const bgl = tl.background || {};
+    const stills = assets.filter((a) => a.kind === "image");
+    const bgOpts = [["", "— no background —"]].concat(stills.map((a) =>
+      [a.asset_id, a.filename || a.keyword || `image · ${a.ext}`]));
+    let bgBody = "";
+    if (!stills.length) {
+      bgBody += `<p class="muted" style="font-size:.74rem;line-height:1.45">Upload a picture under <strong>Media → Assets</strong> first, then pick it here.</p>`;
+    }
+    bgBody += propSelect("__bg_asset", "Picture behind you", bgl.asset_id || "", bgOpts);
+    if (bgl.asset_id) {
+      bgBody += propSelect("__bg_fit", "Fit", bgl.fit || "cover",
+        [["cover", "Fill the frame"], ["contain", "Fit inside"], ["fill", "Stretch"]]);
+      bgBody += `<p class="muted" style="font-size:.72rem;line-height:1.45;margin:6px 0 0">You are cut out of your real background and placed over this. The preview shows a <strong>draft</strong> cutout sampled once a second; the render does it every frame.</p>`;
+      bgBody += `<button class="btn btn-secondary btn-block" data-act="remove-bg" type="button" style="margin-top:6px;border-color:#7f1d1d;color:#f87171">✕ Remove background</button>`;
+    } else {
+      bgBody += `<p class="muted" style="font-size:.72rem;line-height:1.45;margin:6px 0 0">Nothing set — your own background is showing.</p>`;
+    }
+    html += propSection("🖼 Background (behind you)", bgBody, !!bgl.asset_id);
+
     let sfxBody = propCheck("__sfx_overlays", "Auto whoosh / click when overlays & zooms land", tl.sfx_overlays !== false);
     sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Baked on <strong>▶ Render</strong> (not Timeline preview scrub). Louder accents under speech — uncheck to silence.</p>`;
     html += propSection("🔊 Overlay SFX", sfxBody, true);
@@ -5190,6 +5212,15 @@
       scheduleSave();
       setRenderStatus("Logo removed — the image is still in Media if you want it back");
     };
+    const rmBg = wrap.querySelector('[data-act="remove-bg"]');
+    if (rmBg) rmBg.onclick = () => {
+      tl.background = null;
+      pushHistory();
+      refreshBackgroundPreview();
+      renderProps();
+      scheduleSave();
+      setRenderStatus("Background removed — your own background is back on ▶ Render");
+    };
     const selLogo = wrap.querySelector('[data-act="select-logo"]');
     if (selLogo) selLogo.onclick = () => {
       selected = null;
@@ -5225,7 +5256,21 @@
       const key = inp.dataset.key;
       const ev = inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input";
       inp.addEventListener(ev, () => {
-        if (key === "__logo_asset") {
+        if (key === "__bg_asset") {
+          if (inp.value) {
+            tl.background = Object.assign({ fit: "cover" }, tl.background || {},
+                                          { asset_id: inp.value });
+          } else {
+            tl.background = null;
+          }
+          refreshBackgroundPreview();
+          renderProps();
+          scheduleSave();
+        } else if (key === "__bg_fit") {
+          if (tl.background) tl.background.fit = inp.value;
+          refreshBackgroundPreview();
+          scheduleSave();
+        } else if (key === "__logo_asset") {
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
@@ -9164,12 +9209,19 @@
           }
         } else if (name === "set_background") {
           // The server resolved the picture; this only places it.
+          // Say what actually happened. "Applied 1 edit" after clearing a
+          // background that was never set is indistinguishable from a bug,
+          // which is exactly how this looked the first time it was used.
           if (op.clear) {
-            tl.background = null;
-            notes.push("background cleared");
+            if (tl.background) {
+              tl.background = null;
+              notes.push("background removed");
+            } else {
+              notes.push("there was no background to remove");
+            }
           } else if (op.asset_id) {
             tl.background = { asset_id: op.asset_id, fit: op.fit || "cover" };
-            notes.push("background set");
+            notes.push("background set — click ▶ Render to burn it in");
           }
           applied++;
           refreshBackgroundPreview();

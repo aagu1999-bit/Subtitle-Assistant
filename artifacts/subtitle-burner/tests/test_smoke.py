@@ -2023,3 +2023,55 @@ def test_one_render_through_the_whole_pipeline(app_mod, tmp_path, monkeypatch):
                 pass
         app_mod.jobs.pop(sid, None)
         app_mod.jobs.pop(rid, None)
+
+
+def test_the_coeditor_can_see_your_own_photos_and_the_current_background(
+        app_mod, temp_db, monkeypatch, tmp_path):
+    """It told people to "name photos you have already uploaded" and then
+    never showed it any, so that advice could not be followed. It also could
+    not tell whether there was a background to clear."""
+    import uuid
+    aid = uuid.uuid4().hex
+    app_mod.ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    pic = app_mod.ASSET_DIR / f"{aid}.png"
+    pic.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    app_mod._write_asset_meta(aid, filename="my beach.png", source="upload")
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("p", p), {"ops": []})[1])
+    try:
+        tl = _coeditor_timeline()
+        tl["background"] = {"asset_id": "deadbeef" * 4, "fit": "cover"}
+        app_mod.app.test_client().post("/co-editor", json={
+            "job_id": "j", "prompt": "use my beach photo", "timeline": tl})
+        p = seen["p"]
+        assert "my beach.png" in p, "the model cannot see the user's own photos"
+        assert aid in p, "it needs the id, since that is what the op takes"
+        assert "your_photos" in p and "stock_photos_available" in p
+        assert '"background"' in p, "it cannot tell if there is one to clear"
+    finally:
+        pic.unlink(missing_ok=True)
+        app_mod._asset_meta_path(aid).unlink(missing_ok=True)
+
+
+def test_the_background_has_a_control_not_just_a_prompt():
+    """It shipped prompt-only: no picker, no clear, and nothing on screen
+    saying whether one was set, so "nothing happened" was unanswerable."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert "__bg_asset" in js, "no way to pick a background"
+    assert 'data-act="remove-bg"' in js, "no way to clear one"
+    assert "Background (behind you)" in js, "the panel has no heading"
+    # And the handlers have to exist, or the control is decoration.
+    for key in ('key === "__bg_asset"', 'key === "__bg_fit"'):
+        assert key in js, f"{key} is rendered but never handled"
+
+
+def test_clearing_a_background_that_is_not_there_says_so():
+    """"Applied 1 edit" after clearing nothing is indistinguishable from a
+    bug -- which is how this looked the first time it was used."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    branch = js[js.index('name === "set_background"'):][:900]
+    assert "no background to remove" in branch, (
+        "a no-op clear must say so rather than report success")
+    assert "Render" in branch, "setting one must say it needs a render"
