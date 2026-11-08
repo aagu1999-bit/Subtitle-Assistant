@@ -303,6 +303,24 @@ def test_every_offered_font_is_bundled_or_known_unbundled():
     )
 
 
+def test_the_font_matcher_actually_consults_the_alias_map():
+    """The data being right is not the same as the code using it.
+
+    This suite once passed on a branch where FONT_FILE_ALIASES was present and
+    correct but the matcher never read it, so the default font still
+    registered no @font-face. The browser caught it; these tests did not.
+    """
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    body = js.split("async function _registerSubtitleFonts()")[1].split("\n}\n")[0]
+    assert "FONT_FILE_ALIASES[family]" in body, (
+        "the alias map is defined but the matcher never looks at it"
+    )
+    # And the alias must win over the filename guess, not merely be consulted.
+    assert re.search(r"alias && fonts\.includes\(alias\)\s*\)\s*\?", body), (
+        "the alias is not preferred over the filename-stem match"
+    )
+
+
 def test_the_default_font_resolves_to_a_file():
     """It did not, which is how preview and render came to disagree."""
     files = [p.name for p in (BURNER / "fonts").glob("*")

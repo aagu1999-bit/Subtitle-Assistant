@@ -145,7 +145,9 @@ CAPCUT_TEMPLATES = {
         "label": "CapCut High-Energy Reel",
         "ai_edit_pack": "pulse",
         "canvas": "9x16",
-        "font": "Integral CF",
+        # Integral CF is commercial and not bundled; Anton is the nearest
+        # heavy condensed face that actually ships here.
+        "font": "Anton",
         "size": 68,
         "primary": "#FFFFFF",
         "highlight": "#00F2EA",
@@ -310,7 +312,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "mrbeast",
         "style": {
-            "font": "Integral CF", "size": 68, "primary": "#FFFFFF",
+            # Commercial, not bundled -- see above.
+            "font": "Anton", "size": 68, "primary": "#FFFFFF",
             "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
         },
         "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
@@ -322,7 +325,9 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "hormozi",
         "style": {
-            "font": "Montserrat Black", "size": 64, "primary": "#FFFFFF",
+            # The family name inside Montserrat-Black.ttf, which is what
+            # libass matches on.
+            "font": "Montserrat Thin Black", "size": 64, "primary": "#FFFFFF",
             "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
