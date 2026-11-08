@@ -560,3 +560,127 @@ def test_the_renderer_reads_the_aim_field(app_mod):
         {"enabled": True, "intensity": "high"}, 1080, 1920, fps=30, dur=1.2)
     assert off != mid, "the aim point changes nothing in the filter"
     assert "iw*0.2000" in off and "ih*0.8000" in off
+
+
+def test_every_ai_edit_pack_font_resolves_both_ways(app_mod):
+    """A pack font has to satisfy two different matchers or it half-works.
+
+    The browser registers @font-face by matching the name against a FILENAME;
+    libass matches it against the family name recorded INSIDE the TTF. Pulse
+    named a commercial font nobody has, and Clarity named "Montserrat Black",
+    which matches the filename but not the family name inside it -- so that
+    pack previewed in Montserrat and rendered in a system font.
+    """
+    font_dir = BURNER / "fonts"
+    files = [p.name for p in font_dir.glob("*")
+             if p.suffix.lower() in (".ttf", ".otf")]
+    aliases = _font_aliases()
+    families = set()
+    for f in files:
+        families |= _ttf_family_names(font_dir / f)
+
+    broken = []
+    for key, pack in app_mod.AI_EDIT_STYLE_PACKS.items():
+        name = (pack.get("style") or {}).get("font")
+        if not name:
+            continue
+        if not _resolves_to_file(name, files, aliases):
+            broken.append(f"{key}: {name!r} matches no file (browser preview)")
+        if name not in families:
+            broken.append(f"{key}: {name!r} is no family inside any TTF (libass render)")
+    assert not broken, "\n".join(broken)
+
+
+# --- co-editor: the op vocabulary is the feature ------------------------
+# The co-editor can only do what its op list covers, so the gaps are not
+# limitations of the idea -- they are missing entries.
+
+def _coeditor_timeline():
+    return {
+        "canvas": "9x16",
+        "style": {"font": "Anton", "size": 64},
+        "tracks": {
+            "main": [{"id": "m1", "source_job_id": "job1", "in": 0, "out": 8}],
+            "overlay": [], "text": [], "music": [],
+            "effects": [{"id": "e1", "type": "punch_zoom", "start": 1.0,
+                         "out": 1.2, "intensity": "high",
+                         "aim": {"x": 0.4, "y": 0.3}, "fx_origin": {"suggestion_id": 1}}],
+        },
+    }
+
+
+def test_the_coeditor_can_see_the_effects_lane(app_mod, temp_db, monkeypatch):
+    """Every AI-placed camera move lives on that lane.
+
+    The summary handed to the model listed main, overlay, text and music but
+    not effects, so it could neither report on a camera move nor change one.
+    """
+    seen = {}
+
+    def fake(prompt):
+        seen["prompt"] = prompt
+        return {"ops": [], "message": "noted"}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "what camera moves are there?", "timeline": _coeditor_timeline()})
+    assert "effect_clips" in seen["prompt"], "the effects lane is invisible to the model"
+    assert "punch_zoom" in seen["prompt"]
+    assert "from_ai" in seen["prompt"], "no way to tell which moves the AI placed"
+
+
+def test_the_new_ops_survive_the_whitelist(app_mod, temp_db, monkeypatch):
+    """An op the server does not allow is dropped before it reaches the UI."""
+    ops = [
+        {"op": "set_shot_range", "index": 0, "in": 2.0, "out": 6.5},
+        {"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 2.0},
+        {"op": "set_punch_aim", "index": 0, "x": 0.33, "y": 0.28},
+        {"op": "delete_effect", "index": 0},
+        {"op": "teleport_clip", "index": 0},          # not a real op
+    ]
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": ops, "message": "ok"})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "do things", "timeline": _coeditor_timeline()}).get_json()
+    names = [o["op"] for o in out["ops"]]
+    assert names == ["set_shot_range", "set_effect_time", "set_punch_aim", "delete_effect"]
+
+
+def test_an_unanswerable_prompt_is_recorded(app_mod, temp_db, monkeypatch):
+    """The prompts that produce nothing are the most useful thing here.
+
+    They are a list of the edits people actually ask for that the co-editor
+    cannot yet make -- which is the list of ops worth adding next.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [], "message": "I can't add b-roll yet."})
+    client = app_mod.app.test_client()
+    client.post("/co-editor", json={
+        "job_id": "job1", "prompt": "add b-roll of a city",
+        "timeline": _coeditor_timeline()})
+    rows = client.get("/suggestion-feedback/job1").get_json()["suggestions"]
+    assert len(rows) == 1 and rows[0]["outcome"] == "rejected"
+    assert rows[0]["proposed"]["prompt"] == "add b-roll of a city"
+
+
+def test_aiming_at_the_speaker_resolves_to_a_point(app_mod, monkeypatch):
+    """"Aim it at me" is how anyone phrases this, so it has to resolve."""
+    tl = _coeditor_timeline()
+    main, effects = tl["tracks"]["main"], tl["tracks"]["effects"]
+
+    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: {"x": 0.61, "y": 0.27})
+    got = app_mod._resolve_punch_aim({"op": "set_punch_aim", "index": 0, "at": "speaker"},
+                                     main, effects)
+    assert got == {"op": "set_punch_aim", "index": 0, "x": 0.61, "y": 0.27}
+
+    # No face data: drop the op rather than ship one that aims at nothing.
+    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: None)
+    assert app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 0, "at": "speaker"}, main, effects) is None
+
+    # Explicit coordinates are clamped, and a bad index is refused.
+    assert app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 0, "x": 5, "y": -1}, main, effects
+    ) == {"op": "set_punch_aim", "index": 0, "x": 1.0, "y": 0.0}
+    assert app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 9, "x": 0.5, "y": 0.5}, main, effects) is None

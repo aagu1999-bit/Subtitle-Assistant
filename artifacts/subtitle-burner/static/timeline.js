@@ -4444,6 +4444,10 @@
           if (op.group != null || op.group_size != null) {
             patch.group = Number(op.group != null ? op.group : op.group_size) || 3;
           }
+          if (op.position_y != null) patch.position_y = Math.min(95, Math.max(10, Number(op.position_y)));
+          if (op.all_caps != null) patch.all_caps = !!op.all_caps;
+          if (op.outline_width != null) patch.outline_width = Math.min(8, Math.max(0, Number(op.outline_width)));
+          if (op.shadow != null) patch.shadow = op.shadow ? 1 : 0;
           tl.style = normalizeTlStyle(Object.assign({}, prev, patch));
           notes.push("caption style");
           applied++;
@@ -4508,6 +4512,51 @@
             } else {
               arr[i].ken_burns = null;
             }
+            applied++;
+          }
+        } else if (name === "set_shot_range") {
+          // Trimming a shot by prompt: "start this clip at 2 seconds".
+          const i = Number(op.index);
+          const arr = tl.tracks.main;
+          if (i >= 0 && i < arr.length) {
+            const c = arr[i];
+            if (op.in != null) c.in = Math.max(0, Number(op.in));
+            if (op.out != null) c.out = Number(op.out);
+            if (!(c.out > (c.in || 0))) c.out = (c.in || 0) + 0.2;
+            notes.push(`shot ${i} range`);
+            applied++;
+          }
+        } else if (name === "set_effect_time") {
+          // Moving or stretching a camera move on the Effects lane.
+          const i = Number(op.index);
+          const arr = tl.tracks.effects || [];
+          if (i >= 0 && i < arr.length) {
+            if (op.start != null) arr[i].start = Math.max(0, Number(op.start));
+            if (op.duration != null) arr[i].out = Math.max(0.2, Number(op.duration));
+            reanchor(arr[i]);
+            notes.push(`effect ${i} timing`);
+            applied++;
+          }
+        } else if (name === "set_punch_aim") {
+          // The aim point lives in `aim`, not `anchor`: `anchor` on a lane clip
+          // records which Main clip it hangs off and is rewritten on reflow.
+          const i = Number(op.index);
+          const arr = tl.tracks.effects || [];
+          if (i >= 0 && i < arr.length && arr[i].type === "punch_zoom") {
+            arr[i].aim = {
+              x: Math.min(1, Math.max(0, Number(op.x))),
+              y: Math.min(1, Math.max(0, Number(op.y))),
+            };
+            notes.push(`aimed effect ${i}`);
+            applied++;
+          }
+        } else if (name === "delete_effect") {
+          const i = Number(op.index);
+          const arr = tl.tracks.effects || [];
+          if (i >= 0 && i < arr.length) {
+            arr.splice(i, 1);
+            if (selected && selected.track === "effects") selected = null;
+            notes.push(`removed effect ${i}`);
             applied++;
           }
         } else if (name === "set_canvas") {
@@ -4615,6 +4664,7 @@
         body: JSON.stringify({
           prompt,
           timeline: timelinePayloadForCoEditor(),
+          job_id: (tl.tracks.main.find((c) => c.source_job_id) || {}).source_job_id || null,
         }),
       });
       const data = await res.json();

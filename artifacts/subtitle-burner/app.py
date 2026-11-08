@@ -181,7 +181,9 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "crossfade",
         "caption_preset": "mrbeast",
         "style": {
-            "font": "Integral CF", "size": 68, "primary": "#FFFFFF",
+            # Integral CF is commercial and not bundled; Anton is the
+            # nearest heavy condensed face that actually ships here.
+            "font": "Anton", "size": 68, "primary": "#FFFFFF",
             "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
         },
         "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
@@ -193,7 +195,10 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "dissolve",
         "caption_preset": "hormozi",
         "style": {
-            "font": "Montserrat Black", "size": 64, "primary": "#FFFFFF",
+            # The family name inside Montserrat-Black.ttf, which is what
+            # libass matches on. "Montserrat Black" matches the filename,
+            # so it previewed correctly and rendered as a system font.
+            "font": "Montserrat Thin Black", "size": 64, "primary": "#FFFFFF",
             "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
@@ -9316,6 +9321,49 @@ def detect_shots():
     return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
 
 
+def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
+    """Turn at:"speaker" into a real point, and sanity-check explicit ones.
+
+    "aim it at me" is the way anyone actually phrases this, so the model is
+    allowed to say `at: "speaker"` and the face detection the reframe analysis
+    already cached resolves it here. Returns None when there is nothing to aim
+    at, so a plausible-looking op never reaches the client as a no-op.
+    """
+    try:
+        idx = int(op.get("index", 0))
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(effects):
+        return None
+
+    if str(op.get("at") or "").lower() in ("speaker", "face", "me", "person"):
+        # The source job behind this moment: effects sit on their own lane, so
+        # take the job from the Main clip playing underneath.
+        job_id = None
+        for c in main:
+            if c.get("source_job_id"):
+                job_id = c["source_job_id"]
+                break
+        if not job_id:
+            return None
+        try:
+            t = float(effects[idx].get("start") or 0)
+        except (TypeError, ValueError):
+            t = 0.0
+        anchor = _face_anchor_at(job_id, t)
+        if not anchor:
+            return None
+        return {"op": "set_punch_aim", "index": idx,
+                "x": anchor.get("x", 0.5), "y": anchor.get("y", 0.5)}
+
+    try:
+        x = min(1.0, max(0.0, float(op.get("x", 0.5))))
+        y = min(1.0, max(0.0, float(op.get("y", 0.5))))
+    except (TypeError, ValueError):
+        return None
+    return {"op": "set_punch_aim", "index": idx, "x": x, "y": y}
+
+
 @app.route("/co-editor", methods=["POST"])
 def co_editor():
     """Natural-language → validated timeline mutation ops (Captions Co-editor)."""
@@ -9329,6 +9377,7 @@ def co_editor():
 
     main = (timeline.get("tracks") or {}).get("main") or []
     overlays = (timeline.get("tracks") or {}).get("overlay") or []
+    effects = (timeline.get("tracks") or {}).get("effects") or []
     style = timeline.get("style") or {}
     speaker_colors = timeline.get("speaker_colors") or {}
     summary = {
@@ -9347,6 +9396,20 @@ def co_editor():
                 "transition": (c.get("transition") or {}).get("type") if isinstance(c.get("transition"), dict) else c.get("transition"),
             }
             for i, c in enumerate(main[:24])
+        ],
+        "effects_count": len(effects),
+        "effect_clips": [
+            {
+                "index": i,
+                "type": c.get("type"),
+                "start": c.get("start"),
+                "duration": c.get("out"),
+                "intensity": c.get("intensity"),
+                "direction": c.get("direction"),
+                "aim": c.get("aim") if isinstance(c.get("aim"), dict) else None,
+                "from_ai": bool(c.get("fx_origin")),
+            }
+            for i, c in enumerate(effects[:16])
         ],
         "overlay_count": len(overlays),
         "overlay_clips": [
@@ -9387,7 +9450,7 @@ Current timeline summary:
 Return ONLY JSON:
 {{
   "ops": [
-    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88"}},
+    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88", "position_y": 82, "group": 3, "all_caps": true, "outline_width": 3, "shadow": 1}},
     {{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}},
     {{"op": "delete_shot", "index": 2}},
     {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
@@ -9401,7 +9464,12 @@ Return ONLY JSON:
     {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
     {{"op": "apply_recommended_cuts", "index": 0}},
     {{"op": "merge_shots", "index": 0}},
-    {{"op": "reorder_shot", "from": 2, "to": 0}}
+    {{"op": "reorder_shot", "from": 2, "to": 0}},
+    {{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}},
+    {{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}},
+    {{"op": "set_punch_aim", "index": 0, "x": 0.42, "y": 0.35}},
+    {{"op": "set_punch_aim", "index": 0, "at": "speaker"}},
+    {{"op": "delete_effect", "index": 0}}
   ],
   "message": "Short confirmation of what you changed (mention Render if captions/styles changed)"
 }}
@@ -9413,6 +9481,16 @@ Rules:
 - Colors must be #RRGGBB. Canvas must be one of 9x16, 16x9, 1x1, 4x5.
 - For "make captions yellow/blue/…" prefer set_caption_style primary/highlight. For Host/Guest colors use set_speaker_colors.
 - For B-roll / overlay motion requests, use enable_ken_burns with track:"overlay".
+- The Effects lane holds timed camera moves, several per video, each with its
+  own start and duration. Use set_effect_time to move or stretch one,
+  set_punch_aim to change where a punch zoom pushes toward, and delete_effect
+  to remove one. Indexes there refer to effect_clips above, not to shots.
+- set_punch_aim takes either explicit x/y in 0..1 (0,0 is top-left) or
+  at:"speaker", which aims at the detected face at that moment.
+- Caption position_y is a percentage from the top: larger is lower. group is
+  words shown at once -- 1 is one word at a time, 4 is a short phrase.
+- If the request needs something no op covers, return ops: [] and say plainly
+  what is missing. Do not approximate it with a different op.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -9431,19 +9509,36 @@ Rules:
         "set_caption_style", "set_speaker_colors", "delete_shot", "set_transition",
         "enable_punch_zoom", "enable_ken_burns", "clear_effects", "set_canvas",
         "set_color_grade", "add_title", "apply_recommended_cuts", "merge_shots",
-        "reorder_shot",
+        "reorder_shot", "set_shot_range", "set_effect_time", "set_punch_aim",
+        "delete_effect",
     }
     ops = []
+    refused = []
     for op in raw_ops:
         if not isinstance(op, dict):
             continue
         name = str(op.get("op") or "")
         if name not in allowed:
+            # Worth knowing about: the model reaching for an op that does not
+            # exist is a concrete request for one that should.
+            refused.append(name)
             continue
+        if name == "set_punch_aim":
+            op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
         ops.append(op)
         if len(ops) >= 8:
             break
 
+    # The prompts that produce nothing are the most useful thing here: they are
+    # a list of the edits people ask for that the co-editor cannot yet make.
+    _record_suggestion(
+        str(data.get("job_id") or ""), "coeditor",
+        {"prompt": prompt[:400], "ops": ops, "invented_ops": refused},
+        "accepted" if ops else "rejected",
+        {"message": message} if message else None,
+    )
     return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
 
 
