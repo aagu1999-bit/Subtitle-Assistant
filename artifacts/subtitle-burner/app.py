@@ -17034,6 +17034,101 @@ def detect_shots():
     return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
 
 
+# How much of the conversation the co-editor is allowed to remember.
+CO_EDITOR_HISTORY_TURNS = 6
+CO_EDITOR_HISTORY_CHARS = 300
+
+# ---- The co-editor's op registry ------------------------------------------
+# One list, two consumers: the `allowed` whitelist the server validates
+# against, and the JSON examples the model is shown. Those were two
+# hand-maintained lists that happened to agree -- 32 names each, checked --
+# but nothing made them agree, and every new op meant editing both.
+#
+# The client's dispatcher in static/timeline.js stays a dispatcher, because
+# it is real per-op logic rather than a list. A test asserts every name here
+# has a branch there, so the third place cannot drift quietly either.
+CO_EDITOR_OP_EXAMPLES = [
+    '{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88", "group": 2, "position_y": 75, "punchword_emphasis": true}',
+    '{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}',
+    '{"op": "delete_shot", "index": 2}',
+    '{"op": "delete_clip", "track": "overlay", "index": 0}',
+    '{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}',
+    '{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}',
+    '{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}',
+    '{"op": "enable_ken_burns", "track": "overlay", "index": 0, "intensity": "med", "direction": "in"}',
+    '{"op": "clear_effects", "index": 0}',
+    '{"op": "clear_effects", "track": "overlay", "index": 0}',
+    '{"op": "set_canvas", "canvas": "9x16"}',
+    '{"op": "set_fit", "fit": "cover"}',
+    '{"op": "set_color_grade", "index": 0, "preset": "warm"}',
+    '{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}',
+    '{"op": "set_text", "index": 0, "text": "New lower third"}',
+    '{"op": "apply_recommended_cuts", "index": 0}',
+    '{"op": "merge_shots", "index": 0}',
+    '{"op": "reorder_shot", "from": 2, "to": 0}',
+    '{"op": "reorder_shot", "from": "S3", "to": "S1"}',
+    '{"op": "swap_shot", "a": "S1", "b": "S2"}',
+    '{"op": "set_overlay_layout", "index": 0, "layout": "pip_tr"}',
+    '{"op": "set_music", "index": 0, "gain_db": -20, "duck": true}',
+    '{"op": "apply_clip_style", "style": "cinematic"}',
+    '{"op": "suggest_broll", "mode": "photo", "placement": "center", "scope": "playhead", "use_ai": false}',
+    '{"op": "accept_all_broll", "as_main": false}',
+    '{"op": "skip_all_broll"}',
+    '{"op": "split_at_playhead"}',
+    '{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}',
+    '{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}',
+    '{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}',
+    '{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}',
+    '{"op": "set_punch_aim", "index": 0, "at": "speaker"}',
+    '{"op": "delete_effect", "index": 0}',
+    '{"op": "add_carousel", "photos": ["bali beach", "temple"], "start": 6.0, "per_photo": 1.6, "motion": "swipe_left", "size": "full"}',
+    '{"op": "set_overlay_motion", "index": 0, "type": "swipe_up", "in": 0.35}',
+    '{"op": "delete_carousel", "index": 0}',
+    '{"op": "set_background", "photo": "bali beach", "fit": "cover"}',
+    '{"op": "set_background", "clear": true}',
+]
+
+
+def _co_editor_op_names() -> set:
+    """Every op name the registry declares."""
+    import re as _re
+    out = set()
+    for ex in CO_EDITOR_OP_EXAMPLES:
+        m = _re.search(r'"op":\s*"([a-z_]+)"', ex)
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def _resolve_set_background(op: dict) -> tuple[dict | None, str]:
+    """Turn a described background into a real picture behind the subject.
+
+    The model can say "a beach"; it cannot fetch an image or know which
+    assets exist, so that happens here -- the same split as the carousel.
+
+    A keyword with no photo provider configured must SAY SO and place
+    nothing. The button-driven b-roll path quietly substitutes a generated
+    text badge when it cannot find a photo, which is a reasonable fallback
+    for a button someone clicked knowingly and a bad one for "put a beach
+    behind me", where it would put the word "beach" behind their head.
+    """
+    if op.get("clear") or str(op.get("photo") or "").strip().lower() in (
+            "none", "off", "remove"):
+        return {"op": "set_background", "clear": True}, ""
+
+    ref = op.get("photo") or op.get("asset_id") or op.get("keyword") or ""
+    ref = str(ref).strip()
+    if not ref:
+        return None, "no picture was named for the background"
+    asset_id, why = _resolve_photo_source(ref)
+    if not asset_id:
+        return None, why
+    fit = str(op.get("fit") or "cover").lower()
+    if fit not in ("cover", "contain", "fill"):
+        fit = "cover"
+    return {"op": "set_background", "asset_id": asset_id, "fit": fit}, ""
+
+
 def _resolve_add_carousel(op: dict) -> tuple[dict | None, str]:
     """Turn a described carousel into overlay clips with real photos attached.
 
@@ -17214,6 +17309,37 @@ def co_editor():
         "overlay_layouts": ["pip_tr", "pip_tl", "pip_br", "pip_bl", "full", "center", "lower"],
     }
 
+    _op_examples = ",\n".join(
+        "    " + ex for ex in CO_EDITOR_OP_EXAMPLES
+    ).replace("{", "{{").replace("}", "}}")
+
+    # What was said before. Its own instructions tell it three times to ask a
+    # clarifying question -- "ask 1-2 clarifying questions if needed", "if
+    # unclear ... ops: [] + honest message" -- but nothing used to carry the
+    # answer back. The drawer looked like a chat and was not one: ask "all
+    # shots or just this one?", hear "all of them", and the model received
+    # three words with no memory of the question.
+    #
+    # Six short turns is enough for "the other one" and "yes, all of them" to
+    # land, and small enough not to grow every request without limit.
+    _history = ""
+    raw_history = data.get("history")
+    if isinstance(raw_history, list) and raw_history:
+        turns = []
+        for turn in raw_history[-CO_EDITOR_HISTORY_TURNS:]:
+            if not isinstance(turn, dict):
+                continue
+            who = "User" if str(turn.get("role")) == "user" else "You"
+            said = str(turn.get("text") or "").strip()[:CO_EDITOR_HISTORY_CHARS]
+            if said:
+                turns.append(f"{who}: {said}")
+        if turns:
+            _history = (
+                "\nEarlier in this conversation (oldest first). If you asked a "
+                "question, what follows it is the answer:\n"
+                + "\n".join(turns) + "\n"
+            )
+
     system_prompt = f"""You are the Studio Timeline co-editor — a natural-language REMOTE CONTROL for this project.
 
 PURPOSE
@@ -17234,48 +17360,14 @@ HARD LIMITS (say no in message, ops: [])
 - suggest_broll queues suggestions for review. Only use accept_all_broll when pending_broll_count > 0 and the user explicitly asks to accept/place them.
 - run_polish starts an async FFmpeg polish job on the Main source (not Timeline Render). Say so in message; do not claim captions were burned.
 
+{_history}
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
 
 Return ONLY JSON:
 {{
   "ops": [
-    {{"op": "set_caption_style", "font": "Anton", "size": 64, "primary": "#FFFFFF", "highlight": "#FFD60A", "accent": "#00FF88", "group": 2, "position_y": 75, "punchword_emphasis": true}},
-    {{"op": "set_speaker_colors", "SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"}},
-    {{"op": "delete_shot", "index": 2}},
-    {{"op": "delete_clip", "track": "overlay", "index": 0}},
-    {{"op": "set_transition", "index": 0, "type": "crossfade", "duration": 0.3}},
-    {{"op": "enable_punch_zoom", "index": 1, "intensity": "med"}},
-    {{"op": "enable_ken_burns", "index": 0, "intensity": "med", "direction": "in"}},
-    {{"op": "enable_ken_burns", "track": "overlay", "index": 0, "intensity": "med", "direction": "in"}},
-    {{"op": "clear_effects", "index": 0}},
-    {{"op": "clear_effects", "track": "overlay", "index": 0}},
-    {{"op": "set_canvas", "canvas": "9x16"}},
-    {{"op": "set_fit", "fit": "cover"}},
-    {{"op": "set_color_grade", "index": 0, "preset": "warm"}},
-    {{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}},
-    {{"op": "set_text", "index": 0, "text": "New lower third"}},
-    {{"op": "apply_recommended_cuts", "index": 0}},
-    {{"op": "merge_shots", "index": 0}},
-    {{"op": "reorder_shot", "from": 2, "to": 0}},
-    {{"op": "reorder_shot", "from": "S3", "to": "S1"}},
-    {{"op": "swap_shot", "a": "S1", "b": "S2"}},
-    {{"op": "set_overlay_layout", "index": 0, "layout": "pip_tr"}},
-    {{"op": "set_music", "index": 0, "gain_db": -20, "duck": true}},
-    {{"op": "apply_clip_style", "style": "cinematic"}},
-    {{"op": "suggest_broll", "mode": "photo", "placement": "center", "scope": "playhead", "use_ai": false}},
-    {{"op": "accept_all_broll", "as_main": false}},
-    {{"op": "skip_all_broll"}},
-    {{"op": "split_at_playhead"}},
-    {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}},
-    {{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}},
-    {{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}},
-    {{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}},
-    {{"op": "set_punch_aim", "index": 0, "at": "speaker"}},
-    {{"op": "delete_effect", "index": 0}},
-    {{"op": "add_carousel", "photos": ["bali beach", "temple"], "start": 6.0, "per_photo": 1.6, "motion": "swipe_left", "size": "full"}},
-    {{"op": "set_overlay_motion", "index": 0, "type": "swipe_up", "in": 0.35}},
-    {{"op": "delete_carousel", "index": 0}}
+{_op_examples}
   ],
   "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
@@ -17323,16 +17415,7 @@ Rules:
     if isinstance(result, dict):
         message = str(result.get("message") or "")[:500]
 
-    allowed = {
-        "set_caption_style", "set_speaker_colors", "delete_shot", "delete_clip",
-        "set_transition", "enable_punch_zoom", "enable_ken_burns", "clear_effects",
-        "set_canvas", "set_fit", "set_color_grade", "add_title", "set_text",
-        "apply_recommended_cuts", "merge_shots", "reorder_shot", "swap_shot",
-        "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
-        "accept_all_broll", "skip_all_broll", "split_at_playhead", "run_polish",
-        "set_shot_range", "set_effect_time", "set_punch_aim", "delete_effect",
-        "add_carousel", "set_overlay_motion", "delete_carousel",
-    }
+    allowed = _co_editor_op_names()
     ops = []
     refused = []
     blocked = []
@@ -17347,6 +17430,14 @@ Rules:
             continue
         if name == "set_punch_aim":
             op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name == "set_background":
+            # Same contract as the carousel: a keyword with no provider has
+            # to be explained, not silently turned into something else.
+            op, note = _resolve_set_background(op)
+            if note:
+                blocked.append(note)
             if op is None:
                 continue
         elif name == "add_carousel":

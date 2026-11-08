@@ -1411,3 +1411,16 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
 .tl-broll-card.flash {
   box-shadow: 0 0 0 2px #9785ff;
 }
+
+/* The layer behind the subject. Sits under #tlPreviewVideo inside the stage,
+   above the stage's own black, so a background reads as *behind* rather than
+   *instead of*. The video above it carries a mask from /segment-preview. */
+.tl-background-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-position: center;
+  background-repeat: no-repeat;
+  display: none;
+  pointer-events: none;
+}

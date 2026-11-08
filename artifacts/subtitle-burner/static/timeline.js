@@ -3861,6 +3861,60 @@
   // It survived a test because the test stepped the playhead with
   // `video.currentTime = t`, and a "seeked" listener forces a rebuild. Four
   // seeks looked like animation. Anything checking this has to PLAY.
+  // ---- Background preview ---------------------------------------------
+  // Applying a background and seeing nothing until a render is not a feature.
+  // /segment-preview already returns a real matte PNG for any instant, so the
+  // stage can show the true cutout rather than a guess at one.
+  //
+  // DRAFT, deliberately: sampled on pause and scrub, rounded to the second
+  // and cached, never per frame. The render's matte is per-frame. Saying so
+  // in the UI matters more than hiding the difference.
+  let _bgMatteAt = null;
+
+  function backgroundLayerEl() {
+    const stage = $("tlStage");
+    if (!stage) return null;
+    let el = $("tlBackgroundLayer");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "tlBackgroundLayer";
+      el.className = "tl-background-layer";
+      // Behind the video, in front of the stage's own black.
+      stage.insertBefore(el, stage.firstChild);
+    }
+    return el;
+  }
+
+  function refreshBackgroundPreview() {
+    const el = backgroundLayerEl();
+    const v = $("tlPreviewVideo");
+    if (!el || !v) return;
+    const bg = tl && tl.background;
+    if (!bg || !bg.asset_id) {
+      el.style.display = "none";
+      v.style.webkitMaskImage = "";
+      v.style.maskImage = "";
+      _bgMatteAt = null;
+      return;
+    }
+    el.style.display = "block";
+    el.style.backgroundImage = `url(/asset/${bg.asset_id})`;
+    el.style.backgroundSize = (bg.fit === "contain") ? "contain" : "cover";
+
+    // The matte is what makes it read as "behind" rather than "instead of".
+    const job = tl.tracks.main.find((c) => c.source_job_id);
+    if (!job) return;
+    const t = Math.max(0, Math.round(playheadOutputTime() || v.currentTime || 0));
+    if (t === _bgMatteAt) return;
+    _bgMatteAt = t;
+    const url = `/segment-preview/${job.source_job_id}.png?t=${t}`;
+    v.style.webkitMaskImage = `url(${url})`;
+    v.style.maskImage = `url(${url})`;
+    v.style.webkitMaskSize = "100% 100%";
+    v.style.maskSize = "100% 100%";
+  }
+  window.refreshBackgroundPreview = refreshBackgroundPreview;
+
   function applyOverlayFrame(o, ot) {
     const item = o.item;
     if (!item) return;
@@ -4690,6 +4744,7 @@
     const upd = () => {
       updatePlayhead();
       updateStageCompositor();
+      refreshBackgroundPreview();
       // Highlight the word under the playhead in the transcript doc.
       if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
     };
@@ -9107,6 +9162,17 @@
             notes.push(`removed effect ${i}`);
             applied++;
           }
+        } else if (name === "set_background") {
+          // The server resolved the picture; this only places it.
+          if (op.clear) {
+            tl.background = null;
+            notes.push("background cleared");
+          } else if (op.asset_id) {
+            tl.background = { asset_id: op.asset_id, fit: op.fit || "cover" };
+            notes.push("background set");
+          }
+          applied++;
+          refreshBackgroundPreview();
         } else if (name === "add_carousel") {
           // The server already resolved the photos and built the clips, so
           // there is nothing to fetch here -- just drop them on the lane.
@@ -9358,6 +9424,20 @@
     return { applied, notes };
   }
 
+  // What has been said, so the co-editor can hear the answer to its own
+  // question. Its instructions tell it three times to ask for clarification,
+  // but nothing used to carry the reply back: the drawer looked like a chat
+  // and was not one. An array rather than a scrape of #coEditorLog, because
+  // that is display and would drag markup into the payload.
+  let coEditorTurns = [];
+  function rememberCoTurn(role, text) {
+    coEditorTurns.push({ role, text: String(text || "").slice(0, 300) });
+    if (coEditorTurns.length > 12) coEditorTurns = coEditorTurns.slice(-12);
+  }
+  // A question asked about one project must not be answered against another.
+  function forgetCoEditorTurns() { coEditorTurns = []; }
+  window.forgetCoEditorTurns = forgetCoEditorTurns;
+
   async function sendCoEditorPrompt() {
     if (!tl) {
       alert("Open a timeline project first.");
@@ -9368,6 +9448,7 @@
     if (!prompt) return;
     if (input) input.value = "";
     appendCoMsg("user", prompt);
+    rememberCoTurn("user", prompt);
     appendCoMsg("bot", "Thinking…");
     const log = $("coEditorLog");
     const thinking = log && log.lastChild;
@@ -9381,6 +9462,7 @@
           // recorded there are the list of edits people ask for and cannot
           // get, so losing which project they came from loses most of it.
           job_id: tl.job_id,
+          history: coEditorTurns.slice(-6),
           prompt,
           timeline: timelinePayloadForCoEditor(),
           context: coEditorClientContext(),
@@ -9396,6 +9478,7 @@
       if (n && notes.length) msg += " · " + notes.join(", ");
       if (n) msg += " · Click ▶ Render to burn into the export.";
       appendCoMsg("bot", msg);
+      rememberCoTurn("bot", data.message || msg);
     } catch (e) {
       if (thinking) thinking.remove();
       appendCoMsg("bot", "Error: " + e.message);

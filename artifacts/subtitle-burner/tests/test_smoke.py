@@ -1039,13 +1039,16 @@ def test_refused_ops_are_readable_across_every_project(app_mod, temp_db, monkeyp
     'what did they ask for on this one project?'."""
     monkeypatch.setattr(
         app_mod, "_gemini_generate_clip_suggestions",
-        lambda p: {"ops": [{"op": "set_background", "image": "beach"},
+        # Deliberately not a real op. set_background used to stand here and
+        # then got built -- which is the backlog doing its job, and exactly
+        # why this needs a name nothing is going to implement.
+        lambda p: {"ops": [{"op": "animate_text_on_the_beat", "style": "bounce"},
                            {"op": "enable_punch_zoom", "index": 0}],
-                   "message": "can't do the background"})
+                   "message": "can't make text dance yet"})
     client = app_mod.app.test_client()
     # Two different projects asking for the same missing capability.
-    for job, ask in (("jobA", "put a beach behind me"),
-                     ("jobB", "picture behind me while I talk")):
+    for job, ask in (("jobA", "make the captions bounce on the beat"),
+                     ("jobB", "words should pop with the music")):
         client.post("/co-editor", json={
             "job_id": job, "prompt": ask, "timeline": _coeditor_timeline()})
 
@@ -1053,12 +1056,14 @@ def test_refused_ops_are_readable_across_every_project(app_mod, temp_db, monkeyp
     assert data["count"] == 2, "both projects' rows must come back from one call"
 
     wanted = {w["op"]: w for w in data["wanted_ops"]}
-    assert "set_background" in wanted, "the invented op is the whole point"
-    assert wanted["set_background"]["count"] == 2, "asks must add up across projects"
+    assert "animate_text_on_the_beat" in wanted, "the invented op is the point"
+    assert wanted["animate_text_on_the_beat"]["count"] == 2, \
+        "asks must add up across projects"
     # The real op was applied, so it is not a request for anything.
     assert "enable_punch_zoom" not in wanted
     # And it has to carry the words they used, or it is a name with no meaning.
-    assert "put a beach behind me" in wanted["set_background"]["prompts"]
+    assert "make the captions bounce on the beat" in \
+        wanted["animate_text_on_the_beat"]["prompts"]
 
 
 def test_the_backlog_filters_do_not_leak_other_rows(app_mod, temp_db, monkeypatch):
@@ -1745,3 +1750,115 @@ def test_a_degenerate_knee_leaves_the_matte_alone(app_mod, monkeypatch):
     monkeypatch.setattr(app_mod, "MATTE_KNEE_LO", 0.8)
     monkeypatch.setattr(app_mod, "MATTE_KNEE_HI", 0.2)
     assert np.allclose(app_mod._matte_refine(m), m), "inverted knee must no-op"
+
+
+# --- set_background, the registry, and the co-editor's memory ------------
+
+def test_set_background_reaches_the_client_with_a_real_picture(app_mod, temp_db,
+                                                               monkeypatch):
+    """The model names a subject; the server turns it into an asset."""
+    monkeypatch.setattr(app_mod, "_resolve_photo_source",
+                        lambda ref: ("asset123", ""))
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "set_background", "photo": "bali beach"}],
+                   "message": "placed it"})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "put a beach behind me",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == [{"op": "set_background", "asset_id": "asset123",
+                           "fit": "cover"}]
+
+
+def test_clearing_the_background_is_its_own_instruction(app_mod, temp_db,
+                                                        monkeypatch):
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "set_background", "clear": True}]})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "remove the background",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == [{"op": "set_background", "clear": True}]
+
+
+def test_a_background_with_no_provider_says_so_rather_than_improvising(
+        app_mod, temp_db, monkeypatch):
+    """The b-roll button quietly substitutes a text badge when it cannot find
+    a photo. That is fine for a button someone clicked knowingly and wrong
+    for "put a beach behind me", which would put the word behind their head.
+    """
+    monkeypatch.setattr(app_mod, "_broll_any_photo_provider", lambda: False)
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "set_background", "photo": "bali beach"}],
+                   "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "beach behind me",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == [], "nothing should be placed"
+    assert "PEXELS_API_KEY" in out["message"] or "provider" in out["message"].lower(), \
+        f"the refusal must name what is missing: {out['message']!r}"
+
+
+def test_the_op_registry_is_the_only_list(app_mod):
+    """allowed and the prompt examples are generated; the client is checked."""
+    names = app_mod._co_editor_op_names()
+    assert "set_background" in names and len(names) >= 33
+
+    # Every registered op must be shown to the model, or it can never use it.
+    shown = "\n".join(app_mod.CO_EDITOR_OP_EXAMPLES)
+    for n in names:
+        assert f'"op": "{n}"' in shown, f"{n} is allowed but never shown"
+
+    # And must have a client branch, or it is accepted and silently ignored.
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js[js.index("async function applyCoEditorOps"):][:24000]
+    missing = [n for n in sorted(names) if f'name === "{n}"' not in body]
+    assert not missing, f"accepted by the server, ignored by the client: {missing}"
+
+
+def test_the_coeditor_can_hear_the_answer_to_its_own_question(app_mod, temp_db,
+                                                              monkeypatch):
+    """It is told three times to ask for clarification. Nothing used to carry
+    the reply back, so the drawer looked like a chat and was not one."""
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("prompt", p), {"ops": []})[1])
+    app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "all of them",
+        "timeline": _coeditor_timeline(),
+        "history": [{"role": "user", "text": "punch in on the hook"},
+                    {"role": "bot", "text": "All shots, or just this one?"}]})
+    p = seen["prompt"]
+    assert "All shots, or just this one?" in p, "the question is not carried back"
+    assert "punch in on the hook" in p, "the earlier turn is not carried back"
+    assert "all of them" in p
+
+
+def test_the_remembered_conversation_is_bounded(app_mod, temp_db, monkeypatch):
+    """Unbounded history would grow every request's cost without limit."""
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("prompt", p), {"ops": []})[1])
+    long_turns = [{"role": "user", "text": f"turn number {i} " + "x" * 900}
+                  for i in range(30)]
+    app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "now do it", "timeline": _coeditor_timeline(),
+        "history": long_turns})
+    p = seen["prompt"]
+    assert "turn number 29" in p, "the most recent turns must survive"
+    assert "turn number 10" not in p, "old turns must be dropped"
+    assert "x" * 400 not in p, "each turn must be truncated"
+
+
+def test_the_drawer_sends_what_it_remembers():
+    """The server reads `history`; the client has to actually post it."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    send = js[js.index("async function sendCoEditorPrompt"):][:2200]
+    assert "history:" in send, "sendCoEditorPrompt does not post the history"
+    assert "rememberCoTurn" in js, "nothing records the turns"
+    assert "forgetCoEditorTurns" in js, (
+        "a question asked about one project must not be answered against "
+        "another -- there must be a way to clear it")
