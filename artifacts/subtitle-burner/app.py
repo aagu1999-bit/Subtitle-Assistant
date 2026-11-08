@@ -11629,6 +11629,68 @@ def assign_speakers_to_words(words: list, diarization: list) -> list:
     return out
 
 
+def _stamp_caption_words_from_source(caption_words: list,
+                                      seg_meta: list,
+                                      seg_starts: list) -> int:
+    """Colour-code Timeline captions from each source clip's diarization.
+
+    assign_speakers_to_words does this in SOURCE time, where a word and a
+    diarization segment share a clock. Timeline captions do not: the words
+    have been cut, trimmed and concatenated, so a word at 7.2s in the
+    export may be 61.4s in the clip it came from. The only way back is
+    through each segment's own (src_in, src_out) and its start in the
+    output, which is what this undoes -- per segment, since each one
+    carries a different shift.
+
+    Lived inline in render_timeline_job, where a mis-attribution would
+    have shown up as the wrong person's colour on screen and nothing else.
+    Returns the number of words it stamped.
+
+    Words that already carry a speaker are left alone: a stamp made in
+    source time, before any cutting, is the better one.
+    """
+    stamped = 0
+    for idx, meta in enumerate(seg_meta or []):
+        sjid = meta.get("source_job_id")
+        if not sjid:
+            continue
+        cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
+        if not cache_path.exists():
+            continue
+        try:
+            diar_src = (json.loads(cache_path.read_text(encoding="utf-8"))
+                        .get("diarization") or [])
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not diar_src:
+            continue
+        seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+        src_in = float(meta.get("src_in") or 0)
+        src_out = float(meta.get("src_out") or 0)
+        for w in caption_words:
+            if w.get("speaker"):
+                continue
+            try:
+                mid_out = (float(w["start"]) + float(w["end"])) / 2.0
+            except (TypeError, ValueError, KeyError):
+                continue
+            local = mid_out - seg_start
+            # Outside this segment's slice of the output, so another
+            # segment's diarization owns the word (or none does).
+            if local < -0.05 or local > (src_out - src_in) + 0.05:
+                continue
+            src_mid = src_in + max(0.0, local)
+            for seg in diar_src:
+                try:
+                    if float(seg.get("start", 0)) <= src_mid <= float(seg.get("end", 0)):
+                        w["speaker"] = seg.get("speaker")
+                        stamped += 1
+                        break
+                except (TypeError, ValueError):
+                    continue
+    return stamped
+
+
 def _stamp_job_speakers(job_id: str, diarization: list | None = None) -> int:
     """Persist speaker labels onto the job's words. Returns # words stamped."""
     job = jobs.get(job_id)
@@ -14920,40 +14982,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         # Stamp remapped caption words from each segment's Analyze diarization
         # (source time → output time). Prefer already-stamped word.speaker.
-        for idx, meta in enumerate(seg_meta):
-            sjid = meta.get("source_job_id")
-            if not sjid:
-                continue
-            cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
-            if not cache_path.exists():
-                continue
-            try:
-                diar_src = (json.loads(cache_path.read_text(encoding="utf-8")).get("diarization") or [])
-            except (json.JSONDecodeError, OSError):
-                continue
-            if not diar_src:
-                continue
-            seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
-            src_in = float(meta.get("src_in") or 0)
-            src_out = float(meta.get("src_out") or 0)
-            for w in caption_words:
-                if w.get("speaker"):
-                    continue
-                try:
-                    mid_out = (float(w["start"]) + float(w["end"])) / 2.0
-                except (TypeError, ValueError, KeyError):
-                    continue
-                local = mid_out - seg_start
-                if local < -0.05 or local > (src_out - src_in) + 0.05:
-                    continue
-                src_mid = src_in + max(0.0, local)
-                for seg in diar_src:
-                    try:
-                        if float(seg.get("start", 0)) <= src_mid <= float(seg.get("end", 0)):
-                            w["speaker"] = seg.get("speaker")
-                            break
-                    except (TypeError, ValueError):
-                        continue
+        _stamp_caption_words_from_source(caption_words, seg_meta, seg_starts)
 
         # ---- Background: the one pass where the video is NOT the bottom ----
         # Everything else here composites onto the baked main track. This

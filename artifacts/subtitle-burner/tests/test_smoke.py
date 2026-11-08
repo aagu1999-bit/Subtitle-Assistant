@@ -2682,3 +2682,145 @@ def test_the_lockfile_carries_the_vision_dependencies():
     """
     assert _locked_version("opencv-python-headless") is not None, \
         "uv.lock has no opencv-python-headless entry"
+
+
+# ---------------------------------------------------------------------------
+# Analyze -> two speakers -> two caption colours.
+#
+# Listed in the brief as unverified, and it turns out to work -- so these
+# pin it rather than fix it. Worth pinning because the chain is long and
+# every link is silent on failure: a missed stamp does not raise, it just
+# paints both people the same colour, which looks like a styling choice.
+# ---------------------------------------------------------------------------
+
+# #FFD700 -> ASS is &HBBGGRR&, so gold becomes &H00D7FF&.
+_GOLD_HEX, _GOLD_ASS = "#FFD700", "&H00D7FF&"
+_CYAN_HEX, _CYAN_ASS = "#00E5FF", "&HFFE500&"
+_TWO_COLOURS = {"SPEAKER_00": _GOLD_HEX, "SPEAKER_01": _CYAN_HEX}
+
+
+def _spoken_colours(ass):
+    """Every distinct \\c colour tag in the dialogue, in order."""
+    return sorted(set(re.findall(r"\\c(&H[0-9A-Fa-f]{6}&)", ass)))
+
+
+def test_two_speakers_get_two_caption_colours(app_mod):
+    """Words already carrying a speaker: the preferred path."""
+    words = [
+        {"word": "my", "start": 0.0, "end": 0.3, "speaker": "SPEAKER_00"},
+        {"word": "turn", "start": 0.4, "end": 0.7, "speaker": "SPEAKER_00"},
+        {"word": "now", "start": 4.0, "end": 4.3, "speaker": "SPEAKER_01"},
+        {"word": "mine", "start": 4.4, "end": 4.8, "speaker": "SPEAKER_01"},
+    ]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS)
+    got = _spoken_colours(ass)
+    assert _GOLD_ASS in got and _CYAN_ASS in got, got
+    # Both present is the whole claim -- one colour twice would look
+    # deliberate on screen and pass any "did it render" check.
+    assert len(got) >= 2, got
+
+
+def test_unstamped_words_get_their_colour_from_the_diarization(app_mod):
+    """The fallback: no word.speaker, so build_ass matches on midpoints."""
+    words = [{"word": w, "start": s, "end": s + 0.3} for w, s in
+             [("my", 0.0), ("turn", 0.4), ("now", 4.0), ("mine", 4.4)]]
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 2.0},
+            {"speaker": "SPEAKER_01", "start": 3.5, "end": 6.0}]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS, diarization=diar)
+    got = _spoken_colours(ass)
+    assert _GOLD_ASS in got and _CYAN_ASS in got, got
+
+
+def test_one_speaker_is_not_painted_two_colours(app_mod):
+    """A solo clip must not pick up the second speaker's colour.
+
+    The mirror of the test above: a matcher loose enough to colour
+    everything would pass both of those and still be wrong.
+    """
+    words = [{"word": w, "start": s, "end": s + 0.3} for w, s in
+             [("all", 0.0), ("mine", 0.4), ("here", 0.8)]]
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 6.0}]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS, diarization=diar)
+    assert _CYAN_ASS not in _spoken_colours(ass), _spoken_colours(ass)
+
+
+def test_timeline_captions_map_back_to_source_time_for_speakers(app_mod):
+    """Cut, trimmed and concatenated words still find the right speaker.
+
+    This is the link with the most room to be wrong, and the one that was
+    buried inline in render_timeline_job. The export's clock is not the
+    clip's: a word at 1.0s in the output came from 61.0s in the source
+    here, and only (src_in, src_out) plus the segment's output start can
+    undo that. Two segments with DIFFERENT shifts, because a single
+    segment would pass with the shift ignored entirely.
+    """
+    job_id = "pytest_tlstamp_src"
+    cache = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    cache.write_text(json.dumps({"diarization": [
+        {"speaker": "SPEAKER_00", "start": 60.0, "end": 64.0},
+        {"speaker": "SPEAKER_01", "start": 120.0, "end": 124.0},
+    ]}), encoding="utf-8")
+    try:
+        # Segment 0: source 60-64s, laid at output 0s.
+        # Segment 1: source 120-124s, laid at output 4s.
+        seg_meta = [
+            {"source_job_id": job_id, "src_in": 60.0, "src_out": 64.0},
+            {"source_job_id": job_id, "src_in": 120.0, "src_out": 124.0},
+        ]
+        seg_starts = [0.0, 4.0]
+        words = [
+            {"word": "first", "start": 1.0, "end": 1.4},   # -> source 61.2s
+            {"word": "second", "start": 5.0, "end": 5.4},  # -> source 121.2s
+        ]
+        n = app_mod._stamp_caption_words_from_source(words, seg_meta, seg_starts)
+        assert n == 2, f"stamped {n} of 2"
+        assert words[0]["speaker"] == "SPEAKER_00", words[0]
+        assert words[1]["speaker"] == "SPEAKER_01", words[1]
+
+        # And the colours actually differ once that reaches build_ass.
+        ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE,
+                                1080, 1920, speaker_colors=_TWO_COLOURS)
+        got = _spoken_colours(ass)
+        assert _GOLD_ASS in got and _CYAN_ASS in got, got
+    finally:
+        cache.unlink(missing_ok=True)
+
+
+def test_an_existing_speaker_stamp_is_not_overwritten(app_mod):
+    """A stamp made in source time, before any cutting, is the better one."""
+    job_id = "pytest_tlstamp_keep"
+    cache = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    cache.write_text(json.dumps({"diarization": [
+        {"speaker": "SPEAKER_01", "start": 0.0, "end": 10.0},
+    ]}), encoding="utf-8")
+    try:
+        words = [{"word": "mine", "start": 1.0, "end": 1.4,
+                  "speaker": "SPEAKER_00"}]
+        n = app_mod._stamp_caption_words_from_source(
+            words,
+            [{"source_job_id": job_id, "src_in": 0.0, "src_out": 10.0}],
+            [0.0],
+        )
+        assert n == 0
+        assert words[0]["speaker"] == "SPEAKER_00"
+    finally:
+        cache.unlink(missing_ok=True)
+
+
+def test_speaker_stamping_survives_a_missing_analysis(app_mod):
+    """No Analyze run for the source clip: no colours, not an exception.
+
+    Captions are the last pass of a long render. Raising here would cost
+    the whole export over an optional nicety.
+    """
+    words = [{"word": "hello", "start": 0.5, "end": 0.9}]
+    assert app_mod._stamp_caption_words_from_source(
+        words, [{"source_job_id": "pytest_no_such_analysis",
+                 "src_in": 0.0, "src_out": 2.0}], [0.0]) == 0
+    assert "speaker" not in words[0]
+    # And no source job at all (a generated clip, a title card).
+    assert app_mod._stamp_caption_words_from_source(
+        words, [{"src_in": 0.0, "src_out": 2.0}], [0.0]) == 0
