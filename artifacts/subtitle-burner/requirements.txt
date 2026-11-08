@@ -2,6 +2,12 @@ flask>=3.0.0
 faster-whisper>=1.0.0
 requests>=2.31.0
 gunicorn>=21.0.0
+# Fetch source footage from a URL instead of uploading it. Worth having on
+# the server rather than only locally: an upload from a phone is a single
+# non-resumable request that fails on large files, while a URL costs one
+# field. yt-dlp releases often — unpinned on purpose, since extractors break
+# whenever a site changes and the fix only ships in a newer version.
+yt-dlp
 
 # Interview-reframe pipeline (optional — feature is gated to lazy imports
 # so the app still boots without these installed). pyannote.audio pulls
