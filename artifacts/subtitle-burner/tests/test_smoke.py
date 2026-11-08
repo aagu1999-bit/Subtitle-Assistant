@@ -493,8 +493,10 @@ def test_the_brand_preset_round_trips_every_style_key():
     table |= set(re.findall(r'\["(\w+)",\s*"\w+",\s*"[^"]+",',
                             js.split("const NESTED_STYLE_CONTROLS = [")[1].split("\n];")[0]))
     # bg_music hangs off an uploaded file; restoring its numbers without the
-    # audio would be a lie, so it is left out on purpose.
-    handled_elsewhere = {"bg_music"}
+    # audio would be a lie, so it is left out on purpose. speaker_colors has
+    # its own block because the speaker list is dynamic: the pickers have to be
+    # built from the saved keys before their values can be written.
+    handled_elsewhere = {"bg_music", "speaker_colors"}
     gap = emitted - table - handled_elsewhere
     assert not gap, f"saved but never restored: {sorted(gap)}"
 
@@ -505,4 +507,10 @@ def test_the_brand_preset_button_is_wired():
     html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
     for btn in ("saveBrandPresetBtn", "loadBrandPresetBtn"):
         assert f'id="{btn}"' in html, f"{btn} is missing from the markup"
-        assert f'getElementById("{btn}")' in js, f"{btn} has no listener"
+        # Accessor-agnostic: the app looks elements up with both $() and
+        # getElementById, and which one is used is not the point.
+        looked_up = f'$("{btn}")' in js or f'getElementById("{btn}")' in js
+        assert looked_up, f"{btn} is never looked up, so it has no listener"
+        assert re.search(rf'{btn}\.(onclick|addEventListener)', js), (
+            f"{btn} is looked up but nothing is bound to it"
+        )

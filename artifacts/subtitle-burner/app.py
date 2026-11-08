@@ -105,35 +105,6 @@ _patch_huggingface_hub()
 
 app = Flask(__name__)
 
-CAPCUT_TEMPLATES = {
-    "podcast_interview": {
-        "reframe": "9:16",
-        "font": "Montserrat Black",
-        "speaker_colors": {"SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"},
-        "headline_banner": True
-    },
-    "capcut_reels": {
-        "crop": "9:16",
-        "font": "Bebas Neue",
-        "animation": "MrBeast Vibrant Bounce",
-        "words_per_group": 2,
-        "punchwords": True,
-        "auto_overlays": True
-    },
-    "product_spotlight": {
-        "aspect_ratio": ["1:1", "9:16"],
-        "font": "Anton",
-        "headline_banner": "📍 Featured Product",
-        "color_grade": "warm"
-    },
-    "cinematic_vlog": {
-        "aspect_ratio": "16:9",
-        "font": "DM Sans",
-        "animation": "Karaoke Flow",
-        "camera": "subtle slow pan/zoom",
-        "audio": "ambient background music ducking"
-    }
-}
 
 # Canonical Caption look schema used by build_ass / Instant Export / Shorts.
 # Timeline UI and AI Edit packs historically used short aliases (font, size,
