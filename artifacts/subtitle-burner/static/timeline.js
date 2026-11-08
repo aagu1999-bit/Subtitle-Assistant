@@ -3870,6 +3870,7 @@
   // and cached, never per frame. The render's matte is per-frame. Saying so
   // in the UI matters more than hiding the difference.
   let _bgMatteAt = null;
+  let _bgMatteUrl = null;
 
   function backgroundLayerEl() {
     const stage = $("tlStage");
@@ -3908,10 +3909,63 @@
     if (t === _bgMatteAt) return;
     _bgMatteAt = t;
     const url = `/segment-preview/${job.source_job_id}.png?t=${t}`;
-    v.style.webkitMaskImage = `url(${url})`;
-    v.style.maskImage = `url(${url})`;
-    v.style.webkitMaskSize = "100% 100%";
-    v.style.maskSize = "100% 100%";
+
+    // Load it BEFORE masking with it. A mask-image that fails to load does
+    // not fall back to "no mask" -- it makes the element entirely invisible.
+    // So a 400 from a deploy without mediapipe, a 404 for a job not in
+    // memory, or a 500 from the model all produced the same thing on screen:
+    // the background alone, with the person gone. Which reads as "it replaced
+    // me" rather than "the cutout failed", and sent us looking in the wrong
+    // place.
+    // fetch rather than an <img>, because the endpoint reports how much of
+    // the frame it actually found as subject in X-Subject-Coverage, and a
+    // matte that loads but is entirely black masks the video away just as
+    // completely as one that fails to load. Both look like "the background
+    // replaced me", and neither is.
+    const unmask = (note) => {
+      v.style.webkitMaskImage = "";
+      v.style.maskImage = "";
+      _bgMatteAt = null;
+      setBackgroundNote(note);
+    };
+    fetch(url).then((res) => {
+      if (!res.ok) throw new Error("matte " + res.status);
+      const cov = parseFloat(res.headers.get("X-Subject-Coverage") || "0");
+      if (!(cov > 0.005)) {
+        unmask("No person found in this frame, so the cut-out is off — "
+             + "you are shown over the picture instead.");
+        return null;
+      }
+      return res.blob();
+    }).then((blob) => {
+      if (!blob) return;
+      const obj = URL.createObjectURL(blob);
+      v.style.webkitMaskImage = `url(${obj})`;
+      v.style.maskImage = `url(${obj})`;
+      v.style.webkitMaskSize = "100% 100%";
+      v.style.maskSize = "100% 100%";
+      if (_bgMatteUrl) URL.revokeObjectURL(_bgMatteUrl);
+      _bgMatteUrl = obj;
+      setBackgroundNote("");
+    }).catch(() => {
+      unmask("Cut-out preview unavailable — showing you over the picture "
+           + "instead. The render still cuts you out properly.");
+    });
+  }
+
+  // One line under the preview when the draft cutout cannot be made.
+  function setBackgroundNote(text) {
+    const stage = $("tlStage");
+    if (!stage) return;
+    let el = $("tlBackgroundNote");
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "tlBackgroundNote";
+      el.className = "tl-background-note";
+      stage.appendChild(el);
+    }
+    el.textContent = text;
   }
   window.refreshBackgroundPreview = refreshBackgroundPreview;
 

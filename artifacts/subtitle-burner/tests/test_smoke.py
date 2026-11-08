@@ -2075,3 +2075,31 @@ def test_clearing_a_background_that_is_not_there_says_so():
     assert "no background to remove" in branch, (
         "a no-op clear must say so rather than report success")
     assert "Render" in branch, "setting one must say it needs a render"
+
+
+def test_the_cutout_preview_never_masks_with_a_matte_it_has_not_checked():
+    """A mask-image that fails to load does not fall back to "no mask" -- it
+    makes the element ENTIRELY INVISIBLE. Verified in a browser: a video with
+    a mask pointing at a 404 disappears and leaves only what is behind it.
+
+    So a deploy without mediapipe (400), a job not in memory (404), or a
+    frame with nobody in it (a valid but black matte) all produced the same
+    picture: the background alone, no person. Which reads as "it replaced me"
+    rather than "the cut-out failed", and sent the search in the wrong
+    direction for a day.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function refreshBackgroundPreview"):][:3000]
+
+    assert "fetch(" in fn, (
+        "the matte must be fetched and checked before it is used as a mask")
+    assert "X-Subject-Coverage" in fn, (
+        "a matte that loads but finds nobody masks the video away just as "
+        "completely as one that fails -- the coverage header says which")
+    assert ".catch(" in fn and "unmask" in fn, "no fallback path"
+
+    # The mask must only ever be set from a verified blob, never the raw URL.
+    assert "createObjectURL" in fn, "mask should come from the fetched blob"
+    assert "maskImage = `url(/segment-preview" not in js, (
+        "masking straight from the endpoint URL skips the check entirely")
+    assert "revokeObjectURL" in fn, "blob urls leak without this"

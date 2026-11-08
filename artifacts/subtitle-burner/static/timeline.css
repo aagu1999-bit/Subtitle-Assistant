@@ -1424,3 +1424,12 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   display: none;
   pointer-events: none;
 }
+
+/* Shown when the draft cutout cannot be made, so a frame with nobody in it
+   is explained rather than mistaken for the background eating the subject. */
+.tl-background-note {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 7;
+  background: rgba(10,13,19,.88); color: #ffd60a;
+  font-size: .68rem; line-height: 1.35; padding: 6px 8px; text-align: center;
+  pointer-events: none;
+}
