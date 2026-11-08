@@ -701,13 +701,17 @@ def test_aiming_at_the_speaker_resolves_to_a_point(app_mod, monkeypatch):
     tl = _coeditor_timeline()
     main, effects = tl["tracks"]["main"], tl["tracks"]["effects"]
 
-    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: {"x": 0.61, "y": 0.27})
+    # Patched at _speaker_anchor_at, which is what the resolver now calls:
+    # aiming by biggest face was the bug, so the seam moved. Whether it
+    # really picks the talker is tested on a real fixture further down.
+    monkeypatch.setattr(app_mod, "_speaker_anchor_at",
+                        lambda j, t, words=None: {"x": 0.61, "y": 0.27})
     got = app_mod._resolve_punch_aim({"op": "set_punch_aim", "index": 0, "at": "speaker"},
                                      main, effects)
     assert got == {"op": "set_punch_aim", "index": 0, "x": 0.61, "y": 0.27}
 
     # No face data: drop the op rather than ship one that aims at nothing.
-    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: None)
+    monkeypatch.setattr(app_mod, "_speaker_anchor_at", lambda j, t, words=None: None)
     assert app_mod._resolve_punch_aim(
         {"op": "set_punch_aim", "index": 0, "at": "speaker"}, main, effects) is None
 
@@ -2440,3 +2444,175 @@ def test_the_coeditor_knows_it_can_make_pictures(app_mod):
     body = js[js.index("async function applyCoEditorOps"):][:26000]
     for n in ("make_image", "add_text_message"):
         assert f'name === "{n}"' in body, f"{n} accepted but never placed"
+
+
+# ---------------------------------------------------------------------------
+# Aiming a push at whoever is actually talking.
+#
+# The bug these guard: `at: "speaker"` went through _face_anchor_at, whose
+# whole selection rule was `max(faces, key=w*h)`. In a two-person interview
+# that is whoever sits nearer the lens -- permanently, whether or not they
+# are the one speaking. So "aim it at me" stared at one person for the
+# entire video, and a test that only asserted "an anchor came back" would
+# have passed throughout.
+#
+# The fixture therefore has to be one where the two answers DIFFER: two
+# faces in every frame, one of them visibly bigger, and the diarization
+# handing the smaller one a window of its own. Aiming by size gives the big
+# face at every instant; aiming by speaker has to move.
+# ---------------------------------------------------------------------------
+
+# Deliberately not round numbers, so a hardcoded 0.5 or a silently-centred
+# fallback cannot pass by coincidence.
+_NEAR_FACE = {"cx": 0.2600, "cy": 0.4500, "w": 0.30, "h": 0.40}   # bigger
+_FAR_FACE = {"cx": 0.7800, "cy": 0.3900, "w": 0.14, "h": 0.18}    # smaller
+
+
+def _write_reframe(app_mod, job_id, *, diarization):
+    """A two-person reframe cache: both faces always visible, A then B.
+
+    _assign_speakers_to_faces attributes a speaker to the HIGHEST-SCORING
+    face inside the windows where that speaker talks alone, so the fixture
+    scores the talking head above the listening one. That is a real
+    limitation of the existing mapping worth naming: it separates two
+    people only insofar as detector confidence tracks who is speaking. It
+    is not something this change introduced, and the stills path
+    (_speaker_still_for_time) has always relied on exactly the same rule.
+    """
+    samples = []
+    t = 0.25
+    while t < 8.0:
+        talking_near = t < 4.0
+        samples.append({"t": round(t, 2), "faces": [
+            dict(_NEAR_FACE, score=0.95 if talking_near else 0.55),
+            dict(_FAR_FACE, score=0.55 if talking_near else 0.95),
+        ]})
+        t += 0.5
+    path = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    path.write_text(json.dumps({
+        "faces": samples,
+        "diarization": diarization,
+        "duration": 8.0,
+    }), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def two_speakers(app_mod):
+    """A job whose analysis says A talks 0-4s and B talks 4-8s."""
+    job_id = "pytest_twospk_aim"
+    path = _write_reframe(app_mod, job_id, diarization=[
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 4.0},
+        {"speaker": "SPEAKER_01", "start": 4.0, "end": 8.0},
+    ])
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    try:
+        yield job_id
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_aim_follows_whoever_is_talking(app_mod, two_speakers):
+    """At a moment in A's window it aims at A; in B's window, at B."""
+    early = app_mod._speaker_anchor_at(two_speakers, 2.0)
+    late = app_mod._speaker_anchor_at(two_speakers, 6.0)
+    assert early and late, "analysis was present, so an anchor was expected"
+
+    # The near face is A's. The far face is B's. The aim has to cross.
+    assert early["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.02), early
+    assert late["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), late
+    assert late["x"] - early["x"] > 0.3, (early, late)
+
+
+def test_biggest_face_is_the_wrong_answer_here(app_mod, two_speakers):
+    """Pins the discrimination: size-based aiming never leaves the near face.
+
+    Without this, the test above could pass against a fixture where both
+    rules happen to agree, and would then be guarding nothing.
+    """
+    by_size_early = app_mod._face_anchor_at(two_speakers, 2.0)
+    by_size_late = app_mod._face_anchor_at(two_speakers, 6.0)
+    assert by_size_early["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    assert by_size_late["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    # Same answer at both instants -- it cannot follow anyone.
+    assert by_size_late == by_size_early
+
+
+def test_per_word_speakers_outrank_the_diarization_for_aim(app_mod, two_speakers):
+    """Word-level labels are the better signal and must win.
+
+    _active_speaker_for_time prefers them; this proves the aim path passes
+    them through rather than silently dropping the argument.
+    """
+    words = [{"start": 1.90, "end": 2.10, "speaker": "SPEAKER_01"}]
+    aimed = app_mod._speaker_anchor_at(two_speakers, 2.0, words=words)
+    # Diarization says A at t=2.0; the word says B, so B's face wins.
+    assert aimed["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), aimed
+
+
+def test_the_aim_falls_back_to_the_biggest_face_without_diarization(app_mod):
+    """One person on camera, or no speaker analysis: biggest face is right.
+
+    The fallback has to return something rather than nothing, or wiring the
+    speaker path in would have broken aiming for every single-speaker clip.
+    """
+    job_id = "pytest_nodiar_aim"
+    path = _write_reframe(app_mod, job_id, diarization=[])
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    try:
+        aimed = app_mod._speaker_anchor_at(job_id, 6.0)
+        assert aimed is not None, "faces were present; aiming should still work"
+        assert aimed == app_mod._face_anchor_at(job_id, 6.0)
+        assert aimed["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_aim_is_none_when_no_analysis_has_run(app_mod):
+    """No reframe cache at all -> no anchor, rather than a centred guess."""
+    assert app_mod._speaker_anchor_at("pytest_job_that_does_not_exist", 1.0) is None
+    assert app_mod._speaker_anchor_at(None, 1.0) is None
+
+
+def test_set_punch_aim_at_speaker_resolves_to_the_talker(app_mod, two_speakers):
+    """The co-editor path, end to end: `at: "speaker"` must mean the talker.
+
+    This is the op the model actually emits for "aim it at me", so it is
+    the one that has to resolve correctly -- not just the helper under it.
+    """
+    main = [{"source_job_id": two_speakers, "in": 0.0, "out": 8.0}]
+    effects = [
+        {"type": "punch_zoom", "start": 2.0, "out": 1.0},
+        {"type": "punch_zoom", "start": 6.0, "out": 1.0},
+    ]
+    first = app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 0, "at": "speaker"}, main, effects)
+    second = app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 1, "at": "speaker"}, main, effects)
+    assert first["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.02), first
+    assert second["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), second
+
+
+def test_the_speaker_face_map_is_cached_per_analysis(app_mod, two_speakers):
+    """It is O(faces x speakers x segments) and runs once per effect.
+
+    A long edit aims a dozen pushes from one analysis; recomputing the
+    mapping for each was tens of thousands of interval comparisons a push.
+    """
+    rd = app_mod._load_reframe_cache(two_speakers)
+    calls = {"n": 0}
+    real = app_mod._assign_speakers_to_faces
+
+    def counted(diar, faces):
+        calls["n"] += 1
+        return real(diar, faces)
+
+    app_mod._assign_speakers_to_faces = counted
+    try:
+        for _ in range(5):
+            app_mod._speaker_face_map(two_speakers, rd)
+        assert calls["n"] == 1, f"recomputed {calls['n']} times"
+    finally:
+        app_mod._assign_speakers_to_faces = real

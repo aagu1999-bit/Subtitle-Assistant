@@ -4994,11 +4994,14 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
 
 
 def _face_anchor_at(job_id: str, t: float) -> dict | None:
-    """Normalised (x, y) of the most prominent face nearest time *t*.
+    """Normalised (x, y) of the BIGGEST face nearest time *t*.
 
-    Zooming into the middle of the frame is only right by accident; the
-    reframe analysis already tracked faces, so a punch can push toward the
-    person actually talking. Returns None when no analysis has been run.
+    Zooming into the middle of the frame is only right by accident, so the
+    reframe analysis' tracked faces give a push something to aim at. But
+    "biggest" is not "talking": with two people on camera it picks whoever
+    sits nearer the lens and keeps picking them. Use _speaker_anchor_at,
+    which asks the diarization who is speaking and only falls back here.
+    Returns None when no analysis has been run.
     """
     cache = UPLOAD_DIR / f"{job_id}_reframe.json"
     if not cache.exists():
@@ -5016,6 +5019,70 @@ def _face_anchor_at(job_id: str, t: float) -> dict | None:
         return {"x": round(float(face["cx"]), 4), "y": round(float(face["cy"]), 4)}
     except (KeyError, TypeError, ValueError):
         return None
+
+
+# One reframe cache serves every effect in a single request, and
+# _assign_speakers_to_faces is O(faces x speakers x diar segments) — for a
+# 60s two-hander that is tens of thousands of interval comparisons, which
+# is not something to redo per punch. Keyed on the cache file's mtime so a
+# re-run of Analyze invalidates it.
+_SPEAKER_FACE_CACHE: dict[str, tuple[float, dict, dict]] = {}
+
+
+def _speaker_face_map(job_id: str, rd: dict) -> tuple[dict, dict]:
+    """(positions, bboxes) from _assign_speakers_to_faces, memoised per job."""
+    try:
+        stamp = (UPLOAD_DIR / f"{job_id}_reframe.json").stat().st_mtime
+    except OSError:
+        stamp = 0.0
+    hit = _SPEAKER_FACE_CACHE.get(job_id)
+    if hit and hit[0] == stamp:
+        return hit[1], hit[2]
+    positions, bboxes = _assign_speakers_to_faces(
+        rd.get("diarization") or [], rd.get("faces") or []
+    )
+    _SPEAKER_FACE_CACHE[job_id] = (stamp, positions, bboxes)
+    return positions, bboxes
+
+
+def _speaker_anchor_at(job_id: str | None, t: float,
+                       words: list | None = None) -> dict | None:
+    """Normalised (x, y) of whoever is TALKING at time *t*.
+
+    This is what "aim it at me" means, and what _face_anchor_at cannot do:
+    the biggest face in a two-person interview is whoever sits nearer the
+    camera, permanently, whether or not they are the one speaking. A push
+    aimed by face size stares at the same person for the whole video.
+
+    None of the machinery here is new. Diarization already says who talks
+    when; _assign_speakers_to_faces already says where each speaker's face
+    sits, counting only windows where they speak alone so overlap does not
+    smear the two together. _speaker_still_for_time already chains the two
+    correctly for screenshots. The aim path simply never called any of it.
+
+    Falls back to _face_anchor_at, which is the right answer whenever there
+    is one person on camera or no diarization to go on.
+    """
+    if not job_id:
+        return None
+    rd = _load_reframe_cache(job_id)
+    if not rd:
+        return None
+    if (rd.get("diarization") or []) and (rd.get("faces") or []):
+        try:
+            spk = _active_speaker_for_time(rd, float(t), words=words)
+        except (TypeError, ValueError):
+            spk = None
+        if spk:
+            positions, _bboxes = _speaker_face_map(job_id, rd)
+            pos = positions.get(spk)
+            if pos:
+                try:
+                    return {"x": round(float(pos[0]), 4),
+                            "y": round(float(pos[1]), 4)}
+                except (TypeError, ValueError, IndexError):
+                    pass
+    return _face_anchor_at(job_id, t)
 
 
 def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
@@ -8256,7 +8323,7 @@ def suggest_effects():
     # the reframe analysis has face data to aim with.
     for fx in cleaned:
         if fx["type"] in ("punch_zoom", "zoom_1_5", "zoom_2x"):
-            anchor = _face_anchor_at(job_id, fx["start_time"])
+            anchor = _speaker_anchor_at(job_id, fx["start_time"], words=words)
             if anchor:
                 fx["anchor"] = anchor
     # Record each proposal here rather than client-side: this is where the
@@ -17167,7 +17234,8 @@ def ai_edit_seed():
         effects = _ensure_effects_span_timeline(effects, 0.0, total, win_words, max_fx)
         for fx in effects:
             if fx.get("type") in ("punch_zoom", "zoom_1_5", "zoom_2x"):
-                anchor = _face_anchor_at(work_job_id, fx["start_time"])
+                anchor = _speaker_anchor_at(work_job_id, fx["start_time"],
+                                            words=win_words)
                 if anchor:
                     fx["anchor"] = anchor
         structure = result.get("structure") or {}
@@ -17541,7 +17609,7 @@ def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
             t = float(effects[idx].get("start") or 0)
         except (TypeError, ValueError):
             t = 0.0
-        anchor = _face_anchor_at(job_id, t)
+        anchor = _speaker_anchor_at(job_id, t)
         if not anchor:
             return None
         return {"op": "set_punch_aim", "index": idx,
