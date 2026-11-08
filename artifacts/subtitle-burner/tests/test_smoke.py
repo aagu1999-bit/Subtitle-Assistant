@@ -1647,3 +1647,101 @@ def test_a_background_without_a_matte_leaves_the_video_alone(app_mod, tmp_path,
     assert app_mod._tl_composite_background(
         tmp_path / "base.mp4", {"asset_id": "x"}, 540, 960, out) is False
     assert not out.exists(), "a failed background must not leave a broken file"
+
+
+# --- Matte quality -------------------------------------------------------
+# There is no footage of a person on this machine -- every upload is the same
+# colour-bar test clip -- and no network or key reaches a stock provider. But
+# matplotlib ships a real portrait, so matte quality is measurable offline and
+# deterministically.
+
+def _portrait():
+    import matplotlib.cbook as cbook
+    return (Path(cbook.__file__).parent / "mpl-data" / "sample_data"
+            / "grace_hopper.jpg")
+
+
+def _raw_matte(path):
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+    im = cv2.imread(str(path))
+    seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    try:
+        res = seg.process(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
+    finally:
+        seg.close()
+    return im, np.clip(res.segmentation_mask, 0.0, 1.0)
+
+
+# The cap's white crown: a bright subject against a bright background, which
+# is where this model gives up. On real footage it is the top of the hair.
+_CROWN = (slice(55, 95), slice(215, 300))
+# Sky well clear of the subject -- must stay background whatever we do.
+_SKY = (slice(10, 40), slice(430, 500))
+
+
+def test_the_matte_refinement_firms_up_a_bleeding_edge(app_mod):
+    """The number is the point, not that a function was called."""
+    if not (_have("cv2") and _have("mediapipe") and _have("matplotlib")):
+        pytest.skip("cv2 / mediapipe / matplotlib not installed")
+    _, raw = _raw_matte(_portrait())
+    ref = app_mod._matte_refine(raw)
+
+    raw_crown, ref_crown = raw[_CROWN].mean(), ref[_CROWN].mean()
+    assert raw_crown < 0.80, (
+        f"the model now reports {raw_crown:.3f} on the crown -- it used to "
+        "bleed at 0.705, so this test's premise needs rechecking")
+    assert ref_crown > raw_crown + 0.10, (
+        f"refinement barely moved the bleeding edge: {raw_crown:.3f} -> "
+        f"{ref_crown:.3f}")
+
+
+def test_the_refinement_does_not_simply_brighten_everything(app_mod):
+    """A remap that pulls the whole frame up would pass the test above."""
+    if not (_have("cv2") and _have("mediapipe") and _have("matplotlib")):
+        pytest.skip("cv2 / mediapipe / matplotlib not installed")
+    import numpy as np
+    _, raw = _raw_matte(_portrait())
+    ref = app_mod._matte_refine(raw)
+
+    # The sky is exactly 0.0, so no amount of brightening can move it -- an
+    # earlier version of this test checked only there and happily passed a
+    # refinement that just multiplied the whole mask by three. The pixels
+    # that discriminate are the UNCERTAIN ones leaning background: a remap
+    # pushes them to 0, a brightener pulls them toward subject.
+    band = (raw >= 0.05) & (raw <= 0.15)
+    assert band.sum() > 200, "no uncertain band to test against"
+    assert ref[band].mean() < 0.02, (
+        f"uncertain background was pulled toward subject: "
+        f"{raw[band].mean():.3f} -> {ref[band].mean():.3f}")
+    assert ref[_SKY].max() < 0.05, (
+        f"background pixels became subject: {ref[_SKY].max():.3f}")
+    assert ref.max() <= 1.0 and ref.min() >= 0.0, "alpha left 0..1"
+    # And it must still be a matte, not a silhouette: some partial alpha left.
+    partial = ((ref > 0.05) & (ref < 0.95)).sum()
+    assert partial > 0, "no soft edge at all -- that is a cut-out, not a matte"
+
+
+def test_the_refinement_is_cheap_enough_to_run_per_frame(app_mod):
+    """The guided filter that does this properly costs 196ms a frame, which
+    is six minutes on a 60-second clip against the model's own 7ms."""
+    if not (_have("cv2") and _have("mediapipe") and _have("matplotlib")):
+        pytest.skip("cv2 / mediapipe / matplotlib not installed")
+    import time
+    _, raw = _raw_matte(_portrait())
+    app_mod._matte_refine(raw)                      # warm
+    t0 = time.perf_counter()
+    for _ in range(20):
+        app_mod._matte_refine(raw)
+    per_ms = (time.perf_counter() - t0) / 20 * 1000
+    assert per_ms < 5.0, f"{per_ms:.1f} ms a frame is too slow to run per frame"
+
+
+def test_a_degenerate_knee_leaves_the_matte_alone(app_mod, monkeypatch):
+    """Tuning knobs get mistyped; a bad one must not blank the subject."""
+    import numpy as np
+    m = np.array([[0.0, 0.5, 1.0]], dtype="float32")
+    monkeypatch.setattr(app_mod, "MATTE_KNEE_LO", 0.8)
+    monkeypatch.setattr(app_mod, "MATTE_KNEE_HI", 0.2)
+    assert np.allclose(app_mod._matte_refine(m), m), "inverted knee must no-op"

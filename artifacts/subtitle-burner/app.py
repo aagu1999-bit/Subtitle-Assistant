@@ -12949,6 +12949,44 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
 
 MATTE_DIR = CACHE_DIR / "mattes"
 
+# Where the alpha remap puts its knee. Selfie segmentation comes back
+# UNDER-CONFIDENT on a bright subject against a bright background: measured on
+# a real portrait, the white crown of a cap reads 0.705 rather than 1.0, so
+# about 30% of the background bleeds through and the white reads brown.
+# Rescaling [lo, hi] onto [0, 1] pushes that core to opaque while keeping a
+# feather only in the genuinely uncertain band.
+MATTE_KNEE_LO = 0.20
+MATTE_KNEE_HI = 0.60
+
+
+def _matte_refine(mask):
+    """Firm up an under-confident matte. Takes and returns a 0..1 float mask.
+
+    Measured on matplotlib's bundled grace_hopper.jpg, which is the only
+    photograph of a person available offline and is what the tests use:
+
+        raw                              crown alpha 0.705    --
+        ximgproc.guidedFilter, full res              0.697    196 ms/frame
+        half-res guided + this remap                 0.768    328 ms/frame
+        this remap alone                             0.839    1.3 ms/frame
+
+    The textbook answer is a guided filter and it is the wrong one here. It
+    sharpens an edge but cannot invent subject where the model reported
+    background, and at 196ms a frame it would add six minutes to a 60-second
+    clip against the model's own 7ms.
+
+    HONEST LIMIT: this halves the bleed-through, it does not cure it. The
+    failure is a limitation of the segmentation model. The remap also narrows
+    the soft edge (10.9% -> 5.0% of the subject), which helps a bleeding cap
+    and hurts fine hair. If real footage shows this is not enough, buying a
+    matte is the next move and these numbers are what to compare against.
+    """
+    import numpy as np
+    lo, hi = float(MATTE_KNEE_LO), float(MATTE_KNEE_HI)
+    if hi <= lo:
+        return mask
+    return np.clip((mask - lo) / (hi - lo), 0.0, 1.0)
+
 
 def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                     dur: float | None = None) -> Path | None:
@@ -13016,7 +13054,7 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
             if res is None or res.segmentation_mask is None:
                 mask = np.zeros((H, W), dtype="float32")
             else:
-                mask = np.clip(res.segmentation_mask, 0.0, 1.0)
+                mask = _matte_refine(np.clip(res.segmentation_mask, 0.0, 1.0))
             proc.stdin.write((mask * 255).astype("uint8").tobytes())
             written += 1
     except Exception as exc:
