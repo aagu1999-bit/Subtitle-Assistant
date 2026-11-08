@@ -2317,6 +2317,22 @@ def _smooth_word_timings(words: list,
     return out
 
 
+def _headline_banner_text(value) -> str:
+    """Normalise a headline banner to the string build_ass expects.
+
+    The timeline normaliser explicitly admits a dict here, and build_ass
+    formats the value as a string. A dict is truthy, so it sails past the
+    `if headline_banner:` guard into fmt() and either raises on .upper() or
+    writes its repr into an ASS line -- where the braces are override-block
+    delimiters, so the whole line is discarded.
+    """
+    if isinstance(value, dict):
+        if not value.get("enabled", True):
+            return ""
+        value = value.get("text", "")
+    return str(value or "").strip()
+
+
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
     style = _normalize_caption_style(style)
     font = style.get("font_name", "Montserrat Thin Black")
@@ -2477,7 +2493,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if headline_banner:
         banner_y = int(video_h * 0.05)
         last_end = float(words[-1].get("end", 0)) if words else 0
-        banner_end_ts = _ts_to_ass(last_end)
+        # _ts_to_ass() does not exist: every banner raised NameError here,
+        # so the feature has never rendered once. The helper is ass_timestamp().
+        banner_end_ts = ass_timestamp(last_end)
         lines.append(
             f"Dialogue: 0,0:00:00.00,{banner_end_ts},Banner,,0,0,0,,"
             f"{{\\pos({pos_x},{banner_y})\\bord0\\shad0\\3c&H000000&\\3a&H80&}}{fmt(headline_banner)}"
@@ -4326,7 +4344,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
             w, h, _ = _quality_boost_scale(w, h)
             
         speaker_colors = style.get('speaker_colors', {}) or {}
-        headline_banner = style.get('headline_banner', '')
+        headline_banner = _headline_banner_text(style.get('headline_banner', ''))
         # Color captions by speaker whenever colors are set — don't require
         # the 9:16 reframe compositor to be on.
         diar = diarization_data if (reframe_settings.get("enabled") or speaker_colors) else None

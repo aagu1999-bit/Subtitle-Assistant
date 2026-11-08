@@ -430,7 +430,7 @@ THEMES.forEach((t, i) => {
 // ---- Viral Presets click handler ----
 const VIRAL_PRESETS = {
   hormozi: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", outline: "#000000", outlineWidth: 4, allCaps: true, shadow: 2 },
-  mrbeast: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", outline: "#000000", outlineWidth: 5, allCaps: true, shadow: 3 },
+  mrbeast: { font: "Integral CF", fontFallback: "Anton", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", outline: "#000000", outlineWidth: 5, allCaps: true, shadow: 3 },
   neon:    { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", outline: "#110022", outlineWidth: 3, allCaps: true, shadow: 2 },
   karaoke: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", outline: "#0F172A", outlineWidth: 2, allCaps: false, shadow: 1 },
 };
@@ -443,7 +443,7 @@ document.querySelectorAll("#viralPresets .theme").forEach(btn => {
     const p = VIRAL_PRESETS[presetKey];
     if (!p) return;
     const fontEl = $("font");
-    if (fontEl) fontEl.value = p.font;
+    if (fontEl) fontEl.value = resolveAvailableFont(p.font, p.fontFallback);
     if (sizeEl) { sizeEl.value = p.size; sizeVal.textContent = p.size; }
     if (primaryEl) primaryEl.value = p.primary;
     if (highlightEl) highlightEl.value = p.highlight;
@@ -452,8 +452,12 @@ document.querySelectorAll("#viralPresets .theme").forEach(btn => {
     if (owEl) { owEl.value = p.outlineWidth; owVal.textContent = p.outlineWidth; }
     const capsEl = $("allCaps");
     if (capsEl) capsEl.checked = p.allCaps;
+    // #shadow is a checkbox and getStyle() reads .checked, so assigning
+    // .value here silently did nothing and every preset's shadow was lost.
+    // The preset's number is a depth the style model doesn't carry, so any
+    // non-zero value means "shadow on".
     const shadowEl = $("shadow");
-    if (shadowEl) shadowEl.value = p.shadow;
+    if (shadowEl) shadowEl.checked = !!p.shadow;
     scheduleDraftSave();
   });
 });
@@ -494,6 +498,23 @@ groupEl.oninput = () => {
 // re-render the preview the moment the active family becomes available.
 const _loadedSubtitleFonts = new Set();
 
+// Families whose UI name does not normalise to their filename stem. The name
+// inside the TTF is what libass matches server-side, so these UI values are
+// correct and must NOT be renamed -- only the browser-side filename lookup
+// needs the hint. "Montserrat Thin Black" is genuinely the family name inside
+// Montserrat-Black.ttf; without this entry that face never registered an
+// @font-face, so the preview measured a system face while the render used
+// Montserrat. Preview and render disagreed on a shipped font.
+const FONT_FILE_ALIASES = {
+  "Montserrat Thin Black": "Montserrat-Black.ttf",
+};
+
+// UI family names that resolved to a file on disk. Fonts offered in the
+// dropdown but not bundled (the commercial faces noted in fonts/README.md)
+// stay out, so the dropdown can disable them instead of letting the user pick
+// one that silently falls back to a system face in preview AND render.
+const _availableSubtitleFonts = new Set();
+
 async function _registerSubtitleFonts() {
   let fonts = [];
   try {
@@ -505,34 +526,67 @@ async function _registerSubtitleFonts() {
   const norm = s => s.toLowerCase().replace(/[-_\s]+/g, "");
   const styleEl = document.createElement("style");
   let css = "";
-  const loadPromises = [];
+  const resolved = [];
   for (const family of wanted) {
     const target = norm(family);
-    const match = fonts.find(f => {
+    const alias = FONT_FILE_ALIASES[family];
+    const match = (alias && fonts.includes(alias)) ? alias : fonts.find(f => {
       const stem = f.replace(/\.[^.]+$/, "");
       return norm(stem) === target || norm(stem).includes(target) || target.includes(norm(stem));
     });
     if (!match) continue;
+    _availableSubtitleFonts.add(family);
+    resolved.push(family);
     const url = `/fonts/${encodeURIComponent(match)}`;
     css += `@font-face { font-family: ${JSON.stringify(family)}; src: url("${url}"); font-display: swap; }\n`;
-    // Trigger an explicit download. Without this, the font isn't fetched
-    // until the first DOM node references it, which races the preview's
-    // measureText call.
-    if (document.fonts && document.fonts.load) {
-      loadPromises.push(
-        document.fonts.load(`16px "${family}"`).then(() => {
-          _loadedSubtitleFonts.add(family);
-          // If the user is currently looking at this family, re-measure.
-          if ($("font") && $("font").value === family) {
-            updateFontPreview();
-          }
-        }).catch(() => { /* missing TTF → silent fallback */ })
-      );
-    }
   }
+  // Install the @font-face rules BEFORE asking for the downloads. Calling
+  // document.fonts.load() first resolves against a family the document does
+  // not have yet: it succeeds immediately, fetches nothing, and leaves
+  // _loadedSubtitleFonts empty -- so no subtitle font was ever downloaded and
+  // the preview went on measuring a system face, which is the race the
+  // explicit load exists to prevent.
   styleEl.textContent = css;
   document.head.appendChild(styleEl);
-  await Promise.all(loadPromises);
+  _markUnavailableFontOptions();
+  if (!(document.fonts && document.fonts.load)) return;
+  await Promise.all(resolved.map(family =>
+    document.fonts.load(`16px "${family}"`).then(faces => {
+      // load() resolves with the matching faces; an empty array means the
+      // family still is not known, so do not claim it is ready.
+      if (!faces || !faces.length) return;
+      _loadedSubtitleFonts.add(family);
+      // If the user is currently looking at this family, re-measure.
+      if ($("font") && $("font").value === family) {
+        updateFontPreview();
+      }
+    }).catch(() => { /* missing or malformed TTF -> silent fallback */ })
+  ));
+}
+
+// Grey out the fonts that are not on disk. Driven by /list-fonts rather than a
+// hardcoded list, so dropping a TTF into fonts/ re-enables its option without
+// a code change. If /list-fonts fails, the set stays empty and this never
+// runs, so a transient error cannot disable the whole dropdown.
+function _markUnavailableFontOptions() {
+  const suffix = " (not installed)";
+  document.querySelectorAll("#font option").forEach(o => {
+    const ok = _availableSubtitleFonts.has(o.value);
+    o.disabled = !ok;
+    if (!ok && !o.textContent.endsWith(suffix)) o.textContent += suffix;
+  });
+}
+
+// First candidate family that is actually on disk. Presets name the face they
+// were designed around even when it is a commercial font this repo cannot
+// ship; falling back to a bundled face beats rendering in a silent substitute.
+// With no font list (fetch failed) this returns the first candidate, i.e. the
+// previous behaviour.
+function resolveAvailableFont(...candidates) {
+  for (const c of candidates) {
+    if (c && _availableSubtitleFonts.has(c)) return c;
+  }
+  return candidates.find(Boolean) || "";
 }
 _registerSubtitleFonts();
 
