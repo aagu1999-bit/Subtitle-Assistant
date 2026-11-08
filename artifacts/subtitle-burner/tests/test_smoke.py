@@ -793,7 +793,10 @@ def test_a_swiping_overlay_really_moves_in_the_render(app_mod, tmp_path):
             clip["motion"] = motion
         out = tmp_path / f"{name}.mp4"
         real = app_mod._timeline_clip_source
-        app_mod._timeline_clip_source = lambda c: card if c.get("src") else real(c)
+        # The real resolver takes extra keyword arguments on some branches,
+        # so pass them through rather than pinning this stub to one signature.
+        app_mod._timeline_clip_source = (
+            lambda c, **kw: card if c.get("src") else real(c, **kw))
         try:
             app_mod._tl_composite_overlays(base, [clip], W, H, out, fps=30)
         finally:
@@ -865,8 +868,8 @@ def test_a_keyword_with_no_provider_refuses_instead_of_making_a_badge(app_mod, m
     assert asset_id is None
     assert "provider" in why.lower() and "city skyline" in why
 
-    op, note = app_mod._resolve_add_broll({"keyword": "a city skyline"})
-    assert op is None, "a photo was placed with nothing to place"
+    op, note = app_mod._resolve_add_carousel({"photos": ["a city skyline"]})
+    assert op is None, "a carousel was placed with nothing to place"
     assert "provider" in note.lower()
 
 

@@ -2996,6 +2996,22 @@ def _smooth_word_timings(words: list,
     return out
 
 
+def _headline_banner_text(value) -> str:
+    """Normalise a headline banner to the string build_ass expects.
+
+    The timeline normaliser explicitly admits a dict here, and build_ass
+    formats the value as a string. A dict is truthy, so it sails past the
+    `if headline_banner:` guard into fmt() and either raises on .upper() or
+    writes its repr into an ASS line -- where the braces are override-block
+    delimiters, so the whole line is discarded.
+    """
+    if isinstance(value, dict):
+        if not value.get("enabled", True):
+            return ""
+        value = value.get("text", "")
+    return str(value or "").strip()
+
+
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
     style = _normalize_caption_style(style)
     font = style.get("font_name", _DEFAULT_CAPTION_STYLE["font_name"])
@@ -5445,7 +5461,7 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
             w, h, _ = _quality_boost_scale(w, h)
             
         speaker_colors = style.get('speaker_colors', {}) or {}
-        headline_banner = style.get('headline_banner', '')
+        headline_banner = _headline_banner_text(style.get('headline_banner', ''))
         # Color captions by speaker whenever colors are set — don't require
         # the 9:16 reframe compositor to be on.
         diar = diarization_data if (reframe_settings.get("enabled") or speaker_colors) else None
@@ -6971,6 +6987,95 @@ def _face_hint_for_job(job_id: str | None) -> tuple[float | None, float | None]:
             except (TypeError, ValueError):
                 break
     return None, None
+
+
+# ---- Prompt-placed B-roll and carousels ---------------------------------
+# The keyword -> stock photo -> timed overlay machinery already existed behind
+# a button. These resolve a co-editor op into concrete overlay clips, because
+# the model cannot fetch a photo or know which assets the user owns.
+
+_CAROUSEL_BOX = {
+    # A carousel's frames share one position, unlike auto B-roll, which spreads
+    # itself around the corners so several callouts can coexist.
+    "full": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "fit": "cover"},
+    "pip": {"x": 0.10, "y": 0.16, "w": 0.80, "h": 0.46, "fit": "cover"},
+}
+
+
+def _resolve_photo_source(ref: str) -> tuple[str | None, str]:
+    """(asset_id, note) for one carousel frame.
+
+    *ref* is either an asset id the user already owns or a subject to go and
+    find. Returns (None, reason) when nothing can be produced, so the caller
+    can refuse out loud instead of placing an empty box.
+    """
+    ref = str(ref or "").strip()
+    if not ref:
+        return None, "empty photo reference"
+    # An id for something already uploaded wins: it is the user's own picture.
+    if _asset_meta_path(ref).exists() or list(ASSET_DIR.glob(f"{ref}.*")):
+        return ref, ""
+    if not _broll_any_photo_provider():
+        return None, (
+            f"no stock photo provider is configured, so '{ref}' cannot be "
+            f"fetched. Set PEXELS_API_KEY or UNSPLASH_ACCESS_KEY, or name "
+            f"photos you have already uploaded."
+        )
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    asset_id = uuid.uuid4().hex
+    got = _fetch_broll_image_for_keyword(ref, ASSET_DIR / asset_id)
+    if not got:
+        return None, f"no photo found for '{ref}'"
+    final = ASSET_DIR / f"{asset_id}{got.suffix.lower()}"
+    if got.resolve() != final.resolve():
+        try:
+            if final.exists():
+                _safe_unlink(final)
+            got.replace(final)
+            got = final
+        except OSError:
+            pass
+    asset_id = got.stem
+    _write_asset_meta(asset_id, filename=f"{ref}{got.suffix.lower()}",
+                      keyword=ref, source="photo")
+    return asset_id, ""
+
+
+def _build_carousel_clips(refs: list, start: float, per_photo: float,
+                          motion: str, size: str) -> tuple[list, list]:
+    """(overlay clips, notes) for a run of photos that hand over in place.
+
+    Deliberately not a new track or renderer path: a carousel is N ordinary
+    overlay clips sharing a box and laid back to back, each sliding in. That
+    reuses the whole overlay pipeline and leaves every frame individually
+    editable afterwards.
+    """
+    box = _CAROUSEL_BOX.get("full" if str(size).lower() in ("full", "fullscreen", "full_frame") else "pip")
+    kind = str(motion or "swipe_left")
+    if kind not in _OVERLAY_SWIPE_FROM and kind != "none":
+        kind = "swipe_left"
+    per_photo = max(0.4, float(per_photo or 1.6))
+    carousel_id = uuid.uuid4().hex[:8]
+
+    clips, notes = [], []
+    t = max(0.0, float(start or 0))
+    for ref in refs[:8]:          # a sane cap; each frame is an ffmpeg input
+        asset_id, why = _resolve_photo_source(ref)
+        if not asset_id:
+            notes.append(why)
+            continue
+        clips.append({
+            "asset_id": asset_id,
+            "carousel_id": carousel_id,
+            "keyword": str(ref)[:60],
+            "start": round(t, 3),
+            "in": 0,
+            "out": round(per_photo, 3),
+            "motion": {"type": kind, "in": min(0.45, per_photo / 3)},
+            **box,
+        })
+        t += per_photo
+    return clips, notes
 
 
 def _make_keyword_badge_png(text: str, dest: Path) -> bool:
@@ -13312,6 +13417,50 @@ def _tl_mix_audio(base: Path, audio_clips: list, out_path: Path) -> None:
     )
 
 
+# Which way a swipe comes FROM. "swipe_left" is the gesture: the new photo
+# enters from the right and travels left, the way a carousel moves under your
+# thumb.
+_OVERLAY_SWIPE_FROM = {
+    "swipe_left":  (1, 0),
+    "swipe_right": (-1, 0),
+    "swipe_up":    (0, 1),
+    "swipe_down":  (0, -1),
+}
+
+
+def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
+                            W: int, H: int) -> tuple[str, str]:
+    """(x, y) expressions for an overlay that slides into place.
+
+    overlay's x and y are per-frame expressions -- `eval` defaults to `frame`
+    -- so the box can move. This code passed plain integers, which is why no
+    overlay could ever travel across the frame.
+
+    The ease is cubic out, the same curve the punch zoom uses, so the app has
+    one motion feel rather than two that nearly match. Offsets are a full
+    canvas dimension, which puts the photo properly off-frame whatever its box
+    size, instead of peeking in at the edge.
+    """
+    if not isinstance(motion, dict):
+        return str(x), str(y)
+    kind = str(motion.get("type") or "none")
+    sx, sy = _OVERLAY_SWIPE_FROM.get(kind, (0, 0))
+    if not (sx or sy):
+        return str(x), str(y)
+    try:
+        slide = max(0.05, float(motion.get("in", 0.35)))
+    except (TypeError, ValueError):
+        slide = 0.35
+
+    # u runs 0->1 across the slide; pow(1-u,3) is the remaining offset, so the
+    # photo starts a full dimension away and decelerates into position.
+    u = f"min(1,max(0,(t-{start:.3f})/{slide:.3f}))"
+    remaining = f"pow(1-{u},3)"
+    x_expr = f"{x}+({sx * W})*{remaining}" if sx else str(x)
+    y_expr = f"{y}+({sy * H})*{remaining}" if sy else str(y)
+    return x_expr, y_expr
+
+
 def _tl_overlay_scale_filter(ow: int, oh: int, fit: str) -> str:
     """FFmpeg scale/crop/pad chain for overlay fit modes."""
     fit = (fit or "cover").lower()
@@ -13530,8 +13679,9 @@ def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
     prep += f",tpad=start_duration={start:.3f}"
     prep += f"[ov{n}]"
     filt.append(prep)
+    x_expr, y_expr = _tl_overlay_motion_expr(ov.get("motion"), x, y, start, W, H)
     filt.append(
-        f"{cur}[ov{n}]overlay=x={x}:y={y}:"
+        f"{cur}[ov{n}]overlay=x='{x_expr}':y='{y_expr}':"
         f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
     )
     cur = f"[bg{n}]"
@@ -16471,6 +16621,74 @@ def detect_shots():
     return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
 
 
+def _resolve_add_carousel(op: dict) -> tuple[dict | None, str]:
+    """Turn a described carousel into overlay clips with real photos attached.
+
+    The model can choose the subjects and the timing; it cannot fetch an image
+    or know which assets exist, so that happens here.
+    """
+    refs = op.get("photos") or op.get("asset_ids") or op.get("keywords") or []
+    if isinstance(refs, str):
+        refs = [refs]
+    refs = [r for r in refs if str(r or "").strip()]
+    if not refs:
+        return None, "no photos were named for the carousel"
+    clips, notes = _build_carousel_clips(
+        refs,
+        start=op.get("start", 0),
+        per_photo=op.get("per_photo", op.get("duration", 1.6)),
+        motion=op.get("motion", "swipe_left"),
+        size=op.get("size", "pip"),
+    )
+    if not clips:
+        return None, "; ".join(dict.fromkeys(notes)) or "no photos could be placed"
+    return {"op": "add_carousel", "clips": clips}, "; ".join(dict.fromkeys(notes))
+
+
+
+def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
+    """Turn at:"speaker" into a real point, and sanity-check explicit ones.
+
+    "aim it at me" is the way anyone actually phrases this, so the model is
+    allowed to say `at: "speaker"` and the face detection the reframe analysis
+    already cached resolves it here. Returns None when there is nothing to aim
+    at, so a plausible-looking op never reaches the client as a no-op.
+    """
+    try:
+        idx = int(op.get("index", 0))
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(effects):
+        return None
+
+    if str(op.get("at") or "").lower() in ("speaker", "face", "me", "person"):
+        # The source job behind this moment: effects sit on their own lane, so
+        # take the job from the Main clip playing underneath.
+        job_id = None
+        for c in main:
+            if c.get("source_job_id"):
+                job_id = c["source_job_id"]
+                break
+        if not job_id:
+            return None
+        try:
+            t = float(effects[idx].get("start") or 0)
+        except (TypeError, ValueError):
+            t = 0.0
+        anchor = _face_anchor_at(job_id, t)
+        if not anchor:
+            return None
+        return {"op": "set_punch_aim", "index": idx,
+                "x": anchor.get("x", 0.5), "y": anchor.get("y", 0.5)}
+
+    try:
+        x = min(1.0, max(0.0, float(op.get("x", 0.5))))
+        y = min(1.0, max(0.0, float(op.get("y", 0.5))))
+    except (TypeError, ValueError):
+        return None
+    return {"op": "set_punch_aim", "index": idx, "x": x, "y": y}
+
+
 @app.route("/co-editor", methods=["POST"])
 def co_editor():
     """Natural-language → validated timeline mutation ops (Captions Co-editor).
@@ -16490,6 +16708,7 @@ def co_editor():
 
     main = (timeline.get("tracks") or {}).get("main") or []
     overlays = (timeline.get("tracks") or {}).get("overlay") or []
+    effects = (timeline.get("tracks") or {}).get("effects") or []
     music = (timeline.get("tracks") or {}).get("music") or []
     texts = (timeline.get("tracks") or {}).get("text") or []
     effects = (timeline.get("tracks") or {}).get("effects") or []
@@ -16518,6 +16737,20 @@ def co_editor():
                 "burn_captions": c.get("burn_captions"),
             }
             for i, c in enumerate(main[:24])
+        ],
+        "effects_count": len(effects),
+        "effect_clips": [
+            {
+                "index": i,
+                "type": c.get("type"),
+                "start": c.get("start"),
+                "duration": c.get("out"),
+                "intensity": c.get("intensity"),
+                "direction": c.get("direction"),
+                "aim": c.get("aim") if isinstance(c.get("aim"), dict) else None,
+                "from_ai": bool(c.get("fx_origin")),
+            }
+            for i, c in enumerate(effects[:16])
         ],
         "overlay_count": len(overlays),
         "overlay_clips": [
@@ -16622,7 +16855,14 @@ Return ONLY JSON:
     {{"op": "skip_all_broll"}},
     {{"op": "split_at_playhead"}},
     {{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}},
-    {{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}}
+    {{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}},
+    {{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}},
+    {{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}},
+    {{"op": "set_punch_aim", "index": 0, "at": "speaker"}},
+    {{"op": "delete_effect", "index": 0}},
+    {{"op": "add_carousel", "photos": ["bali beach", "temple"], "start": 6.0, "per_photo": 1.6, "motion": "swipe_left", "size": "full"}},
+    {{"op": "set_overlay_motion", "index": 0, "type": "swipe_up", "in": 0.35}},
+    {{"op": "delete_carousel", "index": 0}}
   ],
   "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
@@ -16642,6 +16882,20 @@ Rules:
 - "skip all suggestions" → skip_all_broll.
 - "split here" → split_at_playhead (uses current playhead).
 - "polish / polish cut / run polish" → run_polish. pacing: fast|informative|cinematic. broll_mode: pip|center. Optional keywords array. Not the same as ▶ Render.
+- The Effects lane holds timed camera moves, each with its own start and
+  duration. Use set_effect_time to move or stretch one, set_punch_aim to
+  change where a punch zoom pushes toward, and delete_effect to remove one.
+  Indexes there refer to effect_clips, not to shots.
+- set_punch_aim takes explicit x/y in 0..1 (0,0 is top-left) or at:"speaker",
+  which aims at the detected face at that moment.
+- add_carousel places several photos that hand over in place, each sliding in.
+  "photos" may be subjects to search for ("bali beach") or ids of assets the
+  user already uploaded -- ids when they mean their own pictures, subjects
+  when they describe what they want to see. motion names the gesture:
+  swipe_left means the photo enters from the right and travels left. size
+  "full" covers the frame, "pip" sits it in a box over the video.
+- For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
+  which lets the user review before anything lands.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -16663,18 +16917,48 @@ Rules:
         "apply_recommended_cuts", "merge_shots", "reorder_shot", "swap_shot",
         "set_overlay_layout", "set_music", "apply_clip_style", "suggest_broll",
         "accept_all_broll", "skip_all_broll", "split_at_playhead", "run_polish",
+        "set_shot_range", "set_effect_time", "set_punch_aim", "delete_effect",
+        "add_carousel", "set_overlay_motion", "delete_carousel",
     }
     ops = []
+    refused = []
+    blocked = []
     for op in raw_ops:
         if not isinstance(op, dict):
             continue
         name = str(op.get("op") or "")
         if name not in allowed:
+            # Worth knowing about: the model reaching for an op that does not
+            # exist is a concrete request for one that should.
+            refused.append(name)
             continue
+        if name == "set_punch_aim":
+            op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name == "add_carousel":
+            # Fetching photos can fail for reasons the user needs to hear --
+            # no provider key, nothing found -- so say it rather than placing
+            # an empty box.
+            op, note = _resolve_add_carousel(op)
+            if note:
+                blocked.append(note)
+            if op is None:
+                continue
         ops.append(op)
         if len(ops) >= 12:
             break
 
+    # The prompts that produce nothing are the most useful thing here: they are
+    # a list of the edits people ask for that the co-editor cannot yet make.
+    _record_suggestion(
+        str(data.get("job_id") or ""), "coeditor",
+        {"prompt": prompt[:400], "ops": ops, "invented_ops": refused},
+        "accepted" if ops else "rejected",
+        {"message": message} if message else None,
+    )
+    if blocked:
+        message = ((message + " ") if message else "") + " ".join(blocked)
     return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
 
 
