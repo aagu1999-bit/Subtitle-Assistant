@@ -536,7 +536,10 @@ def test_the_brand_preset_round_trips_every_style_key():
     # audio would be a lie, so it is left out on purpose. speaker_colors has
     # its own block because the speaker list is dynamic: the pickers have to be
     # built from the saved keys before their values can be written.
-    handled_elsewhere = {"bg_music", "speaker_colors"}
+    # bg_music hangs off an uploaded file, speaker_colors has a dynamic
+    # picker list, and hook_mode / hook_title are derived rather than stored
+    # on a control of their own.
+    handled_elsewhere = {"bg_music", "speaker_colors", "hook_mode", "hook_title"}
     gap = emitted - table - handled_elsewhere
     assert not gap, f"saved but never restored: {sorted(gap)}"
 
@@ -979,3 +982,25 @@ def test_the_hold_intensities_survive_the_punch_retune(app_mod):
         assert vals.count(peak) > 1, f"{intensity} does not hold at the peak"
         assert vals[-1] == 1.0, f"{intensity} does not settle back"
         assert 1.0 < peak <= 1.18, f"{intensity} peaks at {peak}, above the cap"
+
+
+def test_rebuilding_the_speaker_pickers_keeps_the_enable_toggle():
+    """#speakerColorsEnabled lives inside the wrap that gets cleared.
+
+    syncSpeakerColorPickers() does wrap.innerHTML = "" and never rebuilt the
+    toggle, so any call destroyed it -- after which getStyle() found no
+    checkbox and reported speaker_colors as {} forever, silently dropping them
+    from every render. It runs on the normal path after Analyze, not only from
+    the preset loader, so this was live.
+    """
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    body = js.split("function syncSpeakerColorPickers")[1].split("\nfunction ")[0]
+    assert 'wrap.innerHTML = ""' in body, "the function no longer clears the wrap"
+    assert "speakerColorsEnabled" in body, (
+        "the wrap is cleared without preserving the enable toggle inside it"
+    )
+    assert "wrap.appendChild(toggle)" in body, "the toggle is never put back"
+    # And the markup must still place it inside, or this guard is pointless.
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    wrap = html.split('id="speakerColorPickers"')[1].split("</div>")[0]
+    assert 'id="speakerColorsEnabled"' in wrap

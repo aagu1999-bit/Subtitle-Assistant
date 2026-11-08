@@ -246,7 +246,12 @@ CAPCUT_TEMPLATES = {
 # Timeline UI and AI Edit packs historically used short aliases (font, size,
 # primary, …); _normalize_caption_style merges those into this shape.
 _DEFAULT_CAPTION_STYLE = {
-    "font_name": "Montserrat Thin Black",
+    # Anton, to match the titles, which already default to it on both the
+    # creator and renderer sides. Changing this default does NOT repoint saved
+    # jobs: those carry their own style.font_name. And the Montserrat option
+    # keeps its value -- "Montserrat Thin Black" is the real family name inside
+    # Montserrat-Black.ttf, which is what libass matches on.
+    "font_name": "Anton",
     "font_size": 64,
     "primary_color": "#FFFFFF",
     "highlight_color": "#FFD60A",
@@ -2837,15 +2842,15 @@ def _smooth_word_timings(words: list,
 
 def build_ass(words, style: dict, video_w: int, video_h: int, emoji_rules: dict = None, speaker_colors: dict = None, diarization: list = None, headline_banner: str = None) -> str:
     style = _normalize_caption_style(style)
-    font = style.get("font_name", "Montserrat Thin Black")
-    font_size = int(style.get("font_size", 72))
+    font = style.get("font_name", _DEFAULT_CAPTION_STYLE["font_name"])
+    font_size = int(style.get("font_size", _DEFAULT_CAPTION_STYLE["font_size"]))
     primary = hex_to_ass_color(style.get("primary_color", "#FFFFFF"))
     highlight = hex_to_ass_color(style.get("highlight_color", "#FFD60A"))
     accent = hex_to_ass_color(style.get("accent_color", "#FF6B35"))
     outline = hex_to_ass_color(style.get("outline_color", "#000000"))
-    outline_w = int(style.get("outline_width", 3))
+    outline_w = int(style.get("outline_width", _DEFAULT_CAPTION_STYLE["outline_width"]))
     shadow = int(style.get("shadow", 1))
-    pos_y_pct = float(style.get("position_y", 85))
+    pos_y_pct = float(style.get("position_y", _DEFAULT_CAPTION_STYLE["position_y"]))
     all_caps = bool(style.get("all_caps", True))
     group_size = int(style.get("group_size", 3))
     smoothing_on = style.get("smooth_timings", True)
@@ -10280,6 +10285,7 @@ def index():
         broll_gif_ready=_broll_gif_provider_ready(),
         broll_providers=broll_providers,
         capcut_templates=CAPCUT_TEMPLATES,
+        caption_defaults=_DEFAULT_CAPTION_STYLE,
         asset_version=asset_version,
     )
     # Never let the browser cache the HTML shell. The ?v=asset_version on the

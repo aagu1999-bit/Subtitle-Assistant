@@ -1107,7 +1107,6 @@ function collectSpeakerColors() {
   if ($("guestColor") && !out.SPEAKER_01) out.SPEAKER_01 = $("guestColor").value;
   return out;
 }
-
 function colorForSpeaker(speakerId, index) {
   if (!speakerId) return defaultSpeakerColor("SPEAKER_00", index);
   const map = collectSpeakerColors();
@@ -1126,6 +1125,13 @@ function syncSpeakerColorPickers(speakerIds) {
   if (!ensured.includes("SPEAKER_00")) ensured.unshift("SPEAKER_00");
   if (!ensured.includes("SPEAKER_01") && ensured.length === 1) ensured.push("SPEAKER_01");
   const existing = collectSpeakerColors();
+  // #speakerColorsEnabled lives inside this wrap, so clearing it destroyed the
+  // enable toggle -- after which getStyle() found no checkbox and reported
+  // speaker_colors as {} forever, silently dropping them from every render.
+  // Keep the node and put it back.
+  const toggle = wrap.querySelector("#speakerColorsEnabled");
+  const wasEnabled = toggle ? toggle.checked : true;
+  if (toggle) toggle.remove();
   wrap.innerHTML = "";
   ensured.forEach((id, i) => {
     const label = document.createElement("label");
@@ -1160,6 +1166,10 @@ function syncSpeakerColorPickers(speakerIds) {
     label.appendChild(inp);
     wrap.appendChild(label);
   });
+  if (toggle) {
+    toggle.checked = wasEnabled;
+    wrap.appendChild(toggle);
+  }
 }
 
 // ---- Helpers: collect style / audio ----
@@ -8232,10 +8242,10 @@ window.saveCustomBrandPreset = function(name = "custom") {
     const style = typeof getStyle === "function" ? getStyle() : {};
     localStorage.setItem("_customBrandPreset", JSON.stringify(style));
     console.log("Custom brand preset saved:", name);
-    alert("Brand preset saved successfully!");
+    brandPresetNote("Brand preset saved.");
   } catch (e) {
     console.error("Failed to save preset", e);
-    alert("Failed to save brand preset.");
+    brandPresetNote("Could not save the brand preset: " + e.message);
   }
 };
 
@@ -8336,57 +8346,119 @@ if (applyBrandingToTimelineBtn) {
   };
 }
 
-window.loadCustomBrandPreset = function() {
+// One table maps each style key to the control holding it. getStyle() reads
+// the controls; this writes them back. Driving both ends from one list is how
+// a saved preset stops silently losing settings: the previous loader restored
+// 8 of the ~24 keys getStyle() produces, so position, caps, shadow, grouping,
+// quality boost, the hook settings, punch zoom and silence tightening were all
+// dropped on every load without a word.
+const STYLE_CONTROLS = [
+  // [style key, element id, kind, value-label id, label suffix]
+  ["font_name",           "font",              "value"],
+  ["font_size",           "size",              "number",  "sizeVal"],
+  ["primary_color",       "primary",           "value"],
+  ["highlight_color",     "highlight",         "value"],
+  ["accent_color",        "accent",            "value"],
+  ["outline_color",       "outlineColor",      "value"],
+  ["outline_width",       "outlineWidth",      "number",  "owVal"],
+  ["shadow",              "shadow",            "checked"],
+  ["position_y",          "posY",              "number",  "posVal", "%"],
+  ["all_caps",            "allCaps",           "checked"],
+  ["group_size",          "group",             "number",  "groupVal"],
+  ["smooth_timings",      "smoothTimings",     "checked"],
+  ["punchword_emphasis",  "punchwordEmphasis", "checked"],
+  ["quality_boost",       "qualityBoost",      "checked"],
+  ["headline_banner",     "headlineBanner",    "value"],
+  ["hook_font",           "hookFont",          "value"],
+  ["hook_duration",       "hookDuration",      "number"],
+];
+
+// Nested blocks, which the flat table cannot express. bg_music is deliberately
+// absent: it hangs off an uploaded file, so restoring its numbers without the
+// audio would be a lie. speaker_colors is handled separately because the
+// speaker list is dynamic, hook_mode because it is derived from a checkbox
+// rather than stored on one, and hook_title because it is computed.
+const NESTED_STYLE_CONTROLS = [
+  ["reframe",          "enabled",      "reframeEnabled",      "checked"],
+  ["reframe",          "top_panel",    "reframeTopSelect",    "value"],
+  ["reframe",          "bottom_panel", "reframeBottomSelect", "value"],
+  ["punch_zoom",       "enabled",      "punchZoomEnabled",    "checked"],
+  ["punch_zoom",       "intensity",    "punchZoomIntensity",  "value"],
+  ["tighten_silences", "enabled",      "tightenEnabled",      "checked"],
+  ["tighten_silences", "max_gap",      "tightenMaxGap",       "value"],
+  ["tighten_silences", "target_gap",   "tightenTargetGap",    "value"],
+  ["tighten_silences", "crossfade",    "tightenCrossfade",    "checked"],
+];
+
+// The on-page banner, which a phone can actually see, falling back to alert()
+// if the banner script has not loaded. The old code used alert() even for
+// success, which is three taps on a phone to dismiss.
+function brandPresetNote(msg) {
+  if (window.__studioNote) window.__studioNote(msg);
+  else alert(msg);
+}
+
+function applyStyleToControls(style) {
+  const missing = [];
+  STYLE_CONTROLS.forEach(([key, id, kind, labelId, suffix]) => {
+    if (style[key] === undefined || style[key] === null) return;
+    const el = document.getElementById(id);
+    if (!el) { missing.push(key); return; }
+    if (kind === "checked") el.checked = !!style[key];
+    else el.value = style[key];
+    if (labelId) {
+      const lab = document.getElementById(labelId);
+      if (lab) lab.textContent = style[key] + (suffix || "");
+    }
+  });
+  NESTED_STYLE_CONTROLS.forEach(([key, sub, id, kind]) => {
+    const block = style[key];
+    if (!block || block[sub] === undefined || block[sub] === null) return;
+    const el = document.getElementById(id);
+    if (!el) { missing.push(key + "." + sub); return; }
+    if (kind === "checked") el.checked = !!block[sub];
+    else el.value = block[sub];
+  });
+  // hook_mode is derived from a checkbox rather than stored on one.
+  if (style.hook_mode !== undefined && document.getElementById("hookFullBanner")) {
+    document.getElementById("hookFullBanner").checked = style.hook_mode === "banner";
+  }
+  // Speaker colours: the speaker list is dynamic, so the pickers are built
+  // from the saved keys before their values are written.
+  const sc = style.speaker_colors;
+  const scOn = document.getElementById("speakerColorsEnabled");
+  if (sc && Object.keys(sc).length > 0 && scOn) {
+    scOn.checked = true;
+    if (typeof syncSpeakerColorPickers === "function") {
+      syncSpeakerColorPickers(Object.keys(sc));
+    }
+    Object.entries(sc).forEach(([id, color]) => {
+      const inp = document.querySelector('[data-speaker-color="' + id + '"]');
+      if (inp && color) inp.value = color;
+    });
+  }
+  return missing;
+}
+
+window.loadCustomBrandPreset = function () {
+  let data;
   try {
-    const data = localStorage.getItem("_customBrandPreset");
-    if (!data) {
-      alert("No custom brand preset found.");
-      return;
-    }
-    const style = JSON.parse(data);
-    
-    if (style.font_name && document.getElementById("font")) document.getElementById("font").value = style.font_name;
-    if (style.font_size && document.getElementById("size")) { document.getElementById("size").value = style.font_size; if (document.getElementById("sizeVal")) document.getElementById("sizeVal").textContent = style.font_size; }
-    if (style.primary_color && document.getElementById("primary")) document.getElementById("primary").value = style.primary_color;
-    if (style.highlight_color && document.getElementById("highlight")) document.getElementById("highlight").value = style.highlight_color;
-    if (style.accent_color && document.getElementById("accent")) document.getElementById("accent").value = style.accent_color;
-    if (style.outline_color && document.getElementById("outlineColor")) document.getElementById("outlineColor").value = style.outline_color;
-    if (style.outline_width !== undefined && document.getElementById("outlineWidth")) { document.getElementById("outlineWidth").value = style.outline_width; if (document.getElementById("owVal")) document.getElementById("owVal").textContent = style.outline_width; }
-    
-    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = typeof style.headline_banner === "object" ? (style.headline_banner.text || "") : style.headline_banner;
-    if (style.hook_title && typeof style.hook_title === "object") {
-      if ($("headlineBanner") && style.hook_title.text) $("headlineBanner").value = style.hook_title.text;
-      if ($("hookFont") && style.hook_title.font) $("hookFont").value = style.hook_title.font;
-      if ($("hookDuration") && style.hook_title.duration_sec != null) {
-        $("hookDuration").value = style.hook_title.duration_sec;
-        if ($("hookDurationVal")) $("hookDurationVal").textContent = Number(style.hook_title.duration_sec).toFixed(1) + "s";
-      }
-      if ($("hookFullBanner")) $("hookFullBanner").checked = style.hook_title.mode === "banner";
-    } else {
-      if ($("hookFont") && style.hook_font) $("hookFont").value = style.hook_font;
-      if ($("hookDuration") && style.hook_duration != null) {
-        $("hookDuration").value = style.hook_duration;
-        if ($("hookDurationVal")) $("hookDurationVal").textContent = Number(style.hook_duration).toFixed(1) + "s";
-      }
-      if ($("hookFullBanner") && style.hook_mode) $("hookFullBanner").checked = style.hook_mode === "banner";
-    }
-    
-    if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
-      document.getElementById("speakerColorsEnabled").checked = true;
-      syncSpeakerColorPickers(Object.keys(style.speaker_colors));
-      Object.entries(style.speaker_colors).forEach(([id, color]) => {
-        const inp = document.querySelector(`[data-speaker-color="${id}"]`);
-        if (inp && color) inp.value = color;
-      });
-    }
-    
+    data = localStorage.getItem("_customBrandPreset");
+  } catch (e) {
+    brandPresetNote("Couldn't read saved presets in this browser.");
+    return;
+  }
+  if (!data) { brandPresetNote("No saved brand preset yet."); return; }
+  try {
+    const missing = applyStyleToControls(JSON.parse(data));
     if (typeof scheduleDraftSave === "function") scheduleDraftSave();
     if (typeof updateFontPreview === "function") updateFontPreview();
-    
-    alert("Brand preset loaded successfully!");
+    brandPresetNote(missing.length
+      ? "Brand preset loaded (" + missing.length + " setting(s) had no control)."
+      : "Brand preset loaded.");
   } catch (e) {
     console.error("Failed to load preset", e);
-    alert("Failed to load brand preset.");
+    brandPresetNote("Couldn't load the brand preset: " + e.message);
   }
 };
 

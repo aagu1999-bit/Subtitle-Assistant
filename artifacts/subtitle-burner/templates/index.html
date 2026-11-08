@@ -454,11 +454,11 @@
       <select id="font">
         <optgroup label="Default">
           <option value="DM Sans">DM Sans</option>
-          <option value="Montserrat Thin Black" selected>Montserrat Black</option>
+          <option value="Montserrat Thin Black"{% if caption_defaults.font_name == "Montserrat Thin Black" %} selected{% endif %}>Montserrat Black</option>
         </optgroup>
         <optgroup label="🔥 Viral / street-interview">
           <option value="Bebas Neue">Bebas Neue</option>
-          <option value="Anton">Anton</option>
+          <option value="Anton"{% if caption_defaults.font_name == "Anton" %} selected{% endif %}>Anton</option>
           <option value="Oswald">Oswald</option>
           <option value="Archivo Black">Archivo Black</option>
           <option value="Alfa Slab One">Alfa Slab One</option>
@@ -478,8 +478,8 @@
 
     <div class="row">
       <label>Font size</label>
-      <input type="range" id="size" min="16" max="140" value="56">
-      <span id="sizeVal" class="pill">56</span>
+      <input type="range" id="size" min="16" max="140" value="{{ caption_defaults.font_size }}">
+      <span id="sizeVal" class="pill">{{ caption_defaults.font_size }}</span>
     </div>
 
     <div class="row">
@@ -500,14 +500,14 @@
       <label>Outline</label>
       <input type="color" id="outlineColor" value="#000000">
       <label class="inline">Width</label>
-      <input type="range" id="outlineWidth" min="0" max="8" value="2">
-      <span id="owVal" class="pill">2</span>
+      <input type="range" id="outlineWidth" min="0" max="8" value="{{ caption_defaults.outline_width }}">
+      <span id="owVal" class="pill">{{ caption_defaults.outline_width }}</span>
     </div>
 
     <div class="row">
       <label>Vertical position</label>
-      <input type="range" id="posY" min="10" max="95" value="85">
-      <span id="posVal" class="pill">85%</span>
+      <input type="range" id="posY" min="10" max="95" value="{{ caption_defaults.position_y }}">
+      <span id="posVal" class="pill">{{ caption_defaults.position_y }}%</span>
       <span class="muted">(10 = top, 95 = bottom)</span>
     </div>
 
