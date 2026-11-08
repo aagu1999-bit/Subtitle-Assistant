@@ -11,4 +11,14 @@ dependencies = [
     # "do not use it in a production deployment" for good reason: it is
     # single-process and has no request timeouts or worker supervision.
     "gunicorn>=21.0.0",
+    # Face detection and the person matte. Pinned below 0.10.15: MediaPipe
+    # removed the legacy `mp.solutions` API, and this app is written against
+    # it (mp.solutions.face_detection, mp.solutions.selfie_segmentation).
+    # An unpinned install resolves to a release where `mediapipe.solutions`
+    # does not exist and both features raise AttributeError at runtime.
+    "mediapipe>=0.10.5,<0.10.15",
+    "opencv-python-headless>=4.10.0",
+    # Forced alignment for word timestamps. Heavy (pulls torch), but every
+    # caption highlight and effect placement is anchored to a word time.
+    "whisperx>=3.1.0",
 ]

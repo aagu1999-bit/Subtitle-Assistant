@@ -591,9 +591,10 @@ def transcribe(video_path: Path, pre_clean: bool = False):
 # landing on a stressed word — is anchored to a word timestamp, so alignment
 # error shows up directly on screen. Whisper infers word times from decoder
 # attention, which drifts; WhisperX runs a phoneme model over the audio and
-# aligns the words it was given, which is markedly tighter. Opt in, because it
-# pulls torch and a wav2vec2 model.
-WHISPERX_ALIGN = os.environ.get("WHISPERX_ALIGN", "").lower() in ("1", "true", "yes")
+# aligns the words it was given, which is markedly tighter. On by default;
+# set WHISPERX_ALIGN=0 to skip it. When whisperx isn't installed this costs
+# one failed import per transcription and Whisper's own timings are kept.
+WHISPERX_ALIGN = os.environ.get("WHISPERX_ALIGN", "1").lower() not in ("0", "false", "no")
 
 
 def _refine_word_alignment(audio_path: Path, words: list[dict]) -> list[dict]:

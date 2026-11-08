@@ -16,7 +16,12 @@ gunicorn>=21.0.0
 # OpenCV has no X11 deps and mediapipe will use it transparently via the
 # shared `cv2` module name.
 pyannote.audio>=3.1.0
-mediapipe>=0.10.0
+# Pinned below 0.10.15: MediaPipe removed the legacy `mp.solutions` API, and
+# this app is written against it (mp.solutions.face_detection for the reframe
+# analysis, mp.solutions.selfie_segmentation for the person matte). An
+# unpinned install resolves to a release where `mediapipe.solutions` does not
+# exist, so both raise AttributeError the first time they run.
+mediapipe>=0.10.5,<0.10.15
 opencv-python-headless>=4.10.0
 
 # Tighter word timestamps (optional). Whisper infers word times from decoder
