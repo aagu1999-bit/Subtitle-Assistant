@@ -8239,6 +8239,121 @@ def suggestion_feedback_list(job_id: str):
     return jsonify({"suggestions": out})
 
 
+@app.route("/suggestions")
+def suggestions_across_jobs():
+    """Every recorded suggestion, newest first, across all projects.
+
+    The per-job reader above needs a job id in the path, which is useless for
+    the question that actually matters: *what do people keep asking for that
+    this app cannot do?* Those are the `invented_ops` the co-editor logged
+    when the model reached for an op that does not exist.
+
+    Query: ?kind=coeditor&outcome=rejected&limit=200
+    """
+    kind = (request.args.get("kind") or "").strip()
+    outcome = (request.args.get("outcome") or "").strip()
+    try:
+        limit = max(1, min(1000, int(request.args.get("limit", 200))))
+    except (TypeError, ValueError):
+        limit = 200
+
+    where, params = [], []
+    if kind:
+        where.append("kind = ?")
+        params.append(kind)
+    if outcome:
+        where.append("outcome = ?")
+        params.append(outcome)
+    sql = "SELECT id, job_id, kind, outcome, proposed, final, created_at FROM suggestions"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    try:
+        with _db_lock:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    items, wanted = [], {}
+    for r in rows:
+        item = dict(r)
+        for key in ("proposed", "final"):
+            if item.get(key):
+                try:
+                    item[key] = json.loads(item[key])
+                except (ValueError, TypeError):
+                    pass
+        prop = item.get("proposed")
+        if isinstance(prop, dict):
+            for name in prop.get("invented_ops") or []:
+                name = str(name or "").strip()
+                if not name:
+                    continue
+                slot = wanted.setdefault(name, {"op": name, "count": 0, "prompts": []})
+                slot["count"] += 1
+                ask = str(prop.get("prompt") or "").strip()
+                if ask and len(slot["prompts"]) < 5 and ask not in slot["prompts"]:
+                    slot["prompts"].append(ask)
+        items.append(item)
+
+    # The headline: the ops the model invented, most-asked first. This is the
+    # backlog, written by real use rather than by guesswork.
+    ranked = sorted(wanted.values(), key=lambda w: -w["count"])
+    return jsonify({"suggestions": items, "wanted_ops": ranked, "count": len(items)})
+
+
+@app.route("/suggestions-report")
+def suggestions_report():
+    """The same data as a page, so it can be read without a JSON viewer."""
+    return Response("""<!doctype html><meta charset="utf-8">
+<title>What people asked for</title>
+<style>
+ body{font:15px/1.55 system-ui,sans-serif;background:#0b0d13;color:#e8eaee;margin:0;padding:28px}
+ h1{font-size:1.25rem;margin:0 0 4px} p.sub{color:#8b93a3;margin:0 0 24px;font-size:.85rem}
+ h2{font-size:.95rem;margin:28px 0 10px;color:#f8fafc}
+ table{border-collapse:collapse;width:100%;max-width:900px}
+ th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #1e222c;vertical-align:top}
+ th{color:#8b93a3;font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+ code{color:#ffd60a}  .n{color:#8b93a3;font-variant-numeric:tabular-nums}
+ .ask{color:#aeb4c0;font-size:.85rem}
+ .empty{color:#8b93a3;background:#12151d;border:1px solid #1e222c;border-radius:10px;padding:16px;max-width:900px}
+</style>
+<h1>What people asked the co-editor for</h1>
+<p class="sub">Ops the model reached for that do not exist, most-asked first. This is a backlog written by use.</p>
+<div id="out">Loading…</div>
+<script>
+fetch("/suggestions?limit=1000").then(r=>r.json()).then(d=>{
+  const out=document.getElementById("out");
+  const w=d.wanted_ops||[];
+  let h="";
+  if(!w.length){
+    h+='<div class="empty">Nothing recorded yet. Every co-editor prompt that makes the model '
+     + 'invent an op lands here \\u2014 so this fills up as the app gets used.</div>';
+  } else {
+    h+='<table><tr><th>Asked for</th><th>Times</th><th>In their words</th></tr>';
+    for(const r of w){
+      h+='<tr><td><code>'+r.op+'</code></td><td class="n">'+r.count+'</td><td class="ask">'
+       + (r.prompts||[]).map(p=>'\\u201c'+p+'\\u201d').join('<br>')+'</td></tr>';
+    }
+    h+='</table>';
+  }
+  h+='<h2>Everything recorded ('+(d.count||0)+')</h2><table>'
+   + '<tr><th>When</th><th>Kind</th><th>Outcome</th><th>Prompt</th></tr>';
+  for(const s of (d.suggestions||[])){
+    const when=s.created_at?new Date(s.created_at*1000).toLocaleString():"";
+    const p=(s.proposed&&s.proposed.prompt)||"";
+    h+='<tr><td class="n">'+when+'</td><td>'+(s.kind||"")+'</td><td>'+(s.outcome||"")
+     + '</td><td class="ask">'+p+'</td></tr>';
+  }
+  out.innerHTML=h+'</table>';
+}).catch(e=>{document.getElementById("out").textContent="Could not load: "+e.message;});
+</script>""", mimetype="text/html")
+
+
 @app.route("/clip-from-job", methods=["POST"])
 def clip_from_job():
     """Spawn a new job that's a trimmed slice of an existing job's source video.

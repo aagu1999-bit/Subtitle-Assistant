@@ -9385,6 +9385,11 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // Without this every co-editor row lands under job_id = "", which
+          // is a URL the feedback reader cannot even address. The refusals
+          // recorded there are the list of edits people ask for and cannot
+          // get, so losing which project they came from loses most of it.
+          job_id: tl.job_id,
           prompt,
           timeline: timelinePayloadForCoEditor(),
           context: coEditorClientContext(),

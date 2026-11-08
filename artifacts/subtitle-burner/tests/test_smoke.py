@@ -1011,3 +1011,62 @@ def test_rebuilding_the_speaker_pickers_keeps_the_enable_toggle():
     html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
     wrap = html.split('id="speakerColorPickers"')[1].split("</div>")[0]
     assert 'id="speakerColorsEnabled"' in wrap
+
+
+# --- The refusal backlog -----------------------------------------------
+# Every co-editor prompt that makes the model reach for an op that does not
+# exist is a concrete request for one that should. Those were being recorded
+# and then lost: the client never sent a job_id, so the rows landed under
+# job_id = "" and the only reader took a job id in the URL path.
+
+def test_the_coeditor_tells_the_log_which_project_it_was():
+    """Without a job_id every refusal lands at a URL nothing can address."""
+    src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    send = src.split("async function sendCoEditorPrompt")[1].split("\n  }")[0]
+    assert '"/co-editor"' in send, "found the wrong function"
+    assert re.search(r"job_id:\s*tl\.job_id", send), \
+        "sendCoEditorPrompt must post job_id or the refusal log cannot be read back"
+
+
+def test_refused_ops_are_readable_across_every_project(app_mod, temp_db, monkeypatch):
+    """The backlog question is 'what do people keep asking for?', not
+    'what did they ask for on this one project?'."""
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "set_background", "image": "beach"},
+                           {"op": "enable_punch_zoom", "index": 0}],
+                   "message": "can't do the background"})
+    client = app_mod.app.test_client()
+    # Two different projects asking for the same missing capability.
+    for job, ask in (("jobA", "put a beach behind me"),
+                     ("jobB", "picture behind me while I talk")):
+        client.post("/co-editor", json={
+            "job_id": job, "prompt": ask, "timeline": _coeditor_timeline()})
+
+    data = client.get("/suggestions?kind=coeditor").get_json()
+    assert data["count"] == 2, "both projects' rows must come back from one call"
+
+    wanted = {w["op"]: w for w in data["wanted_ops"]}
+    assert "set_background" in wanted, "the invented op is the whole point"
+    assert wanted["set_background"]["count"] == 2, "asks must add up across projects"
+    # The real op was applied, so it is not a request for anything.
+    assert "enable_punch_zoom" not in wanted
+    # And it has to carry the words they used, or it is a name with no meaning.
+    assert "put a beach behind me" in wanted["set_background"]["prompts"]
+
+
+def test_the_backlog_filters_do_not_leak_other_rows(app_mod, temp_db, monkeypatch):
+    """A kind filter that quietly ignores itself would make the page lie."""
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [], "message": "no"})
+    client = app_mod.app.test_client()
+    client.post("/co-editor", json={"job_id": "jobA", "prompt": "x",
+                                    "timeline": _coeditor_timeline()})
+    app_mod._record_suggestion("jobA", "effect", {"type": "punch_zoom"}, "proposed")
+
+    assert client.get("/suggestions").get_json()["count"] == 2
+    assert client.get("/suggestions?kind=effect").get_json()["count"] == 1
+    assert client.get("/suggestions?kind=coeditor").get_json()["count"] == 1
+    assert client.get("/suggestions?outcome=rejected").get_json()["count"] == 1
+    # A bad limit must not 500 the page that reads it.
+    assert client.get("/suggestions?limit=banana").status_code == 200
