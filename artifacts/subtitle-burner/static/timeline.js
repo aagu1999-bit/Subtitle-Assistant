@@ -1145,7 +1145,7 @@
 
     if (t === "text") {
       html += propTextarea("text", "Text (use line breaks)", c.text);
-      html += `<div class="tl-prop-grid">${propNum("size", "Font size", c.size, 10, 200)}${propSelect("font", "Font", c.font, FONT_OPTS)}</div>`;
+      html += `<div class="tl-prop-grid">${propNum("size", "Font size", c.size, 10, 200)}${propSelect("font", "Font", c.font, fontOpts())}</div>`;
       html += `<div class="tl-prop-grid">${propColor("color", "Text color", c.color)}${propSelect("anim", "Animation", c.anim, [["fade", "Fade"], ["slideup", "Slide up"], ["none", "None"]])}</div>`;
       html += propCheck("bg_enabled", "Background box (lower-third)", c.bg_enabled);
       html += `<div class="tl-prop-grid">${propColor("bg_color", "Box color", c.bg_color)}${propRange("bg_opacity", "Box opacity", c.bg_opacity, 0, 1, 0.05)}</div>`;
@@ -1302,12 +1302,22 @@
     });
   }
 
-  const FONT_OPTS = [
+  // Titles used to carry their own shorter hard-coded list, so four bundled
+  // faces were offered for captions but not for titles. Read the caption
+  // dropdown instead -- it is already the list the font loader registers from
+  // -- and skip anything it has marked as having no file on disk.
+  const FONT_OPTS_FALLBACK = [
     ["Anton", "Anton"], ["Bebas Neue", "Bebas Neue"], ["Oswald", "Oswald"],
     ["Archivo Black", "Archivo Black"], ["Montserrat Thin Black", "Montserrat Black"],
     ["Alfa Slab One", "Alfa Slab One"], ["Staatliches", "Staatliches"],
     ["Passion One", "Passion One"], ["DM Sans", "DM Sans"],
   ];
+  function fontOpts() {
+    const opts = Array.from(document.querySelectorAll("#font option"))
+      .filter((o) => !o.disabled)
+      .map((o) => [o.value, o.textContent.replace(/ \(not installed\)$/, "")]);
+    return opts.length ? opts : FONT_OPTS_FALLBACK;
+  }
   const TRANSITION_OPTS = [
     ["", "Hard cut"], ["fade", "Crossfade"], ["fadeblack", "Fade through black"],
     ["dissolve", "Dissolve"], ["slideleft", "Slide left"], ["slideright", "Slide right"],

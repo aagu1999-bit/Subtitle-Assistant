@@ -4141,52 +4141,127 @@ if (capcutTemplateEl) {
 }
 
 // ---- Custom Brand Preset Saver ----
-window.saveCustomBrandPreset = function(name = "custom") {
+// ---- Custom brand preset -------------------------------------------
+// One table maps each style key to the control holding it. getStyle() reads
+// the controls; this writes them back. Driving both ends from one list is how
+// a saved preset stops silently losing settings: the previous loader restored
+// 8 of the ~20 keys getStyle() produces, so position, caps, shadow, grouping
+// and the quality flags were dropped on every load without a word.
+const STYLE_CONTROLS = [
+  // [style key, element id, kind, value-label id, label suffix]
+  ["font_name",           "font",              "value"],
+  ["font_size",           "size",              "number",  "sizeVal"],
+  ["primary_color",       "primary",           "value"],
+  ["highlight_color",     "highlight",         "value"],
+  ["accent_color",        "accent",            "value"],
+  ["outline_color",       "outlineColor",      "value"],
+  ["outline_width",       "outlineWidth",      "number",  "owVal"],
+  ["shadow",              "shadow",            "checked"],
+  ["position_y",          "posY",              "number",  "posVal", "%"],
+  ["all_caps",            "allCaps",           "checked"],
+  ["group_size",          "group",             "number",  "groupVal"],
+  ["smooth_timings",      "smoothTimings",     "checked"],
+  ["punchword_emphasis",  "punchwordEmphasis", "checked"],
+  ["quality_boost",       "qualityBoost",      "checked"],
+  ["headline_banner",     "headlineBanner",    "value"],
+];
+
+// The on-page banner, which a phone can actually see, falling back to alert()
+// if the banner script has not loaded. The old code used alert() even for
+// success, which is three taps on a phone to dismiss.
+// Nested blocks, which the flat table cannot express. bg_music is
+// deliberately absent: it hangs off an uploaded file, so restoring its numbers
+// without the audio would be a lie.
+const NESTED_STYLE_CONTROLS = [
+  ["reframe",          "enabled",      "reframeEnabled",      "checked"],
+  ["reframe",          "top_panel",    "reframeTopSelect",    "value"],
+  ["reframe",          "bottom_panel", "reframeBottomSelect", "value"],
+  ["punch_zoom",       "enabled",      "punchZoomEnabled",    "checked"],
+  ["punch_zoom",       "intensity",    "punchZoomIntensity",  "value"],
+  ["tighten_silences", "enabled",      "tightenEnabled",      "checked"],
+  ["tighten_silences", "max_gap",      "tightenMaxGap",       "value"],
+  ["tighten_silences", "target_gap",   "tightenTargetGap",    "value"],
+  ["tighten_silences", "crossfade",    "tightenCrossfade",    "checked"],
+  ["speaker_colors",   "SPEAKER_00",   "hostColor",           "value"],
+  ["speaker_colors",   "SPEAKER_01",   "guestColor",          "value"],
+];
+
+function brandPresetNote(msg) {
+  if (window.__studioNote) window.__studioNote(msg);
+  else alert(msg);
+}
+
+function applyStyleToControls(style) {
+  const missing = [];
+  STYLE_CONTROLS.forEach(([key, id, kind, labelId, suffix]) => {
+    if (style[key] === undefined || style[key] === null) return;
+    const el = document.getElementById(id);
+    if (!el) { missing.push(key); return; }
+    if (kind === "checked") el.checked = !!style[key];
+    else el.value = style[key];
+    if (labelId) {
+      const lab = document.getElementById(labelId);
+      if (lab) lab.textContent = style[key] + (suffix || "");
+    }
+  });
+  NESTED_STYLE_CONTROLS.forEach(([key, sub, id, kind]) => {
+    const block = style[key];
+    if (!block || block[sub] === undefined || block[sub] === null) return;
+    const el = document.getElementById(id);
+    if (!el) { missing.push(`${key}.${sub}`); return; }
+    if (kind === "checked") el.checked = !!block[sub];
+    else el.value = block[sub];
+  });
+  // The speaker-colour toggle is not itself part of the style blob; it is
+  // inferred from whether any colours were saved.
+  const scOn = document.getElementById("speakerColorsEnabled");
+  if (scOn && style.speaker_colors && Object.keys(style.speaker_colors).length) {
+    scOn.checked = true;
+  }
+  return missing;
+}
+
+window.saveCustomBrandPreset = function (name = "custom") {
   try {
     const style = typeof getStyle === "function" ? getStyle() : {};
     localStorage.setItem("_customBrandPreset", JSON.stringify(style));
-    console.log("Custom brand preset saved:", name);
-    alert("Brand preset saved successfully!");
+    brandPresetNote("Brand preset saved.");
   } catch (e) {
     console.error("Failed to save preset", e);
-    alert("Failed to save brand preset.");
+    brandPresetNote("Couldn't save the brand preset: " + e.message);
   }
 };
 
-window.loadCustomBrandPreset = function() {
+window.loadCustomBrandPreset = function () {
+  let data;
   try {
-    const data = localStorage.getItem("_customBrandPreset");
-    if (!data) {
-      alert("No custom brand preset found.");
-      return;
-    }
-    const style = JSON.parse(data);
-    
-    if (style.font_name && document.getElementById("font")) document.getElementById("font").value = style.font_name;
-    if (style.font_size && document.getElementById("size")) { document.getElementById("size").value = style.font_size; if (document.getElementById("sizeVal")) document.getElementById("sizeVal").textContent = style.font_size; }
-    if (style.primary_color && document.getElementById("primary")) document.getElementById("primary").value = style.primary_color;
-    if (style.highlight_color && document.getElementById("highlight")) document.getElementById("highlight").value = style.highlight_color;
-    if (style.accent_color && document.getElementById("accent")) document.getElementById("accent").value = style.accent_color;
-    if (style.outline_color && document.getElementById("outlineColor")) document.getElementById("outlineColor").value = style.outline_color;
-    if (style.outline_width !== undefined && document.getElementById("outlineWidth")) { document.getElementById("outlineWidth").value = style.outline_width; if (document.getElementById("owVal")) document.getElementById("owVal").textContent = style.outline_width; }
-    
-    if (style.headline_banner !== undefined && document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = style.headline_banner;
-    
-    if (style.speaker_colors && Object.keys(style.speaker_colors).length > 0 && document.getElementById("speakerColorsEnabled")) {
-      document.getElementById("speakerColorsEnabled").checked = true;
-      if (style.speaker_colors.SPEAKER_00 && document.getElementById("hostColor")) document.getElementById("hostColor").value = style.speaker_colors.SPEAKER_00;
-      if (style.speaker_colors.SPEAKER_01 && document.getElementById("guestColor")) document.getElementById("guestColor").value = style.speaker_colors.SPEAKER_01;
-    }
-    
+    data = localStorage.getItem("_customBrandPreset");
+  } catch (e) {
+    brandPresetNote("Couldn't read saved presets in this browser.");
+    return;
+  }
+  if (!data) { brandPresetNote("No saved brand preset yet."); return; }
+  try {
+    const missing = applyStyleToControls(JSON.parse(data));
     if (typeof scheduleDraftSave === "function") scheduleDraftSave();
     if (typeof updateFontPreview === "function") updateFontPreview();
-    
-    alert("Brand preset loaded successfully!");
+    brandPresetNote(missing.length
+      ? `Brand preset loaded (${missing.length} setting(s) had no control).`
+      : "Brand preset loaded.");
   } catch (e) {
     console.error("Failed to load preset", e);
-    alert("Failed to load brand preset.");
+    brandPresetNote("Couldn't load the brand preset: " + e.message);
   }
 };
+
+// The button existed in the markup with no listener at all, so the feature was
+// reachable only from the console.
+(function wireBrandPresetButtons() {
+  const save = document.getElementById("saveBrandPresetBtn");
+  if (save) save.addEventListener("click", () => window.saveCustomBrandPreset());
+  const load = document.getElementById("loadBrandPresetBtn");
+  if (load) load.addEventListener("click", () => window.loadCustomBrandPreset());
+})();
 
 // ---- Auto-Fetch B-Roll & Overlays Button Handler ----
 const autoFetchOverlaysBtn = document.getElementById("autoFetchOverlaysBtn");

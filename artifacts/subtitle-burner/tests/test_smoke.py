@@ -464,3 +464,45 @@ def test_feedback_for_an_unknown_suggestion_is_not_dropped(app_mod, temp_db):
     rows = client.get("/suggestion-feedback/j4").get_json()["suggestions"]
     assert len(rows) == 1, "the correction was silently discarded"
     assert rows[0]["final"]["intensity"] == "low"
+
+
+# --- dead and duplicated brand machinery --------------------------------
+
+def test_no_unreferenced_template_table_in_python(app_mod):
+    """app.py carried a CAPCUT_TEMPLATES dict nothing ever read.
+
+    The JS has its own table with a different schema, and that one is what
+    actually drives the dropdown. Two tables claiming to be the same thing is
+    how they drift.
+    """
+    assert not hasattr(app_mod, "CAPCUT_TEMPLATES")
+
+
+def test_the_brand_preset_round_trips_every_style_key():
+    """The loader restored 8 of the ~20 keys getStyle() produces.
+
+    Both ends are now driven by STYLE_CONTROLS, so this checks that table
+    covers what getStyle() emits rather than trusting the two to stay level.
+    """
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    emitted = set(re.findall(r"^\s{4}(\w+):",
+                             js.split("function getStyle()")[1].split("\n  };")[0],
+                             re.M))
+    table = set(re.findall(r'\["(\w+)",\s*"[^"]+",',
+                           js.split("const STYLE_CONTROLS = [")[1].split("\n];")[0]))
+    table |= set(re.findall(r'\["(\w+)",\s*"\w+",\s*"[^"]+",',
+                            js.split("const NESTED_STYLE_CONTROLS = [")[1].split("\n];")[0]))
+    # bg_music hangs off an uploaded file; restoring its numbers without the
+    # audio would be a lie, so it is left out on purpose.
+    handled_elsewhere = {"bg_music"}
+    gap = emitted - table - handled_elsewhere
+    assert not gap, f"saved but never restored: {sorted(gap)}"
+
+
+def test_the_brand_preset_button_is_wired():
+    """It sat in the markup with no listener, so the feature was console-only."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    for btn in ("saveBrandPresetBtn", "loadBrandPresetBtn"):
+        assert f'id="{btn}"' in html, f"{btn} is missing from the markup"
+        assert f'getElementById("{btn}")' in js, f"{btn} has no listener"
