@@ -500,14 +500,22 @@ def test_feedback_for_an_unknown_suggestion_is_not_dropped(app_mod, temp_db):
 
 # --- dead and duplicated brand machinery --------------------------------
 
-def test_no_unreferenced_template_table_in_python(app_mod):
-    """app.py carried a CAPCUT_TEMPLATES dict nothing ever read.
+def test_the_capcut_table_has_exactly_one_source(app_mod):
+    """Two tables claiming to be the same thing is how they drift.
 
-    The JS has its own table with a different schema, and that one is what
-    actually drives the dropdown. Two tables claiming to be the same thing is
-    how they drift.
+    On one branch the Python copy was dead weight and the JS had its own, with
+    a different schema. Here the Python one is authoritative: it is injected
+    into the page and the JS prefers it, keeping its own copy only as a
+    fallback. That is the arrangement worth protecting -- the failure mode is
+    someone removing the injection and leaving the two to diverge silently.
     """
-    assert not hasattr(app_mod, "CAPCUT_TEMPLATES")
+    assert hasattr(app_mod, "CAPCUT_TEMPLATES"), "the server table is gone"
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "capcut_templates" in html, "the server table never reaches the page"
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    assert "window.CAPCUT_TEMPLATES" in js, (
+        "the JS ignores the injected table and uses only its own copy"
+    )
 
 
 def test_the_brand_preset_round_trips_every_style_key():
@@ -933,3 +941,41 @@ def test_the_preview_and_the_render_swipe_on_the_same_curve(app_mod):
         assert abs(a - b) < 1e-6, (
             f"at {t}s the preview offsets by {a} and the render by {b}")
     assert js_vals[0] == 1.0 and js_vals[-1] == 0.0, "the curve does not run 1->0"
+
+
+def test_the_hold_intensities_survive_the_punch_retune(app_mod):
+    """"Hold" zooms are a different effect and must not be retuned.
+
+    They snap to a scale and stay there for the whole clip, which is the
+    opposite of a punch. Lowering the punch peaks and changing their curve
+    must leave these completely alone -- this is the one step in the port that
+    could quietly regress work that was already here.
+    """
+    import re
+
+    def curve(intensity, dur=1.2):
+        f = app_mod._tl_punch_zoom_filter(
+            {"enabled": True, "intensity": intensity}, 1080, 1920, fps=30, dur=dur)
+        z = re.search(r"zoompan=z='([^']+)'", f).group(1)
+        py = z.replace("if(", "IF(").replace("lt(", "LT(").replace("gte(", "GTE(")
+        py = re.sub(r"\bin\b", "N", py)
+        env = {"IF": lambda c, a, b: a if c else b, "LT": lambda a, b: a < b,
+               "GTE": lambda a, b: a >= b, "pow": pow, "min": min, "max": max}
+        return [round(eval(py, {**env, "N": float(n)}), 4) for n in range(0, 40, 4)]
+
+    for intensity, scale in (("1.5x", 1.5), ("2x", 2.0),
+                             ("hold_1_5", 1.5), ("hold_2", 2.0)):
+        vals = curve(intensity)
+        assert set(vals) == {scale}, (
+            f"{intensity} should hold flat at {scale}, got {vals}")
+        assert app_mod._PUNCH_PEAK[intensity] == scale
+
+    # And the punch intensities must now rise, hold and release.
+    for intensity in ("low", "med", "high", "strong"):
+        vals = curve(intensity)
+        peak = app_mod._PUNCH_PEAK[intensity]
+        assert vals[0] == 1.0, f"{intensity} does not start at rest"
+        assert max(vals) == peak, f"{intensity} never reaches its peak"
+        assert vals.count(peak) > 1, f"{intensity} does not hold at the peak"
+        assert vals[-1] == 1.0, f"{intensity} does not settle back"
+        assert 1.0 < peak <= 1.18, f"{intensity} peaks at {peak}, above the cap"

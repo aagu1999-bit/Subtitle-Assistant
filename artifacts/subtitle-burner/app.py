@@ -12140,7 +12140,9 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
 
 
 _PUNCH_PEAK = {
-    "low": 1.15, "med": 1.25, "high": 1.40, "strong": 1.40,
+    # Peaks follow the blank-wall rulebook: a punch-in tops out around 118%.
+    # These went to 140%, which reads as a jump cut rather than emphasis.
+    "low": 1.08, "med": 1.12, "high": 1.18, "strong": 1.18,
     # "Hold" zooms: snap to the target scale and stay there for the whole
     # clip/effect duration instead of decaying back to 1.0 (see
     # _PUNCH_HOLD_INTENSITIES below).
@@ -12151,9 +12153,18 @@ PUNCH_DECAY_SECONDS = 0.45
 # than easing back down to 1.0 — used by the 1.5x / 2x "Zoom hold" effects.
 _PUNCH_HOLD_INTENSITIES = {"1.5x", "2x", "hold_1_5", "hold_2"}
 
+# Frames, at the project fps: snap in, sit at the peak, release more slowly
+# than it arrived. The asymmetry is what makes it feel like a camera operator
+# rather than a keyframe, and the hold is what makes the emphasis land.
+# Applies to the punch intensities only; the hold intensities above have their
+# own shape.
+PUNCH_IN_FRAMES = 5
+PUNCH_OUT_FRAMES = 8
+PUNCH_HOLD_SECONDS = 0.30   # used only when the effect's length isn't known
+
 
 def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
-                          fps: int = 30) -> str:
+                          fps: int = 30, dur: float | None = None) -> str:
     """Build an animated punch zoom: hit the peak on the beat, ease back out.
 
     Returns "" when disabled.
@@ -12200,13 +12211,31 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
         # the rest of the clip — no ease-back-to-1.0 decay.
         z = f"if(gte(in,{f0:.3f}),{peak:.4f},1)"
     else:
-        fd = max(1.0, decay * max(1, fps))
-        # Progress through the decay, clamped so the frames before the hit read 0
-        # and everything after the settle reads 1.
-        u = f"min(1,max(0,(in-{f0:.3f})/{fd:.3f}))"
-        # gte() holds the zoom at 1.0 until the hit; without it the clamp above
-        # would park the frame at full zoom for the whole run-up.
-        z = f"1+{amp:.4f}*pow(1-{u},3)*gte(in,{f0:.3f})"
+        # Rise, hold, release -- both ramps cubic. `decay` still sets the
+        # release when no length is known, so existing configs keep working.
+        rate = max(1, fps)
+        f_in = max(1.0, float(punch_cfg.get("in_frames", PUNCH_IN_FRAMES)))
+        f_out = max(1.0, float(punch_cfg.get("out_frames", PUNCH_OUT_FRAMES)))
+        if dur and dur > 0:
+            f_total = max(1.0, (dur - hit) * rate)
+        else:
+            f_total = f_in + PUNCH_HOLD_SECONDS * rate + f_out
+        if f_total < f_in + f_out:
+            # Too short to hold: keep the in/out proportions, drop the sustain.
+            squeeze = f_total / (f_in + f_out)
+            f_in, f_out = f_in * squeeze, f_out * squeeze
+        f_hold_end = max(f_in, f_total - f_out)
+
+        n = f"(in-{f0:.3f})"
+        rise = f"(1-pow(1-{n}/{f_in:.3f},3))"
+        fall = f"pow(1-({n}-{f_hold_end:.3f})/{f_out:.3f},3)"
+        z = (
+            f"1+{amp:.4f}*"
+            f"if(lt({n},0),0,"
+            f"if(lt({n},{f_in:.3f}),{rise},"
+            f"if(lt({n},{f_hold_end:.3f}),1,"
+            f"if(lt({n},{f_total:.3f}),{fall},0))))"
+        )
     return (
         f"zoompan=z='{z}':"
         f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
@@ -12259,7 +12288,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     kb = None if is_gif else _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
         vf += "," + kb
-    pz = _tl_punch_zoom_filter(punch, W, H, fps)
+    pz = _tl_punch_zoom_filter(punch, W, H, fps, dur)
     if pz:
         vf += "," + pz
     cf = _tl_color_filter(color)
