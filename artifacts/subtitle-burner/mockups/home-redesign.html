@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home redesign</title>
+<!-- The real app CSS, so this is a preview and not a different app. -->
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* ---- Mockup chrome only (never ships) ---------------------------- */
+  body { padding: 0; }
+  .mk-wrap { max-width: 1500px; margin: 0 auto; padding: 24px 20px 60px; }
+  .mk-h { font-family:'Outfit',sans-serif; font-size:1.05rem; font-weight:700;
+          color:#e8eaee; margin:0 0 4px; }
+  .mk-sub { color:#94a3b8; font-size:.8rem; margin:0 0 12px; }
+  .mk-row { display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; }
+  .mk-frame { border:1px solid #2a2f3a; border-radius:14px; overflow:hidden;
+              background:#0b0d13; box-shadow:0 10px 40px rgba(0,0,0,.45); }
+  .mk-desktop { width:960px; max-width:100%; }
+  .mk-phone   { width:390px; }
+  .mk-label { font-size:.72rem; color:#64748b; letter-spacing:.08em;
+              text-transform:uppercase; margin:0 0 6px; font-weight:700; }
+
+  /* ---- The proposed home (this is the part that would ship) -------- */
+  .home-head {
+    display:flex; align-items:center; gap:12px;
+    padding:12px 18px; border-bottom:1px solid #1e222c; background:#0e1118;
+  }
+  .home-head .logo { font-family:'Outfit',sans-serif; font-weight:700;
+                     font-size:.95rem; color:#e8eaee; flex:1; }
+  .home-nav {
+    display:flex; gap:6px; padding:10px 18px 0; overflow-x:auto;
+    border-bottom:1px solid #1e222c;
+  }
+  .home-nav button {
+    background:transparent; border:none; border-bottom:2px solid transparent;
+    color:#94a3b8; font:inherit; font-size:.82rem; font-weight:600;
+    padding:8px 12px 10px; cursor:pointer; white-space:nowrap;
+  }
+  .home-nav button.on { color:#f8fafc; border-bottom-color:#f59e0b; }
+
+  .home-body { padding:30px 24px 26px; }
+  .home-q {
+    font-family:'Outfit',sans-serif; font-size:1.45rem; font-weight:700;
+    color:#f8fafc; margin:0 0 2px; letter-spacing:-.01em;
+  }
+  .home-q-sub { color:#8b93a3; font-size:.82rem; margin:0 0 18px; }
+  /* One grid, five tracks on desktop, two on a phone. Same .tpl-card as the
+     app already ships — no second card style to keep in sync. */
+  .home-grid {
+    display:grid; gap:12px; margin:0 0 30px;
+    grid-template-columns:repeat(auto-fit, minmax(min(168px,100%), 1fr));
+  }
+  .home-grid .tpl-card { gap:5px; padding:16px 15px; }
+
+  .home-sep {
+    display:flex; align-items:center; gap:12px; margin:0 0 12px;
+    color:#64748b; font-size:.76rem; font-weight:600;
+    letter-spacing:.04em; text-transform:uppercase;
+  }
+  .home-sep::after { content:""; flex:1; height:1px; background:#1e222c; }
+  .home-sep .count { text-transform:none; letter-spacing:0; font-weight:500; }
+
+  #mkJobs, #mkJobsPhone { display:flex; flex-direction:column; gap:6px; }
+  .job-item .job-continue {
+    font-size:.74rem; font-weight:600; color:#e8eaee;
+    background:rgba(108,92,255,.14); border:1px solid #3b3570;
+    border-radius:7px; padding:5px 10px; white-space:nowrap; cursor:pointer;
+  }
+  .job-item .job-continue:hover { border-color:#6c5cff; background:rgba(108,92,255,.26); }
+  /* The retry that used to be the loudest button on the screen, now on the
+     one row that needs it. */
+  .job-item .job-retry-inline {
+    font-size:.74rem; font-weight:600; color:#ffb4b4;
+    background:rgba(220,70,70,.12); border:1px solid #5a2b2b;
+    border-radius:7px; padding:5px 10px; white-space:nowrap; cursor:pointer;
+  }
+  .job-item .job-retry-inline:hover { border-color:#d05050; background:rgba(220,70,70,.22); }
+  .job-more {
+    margin-top:8px; background:transparent; border:none; color:#8b93a3;
+    font:inherit; font-size:.8rem; font-weight:600; cursor:pointer; padding:6px 2px;
+  }
+  .job-more:hover { color:#e8eaee; }
+  .job-item .job-quiet { opacity:0; transition:opacity .12s; }
+  .job-item:hover .job-quiet { opacity:1; }
+
+  /* Phone: cards two-up, tighter padding. Nothing else differs. */
+  .mk-phone .home-body { padding:20px 14px 18px; }
+  .mk-phone .home-q { font-size:1.2rem; }
+  .mk-phone .home-grid { grid-template-columns:1fr 1fr; gap:9px; margin-bottom:24px; }
+  .mk-phone .home-grid .tpl-card { padding:13px 12px; }
+  .mk-phone .home-nav { padding:8px 12px 0; }
+  .mk-phone .home-head { padding:10px 12px; }
+  .mk-phone .home-head .btn-export { display:none; }
+  .mk-phone .home-grid .tpl-card:last-child { grid-column:1 / -1; flex-direction:row;
+    align-items:center; gap:10px; }
+  .mk-phone .home-grid .tpl-card:last-child .tpl-glyph { font-size:1.25rem; }
+  .mk-phone .job-item { flex-wrap:wrap; row-gap:8px; padding:11px 12px; }
+  .mk-phone .job-item .job-name { flex:1 0 100%; font-size:.9rem; }
+  .mk-phone .job-item .job-continue,
+  .mk-phone .job-item .job-retry-inline { margin-left:auto; }
+  .mk-phone .job-item .job-quiet { opacity:1; }
+
+  .btn-export {
+    background:linear-gradient(135deg,#f59e0b,#f97316); color:#1a1205;
+    border:none; border-radius:8px; font:inherit; font-size:.78rem;
+    font-weight:700; padding:7px 12px; cursor:pointer; white-space:nowrap;
+  }
+  .mk-note { max-width:860px; color:#94a3b8; font-size:.82rem; line-height:1.6;
+             margin:30px 0 0; }
+  .mk-note strong { color:#e8eaee; }
+  .mk-note ul { margin:8px 0 0; padding-left:20px; }
+  .mk-note li { margin-bottom:5px; }
+  .mk-gone { color:#8b93a3; }
+  .mk-gone code { color:#cbd5e1; }
+</style>
+</head>
+<body>
+<div class="mk-wrap">
+  <p class="mk-h">Proposed home — one question, one nav, one button per row</p>
+  <p class="mk-sub">Template cards come from the real <code>STUDIO_TEMPLATES</code>; the rows are a stand-in for your ten videos. Nothing here is wired up — it is a picture of the shape.</p>
+
+  <div class="mk-row">
+    <div>
+      <p class="mk-label">Desktop</p>
+      <div class="mk-frame mk-desktop" id="mkDesktop"></div>
+    </div>
+    <div>
+      <p class="mk-label">Phone — 390px</p>
+      <div class="mk-frame mk-phone" id="mkPhone"></div>
+    </div>
+  </div>
+
+  <div class="mk-note">
+    <p><strong>What left the screen</strong></p>
+    <ul class="mk-gone">
+      <li>The second nav bar — <code>#workflowSteps</code> in the header listed the same destinations as <code>#mainTabs</code>.</li>
+      <li>The dropzone above the cards. Picking a template is what asks for footage, inside <code>openTemplateSetup()</code>, which already offers a fresh upload <em>or</em> clips you have here.</li>
+      <li><code>#go</code> "Transcribe Video" — it was rendered disabled, and its own tooltip said it only retries a failed job. It now appears on the row of the job that failed.</li>
+      <li>One of "Open in Timeline" / "Edit in Timeline" — both called <code>openTimelineEditor(jobId)</code>.</li>
+      <li>"Suggested next steps" and the PIPELINE panel — Whisper / PyAnnote / FFmpeg are not decisions anyone makes here.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+// Verbatim from templates/index.html — the mockup must not invent templates.
+var STUDIO_TEMPLATES = [
+  { key: "recap",      glyph: "🏙", name: "Recap",      cap: "Photos & clips into an event reel" },
+  { key: "tocamera",   glyph: "🎤", name: "To camera",  cap: "One take, cut down & captioned" },
+  { key: "interviews", glyph: "🎙", name: "Interviews", cap: "Several people, one reel" },
+  { key: "session",    glyph: "📹", name: "Session",    cap: "One sitting, several takes" },
+  { key: "shorts",     glyph: "⚡", name: "Shorts",     cap: "One video, many clips" }
+];
+
+var JOBS = [
+  { name: "Test HH",                              status: "ready" },
+  { name: "IMG_2988.MOV",                         status: "transcribing" },
+  { name: "Wellness: The New Community Currency", status: "ready" },
+  { name: "Clip test 4",                          status: "error" },
+  { name: "IMG_3070.MOV",                         status: "ready" },
+  { name: "Studio session \u2014 Aug 14",          status: "ready" },
+  { name: "Founders interview pt 2",              status: "ready" },
+  { name: "Panel recap raw",                      status: "ready" },
+  { name: "IMG_3041.MOV",                         status: "ready" },
+  { name: "car.mp4",                              status: "ready" }
+];
+
+function cards() {
+  return STUDIO_TEMPLATES.map(function (t) {
+    return '<button type="button" class="tpl-card" data-tpl="' + t.key + '">' +
+      '<span class="tpl-glyph">' + t.glyph + '</span>' +
+      '<span class="tpl-name">' + t.name + '</span>' +
+      '<span class="tpl-cap">' + t.cap + '</span></button>';
+  }).join("");
+}
+
+function statusClass(s) {
+  if (s === "ready") return "done";
+  if (s === "error") return "error";
+  return "transcribing";
+}
+
+function rows(list) {
+  return list.map(function (j) {
+    var action = j.status === "error"
+      ? '<button class="job-retry-inline">↻ Retry transcription</button>'
+      // In flight: the pill already says so. A second label repeating it is
+      // the habit this redesign exists to break.
+      : (j.status === "transcribing" ? ''
+          : '<button class="job-continue">Continue →</button>');
+    return '<div class="job-item">' +
+      '<div class="job-name">' + j.name + '</div>' +
+      '<span class="job-status ' + statusClass(j.status) + '">' + j.status + '</span>' +
+      action +
+      '<button class="job-rename job-quiet" title="Rename">✎</button>' +
+      '<button class="job-delete job-quiet" title="Remove from list">✕</button>' +
+      '</div>';
+  }).join("");
+}
+
+function home(phone) {
+  var shown = JOBS.slice(0, phone ? 3 : 4);
+  var rest = JOBS.length - shown.length;
+  return '' +
+  '<div class="home-head">' +
+    '<div class="logo">🎬 Subtitle Assistant Studio</div>' +
+    '<button class="btn-export">⚡ Instant Export MP4</button>' +
+  '</div>' +
+  '<div class="home-nav">' +
+    '<button class="on">🏠 Home</button>' +
+    '<button>🔥 AI Shorts</button>' +
+    '<button>🎬 Timeline</button>' +
+    '<button>🎞 Compilation</button>' +
+  '</div>' +
+  '<div class="home-body">' +
+    '<h1 class="home-q">What are you making?</h1>' +
+    '<p class="home-q-sub">Pick a shape. It asks for your footage next — or reuses what is already here.</p>' +
+    '<div class="home-grid">' + cards() + '</div>' +
+    '<div class="home-sep">or pick up where you left off' +
+      '<span class="count">' + JOBS.length + ' videos</span></div>' +
+    '<div>' + rows(shown) + '</div>' +
+    (rest > 0 ? '<button class="job-more">⌄ Show ' + rest + ' more</button>' : '') +
+  '</div>';
+}
+
+document.getElementById("mkDesktop").innerHTML = home(false);
+document.getElementById("mkPhone").innerHTML = home(true);
+</script>
+</body>
+</html>
