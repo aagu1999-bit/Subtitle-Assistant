@@ -374,3 +374,93 @@ def test_font_faces_are_installed_before_the_explicit_load():
         "document.fonts.load() runs before the @font-face rules are installed; "
         "it will resolve against an unknown family and fetch nothing"
     )
+
+
+# --- suggestion feedback ------------------------------------------------
+# Every accept, correction and dismissal used to be discarded. The `edited`
+# row is the one that matters: proposed vs shipped is a labelled example of
+# how the suggestion was wrong.
+
+@pytest.fixture
+def temp_db(app_mod, tmp_path, monkeypatch):
+    """Point the schema and every write at a throwaway database."""
+    monkeypatch.setattr(app_mod, "DB_PATH", tmp_path / "jobs.db")
+    app_mod._db_init()
+    return app_mod.DB_PATH
+
+
+def test_an_edited_suggestion_stores_both_halves(app_mod, temp_db):
+    client = app_mod.app.test_client()
+    proposed = {"type": "punch_zoom", "start": 10.0, "end": 12.0, "intensity": "med"}
+    created = client.post("/suggestion-feedback", json={
+        "job_id": "j1", "kind": "effect", "outcome": "proposed", "proposed": proposed,
+    }).get_json()
+    sid = created["suggestion_id"]
+
+    final = dict(proposed, intensity="low", anchor={"x": 0.3, "y": 0.42})
+    resolved = client.post("/suggestion-feedback", json={
+        "job_id": "j1", "kind": "effect", "outcome": "edited",
+        "suggestion_id": sid, "proposed": proposed, "final": final,
+    }).get_json()
+    assert resolved["ok"], resolved
+
+    rows = client.get("/suggestion-feedback/j1").get_json()["suggestions"]
+    assert len(rows) == 1, "resolving a suggestion must not open a second row"
+    assert rows[0]["outcome"] == "edited"
+    assert rows[0]["proposed"] == proposed, "the original proposal was overwritten"
+    assert rows[0]["final"] == final
+    assert rows[0]["resolved_at"]
+
+
+def test_a_dismissed_suggestion_is_recorded(app_mod, temp_db):
+    """Rejection was implicit before, so a bad placement looked like an unread one."""
+    client = app_mod.app.test_client()
+    client.post("/suggestion-feedback", json={
+        "job_id": "j2", "kind": "effect", "outcome": "rejected",
+        "proposed": {"type": "ken_burns", "start": 3.0, "end": 8.0},
+    })
+    rows = client.get("/suggestion-feedback/j2").get_json()["suggestions"]
+    assert [r["outcome"] for r in rows] == ["rejected"]
+
+
+def test_an_unknown_outcome_is_refused(app_mod, temp_db):
+    client = app_mod.app.test_client()
+    res = client.post("/suggestion-feedback", json={
+        "job_id": "j3", "kind": "effect", "outcome": "maybe",
+    })
+    assert res.status_code == 400
+
+
+# --- the serialize() whitelist -----------------------------------------
+
+def test_serialize_persists_per_clip_effect_state():
+    """serialize() whitelists main-clip fields and drops anything else.
+
+    A field missing here survives in memory and vanishes on the next debounced
+    save, so the feature works until a reload. `reframe` sat in exactly that
+    state: the props panel edited it and nothing persisted it.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    block = js.split("main: tl.tracks.main.map((c) => ({")[1].split("})),")[0]
+    for key in ("punch_zoom", "ken_burns", "split", "cuts", "color",
+                "reframe", "fx_origin"):
+        assert f"{key}:" in block, f"{key} is edited in the UI but never saved"
+
+
+def test_feedback_for_an_unknown_suggestion_is_not_dropped(app_mod, temp_db):
+    """An id with no row updated nothing and still reported success.
+
+    Projects saved before the table existed carry ids that resolve to nothing.
+    Losing the correction is worse than losing the link to the proposal.
+    """
+    client = app_mod.app.test_client()
+    res = client.post("/suggestion-feedback", json={
+        "job_id": "j4", "kind": "effect", "outcome": "edited",
+        "suggestion_id": 999999,
+        "proposed": {"type": "punch_zoom", "intensity": "med"},
+        "final": {"type": "punch_zoom", "intensity": "low"},
+    }).get_json()
+    assert res["ok"], res
+    rows = client.get("/suggestion-feedback/j4").get_json()["suggestions"]
+    assert len(rows) == 1, "the correction was silently discarded"
+    assert rows[0]["final"]["intensity"] == "low"
