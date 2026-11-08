@@ -1061,7 +1061,10 @@
       saturation: opts.saturation != null ? Number(opts.saturation) : 1,
       hit: opts.hit != null ? Number(opts.hit) : 0,
       decay: opts.decay != null ? Number(opts.decay) : 0.45,
-      anchor: opts.anchor || null,
+      // NOT `anchor`: that name is taken by the lane-anchoring below,
+      // and reanchor() overwrites it with a Main clip id on every
+      // reflow, which silently un-aimed every AI-placed push.
+      aim: opts.aim || opts.anchor || null,
     };
     if (opts.quote) ec.quote = opts.quote;
     if (opts.reason) ec.reason = opts.reason;
@@ -1792,7 +1795,7 @@
           enabled: true,
           intensity: lanePunch.intensity || "med",
           hit: lanePunch.hit != null ? lanePunch.hit : 0,
-          anchor: lanePunch.anchor || null,
+          anchor: lanePunch.aim || null,
         };
         punchRel = Math.max(0, ot - (lanePunch.start || 0));
       } else if (c.punch_zoom && c.punch_zoom.enabled) {
@@ -2338,12 +2341,18 @@
     let html = `<h3>${({ main: "🎬 Main clip", overlay: "🖼 Overlay", effects: "✨ Effect", text: "🔤 Title", music: "🎵 Music" })[t]}</h3>`;
 
     if (t === "effects") {
+      if (c.fx_origin) html += fxOriginBadge(c);
       const typeOpts = EFFECT_TYPES.map((x) => [x.id, `${x.icon} ${x.label}`]);
       html += propSelect("type", "Effect", c.type || "punch_zoom", typeOpts);
       html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start || 0, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", clipDuration(c), 0.2, 120, 0.1)}</div>`;
       html += `<p class="muted" style="font-size:.72rem">Drag the clip on the Effects lane to change when it runs. Main-clip effects still work; lane effects win while they overlap.</p>`;
       if (c.type === "punch_zoom") {
         html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Low"], ["med", "Medium"], ["high", "Strong"], ["strong", "Strong"]])}</div>`;
+        const an = c.aim || {};
+        const ax = an.x != null ? an.x : 0.5, ay = an.y != null ? an.y : 0.5;
+        html += `<div class="tl-prop-grid">${propRange("aim.x", "Aim X", ax, 0, 1, 0.01)}${propRange("aim.y", "Aim Y", ay, 0, 1, 0.01)}</div>`;
+        html += `<button class="btn btn-secondary btn-block" data-act="reaim" style="font-size:.76rem">🎯 Re-aim on the preview</button>`;
+        html += `<p class="muted" style="font-size:.72rem">Where the push lands. AI placement aims at the speaker's eye line; re-aim if it picked the wrong person.</p>`;
       } else if (c.type === "ken_burns") {
         html += `<div class="tl-prop-grid">${propSelect("direction", "Direction", c.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       } else if (c.type === "split_screen") {
@@ -2487,6 +2496,11 @@
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+    // Applying a suggestion selects the new effect clip, which rebuilds this
+    // panel. Redraw the list the user was working from instead of losing it.
+    if (t === "main" && fxSuggest && fxSuggest.jobId === c.source_job_id) {
+      renderFxSuggestions(c);
+    }
     // Color swatch clicks (not a generic data-key control).
     wrap.querySelectorAll(".tl-swatch").forEach((sw) => {
       sw.onclick = () => {
@@ -2696,8 +2710,17 @@
         // whole panel. Text/number/range edits only redraw the lanes so the
         // focused control isn't torn out mid-edit.
         const structural = inp.type === "checkbox" || inp.tagName === "SELECT";
-        if (structural) renderTimeline(); else renderTracks();
+        if (structural) {
+          renderTimeline();   // rebuilds this panel, badge included
+        } else {
+          renderTracks();
+          refreshFxBadge(wrap, c);
+        }
         updateStageCompositor();
+        // A correction to an AI-placed effect is the signal worth keeping: a
+        // labelled example of how the suggestion was wrong. Costs the user
+        // nothing -- it rides on the edit they already made.
+        noteSuggestionEdit(c);
         scheduleSave();
       };
       inp.addEventListener(inp.tagName === "SELECT" || inp.type === "checkbox" || inp.type === "color" ? "change" : "input", handler);
@@ -2722,6 +2745,10 @@
     };
     const sfx = wrap.querySelector('[data-act="suggestfx"]');
     if (sfx) sfx.onclick = () => suggestEffectsFor(c, sfx);
+    const reaim = wrap.querySelector('[data-act="reaim"]');
+    if (reaim) reaim.onclick = () => startAnchorAim(c, reaim);
+    const fxreset = wrap.querySelector('[data-act="fxreset"]');
+    if (fxreset) fxreset.onclick = () => resetToSuggestion(c);
     const restyle = wrap.querySelector('[data-act="restyle"]');
     if (restyle) restyle.onclick = () => {
       const pack = (wrap.querySelector("[data-restyle-pack]") || {}).value || "pulse";
@@ -2739,6 +2766,78 @@
     ken_burns: "🎞 Ken Burns",
     split_screen: "⬓ Split screen",
   };
+
+  // The suggestion list outlives the props panel it is drawn in: applying one
+  // selects the new effect clip, which rebuilds the panel, and losing the rest
+  // at that moment would mean re-running the model to place a second move.
+  let fxSuggest = null;   // { jobId, effects, state: {key: "applied"|"dismissed"} }
+
+  function fxKey(e) {
+    return `${e.type}@${Number(e.start_time).toFixed(2)}`;
+  }
+
+  // Fire-and-forget. The user's edit has already happened locally, so a failed
+  // telemetry write must never surface as a broken interaction.
+  function recordSuggestion(payload) {
+    return fetch("/suggestion-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  }
+
+  // The effect's parameters as they stand now, in the same shape fx_origin
+  // stores the proposal in, so the two compare field by field.
+  function currentFxState(c) {
+    const out = {
+      type: c.type || null,
+      start: c.start || 0,
+      dur: clipDuration(c),
+      intensity: c.intensity || "med",
+    };
+    if (c.type === "ken_burns") out.direction = c.direction || "in";
+    if (c.aim && c.aim.x != null) out.anchor = { x: c.aim.x, y: c.aim.y };
+    return out;
+  }
+
+  // Order-insensitive. fx_origin.proposed comes back from the server, whose
+  // JSON encoder sorts keys, while currentFxState() builds its object in
+  // insertion order -- so comparing JSON strings would call an untouched
+  // effect "edited" after every reload and poison the signal. Floats are
+  // rounded because an anchor click is not meaningfully different from itself
+  // at the fifth decimal place.
+  function fxCanonical(v) {
+    if (Array.isArray(v)) return v.map(fxCanonical);
+    if (v && typeof v === "object") {
+      return Object.keys(v).sort().reduce((o, k) => {
+        if (v[k] !== undefined) o[k] = fxCanonical(v[k]);
+        return o;
+      }, {});
+    }
+    return typeof v === "number" ? Math.round(v * 1e4) / 1e4 : v;
+  }
+  function fxSame(a, b) {
+    return JSON.stringify(fxCanonical(a)) === JSON.stringify(fxCanonical(b));
+  }
+
+  // Record a correction to an AI-placed effect. Rides on the same change the
+  // user already wanted to make, so there is no extra interaction -- and
+  // debounced, because a slider drag is one correction, not forty.
+  let fxEditTimer = null;
+  function noteSuggestionEdit(c) {
+    const o = c && c.fx_origin;
+    if (!o || !o.suggestion_id) return;
+    clearTimeout(fxEditTimer);
+    fxEditTimer = setTimeout(() => {
+      const final = currentFxState(c);
+      // Back to exactly what was suggested: that is an acceptance, not an edit.
+      const outcome = fxSame(final, o.proposed) ? "accepted" : "edited";
+      recordSuggestion({
+        job_id: o.job_id, kind: "effect", outcome: outcome,
+        suggestion_id: o.suggestion_id, proposed: o.proposed, final: final,
+      });
+    }, 900);
+  }
 
   async function suggestEffectsFor(clip, btn) {
     const list = $("tlFxList");
@@ -2764,13 +2863,8 @@
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      // Suggestions are in source time; only those inside this clip's trim can
-      // be applied to it.
-      const cin = clip.in || 0, cout = clip.out || 0;
-      const usable = (data.effects || []).filter(
-        (e) => e.start_time >= cin - 0.01 && e.end_time <= cout + 0.01
-      );
-      renderFxSuggestions(clip, data.effects || [], usable);
+      fxSuggest = { jobId: clip.source_job_id, effects: data.effects || [], state: {} };
+      renderFxSuggestions(clip);
     } catch (e) {
       if (list) list.innerHTML = `<p class="muted" style="font-size:.72rem;color:#ff8a8a">${e.message}</p>`;
     } finally {
@@ -2778,38 +2872,76 @@
     }
   }
 
-  function renderFxSuggestions(clip, all, usable) {
+  function renderFxSuggestions(clip) {
     const list = $("tlFxList");
-    if (!list) return;
-    if (!all.length) {
+    if (!list || !fxSuggest) return;
+    const effects = fxSuggest.effects;
+    if (!effects.length) {
       list.innerHTML = `<p class="muted" style="font-size:.72rem">No moments stood out — the transcript may be too short.</p>`;
       return;
     }
-    const outside = all.length - usable.length;
+    // Suggestions are in source time; one outside this clip's trim has no
+    // moment to land on, but it can still be dismissed -- that judgement is
+    // about the suggestion, not about which clip happens to be selected.
+    const cin = clip.in || 0, cout = clip.out || 0;
     let html = "";
-    usable.forEach((e, i) => {
+    effects.forEach((e, i) => {
+      const st = fxSuggest.state[fxKey(e)];
+      const inRange = e.start_time >= cin - 0.01 && e.end_time <= cout + 0.01;
       const dur = (e.end_time - e.start_time).toFixed(1);
-      html += `<div class="tl-fx-sug" style="border:1px solid #2c3240;border-radius:8px;padding:8px;margin-bottom:6px">
+      let action;
+      if (st === "applied") {
+        action = `<span style="font-size:.72rem;color:#7fe0a0">✓ Applied</span>`;
+      } else if (st === "dismissed") {
+        action = `<span class="muted" style="font-size:.72rem">Dismissed</span>
+          <button class="btn btn-secondary" data-fxrestore="${i}" style="font-size:.72rem;padding:3px 8px">Restore</button>`;
+      } else if (!inRange) {
+        action = `<span class="muted" style="font-size:.72rem">Outside this clip's trim</span>
+          <button class="btn btn-secondary" data-fxno="${i}" style="font-size:.74rem;padding:3px 8px">Dismiss</button>`;
+      } else {
+        action = `<button class="btn btn-secondary" data-fx="${i}" style="font-size:.74rem;padding:3px 8px">Apply</button>
+          <button class="btn btn-secondary" data-fxno="${i}" style="font-size:.74rem;padding:3px 8px">Dismiss</button>`;
+      }
+      html += `<div class="tl-fx-sug" style="border:1px solid #2c3240;border-radius:8px;padding:8px;margin-bottom:6px;${st ? "opacity:.6;" : ""}">
         <div style="display:flex;align-items:center;gap:6px;justify-content:space-between">
           <strong style="font-size:.78rem">${FX_LABEL[e.type] || e.type}</strong>
           <span class="muted" style="font-size:.7rem">${e.start_time.toFixed(1)}s · ${dur}s</span>
         </div>
         ${e.quote ? `<p class="muted" style="font-size:.7rem;margin:4px 0 0">“${e.quote}”</p>` : ""}
         <p class="muted" style="font-size:.7rem;margin:4px 0 6px">${e.reason || ""}</p>
-        <button class="btn btn-secondary" data-fx="${i}" style="font-size:.74rem;padding:3px 8px">Apply</button>
+        <div style="display:flex;align-items:center;gap:6px">${action}</div>
       </div>`;
     });
-    if (outside) {
-      html += `<p class="muted" style="font-size:.7rem">${outside} more fall outside this clip's trim.</p>`;
-    }
     list.innerHTML = html;
     list.querySelectorAll("[data-fx]").forEach((b) => {
-      b.onclick = () => applyEffectSuggestion(clip, usable[parseInt(b.dataset.fx, 10)]);
+      b.onclick = () => applyEffectSuggestion(clip, effects[parseInt(b.dataset.fx, 10)]);
+    });
+    // Dismissal used to be implicit -- a suggestion you ignored recorded
+    // nothing, so a bad placement was indistinguishable from an unread one.
+    list.querySelectorAll("[data-fxno]").forEach((b) => {
+      b.onclick = () => {
+        const e = effects[parseInt(b.dataset.fxno, 10)];
+        fxSuggest.state[fxKey(e)] = "dismissed";
+        recordSuggestion({
+          job_id: fxSuggest.jobId, kind: "effect", outcome: "rejected",
+          suggestion_id: e.suggestion_id, proposed: e,
+        });
+        renderFxSuggestions(clip);
+      };
+    });
+    list.querySelectorAll("[data-fxrestore]").forEach((b) => {
+      b.onclick = () => {
+        delete fxSuggest.state[fxKey(effects[parseInt(b.dataset.fxrestore, 10)])];
+        renderFxSuggestions(clip);
+      };
     });
   }
 
   // Timed suggestions land on the Effects lane (no Main split required).
-  function applyEffectSuggestion(clip, fx) {
+  // async because addEffectClip is: it may have to create the project first,
+  // and awaiting it is what makes the returned clip a clip rather than a
+  // Promise to hang provenance on.
+  async function applyEffectSuggestion(clip, fx) {
     if (!fx) return;
     const idx = tl.tracks.main.findIndex((m) => m.id === clip.id);
     if (idx < 0) return;
@@ -2817,15 +2949,123 @@
     const outStart = clipStart + sourceTimeToLocalOutput(clip, fx.start_time);
     const outEnd = clipStart + sourceTimeToLocalOutput(clip, fx.end_time);
     const dur = Math.max(0.3, outEnd - outStart);
-    addEffectClip(fx.type || "punch_zoom", {
+    const ec = await addEffectClip(fx.type || "punch_zoom", {
       start: outStart,
       out: dur,
       intensity: fx.intensity || "med",
       direction: fx.direction || "in",
-      anchor: fx.anchor || null,
+      aim: fx.anchor || null,
       quote: fx.quote || null,
       reason: fx.reason || null,
     });
+    if (!ec) return;
+    // Where this effect came from, so a wrong placement is correctable and the
+    // correction is recordable. No pre-split range is kept: effects land on
+    // their own lane rather than cutting Main, so there is nothing to rejoin,
+    // and the undo stack already covers taking the placement back.
+    ec.fx_origin = {
+      suggestion_id: fx.suggestion_id || null,
+      job_id: clip.source_job_id || null,
+      proposed: currentFxState(ec),
+    };
+    if (fxSuggest) fxSuggest.state[fxKey(fx)] = "applied";
+    recordSuggestion({
+      job_id: clip.source_job_id, kind: "effect", outcome: "accepted",
+      suggestion_id: fx.suggestion_id, proposed: fx, final: ec.fx_origin.proposed,
+    });
+    renderTimeline();
+    scheduleSave();
+  }
+
+  // Restores the suggestion's parameters. Timing is left alone: the effect
+  // clip can simply be dragged on its lane, and undo covers the rest.
+  function resetToSuggestion(c) {
+    const pr = c.fx_origin && c.fx_origin.proposed;
+    if (!pr) return;
+    pushHistory();
+    c.intensity = pr.intensity || "med";
+    if (pr.direction) c.direction = pr.direction;
+    c.aim = pr.anchor ? { x: pr.anchor.x, y: pr.anchor.y } : null;
+    noteSuggestionEdit(c);   // returning to the suggestion is itself a signal
+    renderTimeline();
+    updateStageCompositor();
+    scheduleSave();
+  }
+
+  // Click the preview to aim the push. Reuses the stage rect maths that box
+  // dragging already relies on, so the preview and the renderer agree on what
+  // the normalised point means.
+  function startAnchorAim(c, btn) {
+    const st = $("tlStage");
+    if (!st) return;
+    const label = btn.textContent;
+    btn.textContent = "Click the preview…";
+    st.style.cursor = "crosshair";
+    const stop = () => {
+      st.style.cursor = "";
+      st.removeEventListener("click", onPick, true);
+      btn.textContent = label;
+    };
+    const onPick = (ev) => {
+      const r = st.getBoundingClientRect();
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!r.width || !r.height) { stop(); return; }
+      pushHistory();
+      c.aim = {
+        x: Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+        y: Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height)),
+      };
+      stop();
+      noteSuggestionEdit(c);
+      renderProps();
+      updateStageCompositor();
+      scheduleSave();
+    };
+    // Capture phase, so an overlay box on the stage does not swallow the click.
+    st.addEventListener("click", onPick, true);
+  }
+
+  // Redraw the badge in place. Range and number edits only redraw the lanes,
+  // so without this the proposed-vs-now comparison goes stale the moment you
+  // nudge a value -- precisely when you want to see what you changed.
+  function refreshFxBadge(wrap, c) {
+    const host = wrap.querySelector("#tlFxOrigin");
+    if (!host || !c.fx_origin) return;
+    host.outerHTML = fxOriginBadge(c);
+    const btn = wrap.querySelector('[data-act="fxreset"]');
+    if (btn) btn.onclick = () => resetToSuggestion(c);
+  }
+
+  // Shows where an effect came from and what has changed since, so a wrong AI
+  // placement reads as something you can correct rather than as a fact.
+  function fxOriginBadge(c) {
+    const o = c.fx_origin;
+    const cur = currentFxState(c);
+    const pt = (v) => (v && v.x != null ? `${Math.round(v.x * 100)}%, ${Math.round(v.y * 100)}%` : "centre");
+    const sec = (v) => (v == null ? "—" : `${Number(v).toFixed(2)}s`);
+    const rows = [];
+    const cmp = (label, a, b, fmt) => {
+      if (a == null && b == null) return;
+      const fa = fmt ? fmt(a) : a, fb = fmt ? fmt(b) : b;
+      if (String(fa) !== String(fb)) {
+        rows.push(`<div>${label}: <s>${fa}</s> → <strong>${fb}</strong></div>`);
+      }
+    };
+    cmp("Start", o.proposed.start, cur.start, sec);
+    cmp("Length", o.proposed.dur, cur.dur, sec);
+    cmp("Strength", o.proposed.intensity, cur.intensity);
+    cmp("Direction", o.proposed.direction, cur.direction);
+    cmp("Aim", o.proposed.anchor, cur.anchor, pt);
+    return `<div id="tlFxOrigin" style="border:1px solid #2c3240;border-left:3px solid #7c5cff;border-radius:6px;padding:7px 9px;margin:0 0 10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <strong style="font-size:.74rem">✨ From AI — ${FX_LABEL[o.proposed.type] || o.proposed.type}</strong>
+        <button class="btn btn-secondary" data-act="fxreset" style="font-size:.7rem;padding:2px 7px">Reset</button>
+      </div>
+      ${rows.length
+        ? `<div class="muted" style="font-size:.7rem;margin-top:5px;line-height:1.5">${rows.join("")}</div>`
+        : `<p class="muted" style="font-size:.7rem;margin:4px 0 0">Unchanged since it was suggested.</p>`}
+    </div>`;
   }
 
   // ---- Text-based editing: strike out words to cut them from the clip ----

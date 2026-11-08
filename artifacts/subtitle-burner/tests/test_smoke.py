@@ -436,15 +436,29 @@ def test_an_unknown_outcome_is_refused(app_mod, temp_db):
 def test_serialize_persists_per_clip_effect_state():
     """serialize() whitelists main-clip fields and drops anything else.
 
-    A field missing here survives in memory and vanishes on the next debounced
-    save, so the feature works until a reload. `reframe` sat in exactly that
-    state: the props panel edited it and nothing persisted it.
+    A field missing from that list survives in memory and vanishes on the next
+    debounced save, so the feature works until a reload -- which is how the
+    per-clip `reframe` control came to edit a value nothing persisted.
     """
     js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
     block = js.split("main: tl.tracks.main.map((c) => ({")[1].split("})),")[0]
-    for key in ("punch_zoom", "ken_burns", "split", "cuts", "color",
-                "reframe", "fx_origin"):
+    for key in ("punch_zoom", "ken_burns", "split", "cuts", "color", "reframe"):
         assert f"{key}:" in block, f"{key} is edited in the UI but never saved"
+
+
+def test_effect_clips_persist_everything_they_carry():
+    """Effects land on their own lane, and that lane is spread-serialised.
+
+    AI provenance attaches to the effect clip, so it needs no whitelist entry
+    -- but only while the effects track keeps spreading. Narrowing it to a
+    field list later would silently drop fx_origin on the next save.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    block = js.split("function serialize()")[1].split("\n  }")[0]
+    assert "effects: (tl.tracks.effects || []).map((c) => ({ ...c }))" in block, (
+        "the effects track no longer spreads; fx_origin needs an explicit entry"
+    )
+    assert "fx_origin" in js, "nothing attaches provenance to an applied effect"
 
 
 def test_feedback_for_an_unknown_suggestion_is_not_dropped(app_mod, temp_db):
@@ -514,3 +528,35 @@ def test_the_brand_preset_button_is_wired():
         assert re.search(rf'{btn}\.(onclick|addEventListener)', js), (
             f"{btn} is looked up but nothing is bound to it"
         )
+
+
+def test_the_punch_aim_does_not_collide_with_lane_anchoring():
+    """`anchor` on a lane clip means "which Main clip do I hang off".
+
+    reanchor() rewrites it to a Main clip id on every reflow, so an aim point
+    stored there was wiped moments after the model set it -- and the server's
+    isinstance(dict) guard then discarded the string silently, leaving every
+    AI-aimed push rendered dead centre with nothing in any log.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js.split("async function addEffectClip")[1].split("\n  }\n")[0]
+    assert "aim:" in body, "the effect clip has no aim field of its own"
+    assert not re.search(r"^\s+anchor: opts\.", body, re.M), (
+        "the aim point is being stored in `anchor`, which reanchor() overwrites"
+    )
+    # reanchor must still own `anchor`; this is what makes the collision real.
+    assert "c.anchor = tl.tracks.main[idx].id" in js
+
+
+def test_the_renderer_reads_the_aim_field(app_mod):
+    """A lane punch has to reach the filter aimed, not centred."""
+    src = (BURNER / "app.py").read_text(encoding="utf-8")
+    assert 'aim = fx.get("aim")' in src, "the lane mapping never looks at aim"
+    # And the filter must actually move the window off centre for an aim.
+    off = app_mod._tl_punch_zoom_filter(
+        {"enabled": True, "intensity": "high", "anchor": {"x": 0.2, "y": 0.8}},
+        1080, 1920, fps=30, dur=1.2)
+    mid = app_mod._tl_punch_zoom_filter(
+        {"enabled": True, "intensity": "high"}, 1080, 1920, fps=30, dur=1.2)
+    assert off != mid, "the aim point changes nothing in the filter"
+    assert "iw*0.2000" in off and "ih*0.8000" in off
