@@ -12738,21 +12738,10 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     configuration, so the window size cannot change per frame. zoompan
     re-evaluates z every frame, which is why the zoom is built there.
     """
-    if not punch_cfg or not punch_cfg.get("enabled"):
+    tracks = punch_zoom_tracks(punch_cfg, dur)
+    if not tracks:
         return ""
-    peak = _PUNCH_PEAK.get(punch_cfg.get("intensity", "med"), 1.25)
-    amp = peak - 1.0
-    if amp <= 0:
-        return ""
-
-    try:
-        hit = max(0.0, float(punch_cfg.get("hit", 0.0)))
-    except (TypeError, ValueError):
-        hit = 0.0
-    try:
-        decay = max(0.05, float(punch_cfg.get("decay", PUNCH_DECAY_SECONDS)))
-    except (TypeError, ValueError):
-        decay = PUNCH_DECAY_SECONDS
+    track, ease = tracks
 
     anchor = punch_cfg.get("anchor") or {}
     try:
@@ -12761,37 +12750,12 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     except (TypeError, ValueError):
         ax = ay = 0.5
 
-    f0 = hit * max(1, fps)
-    if punch_cfg.get("intensity") in _PUNCH_HOLD_INTENSITIES:
-        # Hold zoom: snap to the target scale at the hit and stay there for
-        # the rest of the clip — no ease-back-to-1.0 decay.
-        z = f"if(gte(in,{f0:.3f}),{peak:.4f},1)"
-    else:
-        # Rise, hold, release -- both ramps cubic. `decay` still sets the
-        # release when no length is known, so existing configs keep working.
-        rate = max(1, fps)
-        f_in = max(1.0, float(punch_cfg.get("in_frames", PUNCH_IN_FRAMES)))
-        f_out = max(1.0, float(punch_cfg.get("out_frames", PUNCH_OUT_FRAMES)))
-        if dur and dur > 0:
-            f_total = max(1.0, (dur - hit) * rate)
-        else:
-            f_total = f_in + PUNCH_HOLD_SECONDS * rate + f_out
-        if f_total < f_in + f_out:
-            # Too short to hold: keep the in/out proportions, drop the sustain.
-            squeeze = f_total / (f_in + f_out)
-            f_in, f_out = f_in * squeeze, f_out * squeeze
-        f_hold_end = max(f_in, f_total - f_out)
+    # zoompan only sees the frame counter, so local seconds are in/fps. The
+    # track above never learns that -- it is the same spec the browser reads.
+    z = keyframes.to_ffmpeg_expr(track, f"(in/{max(1, int(fps))})", ease)
+    if z is None:
+        return ""
 
-        n = f"(in-{f0:.3f})"
-        rise = f"(1-pow(1-{n}/{f_in:.3f},3))"
-        fall = f"pow(1-({n}-{f_hold_end:.3f})/{f_out:.3f},3)"
-        z = (
-            f"1+{amp:.4f}*"
-            f"if(lt({n},0),0,"
-            f"if(lt({n},{f_in:.3f}),{rise},"
-            f"if(lt({n},{f_hold_end:.3f}),1,"
-            f"if(lt({n},{f_total:.3f}),{fall},0))))"
-        )
     return (
         f"zoompan=z='{z}':"
         f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
@@ -13578,6 +13542,62 @@ def overlay_motion_tracks(motion) -> dict:
     if sy:
         tracks["y"] = [[0.0, float(sy)], [slide, 0.0]]
     return tracks
+
+
+# The frame counts above are expressed at this rate. They always were -- the
+# preview hardcoded 30 to turn them into seconds while the renderer used the
+# project fps, so a 60fps project previewed a push twice as long as it burned.
+# Naming the reference rate once is the fix: the shape is a duration, not a
+# frame count, and both sides now read it in seconds.
+PUNCH_REF_FPS = 30
+_PUNCH_EASE = "out_cubic"
+
+
+def punch_zoom_tracks(cfg, dur: float | None = None) -> tuple[list, str] | None:
+    """A punch config as a (scale track, ease) pair, in local seconds.
+
+    Both of the punch's ramps turn out to be the same curve: the rise is
+    1 + amp*(1-pow(1-u,3)) and the release is 1 + amp*pow(1-u,3), which are
+    out_cubic on 1 -> peak and on peak -> 1 respectively. So the whole effect
+    is one track, not two hand-written halves that have to stay in step.
+
+    The hold intensities are a different effect and stay one: they snap to a
+    scale and remain there, which is the "hold" ease.
+
+    Mirrors punchZoomTracks() in static/keyframes-motion.js.
+    """
+    if not cfg or not cfg.get("enabled"):
+        return None
+    intensity = cfg.get("intensity", "med")
+    peak = _PUNCH_PEAK.get(intensity, 1.25)
+    if peak - 1.0 <= 0:
+        return None
+    try:
+        hit = max(0.0, float(cfg.get("hit", 0.0)))
+    except (TypeError, ValueError):
+        hit = 0.0
+
+    if intensity in _PUNCH_HOLD_INTENSITIES:
+        # Snap at the hit and stay. A constant track when the hit is at zero,
+        # so the very first frame is already at scale as it is today.
+        if hit <= 0:
+            return [[0.0, peak]], "hold"
+        return [[0.0, 1.0], [hit, peak]], "hold"
+
+    t_in = max(1.0, float(cfg.get("in_frames", PUNCH_IN_FRAMES))) / PUNCH_REF_FPS
+    t_out = max(1.0, float(cfg.get("out_frames", PUNCH_OUT_FRAMES))) / PUNCH_REF_FPS
+    if dur and dur > 0:
+        total = max(0.01, dur - hit)
+    else:
+        total = t_in + PUNCH_HOLD_SECONDS + t_out
+    if total < t_in + t_out:
+        # Too short to hold: keep the in/out proportions, drop the sustain.
+        squeeze = total / (t_in + t_out)
+        t_in, t_out = t_in * squeeze, t_out * squeeze
+    hold_end = max(t_in, total - t_out)
+
+    return ([[hit, 1.0], [hit + t_in, peak],
+             [hit + hold_end, peak], [hit + total, 1.0]], _PUNCH_EASE)
 
 
 def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,

@@ -48,11 +48,68 @@
     };
   }
 
+  // ---- Punch zoom -----------------------------------------------------
+  // Mirrors _PUNCH_PEAK / punch_zoom_tracks() in app.py.
+  var PUNCH_PEAK = {
+    low: 1.08, med: 1.12, high: 1.18, strong: 1.18,
+    "1.5x": 1.5, "2x": 2.0, hold_1_5: 1.5, hold_2: 2.0,
+  };
+  var PUNCH_HOLD_INTENSITIES = ["1.5x", "2x", "hold_1_5", "hold_2"];
+  var PUNCH_IN_FRAMES = 5;
+  var PUNCH_OUT_FRAMES = 8;
+  var PUNCH_HOLD_SECONDS = 0.30;
+  // The frame counts are expressed at this rate, which is a duration, not a
+  // frame count. This file used to turn them into seconds with a hardcoded
+  // 30 while the renderer used the project fps, so a 60fps project previewed
+  // a push twice as long as it burned.
+  var PUNCH_REF_FPS = 30;
+  var PUNCH_EASE = "out_cubic";
+
+  function punchZoomTracks(cfg, dur) {
+    if (!cfg || !cfg.enabled) return null;
+    var intensity = cfg.intensity || "med";
+    var peak = PUNCH_PEAK[intensity] || 1.25;
+    if (peak - 1 <= 0) return null;
+    var hit = Math.max(0, Number(cfg.hit) || 0);
+
+    if (PUNCH_HOLD_INTENSITIES.indexOf(intensity) !== -1) {
+      if (hit <= 0) return { track: [[0, peak]], ease: "hold" };
+      return { track: [[0, 1], [hit, peak]], ease: "hold" };
+    }
+
+    var tIn = Math.max(1, Number(cfg.in_frames) || PUNCH_IN_FRAMES) / PUNCH_REF_FPS;
+    var tOut = Math.max(1, Number(cfg.out_frames) || PUNCH_OUT_FRAMES) / PUNCH_REF_FPS;
+    var total = (dur && dur > 0) ? Math.max(0.01, dur - hit)
+                                 : tIn + PUNCH_HOLD_SECONDS + tOut;
+    if (total < tIn + tOut) {
+      var squeeze = total / (tIn + tOut);
+      tIn *= squeeze; tOut *= squeeze;
+    }
+    var holdEnd = Math.max(tIn, total - tOut);
+    return {
+      track: [[hit, 1], [hit + tIn, peak], [hit + holdEnd, peak],
+              [hit + total, 1]],
+      ease: PUNCH_EASE,
+    };
+  }
+
+  /** Scale at tRel seconds into the effect. 1 when there is nothing to do. */
+  function punchScaleAt(cfg, tRel, dur) {
+    var t = punchZoomTracks(cfg, dur);
+    if (!t) return 1;
+    var v = root.Keyframes.evalTrack(t.track, tRel, t.ease);
+    return v === null ? 1 : v;
+  }
+
   root.KeyframeMotion = {
     SWIPE_FROM: SWIPE_FROM,
     MOTION_EASE: MOTION_EASE,
     motionTracks: motionTracks,
     motionOffsetAt: motionOffsetAt,
+    PUNCH_PEAK: PUNCH_PEAK,
+    PUNCH_HOLD_INTENSITIES: PUNCH_HOLD_INTENSITIES,
+    punchZoomTracks: punchZoomTracks,
+    punchScaleAt: punchScaleAt,
   };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = root.KeyframeMotion;

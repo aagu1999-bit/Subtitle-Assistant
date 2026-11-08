@@ -3892,55 +3892,20 @@
     for (const o of ovEntries) applyOverlayFrame(o, ot);
   }
 
-  // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
-  // The renderer snaps to the peak on the hit and eases out on a cubic, so the
-  // preview has to use the same numbers or the move previews wrong.
-  const PUNCH_PEAK = {
-    // Mirrors _PUNCH_PEAK in app.py. The punch peaks top out at 118%; 140%
-    // read as a jump cut rather than emphasis.
-    low: 1.08, med: 1.12, high: 1.18, strong: 1.18,
-    "1.5x": 1.5, "2x": 2.0, hold_1_5: 1.5, hold_2: 2.0,
-  };
   const PUNCH_DECAY = 0.45;
-  // Mirrors PUNCH_IN_FRAMES / PUNCH_OUT_FRAMES / PUNCH_HOLD_SECONDS in app.py.
-  const PUNCH_IN_FRAMES = 5;
-  const PUNCH_OUT_FRAMES = 8;
-  const PUNCH_HOLD = 0.30;
-  const PUNCH_FPS = 30;   // the frame counts above are expressed at 30fps
-  // "Hold" intensities snap to their target scale at the hit and stay there
-  // for the whole duration instead of easing back to 1.0 — see
-  // _PUNCH_HOLD_INTENSITIES in app.py.
-  const PUNCH_HOLD_INTENSITIES = new Set(["1.5x", "2x", "hold_1_5", "hold_2"]);
   // Effects-lane fx types that behave like punch_zoom for preview purposes,
   // mapped to the intensity they should render at.
   const ZOOM_HOLD_LANE_TYPES = { zoom_1_5: "1.5x", zoom_2x: "2x" };
 
-  // Mirrors _tl_punch_zoom_filter in app.py: hold intensities snap and stay,
-  // punch intensities rise, hold, then release on a slower cubic. Preview and
-  // render have to share these numbers or a move previews differently from
-  // how it burns in.
+  // The peaks, the frame counts and the rise/hold/release curve all moved to
+  // static/keyframes-motion.js, which builds the same keyframe track app.py
+  // compiles into the zoompan expression. The copy that used to live here
+  // turned its frame counts into seconds with a hardcoded 30, so a 60fps
+  // project -- which is what the polish path renders at -- previewed a push
+  // twice as long as it burned.
   function punchScaleAt(cfg, tRel, dur) {
-    const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
-    const amp = peak - 1;
-    if (amp <= 0) return 1;
-    const hit = Math.max(0, Number(cfg.hit) || 0);
-    if (tRel < hit) return 1;
-    if (PUNCH_HOLD_INTENSITIES.has(cfg.intensity)) return peak;
-
-    const n = tRel - hit;
-    let tIn = Math.max(1, Number(cfg.in_frames) || PUNCH_IN_FRAMES) / PUNCH_FPS;
-    let tOut = Math.max(1, Number(cfg.out_frames) || PUNCH_OUT_FRAMES) / PUNCH_FPS;
-    let total = (dur && dur > 0) ? Math.max(0.01, dur - hit) : tIn + PUNCH_HOLD + tOut;
-    if (total < tIn + tOut) {
-      const squeeze = total / (tIn + tOut);
-      tIn *= squeeze; tOut *= squeeze;
-    }
-    const holdEnd = Math.max(tIn, total - tOut);
-
-    if (n < tIn) return 1 + amp * (1 - Math.pow(1 - n / tIn, 3));
-    if (n < holdEnd) return 1 + amp;
-    if (n < total) return 1 + amp * Math.pow(1 - (n - holdEnd) / tOut, 3);
-    return 1;
+    if (!window.KeyframeMotion) return 1;
+    return window.KeyframeMotion.punchScaleAt(cfg, tRel, dur);
   }
 
   // Effects-lane lookup that also matches zoom_1_5 / zoom_2x "hold" clips,

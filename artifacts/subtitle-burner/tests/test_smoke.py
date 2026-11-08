@@ -1195,34 +1195,55 @@ def test_ken_burns_preview_and_render_do_not_agree_today(app_mod):
         "characterisation test and keep the parity one")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "The preview hardcodes PUNCH_FPS = 30 to convert its frame counts to "
-    "seconds while the renderer uses the project fps, so at 60fps the "
-    "preview shows a push twice as long as the render produces. Fixed when "
-    "the punch zoom moves onto keyframe tracks."))
 def test_the_punch_zoom_agrees_with_its_preview_at_any_fps(app_mod):
-    """What parity should look like once the engine owns the curve."""
-    times = [0.0, 0.05, 0.1, 0.2, 0.4, 0.6]
-    out = _node_eval(
-        "const PUNCH_PEAK", "function activePunchLikeEffect",
-        'const o=[];for(const t of %s) '
-        'o.push(punchScaleAt({intensity:"med",hit:0}, t, 1.2).toFixed(6)); '
-        'console.log(o.join(" "));' % times)
-    js_vals = [float(v) for v in out.split()]
+    """The preview used to hardcode 30fps to turn its frame counts into
+    seconds while the renderer used the project fps, so a 60fps project --
+    which is what the polish path renders at -- previewed a push twice as
+    long as it burned. Both now read one track in seconds.
 
-    fps = 60
-    f = app_mod._tl_punch_zoom_filter(
-        {"enabled": True, "intensity": "med", "hit": 0}, 1080, 1920,
-        fps=fps, dur=1.2)
-    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    py_vals = _eval_zoompan_z(expr, [int(round(t * fps)) for t in times])
+    Compared at frame boundaries, because the renderer can only evaluate at
+    in/fps; asking it for 0.05s at 24fps compares two different instants and
+    measures quantisation rather than agreement.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
 
-    for t, a, b in zip(times, js_vals, py_vals):
-        assert abs(a - b) < 1e-3, (
-            f"at {t}s the preview scales {a} and the render {b}")
+    cfg = {"enabled": True, "intensity": "med", "hit": 0}
+    dur = 1.2
 
+    def preview_at(times):
+        script = (
+            "globalThis.window=globalThis;\n"
+            "globalThis.Keyframes=require(%r);\n"
+            % str(BURNER / "static" / "keyframes.js")
+            + "const M=require(%r);\n" % str(BURNER / "static" / "keyframes-motion.js")
+            + "const o=[];for(const t of %s)" % json.dumps(times)
+            + " o.push(M.punchScaleAt(%s,t,%s).toFixed(9));" % (json.dumps(cfg), dur)
+            + "console.log(o.join(' '));"
+        )
+        return [float(v) for v in subprocess.run(
+            [node, "-e", script], capture_output=True, text=True,
+            check=True).stdout.split()]
 
-# --- The preview has to animate during PLAYBACK, not only on a seek ------
+    # 30 is included so a "fix" that merely hardcodes another rate fails too.
+    for fps in (24, 30, 60):
+        frames = [0, 1, 2, 4, 7, 12, int(0.6 * fps), int(1.0 * fps)]
+        f = app_mod._tl_punch_zoom_filter(cfg, 1080, 1920, fps=fps, dur=dur)
+        expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+        py_vals = _eval_zoompan_z(expr, frames)
+        js_vals = preview_at([n / fps for n in frames])
+        for n, a, b in zip(frames, js_vals, py_vals):
+            assert abs(a - b) < 1e-4, (
+                f"at {fps}fps, frame {n} ({n / fps:.4f}s): "
+                f"preview {a}, render {b}")
+
+    # And the shape must still be a push: rest, rise, hold, settle.
+    vals = preview_at([0, 0.1, 0.5, 1.19])
+    assert vals[0] == pytest.approx(1.0), "does not start at rest"
+    assert max(vals) == pytest.approx(1.12, abs=1e-6), "never reaches its peak"
+    assert vals[-1] < 1.01, "does not settle back"
+
 
 def test_the_overlay_frame_writes_position_as_time_advances():
     """applyOverlayFrame is the per-frame writer. Run it and watch the box.
