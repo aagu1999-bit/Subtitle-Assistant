@@ -1070,3 +1070,147 @@ def test_the_backlog_filters_do_not_leak_other_rows(app_mod, temp_db, monkeypatc
     assert client.get("/suggestions?outcome=rejected").get_json()["count"] == 1
     # A bad limit must not 500 the page that reads it.
     assert client.get("/suggestions?limit=banana").status_code == 200
+
+
+# --- Characterisation: what the three animation systems do TODAY --------
+# These pin current behaviour before the keyframe engine replaces it. Some of
+# them pin behaviour that is wrong; that is deliberate. A migration you cannot
+# diff is a rewrite, and Ken Burns in particular has had no test at all, so a
+# regression in it passes the whole suite today.
+
+def _eval_zoompan_z(expr: str, frames, recursive=False):
+    """Evaluate a zoompan z-expression the way ffmpeg would.
+
+    `in` is the input frame index. `zoom` is the PREVIOUS frame's output zoom,
+    which ffmpeg initialises to 1.0 -- that recursion is why Ken Burns is not
+    a function of time and has to be simulated rather than sampled.
+    """
+    py = (expr.replace("if(", "IF(").replace("lte(", "LTE(")
+              .replace("lt(", "LT(").replace("gte(", "GTE("))
+    py = re.sub(r"\bin\b", "N", py)
+    py = re.sub(r"\bzoom\b", "Z", py)
+    env = {"IF": lambda c, a, b: a if c else b,
+           "LT": lambda a, b: a < b, "LTE": lambda a, b: a <= b,
+           "GTE": lambda a, b: a >= b, "pow": pow, "min": min, "max": max}
+    out, z = [], 1.0
+    for n in range(max(frames) + 1):
+        val = eval(py, {**env, "N": float(n), "Z": z})
+        if recursive:
+            z = val
+        if n in frames:
+            out.append(round(val, 4))
+    return out
+
+
+def _node_eval(block_from: str, block_to: str, body: str):
+    """Run a slice of timeline.js under node and return its stdout."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    js_src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    block = js_src[js_src.index(block_from):js_src.index(block_to)]
+    block = re.sub(r"^\s*const ", "var ", block, flags=re.M)
+    block = re.sub(r"^\s*function ", "function ", block, flags=re.M)
+    res = subprocess.run([node, "-e", block + body],
+                         capture_output=True, text=True, check=True)
+    return res.stdout.strip()
+
+
+def test_ken_burns_today_accumulates_instead_of_following_the_clock(app_mod):
+    """Characterisation. The push-in ramps by a fixed increment per frame.
+
+    There is no `t` and no `in` in the expression -- it adds to its own
+    previous value, so it cannot be seeked and its shape depends on how many
+    frames have already gone by. Pinned here so the migration to a keyframe
+    track is a visible diff rather than a claim.
+    """
+    f = app_mod._tl_kenburns_filter(
+        {"enabled": True, "intensity": "med", "direction": "in"},
+        1080, 1920, fps=30, dur=4.0)
+    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+    assert "zoom" in expr, "the ramp is built on its own previous value"
+    assert not re.search(r"\bt\b", expr), "Ken Burns does not consult the clock"
+    assert not re.search(r"\bin\b", expr), "nor the frame counter"
+
+    vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 119], recursive=True)
+    # amount 0.22 over 120 frames => +0.0018333 per frame, capped at 1.22.
+    assert vals[0] == pytest.approx(1.0018, abs=5e-4)
+    assert vals[-1] == pytest.approx(1.22, abs=5e-3), f"never arrives: {vals}"
+    assert vals == sorted(vals), f"a push-in must not go backwards: {vals}"
+
+
+def test_ken_burns_pull_out_snaps_back_when_it_lands(app_mod):
+    """Characterisation of a BUG, pinned so fixing it is deliberate.
+
+    The pull-out is `if(lte(zoom,1.0), maxz, max(zoom-inc,1.0))`. It leans on
+    the first frame's zoom being 1.0 to jump to full zoom -- but the moment
+    the ease-out actually reaches 1.0, that same test fires again and throws
+    it straight back to maxz. On any clip long enough to finish, it snaps.
+    """
+    f = app_mod._tl_kenburns_filter(
+        {"enabled": True, "intensity": "med", "direction": "out"},
+        1080, 1920, fps=30, dur=1.0)   # short clip: the ramp completes early
+    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+    vals = _eval_zoompan_z(expr, list(range(0, 60)), recursive=True)
+
+    assert vals[0] == pytest.approx(1.22, abs=1e-3), "should start zoomed in"
+    assert min(vals) == pytest.approx(1.0, abs=1e-6), "should reach rest"
+    # The defect: after settling it climbs again instead of staying put.
+    landed = vals.index(min(vals))
+    assert max(vals[landed:]) > 1.2, (
+        "the pull-out no longer snaps back -- if this is intentional, this "
+        "characterisation test is what should be updated")
+
+
+def test_ken_burns_preview_and_render_do_not_agree_today(app_mod):
+    """Characterisation. Same name, two different curves.
+
+    The renderer accumulates a fixed increment per frame; the preview is
+    `1 + amount * (tRel/dur)`, plain linear. They only coincide at the ends.
+    """
+    out = _node_eval(
+        "const KENBURNS_AMOUNT", "const OVERLAY_SWIPE_FROM",
+        'const o=[];for(const u of [0,0.25,0.5,0.75,1]) '
+        'o.push(kenBurnsScaleAt({enabled:true,intensity:"med",direction:"in"},'
+        ' u*4, 4).toFixed(6)); console.log(o.join(" "));')
+    js_vals = [float(v) for v in out.split()]
+    assert js_vals == [pytest.approx(1 + 0.22 * u, abs=1e-6)
+                       for u in (0, 0.25, 0.5, 0.75, 1)], "preview is linear"
+
+    f = app_mod._tl_kenburns_filter(
+        {"enabled": True, "intensity": "med", "direction": "in"},
+        1080, 1920, fps=30, dur=4.0)
+    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+    py_vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 119], recursive=True)
+
+    gaps = [abs(a - b) for a, b in zip(js_vals, py_vals)]
+    assert max(gaps) > 1e-3, (
+        "preview and render now agree on Ken Burns -- delete this "
+        "characterisation test and keep the parity one")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "The preview hardcodes PUNCH_FPS = 30 to convert its frame counts to "
+    "seconds while the renderer uses the project fps, so at 60fps the "
+    "preview shows a push twice as long as the render produces. Fixed when "
+    "the punch zoom moves onto keyframe tracks."))
+def test_the_punch_zoom_agrees_with_its_preview_at_any_fps(app_mod):
+    """What parity should look like once the engine owns the curve."""
+    times = [0.0, 0.05, 0.1, 0.2, 0.4, 0.6]
+    out = _node_eval(
+        "const PUNCH_PEAK", "function activePunchLikeEffect",
+        'const o=[];for(const t of %s) '
+        'o.push(punchScaleAt({intensity:"med",hit:0}, t, 1.2).toFixed(6)); '
+        'console.log(o.join(" "));' % times)
+    js_vals = [float(v) for v in out.split()]
+
+    fps = 60
+    f = app_mod._tl_punch_zoom_filter(
+        {"enabled": True, "intensity": "med", "hit": 0}, 1080, 1920,
+        fps=fps, dur=1.2)
+    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
+    py_vals = _eval_zoompan_z(expr, [int(round(t * fps)) for t in times])
+
+    for t, a, b in zip(times, js_vals, py_vals):
+        assert abs(a - b) < 1e-3, (
+            f"at {t}s the preview scales {a} and the render {b}")
