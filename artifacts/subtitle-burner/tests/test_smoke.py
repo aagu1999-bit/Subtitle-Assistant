@@ -2616,3 +2616,69 @@ def test_the_speaker_face_map_is_cached_per_analysis(app_mod, two_speakers):
         assert calls["n"] == 1, f"recomputed {calls['n']} times"
     finally:
         app_mod._assign_speakers_to_faces = real
+
+
+# ---------------------------------------------------------------------------
+# The pin has to reach the machine that installs.
+#
+# The deployed app died with `module 'mediapipe' has no attribute
+# 'solutions'` while pyproject.toml and requirements.txt both said
+# `mediapipe>=0.10.5,<0.10.22`. The pin was never wrong -- uv.lock simply
+# had no mediapipe entry at all (44 locked packages, zero matches) and
+# predated the pin by two weeks. Replit installs from the lock, so the
+# declaration was decorative.
+#
+# test_mediapipe_still_exposes_the_solutions_api checks the LOCAL install,
+# which was correctly pinned, so it could never catch this. This checks
+# the artifact a deploy actually reads.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = BURNER.parent.parent
+
+
+def _locked_version(name):
+    """The version uv.lock pins for *name*, or None if it locks none."""
+    lock = REPO_ROOT / "uv.lock"
+    if not lock.exists():
+        pytest.skip("uv.lock not in this checkout")
+    block = None
+    for chunk in lock.read_text(encoding="utf-8").split("[[package]]"):
+        if re.search(rf'^\s*name = "{re.escape(name)}"\s*$', chunk, re.M):
+            block = chunk
+            break
+    if block is None:
+        return None
+    m = re.search(r'^\s*version = "([^"]+)"', block, re.M)
+    return m.group(1) if m else None
+
+
+def test_the_lockfile_honours_the_mediapipe_pin():
+    """uv.lock must resolve mediapipe, and resolve it under the ceiling.
+
+    Both halves matter and they fail for different reasons: a missing
+    entry means the lock never saw the dependency, and a too-new version
+    means it saw it and ignored the ceiling. Either way a fresh build
+    lands on a release without `mp.solutions`.
+    """
+    declared = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    ceiling = re.search(r'"mediapipe>=[\d.]+,<([\d.]+)"', declared)
+    assert ceiling, "pyproject.toml no longer declares an upper bound on mediapipe"
+    limit = tuple(int(p) for p in ceiling.group(1).split("."))
+
+    locked = _locked_version("mediapipe")
+    assert locked is not None, (
+        "uv.lock has no mediapipe entry, so the pin never reaches a build "
+        "that installs from the lock"
+    )
+    got = tuple(int(p) for p in re.findall(r"\d+", locked)[:3])
+    assert got < limit, f"uv.lock pins mediapipe {locked}, at or above the {ceiling.group(1)} ceiling"
+
+
+def test_the_lockfile_carries_the_vision_dependencies():
+    """opencv too -- the matte and every face read go through cv2.
+
+    It went missing from the lock for the same reason mediapipe did, and
+    without it Analyze and the background both fail on a fresh build.
+    """
+    assert _locked_version("opencv-python-headless") is not None, \
+        "uv.lock has no opencv-python-headless entry"
