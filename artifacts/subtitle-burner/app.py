@@ -581,10 +581,137 @@ def transcribe(video_path: Path, pre_clean: bool = False):
                 if not text:
                     continue
                 words.append({"word": text, "start": float(w.start), "end": float(w.end)})
-        return words
+        return _refine_word_alignment(target, words)
     finally:
         if cleaned:
             _safe_unlink(cleaned)
+
+
+# Every effect this app places — a caption highlight, a punch zoom, a headline
+# landing on a stressed word — is anchored to a word timestamp, so alignment
+# error shows up directly on screen. Whisper infers word times from decoder
+# attention, which drifts; WhisperX runs a phoneme model over the audio and
+# aligns the words it was given, which is markedly tighter. Opt in, because it
+# pulls torch and a wav2vec2 model.
+WHISPERX_ALIGN = os.environ.get("WHISPERX_ALIGN", "").lower() in ("1", "true", "yes")
+
+
+def _refine_word_alignment(audio_path: Path, words: list[dict]) -> list[dict]:
+    """Tighten word timings with WhisperX forced alignment.
+
+    Returns *words* unchanged when disabled, unavailable, or if alignment
+    fails or returns fewer words than it was given — a worse transcript is a
+    far worse outcome than a slightly loose one, so this never degrades what
+    it was handed.
+    """
+    if not WHISPERX_ALIGN or not words:
+        return words
+    try:
+        import whisperx
+    except Exception as e:
+        ai_logger.info(f"WhisperX alignment unavailable, keeping Whisper timings: {e}")
+        return words
+    try:
+        device = os.environ.get("WHISPERX_DEVICE", "cpu")
+        lang = os.environ.get("WHISPERX_LANG", "en")
+        model, meta = whisperx.load_align_model(language_code=lang, device=device)
+        # Align wants segments of text; one spanning segment is enough, since
+        # the word list already carries the tokenisation we want back.
+        segment = {
+            "start": float(words[0]["start"]),
+            "end": float(words[-1]["end"]),
+            "text": " ".join(w["word"] for w in words),
+        }
+        out = whisperx.align(
+            [segment], model, meta, str(audio_path), device,
+            return_char_alignments=False,
+        )
+        aligned = [
+            {"word": str(w["word"]).strip(),
+             "start": float(w["start"]), "end": float(w["end"])}
+            for w in (out.get("word_segments") or [])
+            if str(w.get("word", "")).strip()
+            and w.get("start") is not None and w.get("end") is not None
+        ]
+        if len(aligned) < len(words) * 0.9:
+            ai_logger.info(
+                f"WhisperX returned {len(aligned)} of {len(words)} words; "
+                f"keeping Whisper timings."
+            )
+            return words
+        ai_logger.info(f"WhisperX aligned {len(aligned)} words.")
+        return aligned
+    except Exception as e:
+        ai_logger.info(f"WhisperX alignment failed, keeping Whisper timings: {e}")
+        return words
+
+
+def _segment_deps_available() -> tuple[bool, str]:
+    """Return (ok, msg) for the person-matte path.
+
+    Lighter than the reframe check: selfie segmentation needs mediapipe and
+    OpenCV but no pyannote, no torch and no Hugging Face token, so it can work
+    on installs where the full reframe pipeline can't.
+    """
+    try:
+        import mediapipe  # noqa: F401
+    except ImportError as e:
+        return False, f"mediapipe failed to import: {e}"
+    except Exception as e:
+        return False, f"mediapipe import raised {type(e).__name__}: {e}"
+    try:
+        import cv2  # noqa: F401
+    except ImportError as e:
+        return False, f"OpenCV failed to import: {e}"
+    except Exception as e:
+        return False, f"OpenCV import raised {type(e).__name__}: {e}"
+    return True, ""
+
+
+def segment_person_at(video_path: Path, t: float) -> bytes:
+    """PNG of the person matte at time *t*: white subject on black.
+
+    MediaPipe's selfie segmentation is built for exactly this shot — one
+    person, fixed camera — and runs on CPU, so a matte costs a frame decode
+    rather than a model download. It is already a dependency for face
+    detection; this just uses the other solution in the same package.
+
+    Returns PNG bytes so the caller can eyeball the edges (hair and sleeves
+    are where this class of model gives up) before anything depends on it.
+    """
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(round(t * fps))))
+        ok, frame = cap.read()
+        if not ok:
+            raise RuntimeError(f"Could not read a frame at {t:.2f}s")
+    finally:
+        cap.release()
+
+    # model_selection=1 is the landscape/general model: more accurate than the
+    # 0 "square" variant on a full-frame portrait shot.
+    segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(
+        model_selection=1
+    )
+    try:
+        res = segmenter.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    finally:
+        segmenter.close()
+    if res is None or res.segmentation_mask is None:
+        raise RuntimeError("Segmentation returned no mask for this frame.")
+
+    matte = (np.clip(res.segmentation_mask, 0.0, 1.0) * 255).astype("uint8")
+    ok, buf = cv2.imencode(".png", matte)
+    if not ok:
+        raise RuntimeError("Could not encode the matte as PNG.")
+    return buf.tobytes()
 
 
 # ---- Interview reframe: speaker diarization + face tracking ----
@@ -4095,6 +4222,36 @@ def _create_clip_from_job(source_job_id: str, start: float, end: float, label: s
     }
     _db_save_job(new_job_id)
     return new_job_id
+
+@app.route("/segment-preview/<job_id>.png")
+def segment_preview(job_id: str):
+    """The person matte for one frame, as a PNG.
+
+    Put up before anything in the render depends on segmentation: these models
+    fail at hair, glasses and sleeves, and that is only judgeable by eye. Pass
+    ?t=<seconds> to sample a different frame.
+    """
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    ok, msg = _segment_deps_available()
+    if not ok:
+        return jsonify({"error": f"Segmentation unavailable — {msg}"}), 400
+    video_path = find_video_path(job_id)
+    if not video_path:
+        return jsonify({"error": "Source video is no longer on disk."}), 404
+    try:
+        t = max(0.0, float(request.args.get("t", 0)))
+    except (TypeError, ValueError):
+        t = 0.0
+    try:
+        png = segment_person_at(video_path, t)
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    resp = make_response(png)
+    resp.headers["Content-Type"] = "image/png"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
 
 @app.route("/selftest")
 def selftest():

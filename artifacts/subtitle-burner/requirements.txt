@@ -18,3 +18,11 @@ gunicorn>=21.0.0
 pyannote.audio>=3.1.0
 mediapipe>=0.10.0
 opencv-python-headless>=4.10.0
+
+# Tighter word timestamps (optional). Whisper infers word times from decoder
+# attention and they drift; WhisperX aligns them against a phoneme model, and
+# every caption highlight and effect in this app is anchored to a word time.
+# Off unless WHISPERX_ALIGN=1, and it falls back to Whisper's own timings if
+# the import or the alignment fails. Pulls torch, so pyannote already covers
+# most of the download if the reframe feature is installed.
+whisperx>=3.1.0
