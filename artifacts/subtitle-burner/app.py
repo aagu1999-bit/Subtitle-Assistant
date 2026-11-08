@@ -13130,10 +13130,12 @@ def _tl_bg_source(bg: dict) -> Path | None:
     """Where the background picture actually lives on disk."""
     aid = str(bg.get("asset_id") or "").strip()
     if aid:
-        hits = sorted(ASSET_DIR.glob(f"{aid}.*"))
-        for h in hits:
-            if h.suffix.lower() != ".json":
-                return h
+        # _find_asset_path, not a glob of our own: it validates the id against
+        # [a-f0-9]{32} and skips sidecar .meta.json, which an ad-hoc glob here
+        # did neither of. One asset lookup for the whole app.
+        found = _find_asset_path(aid)
+        if found:
+            return found
     jid = str(bg.get("source_job_id") or "").strip()
     if jid:
         return find_video_path(jid)
@@ -14673,7 +14675,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _stage("placing the background", 45)
             bgd = UPLOAD_DIR / f"{job_id}_tlbg.mp4"
             if _tl_composite_background(base, tl["background"], W, H, bgd,
-                                        fps=fps, dur=total_dur):
+                                        fps=fps, dur=_total_dur):
                 work.append(bgd)
                 base = bgd
 

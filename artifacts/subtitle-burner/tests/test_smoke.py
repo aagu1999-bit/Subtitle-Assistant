@@ -1862,3 +1862,164 @@ def test_the_drawer_sends_what_it_remembers():
     assert "forgetCoEditorTurns" in js, (
         "a question asked about one project must not be answered against "
         "another -- there must be a way to clear it")
+
+
+# --- One render through every pass that changed -------------------------
+
+@needs_ffmpeg
+def test_one_render_through_the_whole_pipeline(app_mod, tmp_path, monkeypatch):
+    """Every piece was verified alone; nothing had exercised the chain.
+
+    The render is eight passes:
+
+        per-segment effects -> concat/xfade -> BACKGROUND -> logo
+          -> audio bed -> overlays -> SFX -> captions+titles -> audio enhance
+
+    The background pass is new and was spliced into the middle of that, and
+    all three effects now emit different filter strings. The first run of
+    this test found a NameError in the background pass that would have
+    crashed every render with a background set -- invisible to the isolated
+    test, which called the function directly.
+
+    The subject is a real person (matplotlib's bundled portrait), so the
+    matte is real rather than stubbed.
+    """
+    for mod in ("cv2", "numpy", "mediapipe", "matplotlib"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import numpy as np
+    import uuid
+
+    portrait = _portrait()
+    sid, rid = uuid.uuid4().hex, uuid.uuid4().hex
+    bg_id, ov_id = uuid.uuid4().hex, uuid.uuid4().hex
+    made = []
+
+    def ff(*args):
+        subprocess.run([FFMPEG, "-v", "error", "-y", *args], check=True)
+
+    try:
+        src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+        ff("-loop", "1", "-i", str(portrait), "-f", "lavfi",
+           "-i", "sine=frequency=330:duration=6", "-t", "6", "-r", "30",
+           "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960",
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src))
+        made.append(src)
+
+        app_mod.ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        bg = app_mod.ASSET_DIR / f"{bg_id}.png"
+        ff("-f", "lavfi", "-i",
+           "gradients=s=540x960:c0=0x0a3d91:c1=0xff8c1a:d=0.1:r=1",
+           "-frames:v", "1", str(bg))
+        ov = app_mod.ASSET_DIR / f"{ov_id}.png"
+        ff("-f", "lavfi", "-i", "color=c=0x19d47a:s=320x200:d=0.1:r=1",
+           "-frames:v", "1", str(ov))
+        made += [bg, ov]
+        # Real uploads always carry meta; without it the overlay resolver
+        # returns None and the clip is dropped from the graph in silence.
+        for aid in (bg_id, ov_id):
+            app_mod._write_asset_meta(aid, filename="t.png", source="test")
+            made.append(app_mod._asset_meta_path(aid))
+
+        words = [{"word": w, "start": 0.6 + i * 0.45, "end": 0.95 + i * 0.45}
+                 for i, w in enumerate("this is the full pipeline".split())]
+        style = {"font_name": "Anton", "font_size": 64, "position_y": 82}
+        base = {"status": "done", "progress": 100, "output": None, "error": None,
+                "audio": None, "emoji_rules": {}, "created_at": 0.0}
+        app_mod.jobs[sid] = {**base, "words": words, "style": style,
+                             "filename": "portrait.mp4"}
+        app_mod.jobs[rid] = {**base, "words": None, "style": style,
+                             "filename": "e2e.mp4"}
+
+        timeline = {
+            "canvas": "9x16", "fps": 30, "fit": "cover", "bg": "#000000",
+            "style": style,
+            "background": {"asset_id": bg_id, "fit": "cover"},
+            "tracks": {
+                "main": [
+                    {"id": "m1", "source_job_id": sid, "in": 0.0, "out": 3.0,
+                     "transition": {"type": "crossfade", "duration": 0.3}},
+                    {"id": "m2", "source_job_id": sid, "in": 3.0, "out": 5.0},
+                ],
+                "effects": [
+                    {"id": "f1", "type": "punch_zoom", "start": 0.4, "out": 1.2,
+                     "intensity": "med", "hit": 0.0},
+                    {"id": "f2", "type": "ken_burns", "start": 1.8, "out": 2.0,
+                     "intensity": "med", "direction": "in"},
+                    {"id": "f3", "type": "zoom_2x", "start": 4.0, "out": 0.8},
+                ],
+                "overlay": [
+                    {"id": "o1", "asset_id": ov_id, "start": 1.0, "in": 0,
+                     "out": 2.5, "x": 0.12, "y": 0.12, "w": 0.4, "h": 0.18,
+                     "fit": "cover", "opacity": 1.0, "fade_in": 0, "fade_out": 0,
+                     "motion": {"type": "swipe_left", "in": 0.8}},
+                ],
+                "text": [{"id": "t1", "text": "END TO END", "start": 0.3,
+                          "out": 2.0, "x": 0.5, "y": 0.2, "size": 56,
+                          "font": "Anton", "align": 2, "anim": "fade"}],
+                "music": [],
+            },
+        }
+
+        app_mod.render_timeline_job(rid, timeline)
+        assert app_mod.jobs[rid]["status"] == "done", app_mod.jobs[rid].get("error")
+
+        out = app_mod.OUTPUT_DIR / f"{rid}.mp4"
+        made.append(out)
+        assert out.exists() and out.stat().st_size > 100_000
+
+        def frame(t):
+            png = tmp_path / f"f{t}.png"
+            ff("-ss", str(t), "-i", str(out), "-frames:v", "1", str(png))
+            return cv2.imread(str(png))
+
+        # The background replaced hers. Asserted by comparing against the
+        # SOURCE at the same corner rather than against a hardcoded colour:
+        # the gradient's exact shade at a given pixel is an accident of the
+        # canvas size, but "this is no longer the photo's own background" is
+        # the actual claim.
+        mid = frame(2.4)
+        src_png = tmp_path / "src.png"
+        ff("-ss", "2.4", "-i", str(src), "-frames:v", "1", str(src_png))
+        src_frame = cv2.resize(cv2.imread(str(src_png)),
+                               (mid.shape[1], mid.shape[0]))
+        corner = (slice(60, 200), slice(30, 160))
+        rendered_bg = mid[corner].reshape(-1, 3).mean(0)
+        original_bg = src_frame[corner].reshape(-1, 3).mean(0)
+        moved = float(np.abs(rendered_bg - original_bg).sum())
+        assert moved > 60, (
+            f"the corner still looks like the photo's own background: "
+            f"rendered {rendered_bg} vs original {original_bg}")
+        assert rendered_bg.max() > 60, f"corner is near-black: {rendered_bg}"
+
+        # And she survived it -- the matte kept the subject, skin-toned.
+        # Sampled below the overlay box (which ends at 0.12+0.18 of the
+        # height) and above the captions, or this reads the green card
+        # instead of her face.
+        face = mid[760:880, 470:640].reshape(-1, 3).mean(0)
+        assert face[2] > face[0] + 20, f"subject missing: BGR {face}"
+
+        # The overlay swiped in rather than appearing at rest, inside the same
+        # filtergraph as everything above.
+        def green_left(im):
+            g = ((im[:, :, 1].astype(int) - im[:, :, 2].astype(int) > 40)
+                 & (im[:, :, 1].astype(int) - im[:, :, 0].astype(int) > 40))
+            cols = np.where(g.any(axis=0))[0]
+            return int(cols.min()) if len(cols) else None
+
+        early, late = green_left(frame(1.05)), green_left(frame(2.4))
+        assert early is not None and late is not None, "the overlay never landed"
+        assert early > late + 200, f"the overlay did not travel: {early} -> {late}"
+        assert abs(late - int(0.12 * 1080)) < 12, f"settled at {late}, not at rest"
+
+        # And the zoom hold still changes framing this late in the chain.
+        assert green_left(frame(4.3)) is None, "overlay outstayed its range"
+    finally:
+        for p in made:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod.jobs.pop(sid, None)
+        app_mod.jobs.pop(rid, None)
