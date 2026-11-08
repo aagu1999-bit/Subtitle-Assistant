@@ -1433,3 +1433,9 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   font-size: .68rem; line-height: 1.35; padding: 6px 8px; text-align: center;
   pointer-events: none;
 }
+
+/* Overlay clips marked "behind me": they sit UNDER #tlPreviewVideo, which the
+   overlay layer cannot do because its own z-index gives it a stacking context
+   its children can never escape downward from. */
+.tl-behind-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.tl-behind-layer > div { pointer-events: none !important; }

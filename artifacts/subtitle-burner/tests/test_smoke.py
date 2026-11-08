@@ -2192,3 +2192,118 @@ def test_the_preview_does_not_promise_a_cutout_the_render_cannot_do():
     assert "The render still cuts you out properly" not in js
     assert "The render will skip it" in js, (
         "say what the render will actually do")
+
+
+# --- Backgrounds you can switch in and out ------------------------------
+
+@needs_ffmpeg
+def test_backgrounds_switch_in_and_out_and_leave_the_footage_between_them(
+        app_mod, tmp_path):
+    """A background is an overlay marked `behind`, so switching them through
+    a clip is several of them in a row on the lane.
+
+    The design rests on one property: laying a cut-out subject back over its
+    OWN frame is a no-op. Measured directly before building on it -- zero
+    differing pixels inside the subject, the rest confined to chroma
+    subsampling at the matte edge, and it does not accumulate over repeated
+    passes. That is what lets the pictures be painted onto a copy of the
+    frame with no branch for the stretches that have none, and it is why
+    the gap between two backgrounds has to be the untouched original.
+    """
+    for mod in ("cv2", "mediapipe", "matplotlib"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import uuid
+
+    base = tmp_path / "base.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-loop", "1", "-i",
+                    str(_portrait()), "-t", "6", "-r", "30", "-vf",
+                    "scale=540:960:force_original_aspect_ratio=increase,"
+                    "crop=540:960", "-pix_fmt", "yuv420p", str(base)], check=True)
+
+    made, ids = [], []
+    for col in ("0x1133ff", "0x11cc33"):          # blue, then green
+        aid = uuid.uuid4().hex
+        ids.append(aid)
+        pic = app_mod.ASSET_DIR / f"{aid}.png"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"color=c={col}:s=540x960:d=0.1:r=1", "-frames:v", "1",
+                        str(pic)], check=True)
+        app_mod._write_asset_meta(aid, filename=f"{col}.png", source="test")
+        made += [pic, app_mod._asset_meta_path(aid)]
+
+    out = tmp_path / "switch.mp4"
+    try:
+        clips = [
+            # Blue, full frame, 0.5 - 2.0
+            {"id": "b1", "asset_id": ids[0], "behind": True, "start": 0.5,
+             "in": 0, "out": 1.5, "x": 0, "y": 0, "w": 1, "h": 1,
+             "fit": "cover", "opacity": 1, "fade_in": 0, "fade_out": 0},
+            # Green, only the TOP 45% -- "any size", real background around it
+            {"id": "b2", "asset_id": ids[1], "behind": True, "start": 3.5,
+             "in": 0, "out": 1.5, "x": 0, "y": 0, "w": 1, "h": 0.45,
+             "fit": "cover", "opacity": 1, "fade_in": 0, "fade_out": 0},
+        ]
+        app_mod._tl_composite_overlays(base, clips, 540, 960, out, fps=30)
+        assert out.exists() and out.stat().st_size > 10_000
+
+        def sample(t, box):
+            png = tmp_path / f"s{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(t), "-i",
+                            str(out), "-frames:v", "1", str(png)], check=True)
+            im = cv2.imread(str(png))
+            return im[box].reshape(-1, 3).mean(0), im
+
+        corner = (slice(40, 90), slice(20, 90))
+        blue, _ = sample(1.2, corner)
+        assert blue[0] > 150 and blue[2] < 90, f"first background missing: {blue}"
+        green, gim = sample(4.2, corner)
+        assert green[1] > 140 and green[2] < 90, f"second background missing: {green}"
+
+        # The gap, and after the last one: the ORIGINAL footage, untouched.
+        for t in (0.2, 2.8, 5.6):
+            got, _ = sample(t, corner)
+            assert not (got[0] > 150 and got[2] < 90), f"blue leaked at {t}s"
+            assert not (got[1] > 140 and got[2] < 90), f"green leaked at {t}s"
+
+        # Size is honoured: below the green box the real background shows.
+        below = gim[700:800, 20:90].reshape(-1, 3).mean(0)
+        assert not (below[1] > 140 and below[2] < 90), (
+            f"a 45%-tall background covered the whole frame: {below}")
+
+        # And she survives all of it.
+        face = gim[600:700, 230:320].reshape(-1, 3).mean(0)
+        assert face[2] > face[0] + 20, f"subject lost: {face}"
+    finally:
+        for p in made:
+            Path(p).unlink(missing_ok=True)
+
+
+def test_an_overlay_without_behind_still_goes_in_front(app_mod):
+    """The new branch must not change what overlays have always done."""
+    src = (BURNER / "app.py").read_text(encoding="utf-8")
+    fn = src[src.index("    def _build_graph(items: list)"):][:2200]
+    assert 'it[0].get("behind")' in fn, "the split must key off the flag"
+    assert "front = [it for it in items if not it[0].get(\"behind\")]" in fn
+    # With nothing behind, no matte is fetched and no split is emitted.
+    assert "if behind:" in fn, "the matte must only be built when needed"
+
+
+def test_a_behind_clip_previews_under_the_video():
+    """#tlOverlayLayer has z-index 2 and therefore its own stacking context,
+    so a child of it can never sit below the video however it is
+    z-indexed. Behind-clips need their own container beneath."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert "behindLayerEl" in js, "no container for behind-clips"
+    assert "item.behind ? behindLayerEl() : layer" in js, (
+        "behind-clips must be appended to the lower container")
+    css = (BURNER / "static" / "timeline.css").read_text(encoding="utf-8")
+    assert ".tl-behind-layer" in css and "z-index: 0" in css
+
+
+def test_the_behind_switch_is_in_the_overlay_panel():
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert 'propCheck("behind"' in js, "no way to mark a clip as a background"
+    assert 'data-layout="full"' in js, "no way to make it full frame"
+    assert 'key === "behind"' in js, "toggling it must re-render and save"

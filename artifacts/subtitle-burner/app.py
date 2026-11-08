@@ -13958,11 +13958,54 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         return
 
     def _build_graph(items: list) -> tuple[list, str, str]:
+        # Overlays marked `behind` go UNDER the subject rather than over it.
+        # They are backgrounds, switchable in and out at any size, and they
+        # reuse everything an overlay already has: timing, position, fit,
+        # swipe, Ken Burns.
+        behind = [it for it in items if it[0].get("behind")]
+        front = [it for it in items if not it[0].get("behind")]
+
         inputs = ["-i", str(base)]
         filt = []
         cur = "[0:v:0]"
         in_idx = 1
-        for n, (ov, path, kind) in enumerate(items, start=1):
+        fg_label = None
+
+        if behind:
+            matte = _tl_matte_video(base, W, H, fps, base_dur or None)
+            if not matte:
+                # No cut-out means no "behind": drawing those pictures over
+                # the top instead would be worse than leaving them out, so
+                # they are dropped and the front overlays still land.
+                ok, why = _segment_deps_available()
+                reason = why if not ok else "the subject could not be separated"
+                print(f"[overlay] {len(behind)} background(s) skipped -- {reason}",
+                      flush=True)
+                _tl_background_skipped.append(reason)
+                behind = []
+            else:
+                inputs += ["-i", str(matte)]
+                # Split the frame: one copy to paint pictures onto, one to cut
+                # the subject out of. Laying that cut-out back over its own
+                # frame is a no-op -- identical inside the subject, transparent
+                # outside -- which is what lets the pictures be painted on a
+                # copy without branching for the stretches that have none.
+                # Measured: zero differing pixels inside the subject, and it
+                # does not accumulate over repeated passes.
+                filt.append("[0:v:0]split=2[tlbk][tlsub]")
+                filt.append(f"[tlsub][{in_idx}:v:0]alphamerge[tlfg]")
+                fg_label = "[tlfg]"
+                cur = "[tlbk]"
+                in_idx += 1
+
+        ordered = behind + front
+        for n, (ov, path, kind) in enumerate(ordered, start=1):
+            if fg_label and not ov.get("behind"):
+                # Everything behind has been painted; put the subject back on
+                # top before the first overlay that belongs in front of it.
+                filt.append(f"{cur}{fg_label}overlay=0:0:format=auto[tlwithfg]")
+                cur = "[tlwithfg]"
+                fg_label = None
             start = max(0.0, float(ov.get("start", 0)))
             o_in = max(0.0, float(ov.get("in", 0)))
             o_out = float(ov.get("out", o_in + 4))
@@ -13977,6 +14020,11 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
                 ov, path, kind, n, inputs, filt, cur, in_idx, start, o_in,
                 length, W, H, fps,
             )
+        if fg_label:
+            # Only behind-clips in this project: the subject still has to go
+            # back on top.
+            filt.append(f"{cur}{fg_label}overlay=0:0:format=auto[tlwithfg]")
+            cur = "[tlwithfg]"
         return inputs, filt, cur
 
     fps = max(15, min(60, int(fps or 30)))

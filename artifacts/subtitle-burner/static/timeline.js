@@ -3872,6 +3872,19 @@
   let _bgMatteAt = null;
   let _bgMatteUrl = null;
 
+  function behindLayerEl() {
+    const stage = $("tlStage");
+    if (!stage) return null;
+    let el = $("tlBehindLayer");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "tlBehindLayer";
+      el.className = "tl-behind-layer";
+      stage.insertBefore(el, stage.firstChild);
+    }
+    return el;
+  }
+
   function backgroundLayerEl() {
     const stage = $("tlStage");
     if (!stage) return null;
@@ -4287,6 +4300,8 @@
     if (boxDrag) return;
 
     layer.innerHTML = "";
+    const behindHost = behindLayerEl();
+    if (behindHost) behindHost.innerHTML = "";
     animEntries = [];
     ovEntries = [];
 
@@ -4413,7 +4428,11 @@
           startBoxDrag(e, "overlay", item, wrap);
         });
 
-        layer.appendChild(wrap);
+        // Behind-clips go under the video. #tlOverlayLayer has z-index 2 and
+        // therefore its own stacking context, so a child of it can never sit
+        // below the video however it is z-indexed -- it needs a container of
+        // its own, beneath.
+        (item.behind ? behindLayerEl() : layer).appendChild(wrap);
         const entry = {
           el: media,
           // The wrapper carries position and opacity; the media inside it
@@ -4950,6 +4969,21 @@
         `and the bed drops while the voice talks.</p>`;
     } else if (t === "overlay") {
       let ovBody = "";
+      // Behind or in front is the first thing about this clip, so it goes
+      // first. A background is an overlay that sits behind you -- same
+      // timing, same sizing, same swipes -- so switching backgrounds in and
+      // out is just several of these in a row on the lane.
+      ovBody += propCheck("behind", "🪞 Behind me (use as a background)", !!c.behind);
+      if (c.behind) {
+        ovBody += `<div style="display:flex;gap:6px;margin:4px 0 8px">` +
+          `<button type="button" class="tl-chip-btn" data-act="ovlayout" data-layout="full">Make it full frame</button>` +
+          `</div>`;
+        ovBody += `<p class="muted" style="font-size:.72rem;line-height:1.45;margin:0 0 8px">` +
+          `You are cut out and placed in front of this. Anywhere it does not ` +
+          `reach, your real background still shows. Needs the cut-out to work ` +
+          `on the server — if it cannot, this clip is skipped and the rest ` +
+          `of your edit still renders.</p>`;
+      }
       ovBody += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start, 0, 99999, 0.1)}${propRange("opacity", "Opacity", c.opacity != null ? c.opacity : 1, 0, 1, 0.05)}</div>`;
       ovBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       ovBody += propCheck("audio", "Include this clip's audio", !!c.audio);
@@ -5333,7 +5367,7 @@
           if (inp.value) tl.logo = Object.assign({ x: 0.04, y: 0.04, w: 0.18, opacity: 0.9 }, tl.logo || {}, { asset_id: inp.value });
           else tl.logo = null;
           renderProps();
-        } else if (key === "audio" || key === "audio_role") {
+        } else if (key === "behind" || key === "audio" || key === "audio_role") {
           // Toggling overlay audio reveals/hides its volume + ducking controls.
           const cl = findClip(selected.track, selected.id);
           if (cl) cl[key] = (inp.type === "checkbox") ? !!inp.checked : inp.value;
