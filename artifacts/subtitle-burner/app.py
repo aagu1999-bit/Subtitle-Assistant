@@ -6506,12 +6506,144 @@ def _with_appearance_bias(query: str, appearance_hint: str) -> str:
     return f"{q}, person resembling: {hint}"
 
 
+# What a generated image is for, as opposed to a drawn one. Generation is
+# right for a place, a mood, a texture -- anything describable. It is WRONG
+# for anything that has to carry exact words: image models approximate
+# letterforms and invent wording, so "a text message saying X" comes back
+# saying something else. That is what _draw_text_thread is for.
+_IMAGE_STYLE_PROMPTS = {
+    "photo": "A single realistic photograph. No watermarks, no UI chrome.",
+    "illustration": "A single clean illustration, flat colour, no text.",
+    "graphic": "A single bold graphic suitable as a video overlay. "
+               "Simple shapes, strong contrast, no watermarks.",
+}
+
+
+def draw_text_thread(messages: list, dest: Path, width: int = 900,
+                     title: str = "") -> Path | None:
+    """Draw an iMessage-style conversation as a transparent PNG.
+
+    DRAWN, not generated, and that is the point. An image model asked for
+    "a text saying are you coming tonight?" returns something that reads as
+    a text message and says something else -- it approximates letterforms
+    and invents wording. Anything carrying exact words has to be drawn.
+
+    `messages` is [{"from": "me"|"them", "text": str}]. "me" is the blue
+    right-hand side. No status bar, battery or carrier: it stays readable at
+    reel size, and it does not pretend to be a screenshot of a real exchange.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception as exc:
+        print(f"[textthread] Pillow unavailable: {exc}", flush=True)
+        return None
+
+    rows = []
+    for m in (messages or [])[:12]:
+        if not isinstance(m, dict):
+            continue
+        txt = str(m.get("text") or "").strip()
+        if txt:
+            rows.append((str(m.get("from") or "them").lower() == "me", txt[:240]))
+    if not rows:
+        return None
+
+    pad, gap, radius = 26, 14, 30
+    bubble_max = int(width * 0.74)
+    # A text message is set in a plain UI sans. Taking whatever sorted first
+    # gave Alfa Slab One -- a slab display face, legible but obviously not a
+    # phone. DM Sans is the only neutral sans bundled, so name it.
+    def _pick(size):
+        for name in ("DM Sans.ttf", "DMSans-Regular.ttf"):
+            cand = FONT_DIR / name
+            if cand.exists():
+                try:
+                    return ImageFont.truetype(str(cand), size)
+                except OSError:
+                    pass
+        for sys_font in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",):
+            if Path(sys_font).exists():
+                try:
+                    return ImageFont.truetype(sys_font, size)
+                except OSError:
+                    pass
+        rest = sorted(FONT_DIR.glob("*.ttf"))
+        if rest:
+            try:
+                return ImageFont.truetype(str(rest[0]), size)
+            except OSError:
+                pass
+        return ImageFont.load_default()
+
+    font = _pick(30)
+    title_font = _pick(24)
+
+    probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+
+    def wrap(text):
+        words, lines, cur = text.split(), [], ""
+        for w in words:
+            trial = (cur + " " + w).strip()
+            if probe.textbbox((0, 0), trial, font=font)[2] > bubble_max - 2 * pad and cur:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        return lines or [""]
+
+    laid, total_h = [], pad
+    if title:
+        total_h += 54
+    for is_me, txt in rows:
+        lines = wrap(txt)
+        lh = probe.textbbox((0, 0), "Ag", font=font)[3] + 8
+        bw = max(probe.textbbox((0, 0), l, font=font)[2] for l in lines) + 2 * pad
+        bh = lh * len(lines) + pad
+        laid.append((is_me, lines, int(bw), int(bh), lh))
+        total_h += bh + gap
+    total_h += pad
+
+    img = Image.new("RGBA", (width, int(total_h)), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    y = pad
+    if title:
+        tw = probe.textbbox((0, 0), title, font=title_font)[2]
+        d.text(((width - tw) // 2, y), title, font=title_font,
+               fill=(174, 180, 192, 255))
+        y += 54
+    for is_me, lines, bw, bh, lh in laid:
+        x = width - pad - bw if is_me else pad
+        fill = (10, 132, 255, 255) if is_me else (58, 58, 60, 255)
+        d.rounded_rectangle([x, y, x + bw, y + bh], radius=radius, fill=fill)
+        ty = y + pad // 2
+        for line in lines:
+            d.text((x + pad, ty), line, font=font, fill=(255, 255, 255, 255))
+            ty += lh
+        y += bh + gap
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    img.save(dest, "PNG")
+    return dest if dest.exists() and dest.stat().st_size > 200 else None
+
+
+def gemini_image(prompt: str, dest_stem: Path) -> Path | None:
+    """Generate an image from any prompt. Returns the saved Path or None.
+
+    The thin general-purpose entry point the co-editor reaches. Shares the
+    model and the save path with the B-roll flow; shares none of its wording.
+    """
+    return _generate_broll_gemini_image(prompt, dest_stem, _raw_prompt=True)
+
+
 def _generate_broll_gemini_image(
     query: str,
     dest_stem: Path,
     *,
     appearance_hint: str = "",
     reference_face: Path | None = None,
+    _raw_prompt: bool = False,
 ) -> Path | None:
     """Generate a B-roll still via Gemini image model. Returns saved Path or None."""
     api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
@@ -6527,11 +6659,19 @@ def _generate_broll_gemini_image(
             f" If people appear, they should resemble: {hint}. "
             "Match age range, hair, skin tone, and clothing vibe — do not copy a real identity."
         )
-    prompt = (
-        "Generate a single realistic photo suitable as video B-roll (no text, "
-        "no logos, no watermarks, no UI chrome). Landscape-friendly composition. "
-        f"Subject: {q}.{likeness}"
-    )
+    # The B-ROLL framing lives here, in the caller, not in the generator.
+    # It used to be the only prompt the image model ever saw -- which is why
+    # the app could not make a graphic with words in it: the one path to the
+    # model was instructed to refuse text and UI chrome. _gemini_image below
+    # takes whatever prompt it is given.
+    if _raw_prompt:
+        prompt = q
+    else:
+        prompt = (
+            "Generate a single realistic photo suitable as video B-roll (no text, "
+            "no logos, no watermarks, no UI chrome). Landscape-friendly composition. "
+            f"Subject: {q}.{likeness}"
+        )
     if reference_face and reference_face.exists():
         prompt += (
             " Use the attached reference face only for likeness of any people in the new photo. "
@@ -17176,6 +17316,8 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "delete_carousel", "index": 0}',
     '{"op": "set_background", "photo": "bali beach", "fit": "cover"}',
     '{"op": "set_background", "clear": true}',
+    '{"op": "make_image", "description": "a pier in Jersey City at dusk", "style": "photo", "start": 3.0, "duration": 4, "behind": true}',
+    '{"op": "add_text_message", "title": "Mom", "start": 2.0, "duration": 4, "messages": [{"from": "them", "text": "are you going tonight"}, {"from": "me", "text": "obviously"}]}',
 ]
 
 
@@ -17217,6 +17359,103 @@ def _co_editor_asset_choices(limit: int = 12) -> list:
     except OSError:
         return []
     return out
+
+
+def _save_generated_asset(path: Path, label: str) -> str:
+    """Move a freshly made picture into the asset library and return its id.
+
+    Through _write_asset_meta, so it shows up in the Background and Logo
+    pickers exactly like something uploaded -- a generated image that cannot
+    be found again is a worse kind of missing.
+    """
+    aid = uuid.uuid4().hex
+    dest = ASSET_DIR / f"{aid}{path.suffix.lower() or '.png'}"
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(dest))
+    _write_asset_meta(aid, filename=label[:80], source="generated")
+    return aid
+
+
+def _overlay_from_op(op: dict, asset_id: str, *, default_dur: float = 3.0) -> dict:
+    """Placement for a picture the co-editor just made.
+
+    It comes back as an OVERLAY clip, which is what makes it useful: it can
+    sit behind the speaker or in front, full frame or in a box, start and end
+    where asked, and carry a swipe or a drift -- none of which needed new
+    code, because overlays already do all of it.
+    """
+    try:
+        start = max(0.0, float(op.get("start", 0)))
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        dur = max(0.3, float(op.get("duration", op.get("per_photo", default_dur))))
+    except (TypeError, ValueError):
+        dur = default_dur
+    behind = bool(op.get("behind"))
+    full = bool(op.get("full")) or behind
+    box = ({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0} if full
+           else {"x": 0.08, "y": 0.18, "w": 0.84, "h": 0.46})
+    return {
+        "asset_id": asset_id, "start": round(start, 3), "in": 0,
+        "out": round(dur, 3), "fit": op.get("fit") or "cover",
+        "opacity": 1.0, "fade_in": 0.12, "fade_out": 0.12,
+        "behind": behind, **box,
+    }
+
+
+def _resolve_make_image(op: dict) -> tuple[dict | None, str]:
+    """Make a picture from a description and hand back a placeable clip.
+
+    The model can describe; it cannot draw or save. Same split as the
+    carousel and the background.
+    """
+    desc = str(op.get("description") or op.get("prompt") or op.get("subject") or "").strip()
+    if not desc:
+        return None, "nothing was described for the image"
+    if not _gemini_image_ready():
+        return None, ("image generation is not configured on this server -- "
+                      "GEMINI_API_KEY is needed for it")
+    style = str(op.get("style") or "photo").lower()
+    framing = _IMAGE_STYLE_PROMPTS.get(style, _IMAGE_STYLE_PROMPTS["photo"])
+    tmp = CACHE_DIR / f"gen_{uuid.uuid4().hex[:10]}"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    made = gemini_image(f"{framing} {desc}", tmp)
+    if not made:
+        return None, f"could not generate an image of '{desc[:60]}'"
+    aid = _save_generated_asset(made, desc)
+    return {"op": "make_image", "clip": _overlay_from_op(op, aid),
+            "description": desc[:120]}, ""
+
+
+def _resolve_add_text_message(op: dict) -> tuple[dict | None, str]:
+    """A text-message thread, DRAWN rather than generated.
+
+    An image model asked for a message saying something specific returns
+    something that reads as a message and says something else. Exact words
+    have to be drawn.
+    """
+    msgs = op.get("messages") or op.get("thread") or []
+    if isinstance(msgs, dict):
+        msgs = [msgs]
+    clean = []
+    for m in msgs if isinstance(msgs, list) else []:
+        if isinstance(m, str):
+            clean.append({"from": "them", "text": m})
+        elif isinstance(m, dict) and str(m.get("text") or "").strip():
+            clean.append(m)
+    if not clean:
+        return None, "no messages were given for the text thread"
+    tmp = CACHE_DIR / f"thread_{uuid.uuid4().hex[:10]}.png"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    made = draw_text_thread(clean, tmp, title=str(op.get("title") or "")[:40])
+    if not made:
+        return None, "the text thread could not be drawn"
+    aid = _save_generated_asset(made, "text thread")
+    clip = _overlay_from_op(op, aid, default_dur=4.0)
+    clip["fit"] = "contain"          # never crop someone's words
+    return {"op": "add_text_message", "clip": clip,
+            "count": len(clean)}, ""
 
 
 def _resolve_set_background(op: dict) -> tuple[dict | None, str]:
@@ -17545,6 +17784,16 @@ Rules:
   null there is nothing to clear, and saying so is more use than emitting an
   op that changes nothing.
 - {{"op": "set_background", "clear": true}} removes it.
+- YOU CAN MAKE PICTURES. make_image generates one from a description and
+  places it as an overlay clip, so it can sit behind the speaker
+  ("behind": true), or in front, full frame or in a box, at any moment.
+  Use it when they ask for something to be shown that no photo of theirs
+  covers. Never say you cannot create images.
+- But generation CANNOT be trusted to render exact words -- it approximates
+  letterforms and invents wording. So for anything that has to carry
+  specific text, use add_text_message, which DRAWS an iMessage-style thread
+  with the words exactly as given. If they want a conversation on screen,
+  that is the op, not make_image.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -17574,6 +17823,18 @@ Rules:
             continue
         if name == "set_punch_aim":
             op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name == "make_image":
+            op, note = _resolve_make_image(op)
+            if note:
+                blocked.append(note)
+            if op is None:
+                continue
+        elif name == "add_text_message":
+            op, note = _resolve_add_text_message(op)
+            if note:
+                blocked.append(note)
             if op is None:
                 continue
         elif name == "set_background":

@@ -6749,9 +6749,8 @@
     };
     updatePolishDownloadUi(output);
     scheduleSave();
-    if (typeof window.triggerVideoDownload === "function") {
-      window.triggerVideoDownload(output, { timeline: true, polish: true });
-    } else if (typeof window.showDownloadReadyBanner === "function") {
+    // Polish finishing is not a request to download it.
+    if (typeof window.showDownloadReadyBanner === "function") {
       window.showDownloadReadyBanner(output, { timeline: true, polish: true });
     }
   }
@@ -6935,7 +6934,7 @@
           }
           if (s.status === "done" && s.output) {
             clearInterval(pollTimer);
-            setRenderStatus("Done ✓ — download ready on Ingest");
+            setRenderStatus("Done ✓ — use ⬇ Download when you want the file");
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
             const v = $("tlPreviewVideo");
             if (v) {
@@ -6952,8 +6951,8 @@
                 stayOnTab: true,
                 timeline: true,
               });
-            } else if (typeof window.triggerVideoDownload === "function") {
-              window.triggerVideoDownload(s.output, { timeline: true });
+            } else if (typeof window.showDownloadReadyBanner === "function") {
+              window.showDownloadReadyBanner(s.output, { timeline: true });
             }
             resolve(s);
           } else if (s.status === "error") {
@@ -9300,6 +9299,23 @@
             notes.push(`removed effect ${i}`);
             applied++;
           }
+        } else if (name === "make_image" || name === "add_text_message") {
+          // The server made the picture and saved it to the asset library;
+          // this places the clip it handed back. It is an ordinary overlay,
+          // so it can be dragged, retimed, resized or marked behind like
+          // anything else on the lane.
+          const c = op.clip;
+          if (c && c.asset_id) {
+            const ov = Object.assign({ id: uid() }, c);
+            tl.tracks.overlay.push(ov);
+            reanchor(ov);
+            applied++;
+            notes.push(name === "add_text_message"
+              ? "text thread placed"
+              : "image made and placed");
+          } else {
+            notes.push("nothing came back to place");
+          }
         } else if (name === "set_background") {
           // The server resolved the picture; this only places it.
           // Say what actually happened. "Applied 1 edit" after clearing a
@@ -9314,7 +9330,7 @@
             }
           } else if (op.asset_id) {
             tl.background = { asset_id: op.asset_id, fit: op.fit || "cover" };
-            notes.push("background set — click ▶ Render to burn it in");
+            notes.push("background set");
           }
           applied++;
           refreshBackgroundPreview();

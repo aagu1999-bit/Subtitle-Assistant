@@ -7837,7 +7837,10 @@ function _renderAssemblyBar() {
     try {
       result?.scrollIntoView?.({ behavior: "smooth", block: "start" });
     } catch (e) { /* ignore */ }
-    triggerVideoDownload(output, { timeline: !!opts.timeline });
+    // Render makes the video; it does not take it. Downloading on every
+    // render drops a file in your Downloads folder for every iteration,
+    // and most renders are iterations. The banner carries the button.
+    showDownloadReadyBanner(output, { timeline: !!opts.timeline });
   }
 
   window.showExportProgressUpdate = showExportProgressUpdate;

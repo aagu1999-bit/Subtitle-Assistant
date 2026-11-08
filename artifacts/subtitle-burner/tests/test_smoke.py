@@ -2074,7 +2074,15 @@ def test_clearing_a_background_that_is_not_there_says_so():
     branch = js[js.index('name === "set_background"'):][:900]
     assert "no background to remove" in branch, (
         "a no-op clear must say so rather than report success")
-    assert "Render" in branch, "setting one must say it needs a render"
+    # The Render reminder belongs in ONE place. It used to be in this note
+    # AND appended by sendCoEditorPrompt, so the drawer read "background set
+    # - click Render to burn it in - Click Render to burn into the export."
+    assert "Render" not in branch, (
+        "the Render reminder is appended once by sendCoEditorPrompt; saying "
+        "it here too is what produced the doubled sentence")
+    send = js[js.index("async function sendCoEditorPrompt"):][:2600]
+    assert send.count("Click \u25b6 Render") == 1, (
+        "exactly one Render reminder, appended in one place")
 
 
 def test_the_cutout_preview_never_masks_with_a_matte_it_has_not_checked():
@@ -2307,3 +2315,128 @@ def test_the_behind_switch_is_in_the_overlay_panel():
     assert 'propCheck("behind"' in js, "no way to mark a clip as a background"
     assert 'data-layout="full"' in js, "no way to make it full frame"
     assert 'key === "behind"' in js, "toggling it must re-render and save"
+
+
+# --- Making pictures on command -----------------------------------------
+
+def test_render_does_not_download_the_file_by_itself():
+    """Render makes the video; it does not take it.
+
+    showExportDone ended by building an <a download> and clicking it, so
+    every render -- and most renders are iterations -- dropped a file in the
+    Downloads folder. The banner it also shows carries a real download link,
+    so the button was always there; the automatic click was the problem.
+    """
+    app_js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    done = app_js[app_js.index("function showExportDone"):][:1600]
+    assert "triggerVideoDownload" not in done, (
+        "a finished render must not click a download for you")
+    assert "showDownloadReadyBanner" in done, "offer the download instead"
+    assert "Download MP4" in app_js, "the banner must carry a real button"
+
+    tl_js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert "triggerVideoDownload" not in tl_js, (
+        "the polish and render-poll paths downloaded automatically too")
+
+
+def test_the_image_generator_takes_any_prompt_now(app_mod):
+    """It existed and worked, aimed at exactly one thing.
+
+    The single path to the image model was instructed to produce B-roll with
+    "no text, no logos, no watermarks, no UI chrome" -- which is why the app
+    could not make a graphic with words in it, and why the co-editor said it
+    could not create images. The B-roll wording now lives in its caller.
+    """
+    src = (BURNER / "app.py").read_text(encoding="utf-8")
+    assert "def gemini_image(" in src, "no general entry point"
+    gen = src[src.index("def gemini_image("):][:700]
+    assert "no text" not in gen, "the general path must not refuse text"
+    # And the B-roll flow must be provably unchanged.
+    broll = src[src.index("def _generate_broll_gemini_image("):][:3000]
+    assert "no text, " in broll and "no logos" in broll, (
+        "the B-roll framing disappeared instead of moving to its caller")
+
+
+def test_make_image_hands_back_something_placeable(app_mod, temp_db, monkeypatch,
+                                                   tmp_path):
+    """A generated picture arrives as an overlay clip, which is what makes
+    it useful: behind the speaker or in front, full frame or a box, timed."""
+    made = tmp_path / "g.png"
+    made.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 400)
+    monkeypatch.setattr(app_mod, "_gemini_image_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "gemini_image",
+                        lambda prompt, stem: made)
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "make_image", "description": "a pier at dusk",
+                            "start": 3.0, "duration": 4, "behind": True}]})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "make me a pier",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert len(out["ops"]) == 1, out
+    clip = out["ops"][0]["clip"]
+    assert re.fullmatch(r"[a-f0-9]{32}", clip["asset_id"]), "needs a real asset id"
+    assert clip["behind"] is True and clip["w"] == 1.0, "behind implies full frame"
+    assert clip["start"] == 3.0 and clip["out"] == 4.0
+    app_mod._find_asset_path(clip["asset_id"]).unlink(missing_ok=True)
+    app_mod._asset_meta_path(clip["asset_id"]).unlink(missing_ok=True)
+
+
+def test_make_image_says_so_when_it_cannot(app_mod, temp_db, monkeypatch):
+    monkeypatch.setattr(app_mod, "_gemini_image_ready", lambda: False)
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "make_image", "description": "a pier"}]})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "j", "prompt": "make me a pier",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == []
+    assert "GEMINI_API_KEY" in out["message"], out["message"]
+
+
+def test_a_drawn_text_thread_carries_the_exact_words(app_mod, tmp_path):
+    """The case generation cannot do.
+
+    An image model asked for a message saying something specific returns
+    something that reads as a message and says something else. So this is
+    drawn, and the test that matters is that the words asked for are the
+    words present.
+    """
+    if not _have("PIL"):
+        pytest.skip("Pillow not installed")
+    from PIL import Image
+    dest = tmp_path / "t.png"
+    got = app_mod.draw_text_thread([
+        {"from": "them", "text": "are you actually going tonight"},
+        {"from": "me", "text": "obviously"},
+    ], dest, title="Mom")
+    assert got and dest.exists()
+
+    im = Image.open(dest).convert("RGBA")
+    assert im.mode == "RGBA", "must be transparent to sit over video"
+    px = im.load()
+    corner = px[2, 2]
+    assert corner[3] == 0, f"the corner should be transparent, got {corner}"
+
+    # "me" is blue and on the RIGHT; "them" is grey and on the LEFT.
+    w, h = im.size
+    def row_has(colour, y, xs):
+        return any(abs(px[x, y][0] - colour[0]) < 24
+                   and abs(px[x, y][2] - colour[2]) < 24 for x in xs)
+    blue, grey = (10, 132, 255), (58, 58, 60)
+    right, left = range(int(w * 0.75), w - 4), range(4, int(w * 0.25))
+    assert any(row_has(blue, y, right) for y in range(0, h, 4)), "no blue on the right"
+    assert any(row_has(grey, y, left) for y in range(0, h, 4)), "no grey on the left"
+
+
+def test_the_coeditor_knows_it_can_make_pictures(app_mod):
+    """It answered "I cannot create custom images" while the capability sat
+    in the codebase behind a hardcoded B-roll prompt."""
+    names = app_mod._co_editor_op_names()
+    assert {"make_image", "add_text_message"} <= names
+    shown = "\n".join(app_mod.CO_EDITOR_OP_EXAMPLES)
+    assert '"op": "make_image"' in shown and '"op": "add_text_message"' in shown
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js[js.index("async function applyCoEditorOps"):][:26000]
+    for n in ("make_image", "add_text_message"):
+        assert f'name === "{n}"' in body, f"{n} accepted but never placed"
