@@ -1717,21 +1717,39 @@
     }
   }
 
-  // Mirrors _PUNCH_PEAK / PUNCH_DECAY_SECONDS and the zoompan curve in app.py.
+  // Mirrors _PUNCH_PEAK and the zoompan curve in app.py.
   // The renderer snaps to the peak on the hit and eases out on a cubic, so the
   // preview has to use the same numbers or the move previews wrong.
-  const PUNCH_PEAK = { low: 1.15, med: 1.25, high: 1.40, strong: 1.40 };
-  const PUNCH_DECAY = 0.45;
+  const PUNCH_PEAK = { low: 1.08, med: 1.12, high: 1.18, strong: 1.18 };
+  const PUNCH_IN_FRAMES = 5;
+  const PUNCH_OUT_FRAMES = 8;
+  const PUNCH_HOLD = 0.30;
+  const PUNCH_FPS = 30;   // the frame counts above are expressed at 30fps
 
-  function punchScaleAt(cfg, tRel) {
+  // Mirrors _tl_punch_zoom_filter in app.py: rise, hold, release, both ramps
+  // cubic. Preview and render have to share these numbers or a move previews
+  // differently from how it burns in.
+  function punchScaleAt(cfg, tRel, dur) {
     const peak = PUNCH_PEAK[cfg.intensity] || PUNCH_PEAK.med;
     const amp = peak - 1;
     if (amp <= 0) return 1;
     const hit = Math.max(0, Number(cfg.hit) || 0);
-    if (tRel < hit) return 1;
-    const decay = Math.max(0.05, Number(cfg.decay) || PUNCH_DECAY);
-    const u = Math.min(1, Math.max(0, (tRel - hit) / decay));
-    return 1 + amp * Math.pow(1 - u, 3);
+    const n = tRel - hit;
+    if (n < 0) return 1;
+
+    let tIn = Math.max(1, Number(cfg.in_frames) || PUNCH_IN_FRAMES) / PUNCH_FPS;
+    let tOut = Math.max(1, Number(cfg.out_frames) || PUNCH_OUT_FRAMES) / PUNCH_FPS;
+    let total = (dur && dur > 0) ? Math.max(0.01, dur - hit) : tIn + PUNCH_HOLD + tOut;
+    if (total < tIn + tOut) {
+      const squeeze = total / (tIn + tOut);
+      tIn *= squeeze; tOut *= squeeze;
+    }
+    const holdEnd = Math.max(tIn, total - tOut);
+
+    if (n < tIn) return 1 + amp * (1 - Math.pow(1 - n / tIn, 3));
+    if (n < holdEnd) return 1 + amp;
+    if (n < total) return 1 + amp * Math.pow(1 - (n - holdEnd) / tOut, 3);
+    return 1;
   }
 
   // Mirrors _KENBURNS_INTENSITY in app.py — slow zoom ramp over the clip.
@@ -1774,14 +1792,16 @@
           enabled: true,
           intensity: lanePunch.intensity || "med",
           hit: lanePunch.hit != null ? lanePunch.hit : 0,
-          decay: lanePunch.decay != null ? lanePunch.decay : PUNCH_DECAY,
           anchor: lanePunch.anchor || null,
         };
         punchRel = Math.max(0, ot - (lanePunch.start || 0));
       } else if (c.punch_zoom && c.punch_zoom.enabled) {
         pz = c.punch_zoom;
       }
-      if (pz && pz.enabled) scale *= punchScaleAt(pz, punchRel);
+      // Same duration the renderer uses, so the hold previews at its real
+      // length: the lane item's own span, or the clip's.
+      const punchDur = lanePunch ? clipDuration(lanePunch) : dur;
+      if (pz && pz.enabled) scale *= punchScaleAt(pz, punchRel, punchDur);
       const a = (pz && pz.anchor) || {};
       const ax = Math.min(1, Math.max(0, Number(a.x != null ? a.x : 0.5)));
       const ay = Math.min(1, Math.max(0, Number(a.y != null ? a.y : 0.5)));
