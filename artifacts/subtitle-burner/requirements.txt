@@ -32,5 +32,21 @@ playwright>=1.40.0
 # OpenCV has no X11 deps and mediapipe will use it transparently via the
 # shared `cv2` module name.
 pyannote.audio>=3.1.0
-mediapipe>=0.10.0
+# Pinned below 0.10.22: MediaPipe removed the legacy `mp.solutions` API, and
+# this app is written against it (mp.solutions.face_detection for the reframe
+# analysis, mp.solutions.selfie_segmentation for the person matte). An
+# unpinned install resolves to a release where `mediapipe.solutions` does not
+# exist, so both raise AttributeError the first time they run. Verified by
+# probing: 0.10.14 and 0.10.21 have it; 0.10.35 and 1.2.2 do not.
+mediapipe>=0.10.5,<0.10.22
 opencv-python-headless>=4.10.0
+
+# Tighter word timestamps. Whisper infers word times from decoder attention and
+# they drift; WhisperX aligns them against a phoneme model, and every caption
+# highlight and effect here is anchored to a word time. On by default when
+# installed; set WHISPERX_ALIGN=0 to skip it. Falls back to Whisper's own
+# timings whenever the import, the model load or the alignment fails.
+#
+# Deliberately NOT in pyproject.toml: it pulls torch (~2-3 GB), and a deploy
+# that builds from pyproject stays lean without it.
+whisperx>=3.1.0
