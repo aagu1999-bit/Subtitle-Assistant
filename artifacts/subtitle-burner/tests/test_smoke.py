@@ -684,3 +684,234 @@ def test_aiming_at_the_speaker_resolves_to_a_point(app_mod, monkeypatch):
     ) == {"op": "set_punch_aim", "index": 0, "x": 1.0, "y": 0.0}
     assert app_mod._resolve_punch_aim(
         {"op": "set_punch_aim", "index": 9, "x": 0.5, "y": 0.5}, main, effects) is None
+
+
+# --- overlays that move -------------------------------------------------
+# Overlay x/y were baked into the filter as constants, so nothing could travel
+# across the frame. They are per-frame expressions (`eval` defaults to frame),
+# which is what makes a swipe possible at all.
+
+def test_a_still_overlay_builds_constant_positions(app_mod):
+    x, y = app_mod._tl_overlay_motion_expr(None, 100, 200, 0.5, 1080, 1920)
+    assert (x, y) == ("100", "200"), "an overlay with no motion must not move"
+    x, y = app_mod._tl_overlay_motion_expr(
+        {"type": "none"}, 100, 200, 0.5, 1080, 1920)
+    assert (x, y) == ("100", "200")
+
+
+def test_a_swipe_comes_from_the_side_it_is_named_for(app_mod):
+    """"swipe_left" is the gesture: the photo enters right and travels left."""
+    import re
+
+    def at(expr, t):
+        py = re.sub(r"\bt\b", repr(float(t)), expr)
+        return eval(py, {"min": min, "max": max, "pow": pow})
+
+    x, y = app_mod._tl_overlay_motion_expr(
+        {"type": "swipe_left", "in": 0.4}, 300, 200, 1.0, 1080, 1920)
+    assert y == "200", "a horizontal swipe must not drift vertically"
+    assert at(x, 1.0) == 300 + 1080, "does not start off-frame"
+    assert at(x, 1.4) == 300, "does not settle at the resting position"
+    mid = at(x, 1.2)
+    assert 300 < mid < 300 + 1080, "no motion between the ends"
+    # Cubic ease-out: most of the distance is covered early.
+    assert mid < 300 + 1080 / 2, "the ease is not decelerating"
+
+    x_r, _ = app_mod._tl_overlay_motion_expr(
+        {"type": "swipe_right", "in": 0.4}, 300, 200, 1.0, 1080, 1920)
+    assert at(x_r, 1.0) == 300 - 1080, "swipe_right must enter from the left"
+
+    _, y_u = app_mod._tl_overlay_motion_expr(
+        {"type": "swipe_up", "in": 0.4}, 300, 200, 1.0, 1080, 1920)
+    assert at(y_u, 1.0) == 200 + 1920, "swipe_up must enter from below"
+
+
+@needs_ffmpeg
+def test_a_swiping_overlay_really_moves_in_the_render(app_mod, tmp_path):
+    """The filter string being right proves nothing -- measure the pixels.
+
+    This is the lesson of the punch zoom, which shipped as a filter that was
+    syntactically perfect and produced no motion whatsoever.
+    """
+    import cv2
+    import numpy as np
+
+    W, H = 360, 640
+    base = tmp_path / "base.mp4"
+    card = tmp_path / "card.png"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", f"color=c=0x202020:size={W}x{H}:rate=30:duration=2",
+                    "-pix_fmt", "yuv420p", str(base)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=c=0xFF00AA:size=200x200:d=1",
+                    "-frames:v", "1", str(card)], check=True)
+
+    def leftmost_card_column(frame):
+        r = frame[:, :, 2].astype(int)
+        g = frame[:, :, 1].astype(int)
+        b = frame[:, :, 0].astype(int)
+        cols = np.where(((r > 150) & (g < 110) & (b > 110)).any(axis=0))[0]
+        return int(cols[0]) if len(cols) else None
+
+    def render(motion, name):
+        clip = {"src": str(card), "start": 0.3, "in": 0, "out": 1.5,
+                "x": 0.25, "y": 0.3, "w": 0.5, "fit": "cover"}
+        if motion:
+            clip["motion"] = motion
+        out = tmp_path / f"{name}.mp4"
+        real = app_mod._timeline_clip_source
+        app_mod._timeline_clip_source = lambda c: card if c.get("src") else real(c)
+        try:
+            app_mod._tl_composite_overlays(base, [clip], W, H, out, fps=30)
+        finally:
+            app_mod._timeline_clip_source = real
+        cap = cv2.VideoCapture(str(out))
+        xs = []
+        for t in (0.35, 0.45, 0.55, 0.80):
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            xs.append(leftmost_card_column(frame) if ok else None)
+        cap.release()
+        return xs
+
+    still = render(None, "still")
+    assert len(set(still)) == 1, f"a still overlay drifted: {still}"
+
+    moved = render({"type": "swipe_left", "in": 0.3}, "swiped")
+    assert len(set(moved)) > 1, f"the swipe produced no motion: {moved}"
+    assert all(a >= b for a, b in zip(moved, moved[1:])), (
+        f"swipe_left must travel leftwards: {moved}")
+    assert moved[0] > still[0], "the photo did not start off to the right"
+    assert moved[-1] == still[-1], (
+        f"the swipe settled at {moved[-1]}, not the resting {still[-1]}")
+
+
+# --- carousels and prompt-placed b-roll ---------------------------------
+
+def test_a_carousel_is_a_run_of_overlay_clips_sharing_a_box(app_mod, monkeypatch):
+    """Deliberately not a new track: N ordinary overlays, laid back to back.
+
+    That reuses the whole overlay pipeline and leaves each frame editable
+    afterwards, which a bespoke carousel object would not.
+    """
+    monkeypatch.setattr(app_mod, "_resolve_photo_source",
+                        lambda ref: (f"asset-{ref}", ""))
+    clips, notes = app_mod._build_carousel_clips(
+        ["one", "two", "three"], start=5.0, per_photo=1.5,
+        motion="swipe_left", size="full")
+    assert notes == []
+    assert len(clips) == 3
+    assert len({c["carousel_id"] for c in clips}) == 1, "frames are not grouped"
+    # Back to back, no overlap: each photo hands over to the next.
+    starts = [c["start"] for c in clips]
+    assert starts == [5.0, 6.5, 8.0]
+    assert all(c["out"] == 1.5 for c in clips)
+    # One shared box, unlike auto b-roll which spreads around the corners.
+    assert len({(c["x"], c["y"], c["w"], c["h"]) for c in clips}) == 1
+    assert clips[0]["w"] == 1.0 and clips[0]["fit"] == "cover", "full should cover"
+    assert all(c["motion"]["type"] == "swipe_left" for c in clips)
+
+
+def test_a_pip_carousel_sits_in_a_box(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", lambda r: (f"a-{r}", ""))
+    clips, _ = app_mod._build_carousel_clips(
+        ["a", "b"], start=0, per_photo=1.0, motion="swipe_up", size="pip")
+    assert clips[0]["w"] < 1.0 and clips[0]["x"] > 0, "pip should not cover the frame"
+
+
+def test_a_keyword_with_no_provider_refuses_instead_of_making_a_badge(app_mod, monkeypatch):
+    """The button path substitutes a generated TEXT BADGE for a missing photo.
+
+    That is fine for a button someone clicked knowingly. For "add b-roll of a
+    city" it would silently put a word on screen where a picture was asked
+    for, so the prompt path says why and places nothing.
+    """
+    monkeypatch.setattr(app_mod, "_broll_any_photo_provider", lambda: False)
+    monkeypatch.setattr(app_mod, "ASSET_DIR", app_mod.ASSET_DIR)
+    asset_id, why = app_mod._resolve_photo_source("a city skyline")
+    assert asset_id is None
+    assert "provider" in why.lower() and "city skyline" in why
+
+    op, note = app_mod._resolve_add_broll({"keyword": "a city skyline"})
+    assert op is None, "a photo was placed with nothing to place"
+    assert "provider" in note.lower()
+
+
+def test_the_carousel_op_reaches_the_client_with_photos_attached(app_mod, temp_db, monkeypatch):
+    """The model picks subjects and timing; the server attaches real photos."""
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", lambda r: (f"a-{r}", ""))
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "add_carousel", "photos": ["x", "y"],
+                            "start": 2.0, "per_photo": 1.2,
+                            "motion": "swipe_left", "size": "full"}],
+                   "message": "done"})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "carousel of two photos that swipe",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert len(out["ops"]) == 1
+    clips = out["ops"][0]["clips"]
+    assert [c["asset_id"] for c in clips] == ["a-x", "a-y"]
+    assert all(c["motion"]["type"] == "swipe_left" for c in clips)
+
+
+def test_a_failed_fetch_is_explained_not_swallowed(app_mod, temp_db, monkeypatch):
+    monkeypatch.setattr(app_mod, "_resolve_photo_source",
+                        lambda r: (None, f"no photo found for '{r}'"))
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: {"ops": [{"op": "add_carousel", "photos": ["nonsense"]}],
+                   "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "carousel of nonsense", "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == [], "an unplaceable carousel still produced an op"
+    assert "no photo found" in out["message"]
+
+
+def test_the_preview_and_the_render_swipe_on_the_same_curve(app_mod):
+    """Two implementations of one motion is how preview and render drift.
+
+    It happened with the punch zoom (the preview kept its own 1.40 peaks) and
+    with the caption font. This compares the browser's easing against the
+    renderer's expression at the same instants rather than trusting that two
+    copies of a cubic stay equal.
+    """
+    import re
+    import shutil
+    import subprocess as sp
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+
+    js_src = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    start = js_src.index("const OVERLAY_SWIPE_FROM")
+    end = js_src.index("// Runs every frame so punch + Ken Burns animate")
+    block = js_src[start:end]
+    block = re.sub(r"^\s*const ", "var ", block, flags=re.M)
+    block = re.sub(r"^\s*function ", "function ", block, flags=re.M)
+
+    times = [0, 0.0875, 0.175, 0.2625, 0.35, 0.5]
+    script = (
+        block
+        + "const out=[];"
+        + f"for (const lt of {times}) "
+        + 'out.push(overlayMotionOffset({motion:{type:"swipe_left",in:0.35}}, lt).dx.toFixed(6));'
+        + "console.log(out.join(' '));"
+    )
+    js = sp.run([node, "-e", script], capture_output=True, text=True, check=True)
+    js_vals = [float(v) for v in js.stdout.split()]
+
+    W = 1000
+    expr, _ = app_mod._tl_overlay_motion_expr(
+        {"type": "swipe_left", "in": 0.35}, 0, 0, 0.0, W, 2000)
+    py_vals = [
+        eval(re.sub(r"\bt\b", repr(float(t)), expr),
+             {"min": min, "max": max, "pow": pow}) / W
+        for t in times
+    ]
+
+    for t, a, b in zip(times, js_vals, py_vals):
+        assert abs(a - b) < 1e-6, (
+            f"at {t}s the preview offsets by {a} and the render by {b}")
+    assert js_vals[0] == 1.0 and js_vals[-1] == 0.0, "the curve does not run 1->0"

@@ -1766,6 +1766,27 @@
     return 1 + amount * u;
   }
 
+  // Which way a swipe comes FROM. "swipe_left" is the gesture: the photo
+  // enters from the right and travels left, the way a carousel moves under
+  // your thumb. Mirrors _OVERLAY_SWIPE_FROM in app.py.
+  const OVERLAY_SWIPE_FROM = {
+    swipe_left: [1, 0], swipe_right: [-1, 0],
+    swipe_up: [0, 1], swipe_down: [0, -1],
+  };
+
+  // Offset as a fraction of the stage, so it drops straight into the percent
+  // positions the overlay box already uses.
+  function overlayMotionOffset(item, localT) {
+    const m = item && item.motion;
+    if (!m) return { dx: 0, dy: 0 };
+    const dir = OVERLAY_SWIPE_FROM[m.type];
+    if (!dir) return { dx: 0, dy: 0 };
+    const slide = Math.max(0.05, Number(m.in) || 0.35);
+    const u = Math.min(1, Math.max(0, localT / slide));
+    const remaining = Math.pow(1 - u, 3);
+    return { dx: dir[0] * remaining, dy: dir[1] * remaining };
+  }
+
   // Runs every frame so punch + Ken Burns animate; compose both scales.
   // Effects-lane clips override Main-clip props when active at the playhead.
   function applyPunchZoom(v, ot) {
@@ -2015,9 +2036,13 @@
         if (fadeIn > 0 && localT < fadeIn) fadeMul = Math.max(0, localT / fadeIn);
         if (fadeOut > 0 && localT > dur - fadeOut) fadeMul = Math.min(fadeMul, Math.max(0, (dur - localT) / fadeOut));
         const baseOp = item.opacity != null ? item.opacity : 1.0;
+        // Mirrors _tl_overlay_motion_expr in app.py: same cubic ease, same
+        // full-dimension offset. Preview and render have to share the curve or
+        // a swipe previews differently from how it burns in.
+        const mo = overlayMotionOffset(item, localT);
         wrap.style.position = "absolute";
-        wrap.style.left = (item.x != null ? item.x : 0.5) * 100 + "%";
-        wrap.style.top = (item.y != null ? item.y : 0.1) * 100 + "%";
+        wrap.style.left = ((item.x != null ? item.x : 0.5) + mo.dx) * 100 + "%";
+        wrap.style.top = ((item.y != null ? item.y : 0.1) + mo.dy) * 100 + "%";
         wrap.style.width = (item.w != null ? item.w : 0.3) * 100 + "%";
         if (item.h != null) wrap.style.height = (item.h * 100) + "%";
         else wrap.style.aspectRatio = "16 / 9";
@@ -4558,6 +4583,50 @@
             if (selected && selected.track === "effects") selected = null;
             notes.push(`removed effect ${i}`);
             applied++;
+          }
+        } else if (name === "add_carousel" || name === "add_broll") {
+          // The server already resolved the photos and built the clips, so
+          // there is nothing to fetch here -- just drop them on the lane.
+          const clips = Array.isArray(op.clips) ? op.clips : [];
+          if (clips.length) {
+            if (!tl.tracks.overlay) tl.tracks.overlay = [];
+            clips.forEach((c) => {
+              const ov = Object.assign({ id: uid(), opacity: 1 }, c);
+              reanchor(ov);
+              tl.tracks.overlay.push(ov);
+            });
+            notes.push(name === "add_broll"
+              ? "b-roll photo" : `carousel of ${clips.length}`);
+            applied++;
+          }
+        } else if (name === "set_overlay_motion") {
+          const i = Number(op.index);
+          const arr = tl.tracks.overlay || [];
+          if (i >= 0 && i < arr.length) {
+            const kind = String(op.type || "none");
+            arr[i].motion = kind === "none"
+              ? null
+              : { type: kind, in: Math.max(0.05, Number(op.in) || 0.35) };
+            notes.push(`overlay ${i} motion`);
+            applied++;
+          }
+        } else if (name === "delete_carousel") {
+          // Remove the whole group: a carousel is several clips sharing one
+          // carousel_id, and deleting one frame of it is never what is meant.
+          const arr = tl.tracks.overlay || [];
+          let cid = op.carousel_id;
+          if (!cid) {
+            const i = Number(op.index);
+            cid = (i >= 0 && i < arr.length) ? arr[i].carousel_id : null;
+          }
+          if (cid) {
+            const before = arr.length;
+            tl.tracks.overlay = arr.filter((c) => c.carousel_id !== cid);
+            if (tl.tracks.overlay.length < before) {
+              if (selected && selected.track === "overlay") selected = null;
+              notes.push(`removed ${before - tl.tracks.overlay.length} carousel frame(s)`);
+              applied++;
+            }
           }
         } else if (name === "set_canvas") {
           const c = String(op.canvas || "").replace(":", "x");

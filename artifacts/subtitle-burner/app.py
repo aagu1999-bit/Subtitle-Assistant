@@ -4934,6 +4934,95 @@ def _overlay_layout_for_index(i: int, placement: str = "pip") -> dict:
     }
 
 
+# ---- Prompt-placed B-roll and carousels ---------------------------------
+# The keyword -> stock photo -> timed overlay machinery already existed behind
+# a button. These resolve a co-editor op into concrete overlay clips, because
+# the model cannot fetch a photo or know which assets the user owns.
+
+_CAROUSEL_BOX = {
+    # A carousel's frames share one position, unlike auto B-roll, which spreads
+    # itself around the corners so several callouts can coexist.
+    "full": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "fit": "cover"},
+    "pip": {"x": 0.10, "y": 0.16, "w": 0.80, "h": 0.46, "fit": "cover"},
+}
+
+
+def _resolve_photo_source(ref: str) -> tuple[str | None, str]:
+    """(asset_id, note) for one carousel frame.
+
+    *ref* is either an asset id the user already owns or a subject to go and
+    find. Returns (None, reason) when nothing can be produced, so the caller
+    can refuse out loud instead of placing an empty box.
+    """
+    ref = str(ref or "").strip()
+    if not ref:
+        return None, "empty photo reference"
+    # An id for something already uploaded wins: it is the user's own picture.
+    if _asset_meta_path(ref).exists() or list(ASSET_DIR.glob(f"{ref}.*")):
+        return ref, ""
+    if not _broll_any_photo_provider():
+        return None, (
+            f"no stock photo provider is configured, so '{ref}' cannot be "
+            f"fetched. Set PEXELS_API_KEY or UNSPLASH_ACCESS_KEY, or name "
+            f"photos you have already uploaded."
+        )
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    asset_id = uuid.uuid4().hex
+    got = _fetch_broll_image_for_keyword(ref, ASSET_DIR / asset_id)
+    if not got:
+        return None, f"no photo found for '{ref}'"
+    final = ASSET_DIR / f"{asset_id}{got.suffix.lower()}"
+    if got.resolve() != final.resolve():
+        try:
+            if final.exists():
+                _safe_unlink(final)
+            got.replace(final)
+            got = final
+        except OSError:
+            pass
+    asset_id = got.stem
+    _write_asset_meta(asset_id, filename=f"{ref}{got.suffix.lower()}",
+                      keyword=ref, source="photo")
+    return asset_id, ""
+
+
+def _build_carousel_clips(refs: list, start: float, per_photo: float,
+                          motion: str, size: str) -> tuple[list, list]:
+    """(overlay clips, notes) for a run of photos that hand over in place.
+
+    Deliberately not a new track or renderer path: a carousel is N ordinary
+    overlay clips sharing a box and laid back to back, each sliding in. That
+    reuses the whole overlay pipeline and leaves every frame individually
+    editable afterwards.
+    """
+    box = _CAROUSEL_BOX.get("full" if str(size).lower() in ("full", "fullscreen", "full_frame") else "pip")
+    kind = str(motion or "swipe_left")
+    if kind not in _OVERLAY_SWIPE_FROM and kind != "none":
+        kind = "swipe_left"
+    per_photo = max(0.4, float(per_photo or 1.6))
+    carousel_id = uuid.uuid4().hex[:8]
+
+    clips, notes = [], []
+    t = max(0.0, float(start or 0))
+    for ref in refs[:8]:          # a sane cap; each frame is an ffmpeg input
+        asset_id, why = _resolve_photo_source(ref)
+        if not asset_id:
+            notes.append(why)
+            continue
+        clips.append({
+            "asset_id": asset_id,
+            "carousel_id": carousel_id,
+            "keyword": str(ref)[:60],
+            "start": round(t, 3),
+            "in": 0,
+            "out": round(per_photo, 3),
+            "motion": {"type": kind, "in": min(0.45, per_photo / 3)},
+            **box,
+        })
+        t += per_photo
+    return clips, notes
+
+
 def _make_keyword_badge_png(text: str, dest: Path) -> bool:
     """Render a simple keyword badge PNG via ffmpeg (no Pillow required)."""
     label = re.sub(r"[^\w\s\-']", "", str(text or "")).strip()[:28] or "B-roll"
@@ -7627,6 +7716,50 @@ def _tl_mix_music(base: Path, music_clips: list, out_path: Path) -> None:
     )
 
 
+# Which way a swipe comes FROM. "swipe_left" is the gesture: the new photo
+# enters from the right and travels left, the way a carousel moves under your
+# thumb.
+_OVERLAY_SWIPE_FROM = {
+    "swipe_left":  (1, 0),
+    "swipe_right": (-1, 0),
+    "swipe_up":    (0, 1),
+    "swipe_down":  (0, -1),
+}
+
+
+def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
+                            W: int, H: int) -> tuple[str, str]:
+    """(x, y) expressions for an overlay that slides into place.
+
+    overlay's x and y are per-frame expressions -- `eval` defaults to `frame`
+    -- so the box can move. This code passed plain integers, which is why no
+    overlay could ever travel across the frame.
+
+    The ease is cubic out, the same curve the punch zoom uses, so the app has
+    one motion feel rather than two that nearly match. Offsets are a full
+    canvas dimension, which puts the photo properly off-frame whatever its box
+    size, instead of peeking in at the edge.
+    """
+    if not isinstance(motion, dict):
+        return str(x), str(y)
+    kind = str(motion.get("type") or "none")
+    sx, sy = _OVERLAY_SWIPE_FROM.get(kind, (0, 0))
+    if not (sx or sy):
+        return str(x), str(y)
+    try:
+        slide = max(0.05, float(motion.get("in", 0.35)))
+    except (TypeError, ValueError):
+        slide = 0.35
+
+    # u runs 0->1 across the slide; pow(1-u,3) is the remaining offset, so the
+    # photo starts a full dimension away and decelerates into position.
+    u = f"min(1,max(0,(t-{start:.3f})/{slide:.3f}))"
+    remaining = f"pow(1-{u},3)"
+    x_expr = f"{x}+({sx * W})*{remaining}" if sx else str(x)
+    y_expr = f"{y}+({sy * H})*{remaining}" if sy else str(y)
+    return x_expr, y_expr
+
+
 def _tl_overlay_scale_filter(ow: int, oh: int, fit: str) -> str:
     """FFmpeg scale/crop/pad chain for overlay fit modes."""
     fit = (fit or "cover").lower()
@@ -7737,8 +7870,10 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         prep += f",tpad=start_duration={start:.3f}"
         prep += f"[ov{n}]"
         filt.append(prep)
+        x_expr, y_expr = _tl_overlay_motion_expr(
+            ov.get("motion"), x, y, start, W, H)
         filt.append(
-            f"{cur}[ov{n}]overlay=x={x}:y={y}:"
+            f"{cur}[ov{n}]overlay=x='{x_expr}':y='{y_expr}':"
             f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
         )
         cur = f"[bg{n}]"
@@ -9321,6 +9456,48 @@ def detect_shots():
     return jsonify({"shots": shots, "cut_points": times, "in": t_in, "out": t_out})
 
 
+def _resolve_add_carousel(op: dict) -> tuple[dict | None, str]:
+    """Turn a described carousel into overlay clips with real photos attached.
+
+    The model can choose the subjects and the timing; it cannot fetch an image
+    or know which assets exist, so that happens here.
+    """
+    refs = op.get("photos") or op.get("asset_ids") or op.get("keywords") or []
+    if isinstance(refs, str):
+        refs = [refs]
+    refs = [r for r in refs if str(r or "").strip()]
+    if not refs:
+        return None, "no photos were named for the carousel"
+    clips, notes = _build_carousel_clips(
+        refs,
+        start=op.get("start", 0),
+        per_photo=op.get("per_photo", op.get("duration", 1.6)),
+        motion=op.get("motion", "swipe_left"),
+        size=op.get("size", "pip"),
+    )
+    if not clips:
+        return None, "; ".join(dict.fromkeys(notes)) or "no photos could be placed"
+    return {"op": "add_carousel", "clips": clips}, "; ".join(dict.fromkeys(notes))
+
+
+def _resolve_add_broll(op: dict) -> tuple[dict | None, str]:
+    """One timed photo over the video. A carousel of one, with no swipe."""
+    ref = op.get("keyword") or op.get("asset_id") or op.get("subject")
+    if not str(ref or "").strip():
+        return None, "no subject was named for the b-roll"
+    clips, notes = _build_carousel_clips(
+        [ref],
+        start=op.get("start", 0),
+        per_photo=op.get("duration", 2.5),
+        motion=op.get("motion", "none"),
+        size=op.get("placement", op.get("size", "pip")),
+    )
+    if not clips:
+        return None, "; ".join(dict.fromkeys(notes)) or "no photo could be placed"
+    clips[0].pop("carousel_id", None)   # a single photo is not a group
+    return {"op": "add_broll", "clips": clips}, "; ".join(dict.fromkeys(notes))
+
+
 def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
     """Turn at:"speaker" into a real point, and sanity-check explicit ones.
 
@@ -9469,7 +9646,11 @@ Return ONLY JSON:
     {{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}},
     {{"op": "set_punch_aim", "index": 0, "x": 0.42, "y": 0.35}},
     {{"op": "set_punch_aim", "index": 0, "at": "speaker"}},
-    {{"op": "delete_effect", "index": 0}}
+    {{"op": "delete_effect", "index": 0}},
+    {{"op": "add_broll", "keyword": "city skyline", "start": 4.0, "duration": 2.5, "placement": "pip"}},
+    {{"op": "add_carousel", "photos": ["bali beach", "temple", "rice fields"], "start": 6.0, "per_photo": 1.6, "motion": "swipe_left", "size": "full"}},
+    {{"op": "set_overlay_motion", "index": 0, "type": "swipe_up", "in": 0.35}},
+    {{"op": "delete_carousel", "index": 0}}
   ],
   "message": "Short confirmation of what you changed (mention Render if captions/styles changed)"
 }}
@@ -9491,6 +9672,19 @@ Rules:
   words shown at once -- 1 is one word at a time, 4 is a short phrase.
 - If the request needs something no op covers, return ops: [] and say plainly
   what is missing. Do not approximate it with a different op.
+- add_broll places one photo over the video. add_carousel places several that
+  hand over in place, each sliding in. "photos" may be subjects to search for
+  ("bali beach") or ids of assets the user already uploaded -- use ids when the
+  user refers to their own pictures, subjects when they describe what they
+  want to see.
+- motion names the gesture: swipe_left means the photo enters from the right
+  and travels left, the way a carousel moves under a thumb. Use "none" for a
+  photo that should simply appear.
+- size "full" covers the frame; "pip" sits it in a box over the video. Prefer
+  "full" when the user says full screen or describes a photo montage, "pip"
+  when they are still on camera.
+- set_overlay_motion changes how an existing overlay arrives; indexes there
+  refer to overlay_clips.
 """
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -9510,10 +9704,12 @@ Rules:
         "enable_punch_zoom", "enable_ken_burns", "clear_effects", "set_canvas",
         "set_color_grade", "add_title", "apply_recommended_cuts", "merge_shots",
         "reorder_shot", "set_shot_range", "set_effect_time", "set_punch_aim",
-        "delete_effect",
+        "delete_effect", "add_broll", "add_carousel", "set_overlay_motion",
+        "delete_carousel",
     }
     ops = []
     refused = []
+    blocked = []
     for op in raw_ops:
         if not isinstance(op, dict):
             continue
@@ -9525,6 +9721,16 @@ Rules:
             continue
         if name == "set_punch_aim":
             op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name in ("add_carousel", "add_broll"):
+            # Fetching photos can fail for reasons the user needs to hear --
+            # no provider key, nothing found -- so say it rather than placing
+            # an empty box or, worse, a word where a picture was asked for.
+            resolver = _resolve_add_carousel if name == "add_carousel" else _resolve_add_broll
+            op, note = resolver(op)
+            if note:
+                blocked.append(note)
             if op is None:
                 continue
         ops.append(op)
@@ -9539,6 +9745,8 @@ Rules:
         "accepted" if ops else "rejected",
         {"message": message} if message else None,
     )
+    if blocked:
+        message = ((message + " ") if message else "") + " ".join(blocked)
     return jsonify({"ops": ops, "message": message or f"Applied {len(ops)} edit(s)."})
 
 
