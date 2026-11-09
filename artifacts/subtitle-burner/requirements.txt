@@ -32,6 +32,15 @@ playwright>=1.40.0
 # OpenCV has no X11 deps and mediapipe will use it transparently via the
 # shared `cv2` module name.
 pyannote.audio>=3.1.0
+# The torch pair pyannote 3.x can actually run on. torchaudio deprecated
+# `AudioMetaData` in 2.8 and REMOVED it in 2.9; pyannote 3.x still calls it
+# and declares torchaudio with no upper bound, so an unconstrained install
+# takes the newest and diarization dies at import with
+# `AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'`.
+# torch and torchaudio must also share a minor -- a mismatched pair fails
+# with symbol errors that look nothing like a version problem.
+torch>=2.8.0,<2.9.0
+torchaudio>=2.8.0,<2.9.0
 # Pinned below 0.10.22: MediaPipe removed the legacy `mp.solutions` API, and
 # this app is written against it (mp.solutions.face_detection for the reframe
 # analysis, mp.solutions.selfie_segmentation for the person matte). An
