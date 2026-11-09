@@ -10,6 +10,86 @@
   console.log("[timeline] " + TL_BUILD + " script loaded");
 
   const $ = (id) => document.getElementById(id);
+
+  // ---- Saying what actually came back -------------------------------------
+  //
+  // `await r.json()` on a response that is not JSON throws
+  //
+  //     Unexpected token '<', "<!doctype "... is not valid JSON
+  //
+  // which is the error being THROWN AWAY: the status code and the page's own
+  // text are the only two things that say which failure this is, and calling
+  // .json() blind discards both. That is how "Analyze whole edit" reported a
+  // parse error instead of the reason.
+  //
+  // The same hazard sits on ~50 other bare .json() calls across timeline.js
+  // and app.js. This is the shared fix; converting the rest is its own job.
+  function describeNonJson(res, text, url) {
+    const status = res.status;
+    if (status === 404) {
+      return `the server has no route for ${url} (404) — it is running a ` +
+             `build from before this feature. Pull dev and restart it.`;
+    }
+    if (status === 502 || status === 503 || status === 504) {
+      return `the request was cut off before the server answered (${status}) ` +
+             `— usually a proxy timeout on a long job.`;
+    }
+    if (status === 413) return "the request body was too large (413).";
+    // A Werkzeug error page carries the exact status in its <title>, which is
+    // the single most useful token in it.
+    let detail = "";
+    const m = /<title[^>]*>([^<]{1,120})<\/title>/i.exec(text || "");
+    if (m) detail = ": " + m[1].trim();
+    else if (text) {
+      const plain = String(text).replace(/<[^>]*>/g, " ")
+        .replace(/\s+/g, " ").trim().slice(0, 120);
+      if (plain) detail = ": " + plain;
+    }
+    return `HTTP ${status} ${res.statusText || ""}`.trim() +
+           ` — the server returned a page, not JSON${detail}`;
+  }
+
+  // POST JSON and get JSON back, or throw an Error that says what happened.
+  async function postJSON(url, body, opts) {
+    opts = opts || {};
+    const res = await fetch(url, {
+      method: opts.method || "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) { /* handled below */ }
+    if (data && typeof data === "object") {
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
+    }
+    throw new Error(describeNonJson(res, text, url));
+  }
+
+  // GET the same way -- with one deliberate difference.
+  //
+  // It throws only on a bad STATUS, never because the body carries an
+  // `error` field. A status endpoint answers 200 with {error: "..."} to
+  // report that the JOB failed, which is data, not a transport failure.
+  // Conflating the two made the poller treat a real diarization error as a
+  // network blip and retry it five times before admitting it -- ten seconds
+  // of "Starting…" and a dead button. Found by driving it in a browser;
+  // every unit test passed throughout.
+  async function getJSON(url) {
+    const res = await fetch(url);
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) { /* handled below */ }
+    if (data && typeof data === "object") {
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+    throw new Error(describeNonJson(res, text, url));
+  }
+
   let PPS = 14;            // pixels per second (mutable: timeline zoom)
   const MIN_TL_SECONDS = 30;
   const TRACK_LABEL_W = 78; // must match .tl-track-label width in timeline.css
@@ -2299,6 +2379,13 @@
   // into two, colouring person A and person D identically. This joins the
   // Main track's audio and diarizes it once, which is the only way to get
   // one label space.
+  // How long to keep polling before giving up and handing the button back.
+  // Generous, because pyannote on a long stitched edit genuinely takes
+  // minutes -- but finite, because a spinner with no end is worse than an
+  // error.
+  const TL_DIAR_POLL_MS = 2000;
+  const TL_DIAR_MAX_MS = 20 * 60 * 1000;
+
   async function runAnalyzeWholeEdit(triggerBtn) {
     if (!tl || !tl.job_id) {
       alert("Open a timeline project first.");
@@ -2314,7 +2401,7 @@
     if (wrap) wrap.hidden = false;
     const was = triggerBtn ? triggerBtn.textContent : "";
     if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = "Analyzing…"; }
-    setAnalyzeProgressUI(10, "Joining the Main track's audio…");
+    setAnalyzeProgressUI(2, "Starting…");
     try {
       const body = { job_id: tl.job_id, timeline: serialize() };
       // Same "Up to N" control the per-source Analyze uses. It is an element
@@ -2323,13 +2410,16 @@
       const sel = document.getElementById("analyzeMaxSpeakers");
       const cap = sel && sel.value ? parseInt(sel.value, 10) : 0;
       if (cap > 0) { body.max_speakers = cap; body.min_speakers = 1; }
-      const r = await fetch("/analyze-timeline-speakers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json();
-      if (!r.ok || data.error) throw new Error(data.error || "analysis failed");
+
+      // The POST only STARTS the analysis and returns at once. It used to
+      // run the whole thing inline, so on a long edit the request sat open
+      // until something upstream cut it off and returned an HTML page --
+      // which surfaced as "Unexpected token '<'" and said nothing useful.
+      const started = await postJSON("/analyze-timeline-speakers", body);
+      const startedAt = Number(started.started_at) || 0;
+
+      const data = await pollWholeEditAnalysis(tl.job_id, startedAt);
+
       // Six speakers need six colours. The project ships with Host and
       // Guest because one interview has two, so without this everyone from
       // the third person on falls back to the plain caption colour -- which
@@ -2342,12 +2432,55 @@
         `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)` +
         ` — one label space`);
     } catch (e) {
-      setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + (e.message || e));
-      alert("Whole-edit analysis failed: " + (e.message || e));
+      const msg = (e && e.message) || String(e);
+      setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + msg);
+      alert("Whole-edit analysis failed: " + msg);
     } finally {
       if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = was; }
     }
   }
+
+  // Poll until the run reaches a terminal state. Resolves with the finished
+  // record; throws with the server's own reason otherwise.
+  async function pollWholeEditAnalysis(jobId, startedAt) {
+    const deadline = Date.now() + TL_DIAR_MAX_MS;
+    let lost = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, TL_DIAR_POLL_MS));
+      if (Date.now() > deadline) {
+        throw new Error(
+          "still running after 20 minutes — it may still finish; reopen the " +
+          "project in a few minutes to pick up the result.");
+      }
+      let st;
+      try {
+        st = await getJSON("/timeline-speakers/" + encodeURIComponent(jobId));
+      } catch (e) {
+        // A blip while a long job runs should not kill the whole wait.
+        if (++lost > 5) throw e;
+        continue;
+      }
+      lost = 0;
+      if (st.error) throw new Error(st.error);
+      if (st.running) {
+        setAnalyzeProgressUI(Math.max(2, Number(st.progress) || 0),
+                             st.stage || "Analyzing…");
+        continue;
+      }
+      // Not running. Only accept a record this run produced: an analysis
+      // cached earlier would otherwise be reported as success on the very
+      // first poll. Both timestamps come from the server's clock.
+      if (st.ready && (!startedAt || Number(st.created_at) >= startedAt - 1)) {
+        return st;
+      }
+      if (++lost > 3) {
+        throw new Error(
+          "the analysis stopped without leaving a result — the server may " +
+          "have restarted. Check the server log and try again.");
+      }
+    }
+  }
+
 
   function wireTranscriptToolbar() {
     const restoreBtn = $("tlTranscriptRestoreBtn");
@@ -7803,6 +7936,11 @@
   window.addEffectClip = addEffectClip;
   window.openEffectPicker = openEffectPicker;
   window.EFFECT_TYPES = EFFECT_TYPES;
+  // Exposed so the rest of the app can stop calling .json() blind too. There
+  // are ~49 other bare call sites; converting them is its own change.
+  window.postJSON = postJSON;
+  window.getJSON = getJSON;
+  window.describeNonJson = describeNonJson;
   window.getTimelineSelection = function () {
     return selected ? { track: selected.track, id: selected.id } : null;
   };

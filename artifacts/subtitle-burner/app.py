@@ -15211,7 +15211,7 @@ def _tl_audio_layout(tl: dict) -> dict:
     }
 
 
-def _tl_concat_main_audio(tl: dict, dest: Path) -> dict:
+def _tl_concat_main_audio(tl: dict, dest: Path, on_progress=None) -> dict:
     """Join the Main track's audio into one 16 kHz mono WAV for diarization.
 
     Audio only, so it is cheap: no video decode, no video encode. The
@@ -15231,6 +15231,11 @@ def _tl_concat_main_audio(tl: dict, dest: Path) -> dict:
     parts: list[Path] = []
     try:
         for i, p in enumerate(pieces):
+            if on_progress:
+                # Real progress, from the work being done -- one step per
+                # piece. The diarization after this reports nothing, so this
+                # is the only honest movement the bar gets.
+                on_progress(i, len(pieces))
             part = UPLOAD_DIR / f"{dest.stem}_p{i:03d}.wav"
             src = _timeline_clip_source(p, prefer_proxy=False)
             made = False
@@ -15349,21 +15354,52 @@ def _tl_load_timeline_diarization(job_id: str) -> dict | None:
 def analyze_timeline_speakers(job_id: str, timeline: dict,
                               *, num_speakers: int | None = None,
                               min_speakers: int | None = None,
-                              max_speakers: int | None = None) -> dict:
-    """Diarize the whole edit once and cache it. Returns the stored record."""
+                              max_speakers: int | None = None,
+                              on_progress=None) -> dict:
+    """Diarize the whole edit once and cache it. Returns the stored record.
+
+    *on_progress* is called as (percent, stage_text) so a caller running
+    this in a thread can report something truthful. The join reports real
+    per-piece progress; pyannote's inference is one opaque call that
+    reports nothing, so the stage text says so rather than animating a bar
+    that is not measuring anything.
+    """
+    def _say(pct, stage):
+        if on_progress:
+            try:
+                on_progress(int(pct), str(stage))
+            except Exception:                    # noqa: BLE001
+                pass
+
+    _say(5, "reading the timeline")
     tl = _normalize_timeline(timeline)
     wav = UPLOAD_DIR / f"{job_id}_tlaudio.wav"
     try:
-        layout = _tl_concat_main_audio(tl, wav)
+        def _joined(i, total):
+            _say(10 + int(45 * i / max(1, total)),
+                 f"joining the Main track's audio ({i + 1}/{total})")
+        layout = _tl_concat_main_audio(tl, wav, on_progress=_joined)
+        _say(60, f"diarizing {layout['analysis_total']:.0f}s of audio — "
+                 f"this can take a few minutes on a long edit")
         segments = diarize_audio(
             wav, num_speakers=num_speakers,
             min_speakers=min_speakers, max_speakers=max_speakers)
     finally:
         _safe_unlink(wav)
 
+    _say(92, "mapping speakers back onto each clip")
     pieces = layout["pieces"]
     by_source = _tl_project_diarization_to_sources(segments, pieces)
     speakers = sorted({s["speaker"] for s in segments if s.get("speaker")})
+    # Colours are computed and STORED here rather than by the endpoint, so
+    # the poller can simply read them back and so they survive a restart.
+    # It also puts this inside the worker's try/except: it used to sit
+    # outside the endpoint's, where an exception became a Werkzeug HTML 500
+    # -- which is exactly the "not valid JSON" failure being fixed.
+    existing = dict(tl.get("speaker_colors") or {})
+    if not existing:
+        existing = {sp: _default_speaker_color(sp, i)
+                    for i, sp in enumerate(speakers)}
     record = {
         "created_at": time.time(),
         "layout": pieces,
@@ -15373,13 +15409,79 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
         "by_source": by_source,
         "speakers": speakers,
         "sources": sorted(by_source.keys()),
+        "speaker_colors": _fill_speaker_colors(existing, speakers),
+        "labels": {sp: _speaker_label_for_id(sp, i)
+                   for i, sp in enumerate(speakers)},
     }
     _tl_diar_path(job_id).write_text(
         json.dumps(record), encoding="utf-8")
+    _say(100, f"{len(speakers)} speaker(s) across "
+              f"{len(record['sources'])} clip(s)")
     print(f"[timeline] whole-edit diarization: {len(speakers)} speakers across "
           f"{len(record['sources'])} source clip(s), "
           f"{layout['analysis_total']:.1f}s of audio", flush=True)
     return record
+
+
+# ---- Running it in the background ----------------------------------------
+#
+# It was synchronous, and that produced the failure it was meant to avoid:
+# pyannote on a long stitched edit takes minutes, so the request sat open
+# until something upstream cut it off and returned an HTML page, which the
+# browser reported as "Unexpected token '<'". The work does not get shorter,
+# so the request has to stop waiting for it.
+#
+# State lives here rather than on jobs[job_id], whose "status"/"progress"
+# belong to the renderer and would collide. It is in-memory on purpose: the
+# durable result is the cached uploads/<job>_tldiar.json, so a restart loses
+# a run in flight and nothing else.
+_TL_DIAR_RUNS: dict[str, dict] = {}
+_TL_DIAR_LOCK = threading.Lock()
+
+
+def _tl_diar_run_state(job_id: str) -> dict | None:
+    with _TL_DIAR_LOCK:
+        run = _TL_DIAR_RUNS.get(job_id)
+        return dict(run) if run else None
+
+
+def analyze_timeline_speakers_job(job_id: str, timeline: dict,
+                                  num_speakers=None, min_speakers=None,
+                                  max_speakers=None) -> None:
+    """Thread target. Every exit path MUST leave a terminal state.
+
+    A spinner with no end is a worse outcome than an error, so the except
+    is deliberately broad and the state is written in a finally-shaped way:
+    whatever happens, the run stops saying "running".
+    """
+    def _progress(pct, stage):
+        with _TL_DIAR_LOCK:
+            run = _TL_DIAR_RUNS.get(job_id)
+            if run is not None:
+                run["progress"] = pct
+                run["stage"] = stage
+
+    try:
+        analyze_timeline_speakers(
+            job_id, timeline, num_speakers=num_speakers,
+            min_speakers=min_speakers, max_speakers=max_speakers,
+            on_progress=_progress)
+    except Exception as e:                       # noqa: BLE001
+        import traceback
+        print(f"[timeline] whole-edit diarization failed: {e}", flush=True)
+        traceback.print_exc()
+        with _TL_DIAR_LOCK:
+            _TL_DIAR_RUNS[job_id] = {
+                "state": "error", "progress": 100,
+                "stage": "failed", "error": str(e)[:500],
+                "started_at": (_TL_DIAR_RUNS.get(job_id) or {}).get("started_at"),
+            }
+        return
+    with _TL_DIAR_LOCK:
+        _TL_DIAR_RUNS[job_id] = {
+            "state": "done", "progress": 100, "stage": "done", "error": None,
+            "started_at": (_TL_DIAR_RUNS.get(job_id) or {}).get("started_at"),
+        }
 
 
 def _normalize_timeline(timeline: dict) -> dict:
@@ -16462,7 +16564,7 @@ def timeline_render():
 
 @app.route("/analyze-timeline-speakers", methods=["POST"])
 def analyze_timeline_speakers_endpoint():
-    """Diarize the WHOLE edit once, in one label space.
+    """START diarizing the WHOLE edit, in one label space. Returns at once.
 
     The third of three buttons, and the distinction between them is exactly
     what caused the confusion this fixes:
@@ -16472,9 +16574,12 @@ def analyze_timeline_speakers_endpoint():
                             which is why six people came back as two
       Analyze whole edit -- the Main track's audio joined and diarized once
 
-    Synchronous on purpose: it decodes no video and encodes nothing, so it
-    is a fraction of the cost of the per-source analyses, and the caller
-    needs the speaker list to colour them.
+    This used to run the analysis inline and answer with the result. On a
+    long stitched edit that meant a request held open for minutes, which
+    something upstream eventually cut off -- returning an HTML page that the
+    browser reported as "Unexpected token '<'". Joining the audio is cheap,
+    but pyannote's inference is not, so the request stops waiting for it:
+    poll GET /timeline-speakers/<job_id>.
     """
     data = request.get_json(force=True) or {}
     job_id = data.get("job_id")
@@ -16492,6 +16597,23 @@ def analyze_timeline_speakers_endpoint():
             "hf_token": deps["hf_token"], "pyannote": deps["pyannote"],
             "diarization_ok": deps["diarization_ok"]}}), 400
 
+    # One run per project. Two pyannote jobs over the same audio would fight
+    # for the same temp files and the same CPU for no benefit.
+    with _TL_DIAR_LOCK:
+        running = _TL_DIAR_RUNS.get(job_id)
+        if running and running.get("state") == "running":
+            return jsonify({
+                "error": "This edit is already being analysed.",
+                "status": "running",
+                "progress": running.get("progress", 0),
+                "stage": running.get("stage") or "",
+            }), 409
+        started_at = time.time()
+        _TL_DIAR_RUNS[job_id] = {
+            "state": "running", "progress": 0,
+            "stage": "starting", "error": None, "started_at": started_at,
+        }
+
     def _opt_int(key: str) -> int | None:
         raw = data.get(key)
         try:
@@ -16500,52 +16622,50 @@ def analyze_timeline_speakers_endpoint():
             return None
         return n if n > 0 else None
 
-    try:
-        rec = analyze_timeline_speakers(
-            job_id, timeline,
-            num_speakers=_opt_int("num_speakers"),
-            min_speakers=_opt_int("min_speakers"),
-            max_speakers=_opt_int("max_speakers"))
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:                      # noqa: BLE001
-        print(f"[timeline] whole-edit diarization failed: {e}", flush=True)
-        return jsonify({"error": f"Whole-edit analysis failed: {e}"}), 500
-
-    # Hand back colours for every speaker found, so the UI can show six
-    # pickers rather than Host and Guest.
-    colours = _fill_speaker_colors(
-        dict(_normalize_timeline(timeline).get("speaker_colors") or {})
-        or {s: _default_speaker_color(s, i)
-            for i, s in enumerate(rec["speakers"])},
-        rec["speakers"])
-    return jsonify({
-        "ok": True,
-        "speakers": rec["speakers"],
-        "speaker_count": len(rec["speakers"]),
-        "sources": rec["sources"],
-        "pieces": len(rec["layout"]),
-        "analysed_seconds": rec["analysis_total"],
-        "speaker_colors": colours,
-        "labels": {s: _speaker_label_for_id(s, i)
-                   for i, s in enumerate(rec["speakers"])},
-    })
+    t = threading.Thread(
+        target=analyze_timeline_speakers_job,
+        args=(job_id, timeline, _opt_int("num_speakers"),
+              _opt_int("min_speakers"), _opt_int("max_speakers")))
+    t.daemon = True
+    t.start()
+    # started_at is the SERVER's clock, and the status reports the record's
+    # created_at on the same clock. The poller compares the two so a cached
+    # result from an earlier analysis cannot be mistaken for this one's --
+    # which it otherwise would be, instantly, on the very first poll.
+    return jsonify({"status": "started", "job_id": job_id,
+                    "started_at": started_at}), 202
 
 
 @app.route("/timeline-speakers/<job_id>", methods=["GET"])
 def timeline_speakers_status(job_id: str):
-    """What the last whole-edit analysis found, if any."""
+    """Progress of a running whole-edit analysis, and its result when done.
+
+    Both halves on purpose: `running` is in memory and dies with the
+    process, while `ready` reads the cached file, so a finished analysis
+    stays reportable across a restart.
+    """
+    run = _tl_diar_run_state(job_id) or {}
+    out = {
+        "ready": False,
+        "state": run.get("state") or "idle",
+        "running": run.get("state") == "running",
+        "progress": run.get("progress", 0),
+        "stage": run.get("stage") or "",
+        "error": run.get("error"),
+    }
     rec = _tl_load_timeline_diarization(job_id)
-    if not rec:
-        return jsonify({"ready": False})
-    return jsonify({
-        "ready": True,
-        "speakers": rec.get("speakers") or [],
-        "speaker_count": len(rec.get("speakers") or []),
-        "sources": rec.get("sources") or [],
-        "analysed_seconds": rec.get("analysis_total"),
-        "created_at": rec.get("created_at"),
-    })
+    if rec:
+        out.update({
+            "ready": True,
+            "speakers": rec.get("speakers") or [],
+            "speaker_count": len(rec.get("speakers") or []),
+            "sources": rec.get("sources") or [],
+            "analysed_seconds": rec.get("analysis_total"),
+            "created_at": rec.get("created_at"),
+            "speaker_colors": rec.get("speaker_colors") or {},
+            "labels": rec.get("labels") or {},
+        })
+    return jsonify(out)
 
 
 @app.route("/timeline/list", methods=["GET"])

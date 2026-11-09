@@ -15,6 +15,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -4413,7 +4414,9 @@ def test_the_whole_edit_endpoint_needs_a_main_track(app_mod, temp_db):
         r = c.post("/analyze-timeline-speakers", json={"job_id": "nope"})
         assert r.status_code == 404
         # Nothing analysed yet is a plain answer, not an error.
-        assert c.get(f"/timeline-speakers/{jid}").get_json() == {"ready": False}
+        st = c.get(f"/timeline-speakers/{jid}").get_json()
+        assert st["ready"] is False and st["running"] is False
+        assert st["state"] == "idle" and st["error"] is None
     finally:
         app_mod.jobs.pop(jid, None)
 
@@ -4519,3 +4522,421 @@ def test_four_people_across_two_interviews_get_four_caption_colours(app_mod):
                                    1080, 1920, speaker_colors=colours)
     assert len(_spoken_colours(ass_before)) == 2, \
         "the bug does not reproduce, so the fix above proves nothing"
+
+
+# ---------------------------------------------------------------------------
+# Saying what actually came back, and not holding the request open.
+#
+# The deployed app reported:
+#
+#     Whole-edit analysis failed: Failed to execute 'json' on 'Response':
+#     Unexpected token '<', "<!doctype "... is not valid JSON
+#
+# which is not the error -- it is the error being THROWN AWAY. The response
+# was an HTML page and the client called `await r.json()` blind, discarding
+# the status code and the page's own text, the only two things that say
+# which failure it was.
+#
+# Two fixes, and they are different failures: the client must report what
+# came back, and the analysis must stop being synchronous so a long edit
+# cannot be cut off mid-request in the first place.
+# ---------------------------------------------------------------------------
+
+_HELPERS_FROM = "  function describeNonJson(res, text, url) {"
+_HELPERS_TO = "  let PPS = 14;"
+
+_WERKZEUG_404 = (
+    "<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n"
+    "<h1>Not Found</h1>\n<p>The requested URL was not found on the server.</p>\n"
+)
+
+
+def _describe(status, status_text, text, url="/analyze-timeline-speakers"):
+    body = (
+        "\nconsole.log(describeNonJson("
+        f"{{status: {status}, statusText: {json.dumps(status_text)}}}, "
+        f"{json.dumps(text)}, {json.dumps(url)}));"
+    )
+    return _node_eval(_HELPERS_FROM, _HELPERS_TO, body)
+
+
+def test_a_404_page_is_reported_as_a_stale_build_not_a_parse_error():
+    """The likely cause of the report, and invisible from the browser.
+
+    A Werkzeug 404 page means the route does not exist, which means the
+    serving process predates the feature. "Unexpected token '<'" sends
+    nobody to a restart; naming the remedy does.
+    """
+    out = _describe(404, "NOT FOUND", _WERKZEUG_404)
+    assert "/analyze-timeline-speakers" in out
+    assert "404" in out
+    low = out.lower()
+    assert "restart" in low and "pull" in low, out
+    assert "unexpected token" not in low
+
+
+def test_a_cut_off_request_is_reported_as_a_timeout():
+    """The other way this exact message appears: a proxy gives up on a long
+    synchronous request and answers with its own page."""
+    for status in (502, 503, 504):
+        out = _describe(status, "Gateway Timeout", "<html><body>oops</body></html>")
+        assert str(status) in out
+        assert "cut off" in out.lower(), out
+
+
+def test_any_other_page_is_reported_with_its_own_title():
+    """A Werkzeug error page carries the exact status in its <title>, which
+    is the single most useful token in it."""
+    out = _describe(
+        500, "INTERNAL SERVER ERROR",
+        "<!doctype html>\n<title>500 Internal Server Error</title>\n"
+        "<h1>Internal Server Error</h1>")
+    assert "500" in out and "Internal Server Error" in out
+    assert "not JSON" in out or "not json" in out.lower()
+
+
+def test_a_real_json_error_still_speaks_for_itself():
+    """The helper must not bury a message the server took care to write."""
+    body = """
+const calls = [];
+global.fetch = async () => ({
+  ok: false, status: 400, statusText: "BAD REQUEST",
+  text: async () => JSON.stringify({error: "pyannote.audio unavailable"}),
+});
+postJSON("/x", {}).then(
+  () => console.log("RESOLVED"),
+  (e) => console.log(e.message));
+"""
+    out = _node_eval(_HELPERS_FROM, _HELPERS_TO, body)
+    assert out == "pyannote.audio unavailable", out
+
+
+def test_postjson_returns_the_parsed_body_on_success():
+    body = """
+global.fetch = async () => ({
+  ok: true, status: 200, statusText: "OK",
+  text: async () => JSON.stringify({status: "started", started_at: 12.5}),
+});
+postJSON("/x", {}).then((d) => console.log(d.status + " " + d.started_at),
+                        (e) => console.log("THREW " + e.message));
+"""
+    assert _node_eval(_HELPERS_FROM, _HELPERS_TO, body) == "started 12.5"
+
+
+# --- the analysis no longer holds the request open -------------------------
+
+@pytest.fixture
+def tl_project(app_mod):
+    """A project job with a one-clip Main track, and a clean run table."""
+    import uuid
+    jid = uuid.uuid4().hex
+    app_mod.jobs[jid] = {
+        "status": "done", "progress": 100, "output": None, "error": None,
+        "audio": None, "emoji_rules": {}, "created_at": 0.0, "words": None,
+        "style": {}, "filename": "project.mp4"}
+    app_mod._TL_DIAR_RUNS.pop(jid, None)
+    try:
+        yield jid
+    finally:
+        app_mod.jobs.pop(jid, None)
+        app_mod._TL_DIAR_RUNS.pop(jid, None)
+        try:
+            app_mod._tl_diar_path(jid).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _tl_body(jid):
+    return {"job_id": jid, "timeline": _audio_tl(
+        [{"id": "m1", "source_job_id": "A", "in": 0.0, "out": 4.0}])}
+
+
+def test_the_request_returns_while_the_analysis_is_still_running(
+        app_mod, temp_db, tl_project, monkeypatch):
+    """The failure being fixed: it used to answer only when pyannote was
+    done, so a long edit held the request open until something upstream cut
+    it off and returned an HTML page."""
+    import threading as _th
+    held = _th.Event()
+    entered = _th.Event()
+
+    def slow(job_id, timeline, **kw):
+        entered.set()
+        held.wait(10)           # still running when the POST answers
+        return {"speakers": [], "sources": [], "layout": [],
+                "analysis_total": 0.0}
+
+    monkeypatch.setattr(app_mod, "analyze_timeline_speakers", slow)
+    monkeypatch.setattr(app_mod, "_reframe_deps_available", lambda: (True, ""))
+    c = app_mod.app.test_client()
+    try:
+        r = c.post("/analyze-timeline-speakers", json=_tl_body(tl_project))
+        assert r.status_code == 202, r.get_json()
+        assert r.get_json()["status"] == "started"
+        assert r.get_json()["started_at"] > 0
+        assert entered.wait(5), "the worker never started"
+
+        st = c.get(f"/timeline-speakers/{tl_project}").get_json()
+        assert st["running"] is True and st["ready"] is False
+    finally:
+        held.set()
+
+
+def test_a_second_start_is_refused_rather_than_run_twice(
+        app_mod, temp_db, tl_project, monkeypatch):
+    """Two pyannote runs over the same audio fight for the same temp files
+    and the same CPU for no benefit."""
+    import threading as _th
+    held = _th.Event()
+    monkeypatch.setattr(app_mod, "analyze_timeline_speakers",
+                        lambda *a, **k: (held.wait(10), {})[1])
+    monkeypatch.setattr(app_mod, "_reframe_deps_available", lambda: (True, ""))
+    c = app_mod.app.test_client()
+    try:
+        assert c.post("/analyze-timeline-speakers",
+                      json=_tl_body(tl_project)).status_code == 202
+        r2 = c.post("/analyze-timeline-speakers", json=_tl_body(tl_project))
+        assert r2.status_code == 409
+        assert "already" in r2.get_json()["error"].lower()
+    finally:
+        held.set()
+
+
+def test_a_worker_that_raises_ends_in_error_not_running(
+        app_mod, temp_db, tl_project, monkeypatch):
+    """The outcome worth guarding hardest.
+
+    A spinner with no end is worse than an error: it tells the user
+    nothing, cannot be retried, and leaves the button dead. So every exit
+    path out of the worker has to leave a terminal state.
+    """
+    def boom(*a, **k):
+        raise ValueError("pyannote fell over")
+
+    monkeypatch.setattr(app_mod, "analyze_timeline_speakers", boom)
+    monkeypatch.setattr(app_mod, "_reframe_deps_available", lambda: (True, ""))
+    c = app_mod.app.test_client()
+    assert c.post("/analyze-timeline-speakers",
+                  json=_tl_body(tl_project)).status_code == 202
+
+    deadline = time.time() + 5
+    st = {}
+    while time.time() < deadline:
+        st = c.get(f"/timeline-speakers/{tl_project}").get_json()
+        if not st["running"]:
+            break
+        time.sleep(0.05)
+    assert st["running"] is False, "the run never reached a terminal state"
+    assert st["state"] == "error"
+    assert "pyannote fell over" in (st["error"] or "")
+
+
+def test_start_poll_ready_end_to_end(app_mod, temp_db, tl_project, monkeypatch,
+                                     tmp_path):
+    """The whole path, with pyannote stubbed: start, poll, read the result.
+
+    diarize_audio is the only part that cannot run here, so it is the only
+    part replaced -- the join, the layout, the projection, the colours, the
+    cached record and the two endpoints are all the real ones.
+    """
+    import uuid
+    src_id = uuid.uuid4().hex
+    src = app_mod.UPLOAD_DIR / f"{src_id}.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=black:s=160x120:d=5:r=15",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+         "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)],
+        check=True)
+    app_mod.jobs[src_id] = {
+        "status": "done", "progress": 100, "output": None, "error": None,
+        "audio": None, "emoji_rules": {}, "created_at": 0.0, "words": None,
+        "style": {}, "filename": "src.mp4"}
+
+    monkeypatch.setattr(app_mod, "_reframe_deps_available", lambda: (True, ""))
+    monkeypatch.setattr(app_mod, "diarize_audio", lambda *a, **k: [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_02"},
+    ])
+    c = app_mod.app.test_client()
+    try:
+        body = {"job_id": tl_project, "timeline": _audio_tl(
+            [{"id": "m1", "source_job_id": src_id, "in": 0.0, "out": 4.0}])}
+        r = c.post("/analyze-timeline-speakers", json=body)
+        assert r.status_code == 202
+        started_at = r.get_json()["started_at"]
+
+        deadline = time.time() + 30
+        st = {}
+        while time.time() < deadline:
+            st = c.get(f"/timeline-speakers/{tl_project}").get_json()
+            if not st["running"]:
+                break
+            time.sleep(0.1)
+        assert st.get("error") is None, st
+        assert st["ready"] is True and st["state"] == "done", st
+        assert st["speaker_count"] == 3
+
+        # Colours come back with the result, so the poller can apply them --
+        # and three speakers get three, not two plus a fallback.
+        colours = st["speaker_colors"]
+        assert len(colours) == 3 and len(set(colours.values())) == 3, colours
+
+        # The record is this run's, which is what lets a poller tell it from
+        # a cached one. Same clock on both sides.
+        assert st["created_at"] >= started_at - 1
+    finally:
+        try:
+            src.unlink(missing_ok=True)
+        except OSError:
+            pass
+        app_mod.jobs.pop(src_id, None)
+
+
+def test_a_cached_result_is_distinguishable_from_this_run(app_mod, tl_project):
+    """Without this the first poll reports instant success.
+
+    An analysis run yesterday leaves a record on disk, so `ready` is true
+    before the new run has done anything. The poller compares the record's
+    created_at against the start time the POST handed back -- both from the
+    server's clock, so no browser-vs-server skew.
+    """
+    app_mod._tl_diar_path(tl_project).write_text(json.dumps({
+        "created_at": 1000.0, "speakers": ["SPEAKER_00"], "sources": ["A"],
+        "by_source": {"A": [{"start": 0, "end": 1, "speaker": "SPEAKER_00"}]},
+    }), encoding="utf-8")
+    st = app_mod.app.test_client().get(
+        f"/timeline-speakers/{tl_project}").get_json()
+    assert st["ready"] is True and st["created_at"] == 1000.0
+    assert st["running"] is False
+    # A run started after that record must not accept it.
+    assert not (st["created_at"] >= 2000.0 - 1)
+
+
+def test_postjson_actually_uses_the_describer_on_an_html_reply():
+    """The describer being right is not the same as it being reached.
+
+    Caught by making postJSON fall back to JSON.parse on the non-JSON path:
+    every test that fed it valid JSON still passed, because none of them
+    ever took that path.
+    """
+    body = """
+global.fetch = async () => ({
+  ok: false, status: 404, statusText: "NOT FOUND",
+  text: async () => %s,
+});
+postJSON("/analyze-timeline-speakers", {}).then(
+  () => console.log("RESOLVED — the HTML reply was treated as success"),
+  (e) => console.log(e.message));
+""" % json.dumps(_WERKZEUG_404)
+    out = _node_eval(_HELPERS_FROM, _HELPERS_TO, body)
+    assert "/analyze-timeline-speakers" in out and "404" in out, out
+    assert "restart" in out.lower(), out
+    assert "unexpected token" not in out.lower()
+    assert "RESOLVED" not in out
+
+
+def test_getjson_describes_an_html_reply_too():
+    """The poller runs on getJSON, so an HTML page mid-poll must read the
+    same way rather than reviving the original parse error."""
+    body = """
+global.fetch = async () => ({
+  ok: false, status: 504, statusText: "Gateway Timeout",
+  text: async () => "<!doctype html><title>504</title>",
+});
+getJSON("/timeline-speakers/x").then(
+  () => console.log("RESOLVED"),
+  (e) => console.log(e.message));
+"""
+    out = _node_eval(_HELPERS_FROM, _HELPERS_TO, body)
+    assert "504" in out and "cut off" in out.lower(), out
+
+
+def test_a_failed_job_reported_with_200_is_data_not_a_transport_error():
+    """getJSON must not throw on a body carrying `error` when the status is OK.
+
+    /timeline-speakers answers 200 with {error: "..."} to say the JOB
+    failed. Treating that as a transport failure made the poller retry it
+    five times as if it were a network blip -- ten seconds of "Starting…"
+    and a dead button before the real reason appeared. Every unit test
+    passed while that was true; only driving it in a browser showed it.
+    """
+    body = """
+global.fetch = async () => ({
+  ok: true, status: 200, statusText: "OK",
+  text: async () => JSON.stringify({running: false, state: "error",
+                                    error: "no audio stream"}),
+});
+getJSON("/timeline-speakers/x").then(
+  (d) => console.log("RETURNED " + d.state + " " + d.error),
+  (e) => console.log("THREW " + e.message));
+"""
+    out = _node_eval(_HELPERS_FROM, _HELPERS_TO, body)
+    assert out == "RETURNED error no audio stream", out
+
+    # A bad STATUS is still a failure, and still speaks with the server's words.
+    body_bad = """
+global.fetch = async () => ({
+  ok: false, status: 500, statusText: "INTERNAL SERVER ERROR",
+  text: async () => JSON.stringify({error: "boom"}),
+});
+getJSON("/timeline-speakers/x").then(
+  () => console.log("RESOLVED"), (e) => console.log(e.message));
+"""
+    assert _node_eval(_HELPERS_FROM, _HELPERS_TO, body_bad) == "boom"
+
+
+def test_the_poller_surfaces_a_job_error_on_the_first_poll():
+    """End to end through the real poll loop, not the source.
+
+    The loop's retry-on-blip counter is what hid this, so the assertion is
+    about HOW MANY polls it took: one, not six.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    poller = js[js.index("  async function pollWholeEditAnalysis"):]
+    poller = poller[:poller.index("\n  function wireTranscriptToolbar")]
+    block = js[js.index(_HELPERS_FROM):js.index(_HELPERS_TO)] + poller
+    block = re.sub(r"^\s*const ", "var ", block, flags=re.M)
+    block = re.sub(r"^\s*function ", "function ", block, flags=re.M)
+    harness = """
+var TL_DIAR_POLL_MS = 1, TL_DIAR_MAX_MS = 5000;
+var polls = 0;
+function setAnalyzeProgressUI() {}
+global.fetch = async () => { polls++; return {
+  ok: true, status: 200, statusText: "OK",
+  text: async () => JSON.stringify({ready: false, running: false,
+                                    state: "error", error: "no audio stream"}),
+}; };
+pollWholeEditAnalysis("j", 100).then(
+  () => console.log("RESOLVED after " + polls),
+  (e) => console.log(e.message + " | polls=" + polls));
+"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    out = subprocess.run([node, "-e", block + harness],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "no audio stream | polls=1", out
+
+
+def test_the_client_polls_rather_than_waiting_on_the_post():
+    """Source-level, because the defect is a missing round trip rather than
+    a wrong value: a client that awaited the POST's result would work in
+    every test here and still time out on a real edit."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("async function runAnalyzeWholeEdit"):]
+    # Up to the POLLER's definition, not past it: the slice used to run to
+    # wireTranscriptToolbar, which swallowed pollWholeEditAnalysis's own
+    # `async function` line -- so the assertion below was satisfied by the
+    # declaration and would have passed with the call removed. Caught by
+    # removing it.
+    fn = fn[:fn.index("async function pollWholeEditAnalysis")]
+    assert "postJSON(" in fn, "still calling fetch().json() blind"
+    assert "await pollWholeEditAnalysis(" in fn, "the POST's reply is awaited as the result"
+    assert "await r.json()" not in fn
+    poll = js[js.index("async function pollWholeEditAnalysis"):][:3000]
+    assert "/timeline-speakers/" in poll
+    assert "st.running" in poll and "st.error" in poll
+    # A poll with no ceiling is a spinner with no end.
+    assert "TL_DIAR_MAX_MS" in poll
