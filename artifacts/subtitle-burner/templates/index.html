@@ -1122,10 +1122,11 @@
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
           Sensitivity
-          <select id="analyzeSensitivity" title="It groups voices that sound alike. If it merged two people who sound different — or missed someone who only speaks briefly — pick &quot;Split similar voices&quot;." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
-            <option value="merge">Merge similar voices</option>
-            <option value="normal" selected>Normal</option>
-            <option value="split">Split similar voices</option>
+          <select id="analyzeSensitivity" title="Auto listens more than once — at a normal setting and a more sensitive one — and keeps the count that holds across both. It takes about twice as long and it is the only setting that can tell you how many people there are. The others do a single fast pass." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+            <option value="auto" selected>Auto — work it out</option>
+            <option value="merge">One pass: merge similar voices</option>
+            <option value="normal">One pass: normal</option>
+            <option value="split">One pass: split similar voices</option>
           </select>
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.88rem">

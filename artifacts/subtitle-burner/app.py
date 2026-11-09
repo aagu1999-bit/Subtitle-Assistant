@@ -2139,20 +2139,28 @@ def _diarization_annotation(diar_out):
 # picks its own number inside the range.
 _DIARIZATION_SENSITIVITY = {
     # name: (threshold multiplier, min_cluster_size multiplier)
-    "merge": (1.12, 1.5),    # fewer, broader speakers
-    "normal": (1.0, 1.0),    # whatever the model ships with
-    "split": (0.88, 0.5),    # separate voices it would otherwise fold together
+    "merge": (1.12, 1.5),         # fewer, broader speakers
+    "normal": (1.0, 1.0),         # whatever the model ships with
+    "split": (0.88, 0.5),         # separate voices it would otherwise fold together
+    "split_more": (0.78, 0.34),   # the last rung "auto" climbs
 }
-_DIARIZATION_SENSITIVITY_DEFAULT = "normal"
+# "auto" is not a tuning -- it is the LADDER, which applies the rungs above
+# one at a time and keeps the count that holds across two of them. It is the
+# default because the question people actually have is "how many people are
+# in this", and a single pass can only report what its own threshold
+# produced. Asking the user for a number they do not have was the mistake.
+_DIARIZATION_SENSITIVITY_DEFAULT = "auto"
 
 
 def _normalize_sensitivity(value) -> str:
     name = str(value or "").strip().lower()
-    aliases = {"": "normal", "auto": "normal", "default": "normal",
+    aliases = {"": "auto", "default": "auto", "detect": "auto",
                "more": "split", "high": "split", "fine": "split",
                "less": "merge", "low": "merge", "coarse": "merge"}
     name = aliases.get(name, name)
-    return name if name in _DIARIZATION_SENSITIVITY else _DIARIZATION_SENSITIVITY_DEFAULT
+    if name == "auto" or name in _DIARIZATION_SENSITIVITY:
+        return name
+    return _DIARIZATION_SENSITIVITY_DEFAULT
 
 
 def _pipeline_clustering_params(pipeline) -> dict | None:
@@ -2186,7 +2194,9 @@ def _apply_diarization_sensitivity(pipeline, sensitivity: str) -> dict | None:
     knob -- this repo has lost that bet three times on moving dependencies.
     """
     name = _normalize_sensitivity(sensitivity)
-    if name == _DIARIZATION_SENSITIVITY_DEFAULT:
+    # "auto" is the ladder, not a setting: it calls back in here with each
+    # rung by name. "normal" is the model's own tuning, so neither retunes.
+    if name in ("auto", "normal"):
         return None
     params = _pipeline_clustering_params(pipeline)
     if params is None:
@@ -2263,6 +2273,62 @@ def _segments_from_diar_annotation(ann) -> list[dict]:
     return segments
 
 
+# The ladder "auto" climbs. Order matters: it stops as soon as two rungs
+# agree, so the cheap, conservative one goes first.
+_DIARIZATION_AUTO_LADDER = ("normal", "split", "split_more")
+
+
+def _run_diarization_pass(pipeline, waveform, sr, audio_path: Path,
+                          call_kwargs: dict, sensitivity: str) -> list[dict]:
+    """One pipeline call at one sensitivity. The tuning never outlives it."""
+    restore = _apply_diarization_sensitivity(pipeline, sensitivity)
+    try:
+        if waveform is not None:
+            diar = pipeline({"waveform": waveform, "sample_rate": sr},
+                            **call_kwargs)
+        else:
+            diar = pipeline(str(audio_path), **call_kwargs)
+    finally:
+        # The pipeline is a module-level cache shared by every Analyze, so a
+        # tuning left behind would quietly change the next run -- and in a
+        # ladder it would compound across rungs.
+        _restore_diarization_params(pipeline, restore)
+    return _segments_from_diar_annotation(_diarization_annotation(diar))
+
+
+def _speaker_count(segments: list) -> int:
+    return len({s.get("speaker") for s in (segments or []) if s.get("speaker")})
+
+
+def _choose_auto_result(passes: list) -> tuple[int, str]:
+    """Pick the count to trust from the ladder's results.
+
+    Returns (index of the winning pass, "stable" | "uncertain").
+
+    The rule, and why: a count that survives a change of sensitivity is
+    evidence; a count from a single run is a guess. So two rungs agreeing
+    IS the answer. If all of them disagree the count is simply climbing
+    with every nudge, which is over-splitting rather than discovery -- the
+    middle is the conservative pick and it is reported as uncertain rather
+    than dressed up.
+    """
+    counts = [p["speaker_count"] for p in passes]
+    if len(counts) == 1:
+        return 0, "single"
+    for i in range(1, len(counts)):
+        if counts[i] == counts[i - 1]:
+            # The EARLIER of the two agreeing rungs. Both found the same
+            # number of people, so the count is not in question -- but the
+            # gentler tuning carved that audio less aggressively, and its
+            # segments are the ones worth keeping.
+            return i - 1, "stable"
+    # Non-adjacent agreement (e.g. 3, 4, 3) still counts as holding.
+    for i, c in enumerate(counts):
+        if counts.count(c) > 1:
+            return i, "stable"
+    return len(counts) // 2, "uncertain"
+
+
 def diarize_audio(
     video_path: Path,
     *,
@@ -2270,6 +2336,8 @@ def diarize_audio(
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     sensitivity: str | None = None,
+    report: dict | None = None,
+    on_pass=None,
 ) -> list[dict]:
     """Run pyannote speaker diarization and return a list of segments:
     [{start, end, speaker}]  where speaker is "SPEAKER_00", "SPEAKER_01", ...
@@ -2277,20 +2345,24 @@ def diarize_audio(
     Sorted by start. EVERY track pyannote returns is kept, overlaps
     included -- ``_segments_from_diar_annotation`` iterates them all, and
     ``find_overlap_regions`` then derives the two-at-once windows from the
-    same list. (This used to claim overlapped regions were skipped. They
-    are not, and a comment that lies about where speakers go is expensive
-    when a speaker goes missing.)
+    same list.
 
-    *num_speakers* forces an exact count; *min/max_speakers* only permit a
+    *num_speakers* forces an exact count. *min/max_speakers* only permit a
     RANGE, inside which the clustering still picks its own number.
-    *sensitivity* moves that choice -- see _DIARIZATION_SENSITIVITY.
 
-    Speeds vs the old path:
-      - cached pipeline (no per-run HF download / weight load)
-      - CUDA/MPS when available (DIARIZATION_DEVICE=auto)
-      - multi-thread torch on Linux
-      - in-memory waveform when possible
-      - optional num_speakers hint shrinks clustering work
+    *sensitivity* "auto" (the default) WORKS THE COUNT OUT: it diarizes at
+    a normal setting and then at a more sensitive one, and trusts the count
+    that holds across both. One pass can only ever report what its own
+    threshold produced -- it cannot tell you whether 2 is the truth or an
+    artefact of where that threshold sits. Two can.
+
+    The audio is extracted and loaded ONCE and the waveform reused, so the
+    ladder costs extra inference and nothing else. It stops as soon as two
+    rungs agree, which is the common case.
+
+    *report*, if given, is filled with what each pass found -- including a
+    per-speaker breakdown, which is the half that makes the number
+    believable. *on_pass(i, total, sensitivity)* reports progress.
     """
     import torch
 
@@ -2309,7 +2381,6 @@ def diarize_audio(
                 "Check that the video has an audio track."
             )
         pipeline = _get_diarization_pipeline()
-        restore = _apply_diarization_sensitivity(pipeline, sensitivity)
         call_kwargs: dict = {}
         if num_speakers is not None and int(num_speakers) > 0:
             call_kwargs["num_speakers"] = int(num_speakers)
@@ -2318,29 +2389,71 @@ def diarize_audio(
         if max_speakers is not None and int(max_speakers) > 0:
             call_kwargs["max_speakers"] = int(max_speakers)
 
-        t0 = time.time()
-        try:
-            waveform, sr = _load_wav_waveform(audio_path)
-            if waveform is not None:
-                diar = pipeline(
-                    {"waveform": waveform, "sample_rate": sr},
-                    **call_kwargs,
-                )
-            else:
-                diar = pipeline(str(audio_path), **call_kwargs)
-        finally:
-            # The pipeline is a module-level cache shared by every Analyze,
-            # so a tuning left behind would quietly change the next run.
-            _restore_diarization_params(pipeline, restore)
-        elapsed = time.time() - t0
+        name = _normalize_sensitivity(sensitivity)
+        # An exact count means the user has told it the answer. Deriving one
+        # anyway would be slower and would ignore what they said.
+        if name == "auto" and call_kwargs.get("num_speakers"):
+            name = "normal"
+        ladder = _DIARIZATION_AUTO_LADDER if name == "auto" else (name,)
+
+        waveform, sr = _load_wav_waveform(audio_path)
         device = _diarization_device_resolved or "unknown"
-        print(
-            f"[diarize] inference {elapsed:.1f}s device={device} "
-            f"model={DIARIZATION_MODEL}",
-            flush=True,
-        )
-        ann = _diarization_annotation(diar)
-        return _segments_from_diar_annotation(ann)
+        passes: list[dict] = []
+        lost: list[str] = []
+        for i, level in enumerate(ladder):
+            if on_pass:
+                try:
+                    on_pass(i, len(ladder), level)
+                except Exception:            # noqa: BLE001
+                    pass
+            t0 = time.time()
+            try:
+                segs = _run_diarization_pass(
+                    pipeline, waveform, sr, audio_path, call_kwargs, level)
+            except Exception as e:           # noqa: BLE001
+                # A second opinion that crashes must not cost the first one.
+                # Failing the whole Analyze because a LATER rung fell over
+                # would be the wrong trade; the earlier result is real.
+                if not passes:
+                    raise
+                print(f"[diarize] pass '{level}' failed ({e}); keeping "
+                      f"{len(passes)} earlier pass(es)", flush=True)
+                lost.append(level)
+                break
+            elapsed = time.time() - t0
+            n = _speaker_count(segs)
+            print(f"[diarize] pass {i + 1}/{len(ladder)} '{level}': "
+                  f"{n} speaker(s) in {elapsed:.1f}s device={device} "
+                  f"model={DIARIZATION_MODEL}", flush=True)
+            passes.append({
+                "sensitivity": level,
+                "speaker_count": n,
+                "seconds": round(elapsed, 1),
+                "breakdown": _speaker_breakdown(segs),
+                "_segments": segs,
+            })
+            if len(ladder) > 1 and len(passes) >= 2 and \
+                    passes[-1]["speaker_count"] == passes[-2]["speaker_count"]:
+                # Two rungs agree. A third could only cost time.
+                break
+
+        pick, confidence = _choose_auto_result(passes)
+        chosen = passes[pick]
+        if isinstance(report, dict):
+            report.update({
+                "mode": "auto" if len(ladder) > 1 else "fixed",
+                "confidence": confidence,
+                "chosen": {"sensitivity": chosen["sensitivity"],
+                           "speaker_count": chosen["speaker_count"]},
+                "passes": [{k: v for k, v in p.items() if k != "_segments"}
+                           for p in passes],
+                "lost_passes": lost,
+            })
+        if len(ladder) > 1:
+            print(f"[diarize] auto: {chosen['speaker_count']} speaker(s) from "
+                  f"'{chosen['sensitivity']}' ({confidence}) after "
+                  f"{len(passes)} pass(es)", flush=True)
+        return chosen["_segments"]
     finally:
         _safe_unlink(audio_path)
 
@@ -2530,6 +2643,19 @@ def analyze_reframe(
     hb_thread = threading.Thread(target=_heartbeat, name="reframe-hb", daemon=True)
     hb_thread.start()
 
+    # What the detection found, per pass. Filled by diarize_audio and stored
+    # in the cached stats, which /reframe-status already returns -- so the UI
+    # can show the evidence beside the count without a new endpoint.
+    detection: dict = {}
+
+    def _diar_pass_cb(i, total, level):
+        # "auto" listens more than once. The heartbeat alone would make a
+        # second pass look like the first one hanging.
+        if total > 1:
+            _progress(min(52, 18 + int(30 * i / total)),
+                      f"working out how many people are speaking "
+                      f"(pass {i + 1} of up to {total})")
+
     def _run_diar():
         return diarize_audio(
             video_path,
@@ -2537,6 +2663,8 @@ def analyze_reframe(
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
+            report=detection,
+            on_pass=_diar_pass_cb,
         )
 
     def _run_faces():
@@ -2615,6 +2743,9 @@ def analyze_reframe(
             "overlap_seconds": round(sum(o["end"] - o["start"] for o in overlaps), 2),
             "diarization_device": _diarization_device_resolved,
             "speaker_breakdown": _speaker_breakdown(diar),
+            # What each detection pass found. /reframe-status already
+            # returns stats, so the UI gets the evidence for free.
+            "speaker_detection": detection,
             "face_sample_fps": fps,
             "faces_skipped": faces_skipped,
             "faces_status": faces_status,
@@ -15525,9 +15656,19 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
         layout = _tl_concat_main_audio(tl, wav, on_progress=_joined)
         _say(60, f"diarizing {layout['analysis_total']:.0f}s of audio — "
                  f"this can take a few minutes on a long edit")
+
+        def _pass(i, total, level):
+            # "auto" listens more than once; say so, or the bar looks stuck.
+            if total > 1:
+                _say(60 + int(28 * i / total),
+                     f"listening again to work out how many people there are "
+                     f"(pass {i + 1} of up to {total})")
+
+        detection: dict = {}
         segments = diarize_audio(
             wav, num_speakers=num_speakers, sensitivity=sensitivity,
-            min_speakers=min_speakers, max_speakers=max_speakers)
+            min_speakers=min_speakers, max_speakers=max_speakers,
+            report=detection, on_pass=_pass)
     finally:
         _safe_unlink(wav)
 
@@ -15557,6 +15698,9 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
         # runs with no stated cause is how this became confusing in the
         # first place.
         "sensitivity": _normalize_sensitivity(sensitivity),
+        # What each pass found, so the number can be judged rather than
+        # taken on faith: a third person at 20% is visible here.
+        "speaker_detection": detection,
         "num_speakers": num_speakers,
         "max_speakers": max_speakers,
         "speaker_colors": _fill_speaker_colors(existing, speakers),
@@ -16815,7 +16959,8 @@ def timeline_speakers_status(job_id: str):
             "created_at": rec.get("created_at"),
             "speaker_colors": rec.get("speaker_colors") or {},
             "labels": rec.get("labels") or {},
-            "sensitivity": rec.get("sensitivity") or "normal",
+            "sensitivity": rec.get("sensitivity") or "auto",
+            "speaker_detection": rec.get("speaker_detection") or {},
         })
     return jsonify(out)
 

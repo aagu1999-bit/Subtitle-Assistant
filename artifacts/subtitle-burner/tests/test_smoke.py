@@ -5067,10 +5067,14 @@ def test_a_tuning_does_not_leak_into_the_next_analysis(app_mod):
     assert pipe.parameters() == before, "the next Analyze inherits the tuning"
 
 
-def test_an_unknown_sensitivity_falls_back_to_normal(app_mod):
-    for bad in (None, "", "banana", 7, "AUTO"):
-        assert app_mod._normalize_sensitivity(bad) == "normal"
+def test_an_unknown_sensitivity_falls_back_to_the_default(app_mod):
+    """And the default is "auto" -- work the count out -- because asking the
+    user for a number they do not have was the original mistake."""
+    assert app_mod._DIARIZATION_SENSITIVITY_DEFAULT == "auto"
+    for bad in (None, "", "banana", 7):
+        assert app_mod._normalize_sensitivity(bad) == "auto"
     # The words the UI sends, and a few obvious synonyms.
+    assert app_mod._normalize_sensitivity("AUTO") == "auto"
     assert app_mod._normalize_sensitivity("split") == "split"
     assert app_mod._normalize_sensitivity("MERGE") == "merge"
     assert app_mod._normalize_sensitivity("more") == "split"
@@ -5167,7 +5171,9 @@ def test_the_controls_exist_and_one_function_reads_them():
     about what "Up to 6" or "Split similar voices" means."""
     html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
     assert 'id="analyzeSensitivity"' in html
-    assert ">Split similar voices<" in html and ">Merge similar voices<" in html
+    assert "split similar voices" in html and "merge similar voices" in html
+    assert 'value="auto" selected' in html, \
+        "the default must be the one that works the count out"
     assert 'value="exact:3"' in html, "no way to force an exact count"
 
     js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
@@ -5206,4 +5212,252 @@ console.log(JSON.stringify(analyzeSpeakerOptions()));
     assert exact == {"num_speakers": 3, "sensitivity": "split"}, exact
     # A ceiling must NOT send num_speakers, or every run forces a number the
     # user was trying to discover.
-    assert ceiling == {"max_speakers": 6, "min_speakers": 1}, ceiling
+    assert "num_speakers" not in ceiling, ceiling
+    assert ceiling["max_speakers"] == 6 and ceiling["min_speakers"] == 1, ceiling
+    # The setting is always sent now, rather than relying on two defaults
+    # agreeing -- they disagreed once already.
+    assert ceiling["sensitivity"] == "normal", ceiling
+
+
+# ---------------------------------------------------------------------------
+# Working the speaker count out, instead of asking for it.
+#
+# "I never know the exact count — can it not figure it out itself?" Fair:
+# "Exactly N" is useless while N is the question, and "Up to 6" is a ceiling
+# the clustering ignores.
+#
+# One pass can only report what its own threshold produced -- it cannot say
+# whether 2 is the truth or an artefact of where that threshold sits. So
+# "auto" climbs a ladder of sensitivities and keeps the count that HOLDS
+# across two of them. A count that survives a change of setting is evidence.
+#
+# pyannote is not installed here, so what is tested is the ladder: how many
+# passes run, which result is chosen, and that a later pass cannot cost an
+# earlier one. Whether the sensitive pass really finds the third speaker
+# needs real voices.
+# ---------------------------------------------------------------------------
+
+class _LadderStub:
+    """Stands in for the whole diarization stack.
+
+    Records every pipeline call and returns a scripted speaker count per
+    sensitivity, so the ladder's decisions are observable.
+    """
+
+    def __init__(self, counts, fail_on=()):
+        self.counts = counts            # {sensitivity: n_speakers}
+        self.fail_on = set(fail_on)
+        self.calls = []                 # sensitivities, in order
+        self.extractions = 0
+
+    def install(self, app_mod, monkeypatch):
+        stub = self
+
+        monkeypatch.setattr(app_mod, "_get_diarization_pipeline",
+                            lambda: object())
+        monkeypatch.setattr(app_mod, "_diarization_torch_threads", lambda: 1)
+        monkeypatch.setattr(app_mod, "_load_wav_waveform",
+                            lambda p: (None, 16000))
+        monkeypatch.setattr(app_mod, "_safe_unlink", lambda p: None)
+        monkeypatch.setitem(sys.modules, "torch",
+                            type(sys)("torch"))
+        sys.modules["torch"].set_num_threads = lambda n: None
+
+        def fake_extract(src, dest):
+            stub.extractions += 1
+            dest.write_bytes(b"RIFF" + b"\x00" * 64)
+
+        monkeypatch.setattr(app_mod, "_extract_audio_for_diarization",
+                            fake_extract)
+
+        def fake_pass(pipeline, waveform, sr, audio_path, call_kwargs, level):
+            stub.calls.append(level)
+            if level in stub.fail_on:
+                raise RuntimeError(f"pass {level} fell over")
+            n = stub.counts[level]
+            # One segment per speaker, each a second long and labelled so the
+            # chosen pass is identifiable from what comes back.
+            return [{"start": float(i), "end": float(i) + 1.0,
+                     "speaker": f"SPEAKER_{i:02d}", "_from": level}
+                    for i in range(n)]
+
+        monkeypatch.setattr(app_mod, "_run_diarization_pass", fake_pass)
+        return stub
+
+
+def _run_auto(app_mod, monkeypatch, counts, fail_on=(), **kw):
+    stub = _LadderStub(counts, fail_on).install(app_mod, monkeypatch)
+    report = {}
+    segs = app_mod.diarize_audio(app_mod.UPLOAD_DIR / "ladder_probe.mp4",
+                                 report=report, **kw)
+    return stub, segs, report
+
+
+def test_two_agreeing_passes_stop_at_two(app_mod, monkeypatch):
+    """A third pass could only cost time. On a long edit that is minutes."""
+    stub, segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 3, "split": 3, "split_more": 5})
+    assert stub.calls == ["normal", "split"], stub.calls
+    assert rep["chosen"]["speaker_count"] == 3
+    assert rep["confidence"] == "stable"
+    assert len(segs) == 3
+
+
+def test_a_disagreement_runs_a_third_and_takes_what_repeats(app_mod,
+                                                            monkeypatch):
+    """The reported case: normal finds 2, sensitive finds 3. If the third
+    pass also says 3, then 3 is the count that holds."""
+    stub, segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 2, "split": 3, "split_more": 3})
+    assert stub.calls == ["normal", "split", "split_more"]
+    assert rep["chosen"]["speaker_count"] == 3
+    assert rep["confidence"] == "stable"
+    # And the segments are the chosen pass's own, not another run's.
+    assert {s["_from"] for s in segs} == {"split"}, segs
+
+
+def test_a_count_that_keeps_climbing_is_flagged_rather_than_trusted(app_mod,
+                                                                    monkeypatch):
+    """2, then 3, then 4 is not discovery -- it is over-splitting. Take the
+    middle and SAY it is a guess, rather than reporting 4 with confidence."""
+    stub, segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 2, "split": 3, "split_more": 4})
+    assert stub.calls == ["normal", "split", "split_more"]
+    assert rep["confidence"] == "uncertain"
+    assert rep["chosen"]["speaker_count"] == 3, rep["chosen"]
+    assert {s["_from"] for s in segs} == {"split"}
+
+
+def test_an_exact_count_skips_the_ladder_entirely(app_mod, monkeypatch):
+    """"Exactly N" means the user has told it the answer. Deriving one
+    anyway would be slower and would ignore what they said."""
+    stub, segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 4, "split": 9, "split_more": 9},
+        num_speakers=4)
+    assert stub.calls == ["normal"], stub.calls
+    assert rep["mode"] == "fixed"
+    assert len(segs) == 4
+
+
+def test_an_explicit_sensitivity_still_runs_exactly_one_pass(app_mod,
+                                                             monkeypatch):
+    """The single-pass settings shipped in #38 must be untouched -- they are
+    the fast path, and tripling their cost would be a silent regression."""
+    for level in ("normal", "split", "merge"):
+        stub, segs, rep = _run_auto(
+            app_mod, monkeypatch,
+            {"normal": 2, "split": 3, "merge": 1, "split_more": 4},
+            sensitivity=level)
+        assert stub.calls == [level], (level, stub.calls)
+        assert rep["mode"] == "fixed"
+
+
+def test_the_audio_is_extracted_once_for_the_whole_ladder(app_mod, monkeypatch):
+    """Re-extracting per pass would triple the ffmpeg work invisibly -- the
+    kind of cost nobody notices because the result is still right."""
+    stub, _segs, _rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 2, "split": 3, "split_more": 4})
+    assert len(stub.calls) == 3, "expected the full ladder for this fixture"
+    assert stub.extractions == 1, \
+        f"extracted the audio {stub.extractions} times"
+
+
+def test_a_later_pass_that_crashes_does_not_cost_the_earlier_one(app_mod,
+                                                                 monkeypatch):
+    """Failing the whole Analyze because the SECOND OPINION fell over would
+    be the wrong trade. The first pass is a real diarization."""
+    stub, segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 2, "split": 3, "split_more": 4},
+        fail_on=("split",))
+    assert stub.calls == ["normal", "split"]
+    assert len(segs) == 2 and {s["_from"] for s in segs} == {"normal"}
+    assert rep["lost_passes"] == ["split"]
+    assert rep["chosen"]["speaker_count"] == 2
+
+    # But the FIRST pass failing has nothing to fall back on, so it raises
+    # rather than silently reporting zero speakers.
+    with pytest.raises(RuntimeError):
+        _run_auto(app_mod, monkeypatch,
+                  {"normal": 2, "split": 3, "split_more": 4},
+                  fail_on=("normal",))
+
+
+def test_the_report_carries_a_breakdown_per_pass(app_mod, monkeypatch):
+    """The number alone cannot be judged: 2 and 3 look identical. Seeing a
+    third person at 20% of the speech is what makes the answer believable."""
+    _stub, _segs, rep = _run_auto(
+        app_mod, monkeypatch, {"normal": 2, "split": 3, "split_more": 3})
+    assert [p["sensitivity"] for p in rep["passes"]] == \
+        ["normal", "split", "split_more"]
+    for p in rep["passes"]:
+        assert len(p["breakdown"]) == p["speaker_count"]
+        assert all("speech_pct" in row for row in p["breakdown"])
+        assert "seconds" in p
+    # The raw segments are NOT shipped in the report -- they are large and
+    # the caller already has the chosen ones.
+    assert all("_segments" not in p for p in rep["passes"])
+
+
+def test_the_default_really_is_auto_on_both_sides(app_mod):
+    """A default that disagrees between the server and the page is exactly
+    how "Up to 6" came to mean something nobody intended."""
+    assert app_mod._DIARIZATION_SENSITIVITY_DEFAULT == "auto"
+    stub_counts = {"normal": 2, "split": 2}
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    sel = html[html.index('id="analyzeSensitivity"'):]
+    sel = sel[:sel.index("</select>")]
+    assert 'value="auto" selected' in sel, sel[:400]
+    # And "auto" must be a ladder, not a tuning -- the rungs tune themselves.
+    assert app_mod._apply_diarization_sensitivity(object(), "auto") is None
+    assert set(app_mod._DIARIZATION_AUTO_LADDER) <= \
+        set(app_mod._DIARIZATION_SENSITIVITY), stub_counts
+
+
+def test_the_ladder_climbs_towards_splitting(app_mod):
+    """Ordered on purpose: the cheap conservative rung first, so the common
+    case stops after two. A ladder that started at the most aggressive
+    setting would answer differently AND cost more."""
+    ladder = app_mod._DIARIZATION_AUTO_LADDER
+    thresholds = [app_mod._DIARIZATION_SENSITIVITY[n][0] for n in ladder]
+    sizes = [app_mod._DIARIZATION_SENSITIVITY[n][1] for n in ladder]
+    assert thresholds == sorted(thresholds, reverse=True), thresholds
+    assert sizes == sorted(sizes, reverse=True), sizes
+    assert ladder[0] == "normal", "the first rung must be the model's own tuning"
+
+
+def test_the_evidence_line_says_what_the_other_pass_found():
+    """Shown to the user, so it is checked in node rather than assumed."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    block = js[js.index("function describeSpeakerDetection(det)"):
+               js.index("window.describeSpeakerDetection")]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    harness = """
+const disagreed = {mode: "auto", confidence: "stable",
+  chosen: {sensitivity: "split", speaker_count: 3},
+  passes: [{sensitivity: "normal", speaker_count: 2},
+           {sensitivity: "split", speaker_count: 3}]};
+console.log(describeSpeakerDetection(disagreed));
+const climbing = {mode: "auto", confidence: "uncertain",
+  chosen: {sensitivity: "split", speaker_count: 3},
+  passes: [{sensitivity: "normal", speaker_count: 2},
+           {sensitivity: "split", speaker_count: 3},
+           {sensitivity: "split_more", speaker_count: 4}]};
+console.log(describeSpeakerDetection(climbing));
+const agreed = {mode: "auto", confidence: "stable",
+  chosen: {sensitivity: "split", speaker_count: 3},
+  passes: [{sensitivity: "normal", speaker_count: 3},
+           {sensitivity: "split", speaker_count: 3}]};
+console.log(describeSpeakerDetection(agreed));
+console.log("[" + describeSpeakerDetection({mode: "fixed"}) + "]");
+"""
+    out = subprocess.run([node, "-e", block + harness],
+                         capture_output=True, text=True,
+                         check=True).stdout.splitlines()
+    assert "normal found 2" in out[0], out[0]
+    assert "best guess" in out[1], out[1]
+    assert "held steady" in out[2], out[2]
+    # A single fixed pass has no second opinion to report, so it says nothing
+    # rather than inventing reassurance.
+    assert out[3] == "[]", out[3]
