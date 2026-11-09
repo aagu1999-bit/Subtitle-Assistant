@@ -2,6 +2,7 @@
 Subtitle Burner - A Flask web app that adds word-by-word highlighted
 captions to videos using Whisper for transcription and FFmpeg for rendering.
 """
+import errno
 import os
 import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -453,19 +454,54 @@ FONT_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 
 # ---- FFmpeg binary selection ----
-# Prefer imageio-ffmpeg's pre-built binary which includes libass (subtitles filter).
-# Fall back to system ffmpeg if imageio-ffmpeg is not installed.
+# Prefer imageio-ffmpeg's pre-built binary, which includes libass (the
+# subtitles filter every burned caption goes through). Fall back to the
+# system ffmpeg, which on Replit is replit.nix's `pkgs.ffmpeg-full` and has
+# libass too, so the fallback is a real ffmpeg rather than a degraded one.
+#
+# The path is CHECKED, not trusted. imageio_ffmpeg.get_ffmpeg_exe() returns
+# where the binary should be, which is not the same as where it is: an
+# environment rebuild can leave the package importable with its binary gone,
+# and then every single render dies on spawn instead of quietly falling back.
+# That is not hypothetical -- it took the deployed app down, because
+# `uv sync` prunes to the lockfile and imageio-ffmpeg was declared nowhere.
+def _ffmpeg_usable(path: str | None) -> bool:
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+
+
 def _find_ffmpeg() -> str:
     try:
         import imageio_ffmpeg
         ff = imageio_ffmpeg.get_ffmpeg_exe()
-        if ff:
+        if _ffmpeg_usable(ff):
             return ff
     except Exception:
         pass
-    return "ffmpeg"
+    # Resolve the fallback to an absolute path when we can, so the log says
+    # which ffmpeg actually ran rather than the word "ffmpeg".
+    return shutil.which("ffmpeg") or "ffmpeg"
 
 FFMPEG = _find_ffmpeg()
+
+
+def _refresh_ffmpeg() -> bool:
+    """Re-resolve the binary. True if it changed.
+
+    Resolution happens once at import, into a constant read by ~100 call
+    sites. A long-lived gunicorn worker therefore keeps spawning whatever
+    path it memorised at startup -- so reinstalling dependencies without a
+    restart, an ordinary thing to do, left every render failing against a
+    file that no longer existed. Re-resolving on a spawn failure makes the
+    server heal itself instead of needing to be restarted by someone who
+    first has to read a log to know why.
+    """
+    global FFMPEG
+    found = _find_ffmpeg()
+    if found == FFMPEG:
+        return False
+    print(f"[ffmpeg] binary moved: {FFMPEG} -> {found}", flush=True)
+    FFMPEG = found
+    return True
 
 # Default 2 GB — a "500 MB" phone export is often 480–560 MB, and multipart
 # framing pushes Content-Length over a hard 500 MB cap. Override with MAX_UPLOAD_MB.
@@ -4467,17 +4503,34 @@ def _run_ffmpeg_encode(
         run_cmd += ["-progress", "pipe:1"]
     run_cmd += rest
 
-    try:
-        proc = subprocess.Popen(
-            run_cmd,
+    def _spawn(argv: list):
+        return subprocess.Popen(
+            argv,
             stdout=subprocess.PIPE if track_progress else subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
+
+    try:
+        proc = _spawn(run_cmd)
     except OSError as e:
-        ffmpeg_logger.error(f"{what} spawn failed: {e}")
-        return False
+        # The binary we resolved at import is not there any more. Re-resolve
+        # and try once; every render after this one picks up the new path
+        # from the global, so the server recovers on its own.
+        if e.errno == errno.ENOENT and _refresh_ffmpeg():
+            ffmpeg_logger.warning(
+                f"{what}: ffmpeg vanished at {run_cmd[0]} -- retrying with {FFMPEG}"
+            )
+            run_cmd = [FFMPEG] + run_cmd[1:]
+            try:
+                proc = _spawn(run_cmd)
+            except OSError as e2:
+                ffmpeg_logger.error(f"{what} spawn failed after refresh: {e2}")
+                return False
+        else:
+            ffmpeg_logger.error(f"{what} spawn failed: {e}")
+            return False
 
     last_pct = int(progress_lo) if progress_lo is not None else 0
     last_db = 0.0

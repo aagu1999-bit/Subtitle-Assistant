@@ -3217,3 +3217,129 @@ def test_a_speakers_split_survives_the_whole_render_chain(app_mod, tmp_path):
         app_mod._SPEAKER_FACE_CACHE.pop(sid, None)
         app_mod.jobs.pop(sid, None)
         app_mod.jobs.pop(rid, None)
+
+
+# ---------------------------------------------------------------------------
+# The ffmpeg binary must not be able to vanish.
+#
+# What took the deployed app down: `uv sync` prunes the environment to the
+# lockfile, imageio-ffmpeg was declared nowhere, and its bundled binary went
+# away under a RUNNING gunicorn worker. Two separate faults turned that into
+# every render failing:
+#
+#   1. _find_ffmpeg() returned imageio's path without checking it exists, so
+#      even a fresh start would have used a dead path rather than falling
+#      back.
+#   2. Resolution happens once, at import, into a constant read by ~100 call
+#      sites -- so the worker kept spawning the path it memorised at startup
+#      and only a restart could fix it.
+#
+# The log read `Finalize main spawn failed: [Errno 2] No such file or
+# directory` over and over, which names the symptom and not the cause.
+# ---------------------------------------------------------------------------
+
+class _FakeImageio:
+    """Stands in for imageio_ffmpeg, which is not installed here.
+
+    Worth stating plainly: the test environment has no imageio_ffmpeg, so
+    every other test in this file runs on the SYSTEM ffmpeg while production
+    prefers a different binary. The binary the renders actually use has
+    never been exercised by this suite. These tests cover the choosing, not
+    the binary.
+    """
+
+    def __init__(self, path):
+        self._path = path
+
+    def get_ffmpeg_exe(self):
+        return self._path
+
+
+def test_a_missing_bundled_binary_falls_back_instead_of_being_used(app_mod, monkeypatch, tmp_path):
+    """The path is checked, not trusted.
+
+    get_ffmpeg_exe() reports where the binary SHOULD be. An environment
+    rebuild can leave the package importable with the binary gone, and
+    returning that path means every spawn dies.
+    """
+    ghost = tmp_path / "binaries" / "ffmpeg-linux-x86_64-v7.0.2"
+    assert not ghost.exists()
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", _FakeImageio(str(ghost)))
+
+    got = app_mod._find_ffmpeg()
+    assert got != str(ghost), "returned a path that does not exist"
+    assert got == (shutil.which("ffmpeg") or "ffmpeg")
+
+
+def test_a_present_bundled_binary_is_preferred(app_mod, monkeypatch, tmp_path):
+    """The preference still works when the binary is really there."""
+    real = tmp_path / "ffmpeg"
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", _FakeImageio(str(real)))
+    assert app_mod._find_ffmpeg() == str(real)
+
+
+def test_a_non_executable_binary_is_not_used(app_mod, monkeypatch, tmp_path):
+    """Present but not executable is just as unusable as absent."""
+    dud = tmp_path / "ffmpeg"
+    dud.write_text("not a binary")
+    dud.chmod(0o644)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", _FakeImageio(str(dud)))
+    assert app_mod._find_ffmpeg() != str(dud)
+
+
+def test_refresh_reports_whether_the_binary_moved(app_mod, monkeypatch):
+    """_refresh_ffmpeg returns True only on an actual change.
+
+    A retry that fires when nothing moved would just spawn the same dead
+    path twice and log twice as much.
+    """
+    real = app_mod.FFMPEG
+    try:
+        assert app_mod._refresh_ffmpeg() is False, "nothing changed, so no refresh"
+        monkeypatch.setattr(app_mod, "FFMPEG", "/nonexistent/ffmpeg")
+        assert app_mod._refresh_ffmpeg() is True
+        assert app_mod.FFMPEG == real
+    finally:
+        app_mod.FFMPEG = real
+
+
+@needs_ffmpeg
+def test_the_server_heals_itself_when_ffmpeg_moves(app_mod, tmp_path):
+    """The behavioural one: an encode survives the binary disappearing.
+
+    This is the actual outage, reproduced -- a worker holding a path that
+    no longer resolves. Before the fix the encode returns False and the
+    render fails; after it, the spawn is retried against a re-resolved
+    binary and the file is produced. Nobody has to read a log and restart.
+    """
+    real = app_mod.FFMPEG
+    ghost = str(tmp_path / "gone" / "ffmpeg")
+    out = tmp_path / "healed.png"
+    try:
+        app_mod.FFMPEG = ghost          # as if it were pruned under us
+        ok = app_mod._run_ffmpeg_encode(
+            [ghost, "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.1",
+             "-frames:v", "1", str(out)],
+            what="Self-heal probe",
+        )
+        assert ok is True, "encode did not recover from a moved binary"
+        assert out.exists() and out.stat().st_size > 100
+        assert app_mod.FFMPEG == real, "the global should now point at a real binary"
+    finally:
+        app_mod.FFMPEG = real
+
+
+@needs_ffmpeg
+def test_the_resolved_ffmpeg_can_burn_subtitles(app_mod):
+    """libass is the whole reason a particular binary is preferred.
+
+    An ffmpeg without the subtitles filter renders every caption as nothing,
+    silently. Nothing checked that the binary finally chosen has it.
+    """
+    assert app_mod._ffmpeg_usable(app_mod.FFMPEG) or app_mod.FFMPEG == "ffmpeg"
+    out = subprocess.run([app_mod.FFMPEG, "-hide_banner", "-filters"],
+                         capture_output=True, text=True, timeout=60)
+    assert re.search(r"^\s*\S+\s+subtitles\s", out.stdout, re.M), \
+        "the resolved ffmpeg has no subtitles filter -- captions would burn as nothing"
