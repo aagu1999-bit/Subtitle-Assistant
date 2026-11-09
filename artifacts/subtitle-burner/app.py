@@ -5043,6 +5043,14 @@ _EFFECT_LIMITS = {
     "split_screen": (1.0, 15.0),  # both speakers framed together
 }
 
+# Everything the effects lane will carry. _normalize_timeline drops any clip
+# whose type is not in here, so a resolver that accepted a wider set would
+# hand the client a clip that vanishes on the next save -- the silent-sink
+# failure this codebase has hit twice. One definition, both readers.
+TL_EFFECT_TYPES = (
+    "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen",
+)
+
 
 def _build_effect_suggestion_prompt(transcript: str, total: float,
                                     max_effects: int,
@@ -15088,7 +15096,7 @@ def _normalize_timeline(timeline: dict) -> dict:
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
     # Effect-lane clips: type + start + out(duration). Coerce common shapes.
-    _fx_types = {"split_screen", "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color"}
+    _fx_types = set(TL_EFFECT_TYPES)
     cleaned_fx = []
     for fx in tracks["effects"]:
         if not isinstance(fx, dict):
@@ -17857,6 +17865,8 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}',
     '{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}',
     '{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}',
+    '{"op": "add_effect", "type": "split_screen", "start": 10.0, "duration": 5.0, "layout": "stack", "mode": "speakers"}',
+    '{"op": "add_effect", "type": "punch_zoom", "start": 4.2, "duration": 1.2, "intensity": "med"}',
     '{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}',
     '{"op": "set_punch_aim", "index": 0, "at": "speaker"}',
     '{"op": "delete_effect", "index": 0}',
@@ -18005,6 +18015,93 @@ def _resolve_add_text_message(op: dict) -> tuple[dict | None, str]:
     clip["fit"] = "contain"          # never crop someone's words
     return {"op": "add_text_message", "clip": clip,
             "count": len(clean)}, ""
+
+
+def _resolve_add_effect(op: dict) -> tuple[dict | None, str]:
+    """Make the effects lane reachable by prompt.
+
+    The gap this closes: of the ops the co-editor had, three TOUCHED an
+    effect -- clear_effects, delete_effect, set_effect_time -- and none
+    CREATED one. Asked for a split screen from 0:10 to 0:15 it reached for
+    the nearest thing it did have, apply_clip_style("split_stack"), which
+    styles whole Main clips and has no concept of time. Hence the report:
+    "ask for a split over a window, get it over the entire clip."
+
+    The lane itself was never at fault -- _tl_effect_cut_points splits each
+    keep at effect boundaries and scopes props per sub-segment. Nothing
+    could ask it to.
+
+    Durations are clamped to the same per-type bounds the AI placer uses, so
+    a 30-second punch zoom is not a thing the prompt can produce. A clamp
+    that changed what was asked for says so, because a silently retimed
+    effect looks like the bug above all over again.
+    """
+    ftype = str(op.get("type") or op.get("effect") or "").strip().lower()
+    aliases = {
+        "punch": "punch_zoom", "zoom": "punch_zoom", "punchzoom": "punch_zoom",
+        "split": "split_screen", "splitscreen": "split_screen",
+        "split_stack": "split_screen", "stack": "split_screen",
+        "kenburns": "ken_burns", "drift": "ken_burns",
+        "grade": "color", "color_grade": "color",
+        "zoom_1.5x": "zoom_1_5", "zoom_15": "zoom_1_5", "zoom_2": "zoom_2x",
+    }
+    ftype = aliases.get(ftype, ftype)
+    if ftype not in TL_EFFECT_TYPES:
+        return None, (f"{ftype or 'that'} is not an effect this lane carries "
+                      f"({', '.join(TL_EFFECT_TYPES)})")
+
+    try:
+        start = max(0.0, float(op.get("start", 0) or 0))
+    except (TypeError, ValueError):
+        return None, "the effect needs a start time in seconds"
+
+    raw_dur = op.get("duration", op.get("out"))
+    note = ""
+    if raw_dur is None:
+        dur = None          # the client's per-type default
+    else:
+        try:
+            dur = float(raw_dur)
+        except (TypeError, ValueError):
+            return None, "the effect's duration must be a number of seconds"
+        lo, hi = _EFFECT_LIMITS.get(ftype, (0.2, 120.0))
+        clamped = max(lo, min(hi, dur))
+        if abs(clamped - dur) > 0.01:
+            note = (f"a {ftype} runs {lo:g}-{hi:g}s, so {dur:g}s became "
+                    f"{clamped:g}s")
+        dur = clamped
+
+    out = {"op": "add_effect", "type": ftype, "start": round(start, 3)}
+    if dur is not None:
+        out["duration"] = round(dur, 3)
+
+    intensity = str(op.get("intensity") or "").strip().lower()
+    if intensity in ("low", "med", "medium", "high"):
+        out["intensity"] = "med" if intensity == "medium" else intensity
+    direction = str(op.get("direction") or "").strip().lower()
+    if direction in ("in", "out"):
+        out["direction"] = direction
+    preset = str(op.get("preset") or "").strip().lower()
+    if ftype == "color" and preset in ("none", "neutral", "warm", "cool",
+                                       "vivid", "bw"):
+        out["preset"] = preset
+
+    if ftype == "split_screen":
+        layout = str(op.get("layout") or "").strip().lower()
+        if layout in ("auto", "stack", "side", "side_by_side"):
+            out["layout"] = "side" if layout == "side_by_side" else layout
+        # mode:"speakers" is what makes a split frame two PEOPLE out of one
+        # clip rather than stack two different sources. Both fields have to
+        # survive: addEffectClip builds from a fixed field list and dropped
+        # them before this was threaded through.
+        mode = str(op.get("mode") or "").strip().lower()
+        if mode in ("speakers", "sources"):
+            out["mode"] = mode
+        spk = op.get("speakers")
+        if isinstance(spk, list) and spk:
+            out["speakers"] = [str(x) for x in spk[:2]]
+
+    return out, note
 
 
 def _resolve_set_background(op: dict) -> tuple[dict | None, str]:
@@ -18309,9 +18406,22 @@ Rules:
 - "split here" → split_at_playhead (uses current playhead).
 - "polish / polish cut / run polish" → run_polish. pacing: fast|informative|cinematic. broll_mode: pip|center. Optional keywords array. Not the same as ▶ Render.
 - The Effects lane holds timed camera moves, each with its own start and
-  duration. Use set_effect_time to move or stretch one, set_punch_aim to
-  change where a punch zoom pushes toward, and delete_effect to remove one.
-  Indexes there refer to effect_clips, not to shots.
+  duration. Use add_effect to CREATE one, set_effect_time to move or stretch
+  one, set_punch_aim to change where a punch zoom pushes toward, and
+  delete_effect to remove one. Indexes there refer to effect_clips, not to
+  shots.
+- ANY effect that should run over a stretch of the video is add_effect, with
+  a start and a duration in seconds. Types: punch_zoom, zoom_1_5, zoom_2x,
+  ken_burns, color, split_screen. "Split screen from 0:10 to 0:15" is
+  {{"op": "add_effect", "type": "split_screen", "start": 10, "duration": 5}}.
+  For a split that frames two PEOPLE out of one clip, add "mode": "speakers".
+- Two ops are NOT split screen and are a common mix-up:
+  * split_at_playhead CUTS one clip into two pieces at the playhead. It is
+    scissors. It makes no split screen and takes no times.
+  * apply_clip_style (including style "split_stack") restyles WHOLE Main
+    clips and has no concept of time, so it cannot do "from 0:10 to 0:15".
+  If the user names a time, a range, "for N seconds", "at the hook", or any
+  moment at all, the answer is add_effect.
 - set_punch_aim takes explicit x/y in 0..1 (0,0 is top-left) or at:"speaker",
   which aims at the detected face at that moment.
 - add_carousel places several photos that hand over in place, each sliding in.
@@ -18372,6 +18482,16 @@ Rules:
             continue
         if name == "set_punch_aim":
             op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name == "add_effect":
+            # Validates the type against the one list the effects lane
+            # accepts, so an op the client would silently drop never leaves
+            # here, and clamps the duration to the same bounds the AI
+            # placer uses.
+            op, note = _resolve_add_effect(op)
+            if note:
+                blocked.append(note)
             if op is None:
                 continue
         elif name == "make_image":

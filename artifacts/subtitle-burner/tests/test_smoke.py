@@ -1821,6 +1821,224 @@ def test_the_op_registry_is_the_only_list(app_mod):
     assert not missing, f"accepted by the server, ignored by the client: {missing}"
 
 
+# ---------------------------------------------------------------------------
+# "Split screen from 0:10 to 0:15" applied it to the whole clip.
+#
+# The effects lane was never at fault: _tl_effect_cut_points splits each keep
+# at effect boundaries and _tl_effects_overlapping scopes props per
+# sub-segment, and test_a_speakers_split_survives_the_whole_render_chain
+# proves a lane split stops at its own edge.
+#
+# The co-editor could not CREATE an effect. Of the ops it had, three touched
+# the lane -- clear_effects, delete_effect, set_effect_time -- and all three
+# act on an effect that already exists. Asked for a split over a window it
+# reached for the nearest thing it did have, apply_clip_style("split_stack"),
+# which restyles WHOLE Main clips and has no concept of time. Hence the
+# symptom. split_at_playhead made it worse: that is a CUT whose name reads
+# like split-screen, sitting in the same list.
+# ---------------------------------------------------------------------------
+
+def test_a_windowed_effect_can_be_asked_for_at_all(app_mod, temp_db, monkeypatch):
+    """The gap: 35 ops, and not one of them made an effect."""
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "add_effect", "type": "split_screen",
+                             "start": 10.0, "duration": 5.0,
+                             "layout": "stack", "mode": "speakers"}],
+                            "message": "ok"})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "split screen from 0:10 to 0:15",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert len(out["ops"]) == 1, out
+    op = out["ops"][0]
+    # The times are the whole point -- an op that arrived without them would
+    # land at the playhead and be indistinguishable from the bug.
+    assert op["op"] == "add_effect" and op["type"] == "split_screen"
+    assert op["start"] == 10.0 and op["duration"] == 5.0
+    assert op["layout"] == "stack" and op["mode"] == "speakers"
+
+
+def test_the_effect_creator_is_in_every_list_it_has_to_be_in(app_mod):
+    """Registry, prompt and client dispatcher, or it is accepted and ignored."""
+    assert "add_effect" in app_mod._co_editor_op_names()
+    shown = "\n".join(app_mod.CO_EDITOR_OP_EXAMPLES)
+    assert '"op": "add_effect"' in shown
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js[js.index("async function applyCoEditorOps"):][:26000]
+    assert 'name === "add_effect"' in body
+    assert "addEffectClip(" in body, "the branch must reach the real creator"
+
+
+def test_the_prompt_separates_cutting_from_split_screen(app_mod, temp_db,
+                                                        monkeypatch):
+    """The model's confusion IS the bug, so the prompt has to name it.
+
+    Two ops it used to reach for: split_at_playhead, whose name reads like
+    split-screen and is scissors, and apply_clip_style, which has no concept
+    of time. Both stay available for what they really do.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("p", p), {"ops": []})[1])
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "split screen for five seconds",
+        "timeline": _coeditor_timeline()})
+    p = seen["p"]
+    assert "split_at_playhead CUTS" in p, "nothing tells it that one is scissors"
+    assert "apply_clip_style" in p and "no concept of time" in p
+    assert "add_effect" in p
+
+
+def test_an_effect_the_lane_cannot_carry_is_refused_not_dropped(app_mod, temp_db,
+                                                                monkeypatch):
+    """_normalize_timeline drops an unknown effect type on the next save.
+
+    So an op that got past the server would place a clip that silently
+    vanishes -- the silent-sink failure this codebase has hit twice. Refuse
+    it here, and SAY so, because "applied 1 edit" followed by nothing is
+    indistinguishable from a bug.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "add_effect", "type": "barrel_roll",
+                             "start": 1.0, "duration": 1.0}], "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "barrel roll at one second",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == []
+    assert "barrel_roll" in out["message"], out["message"]
+
+    # And every type it DOES accept must survive a save, or the op is a lie.
+    for t in app_mod.TL_EFFECT_TYPES:
+        op, note = app_mod._resolve_add_effect({"type": t, "start": 1.0})
+        assert op is not None, f"{t} refused by the resolver: {note}"
+        tl = app_mod._normalize_timeline({"tracks": {"effects": [
+            {"id": "x", "type": t, "start": 1.0, "out": 2.0}]}})
+        assert tl["tracks"]["effects"], f"{t} accepted but dropped on save"
+
+
+def test_a_clamped_duration_says_it_was_clamped(app_mod):
+    """A silently retimed effect looks exactly like the bug being fixed."""
+    op, note = app_mod._resolve_add_effect(
+        {"type": "punch_zoom", "start": 2.0, "duration": 30.0})
+    lo, hi = app_mod._EFFECT_LIMITS["punch_zoom"]
+    assert op["duration"] == hi
+    assert "30" in note and f"{hi:g}s" in note, note
+
+    # Inside the bounds nothing is said and nothing is changed.
+    op, note = app_mod._resolve_add_effect(
+        {"type": "split_screen", "start": 10.0, "duration": 5.0})
+    assert op["duration"] == 5.0 and note == ""
+
+    # No duration at all leaves it to the client's per-type default rather
+    # than inventing one here, where the two would drift.
+    op, note = app_mod._resolve_add_effect({"type": "ken_burns", "start": 0})
+    assert "duration" not in op and note == ""
+
+
+def test_the_old_whole_clip_style_path_is_untouched(app_mod, temp_db, monkeypatch):
+    """apply_clip_style("split_stack") is still a real thing to want.
+
+    It was the wrong answer for a time range, not the wrong op. Breaking it
+    on the way past would trade one bug for another.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "apply_clip_style", "style": "split_stack"}],
+                            "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "make every shot a split stack",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert [o["op"] for o in out["ops"]] == ["apply_clip_style"]
+    assert out["ops"][0]["style"] == "split_stack"
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert 'name === "apply_clip_style"' in js
+
+
+def test_a_windowed_split_leaves_the_footage_either_side_alone(app_mod, tmp_path):
+    """"It applied to everything" is a pixel claim, so it is checked in pixels.
+
+    The existing chain test samples inside the window and after it. The
+    report was about a split covering the WHOLE clip, so the frame BEFORE
+    the window is the half that was missing -- and it is the half a
+    whole-clip style would fail.
+    """
+    for mod in ("cv2", "flask"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import uuid
+
+    sid, rid = uuid.uuid4().hex, uuid.uuid4().hex
+    made = []
+    try:
+        src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=red:s=640x720:d=3:r=30",
+             "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=3:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+             "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+             "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+            check=True)
+        made.append(src)
+        made.append(_write_two_box_analysis(app_mod, sid))
+
+        base = {"status": "done", "progress": 100, "output": None, "error": None,
+                "audio": None, "emoji_rules": {}, "created_at": 0.0,
+                "words": None, "style": {}}
+        app_mod.jobs[sid] = {**base, "filename": "halves.mp4"}
+        app_mod.jobs[rid] = {**base, "filename": "split.mp4"}
+
+        # The shape the op produces: one window in the middle of the shot,
+        # with real footage on both sides of it.
+        timeline = {
+            "canvas": "9x16", "fps": 30, "fit": "cover", "bg": "#000000",
+            "tracks": {
+                "main": [{"id": "m1", "source_job_id": sid,
+                          "in": 0.0, "out": 3.0, "burn_captions": False}],
+                "effects": [{"id": "f1", "type": "split_screen",
+                             "start": 1.0, "out": 1.0, "mode": "speakers",
+                             "speakers": ["SPEAKER_00", "SPEAKER_01"],
+                             "layout": "auto"}],
+                "overlay": [], "text": [], "music": [],
+            },
+        }
+        app_mod.render_timeline_job(rid, timeline)
+        assert app_mod.jobs[rid]["status"] == "done", app_mod.jobs[rid].get("error")
+        out = app_mod.OUTPUT_DIR / f"{rid}.mp4"
+        made.append(out)
+
+        def split_like(t):
+            png = tmp_path / f"w{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(t),
+                            "-i", str(out), "-frames:v", "1", str(png)],
+                           check=True)
+            im = cv2.imread(str(png))
+            if im is None:
+                return None
+            top, bottom = im[480, 540], im[1440, 540]
+            # Two panels means red above and blue below. One uncut shot
+            # means both samples land in the same half of the 9:16 crop.
+            return bool(top[2] > 150 and top[0] < 80
+                        and bottom[0] > 150 and bottom[2] < 80)
+
+        assert split_like(1.5) is True, "the split is missing inside its window"
+        assert split_like(0.4) is False, \
+            "the split reached BACK before its start -- the reported bug"
+        assert split_like(2.6) is False, "the split leaked past its end"
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod._SPEAKER_FACE_CACHE.pop(sid, None)
+        app_mod.jobs.pop(sid, None)
+        app_mod.jobs.pop(rid, None)
+
+
 def test_the_coeditor_can_hear_the_answer_to_its_own_question(app_mod, temp_db,
                                                               monkeypatch):
     """It is told three times to ask for clarification. Nothing used to carry

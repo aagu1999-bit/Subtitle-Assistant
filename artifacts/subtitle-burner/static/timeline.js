@@ -9368,6 +9368,39 @@
             notes.push(`shot ${i} range`);
             applied++;
           }
+        } else if (name === "add_effect") {
+          // The op the registry was missing. Of the three effect ops the
+          // co-editor had, all three acted on an effect that already
+          // existed -- so asked for a split screen over a time window it
+          // substituted apply_clip_style("split_stack"), which restyles
+          // whole Main clips. That is why a windowed split applied to
+          // everything.
+          //
+          // addEffectClip already anchors to the OUTPUT playhead, defaults
+          // the duration per type, and carries mode/speakers, so this is a
+          // thin call: the capability existed, nothing could ask for it.
+          const ftype = String(op.type || "");
+          if (!EFFECT_TYPES.some((t) => t.id === ftype)) {
+            notes.push(`no such effect: ${ftype || "(none)"}`);
+          } else {
+            const o = {};
+            if (op.start != null) o.start = Number(op.start);
+            if (op.duration != null) o.out = Number(op.duration);
+            else if (op.out != null) o.out = Number(op.out);
+            if (op.intensity) o.intensity = op.intensity;
+            if (op.direction) o.direction = op.direction;
+            if (op.layout) o.layout = op.layout;
+            if (op.preset) o.preset = op.preset;
+            if (op.mode) o.mode = op.mode;
+            if (Array.isArray(op.speakers)) o.speakers = op.speakers;
+            const ec = await addEffectClip(ftype, o);
+            if (ec) {
+              notes.push(`${ftype.replace(/_/g, " ")} at ${ec.start.toFixed(1)}s for ${ec.out.toFixed(1)}s`);
+              applied++;
+            } else {
+              notes.push(`could not place ${ftype}`);
+            }
+          }
         } else if (name === "set_effect_time") {
           // Moving or stretching a camera move on the Effects lane.
           const i = Number(op.index);
