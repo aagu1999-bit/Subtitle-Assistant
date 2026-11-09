@@ -31,6 +31,24 @@ dependencies = [
     # pruned it and every speaker feature went dormant in production. One
     # list is the fix; see the matching note in requirements.txt.
     "pyannote.audio>=3.1.0",
+    # Pinned to the last torch/torchaudio that pyannote 3.x can actually run
+    # on. torchaudio DEPRECATED `AudioMetaData` in 2.8 and REMOVED it in 2.9;
+    # pyannote.audio 3.x still references it, and pyannote declares torchaudio
+    # with no upper bound -- so an unconstrained resolve takes the newest
+    # (2.11.1 when this was written) and diarization dies at import with
+    # `AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'`.
+    #
+    # Same shape as the mediapipe pin above: a library dropped an API its
+    # dependent is written against, and nothing in the metadata records it.
+    # The two must also share a minor -- a torch/torchaudio mismatch is its
+    # own failure mode.
+    #
+    # The way OUT of this pin is pyannote.audio 4.x, which does not use the
+    # removed API. It is not taken here because 4.x requires torchcodec>=0.7.0
+    # (which would not resolve) and is a real API migration that wants testing
+    # against a real torch install, not a hopeful version bump.
+    "torch>=2.8.0,<2.9.0",
+    "torchaudio>=2.8.0,<2.9.0",
     # Polish: the source rough-cut that trims silence before any captions are
     # burned. /polish/ping probes for both and reports which engines exist,
     # so losing them degrades rather than crashes -- but the button stops

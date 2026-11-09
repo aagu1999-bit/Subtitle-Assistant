@@ -3467,3 +3467,68 @@ def test_the_lockfile_carries_the_polish_engines():
     """
     for pkg in ("auto-editor", "moviepy"):
         assert _locked_version(pkg) is not None, f"uv.lock has no {pkg} entry"
+
+
+# ---------------------------------------------------------------------------
+# pyannote's torch stack: the fourth variant of one disease.
+#
+# A library drops an API, the dependent is still written against it, and
+# nothing in the packaging metadata records the incompatibility. mediapipe
+# removed mp.solutions; torchaudio DEPRECATED AudioMetaData in 2.8 and
+# REMOVED it in 2.9, and pyannote.audio 3.x still calls it -- while
+# declaring torchaudio with NO upper bound, so an honest resolve takes the
+# newest and diarization dies at import:
+#
+#   AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'
+#
+# Only a lock test can catch this. The constraint lives in pyproject, the
+# damage happens in uv.lock, and the import failure happens on a server.
+# ---------------------------------------------------------------------------
+
+# Last torchaudio minor that still exports AudioMetaData.
+_TORCHAUDIO_API_REMOVED_IN = (2, 9)
+
+
+def _minor(version):
+    parts = [int(x) for x in re.findall(r"\d+", version)[:2]]
+    return tuple(parts + [0] * (2 - len(parts)))
+
+
+def test_the_lock_keeps_torchaudio_below_the_api_removal():
+    """pyannote 3.x cannot run on torchaudio 2.9+.
+
+    Fails against a lock that resolved torchaudio freely, which is what
+    took diarization down after the dependency was finally installed.
+    """
+    locked = _locked_version("torchaudio")
+    assert locked is not None, "uv.lock has no torchaudio entry"
+    assert _minor(locked) < _TORCHAUDIO_API_REMOVED_IN, (
+        f"uv.lock pins torchaudio {locked}, at or past the "
+        f"{_TORCHAUDIO_API_REMOVED_IN[0]}.{_TORCHAUDIO_API_REMOVED_IN[1]} "
+        "release that removed AudioMetaData, which pyannote.audio 3.x calls"
+    )
+
+
+def test_torch_and_torchaudio_share_a_minor():
+    """A mismatched pair is its own failure, separate from the API removal.
+
+    torchaudio is built against a specific torch; crossing them produces
+    symbol errors that look nothing like a version problem.
+    """
+    t, ta = _locked_version("torch"), _locked_version("torchaudio")
+    assert t and ta, (t, ta)
+    assert _minor(t) == _minor(ta), f"torch {t} vs torchaudio {ta}"
+
+
+def test_the_pin_is_written_down_where_the_resolver_reads_it():
+    """A bound that lives only in the lock is one `uv lock` from gone.
+
+    The lock is an output. If pyproject does not carry the constraint, the
+    next re-lock silently undoes this and the failure returns.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    for pkg in ("torch", "torchaudio"):
+        assert re.search(rf'"{pkg}>=[\d.]+,<[\d.]+"', text), (
+            f"pyproject.toml does not bound {pkg}, so a re-lock will take "
+            "the newest again"
+        )
