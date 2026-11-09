@@ -5745,3 +5745,51 @@ def test_the_drawer_cannot_grow_taller_than_the_space_above_the_nav():
     assert "max-height" in rule, rule
     mh = re.search(r"max-height\s*:\s*([^;]+);", rule).group(1)
     assert "64px" in mh and "dvh" in mh, mh
+
+
+# ---------------------------------------------------------------------------
+# The preview claimed a windowed split covered the whole shot.
+#
+# Asked for a split from 0:20 to 0:25, the co-editor placed it correctly
+# (`add_effect`, #36), the props panel showed Start 20 / 5s, and the render
+# windows it -- test_a_windowed_split_leaves_the_footage_either_side_alone
+# proves that in pixels. But SELECTING the effect clip drew the divider and
+# the "2nd" badge at every playhead position, with no time check at all. At
+# 0:33 that is indistinguishable from a split applied to the entire clip.
+#
+# The data was right and the render was right. The preview was the thing
+# saying otherwise -- the worst place for the lie to live, because it is
+# the only part anyone looks at.
+# ---------------------------------------------------------------------------
+
+def test_the_selected_split_guide_is_scoped_to_its_own_window():
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    sel = js[js.index('if (selected) {\n      const c = findClip(selected.track, selected.id);'):]
+    sel = sel[:sel.index("// Split-screen guide whenever")]
+    assert 'c.type === "split_screen"' in sel, "the selected branch moved"
+    assert "effectCoversPlayhead(" in sel, \
+        "the selected split guide is drawn with no time check again"
+    # And it must say where the effect IS rather than drawing nothing at all.
+    assert "addEffectElsewhereHint(" in sel
+
+
+def test_the_two_guide_paths_share_one_window_arithmetic():
+    """The selected path and the live path disagreed, and that disagreement
+    WAS the bug. One function, two readers."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function effectCoversPlayhead(c, ot)"):]
+    fn = fn[:fn.index("\n  }") + 4]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    harness = """
+function clipDuration(c) { return Number(c.out) || 0; }
+const fx = {start: 20, out: 5};
+console.log(JSON.stringify([10, 19.9, 20, 22, 24.9, 25, 33].map(
+  (t) => effectCoversPlayhead(fx, t))));
+"""
+    out = subprocess.run([node, "-e", fn + harness],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    # Inside is [start, start+out): 20 in, 25 out -- a half-open window, so
+    # two back-to-back effects cannot both own the boundary instant.
+    assert json.loads(out) == [False, False, True, True, True, False, False], out
