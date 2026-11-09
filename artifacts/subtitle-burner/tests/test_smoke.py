@@ -3532,3 +3532,147 @@ def test_the_pin_is_written_down_where_the_resolver_reads_it():
             f"pyproject.toml does not bound {pkg}, so a re-lock will take "
             "the newest again"
         )
+
+
+# ---------------------------------------------------------------------------
+# Loading the pyannote checkpoint on PyTorch 2.6+.
+#
+# From 2.6 torch.load defaults to weights_only=True, which permits only a
+# small set of tensor types. pyannote 3.x checkpoints predate that and
+# carry plain Python objects, so Analyze died at model load with
+# "Unsupported global: GLOBAL torch.torch_version.TorchVersion".
+#
+# The refusals arrive ONE AT A TIME -- each load fails on the next name --
+# so the allowlist is a reviewed set rather than something discovered over
+# four redeploys. It is deliberately NOT built from whatever the error
+# names, and the checkpoint is NOT loaded with weights_only=False: either
+# would let a checkpoint execute code on load, which is precisely what the
+# default exists to prevent.
+#
+# No torch in this environment, so these cover the logic, not the load.
+# ---------------------------------------------------------------------------
+
+class _FakeTorchSerialization:
+    def __init__(self):
+        self.registered = []
+
+    def add_safe_globals(self, objs):
+        self.registered.extend(objs)
+
+
+class _FakeTorch:
+    def __init__(self):
+        self.serialization = _FakeTorchSerialization()
+
+
+def test_the_allowlist_registers_what_exists_and_skips_what_does_not(app_mod, monkeypatch):
+    """A rename upstream must cost the allowlisting, not Analyze.
+
+    These names live in two third-party packages across several versions.
+    Importing them unguarded would turn a renamed class into a crash.
+    """
+    monkeypatch.setattr(app_mod, "_PYANNOTE_SAFE_GLOBALS", [
+        ("json", "JSONDecoder"),            # exists
+        ("pathlib", "Path"),                # exists
+        ("no_such_module_xyz", "Nope"),     # does not
+        ("json", "NoSuchAttr"),             # module exists, attribute not
+    ])
+    fake = _FakeTorch()
+    n = app_mod._allow_pyannote_checkpoint_globals(fake)
+    assert n == 2, f"expected the 2 resolvable names, got {n}"
+
+    import json as _json
+    import pathlib as _pathlib
+    assert set(fake.serialization.registered) == {_json.JSONDecoder, _pathlib.Path}
+
+
+def test_an_older_torch_without_the_api_is_left_alone(app_mod):
+    """torch < 2.6 has no add_safe_globals and no new default.
+
+    Calling into a missing API would break the very installs that never
+    had the problem.
+    """
+    class _Torch26Less:
+        pass
+
+    assert app_mod._allow_pyannote_checkpoint_globals(_Torch26Less()) == 0
+
+
+def test_the_safe_unpickler_error_is_recognised(app_mod):
+    """It is matched on the message, so the match has to be right.
+
+    PyTorch raises a plain UnpicklingError, indistinguishable by type from
+    a genuinely corrupt file.
+    """
+    real = Exception(
+        "Weights only load failed. ... WeightsUnpickler error: Unsupported "
+        "global: GLOBAL torch.torch_version.TorchVersion was not an allowed "
+        "global by default."
+    )
+    assert app_mod._is_weights_only_error(real) is True
+
+    # And must NOT swallow the unrelated failures that have their own help.
+    for other in ("Repo model pyannote/speaker-diarization-3.1 is gated.",
+                  "401 Client Error: Unauthorized",
+                  "Connection reset by peer"):
+        assert app_mod._is_weights_only_error(Exception(other)) is False, other
+
+
+def test_the_help_names_the_missing_type_and_where_to_add_it(app_mod):
+    """PyTorch's own message is a wall of text offering the unsafe fix.
+
+    The useful part is which name to allowlist, so that is what surfaces.
+    """
+    err = Exception(
+        "Weights only load failed. WeightsUnpickler error: Unsupported "
+        "global: GLOBAL omegaconf.listconfig.ListConfig was not an allowed "
+        "global by default."
+    )
+    help_text = app_mod._weights_only_help(err)
+    assert "omegaconf.listconfig.ListConfig" in help_text
+    assert "_PYANNOTE_SAFE_GLOBALS" in help_text
+    assert '("omegaconf.listconfig", "ListConfig")' in help_text
+
+
+def test_the_help_does_not_recommend_disabling_the_check(app_mod):
+    """The guard that matters.
+
+    PyTorch's message suggests weights_only=False, and copying that
+    suggestion into our own error would walk someone straight into letting
+    a downloaded file execute code. The message must say the opposite.
+    """
+    err = Exception("Weights only load failed. Unsupported global: GLOBAL x.Y")
+    help_text = app_mod._weights_only_help(err)
+    advice = help_text.split("PyTorch said:")[0]
+    assert "weights_only=False" in advice and "Do NOT" in advice, advice
+
+
+def test_the_checkpoint_is_never_loaded_with_the_check_disabled(app_mod):
+    """Asserted on the source, because the failure is a silent weakening.
+
+    A future "quick fix" here would not fail any behavioural test -- it
+    would make Analyze work, which is exactly why it needs a guard that
+    notices.
+    """
+    import ast as _ast
+    tree = _ast.parse((BURNER / "app.py").read_text(encoding="utf-8"))
+    offenders = []
+    for node in _ast.walk(tree):
+        # torch.load(..., weights_only=False)
+        if isinstance(node, _ast.Call):
+            for kw in node.keywords:
+                if (kw.arg == "weights_only"
+                        and isinstance(kw.value, _ast.Constant)
+                        and kw.value.value is False):
+                    offenders.append(f"call at line {node.lineno}")
+        # kwargs["weights_only"] = False, the patch-torch.load dodge
+        if isinstance(node, _ast.Assign) and isinstance(node.value, _ast.Constant) \
+                and node.value.value is False:
+            for t in node.targets:
+                if isinstance(t, _ast.Subscript) and isinstance(t.slice, _ast.Constant) \
+                        and t.slice.value == "weights_only":
+                    offenders.append(f"assignment at line {node.lineno}")
+    assert not offenders, (
+        "app.py loads a checkpoint with the safe unpickler disabled: "
+        f"{offenders}"
+    )
