@@ -2291,6 +2291,64 @@
     }
   }
 
+  // Diarize the WHOLE edit, not each clip it was cut from.
+  //
+  // "Analyze all Main" runs the per-source analysis once per source, and
+  // every run numbers its speakers from scratch -- so three interviews come
+  // back as SPEAKER_00/01 three times over and the project merges six people
+  // into two, colouring person A and person D identically. This joins the
+  // Main track's audio and diarizes it once, which is the only way to get
+  // one label space.
+  async function runAnalyzeWholeEdit(triggerBtn) {
+    if (!tl || !tl.job_id) {
+      alert("Open a timeline project first.");
+      return;
+    }
+    const mains = ((tl.tracks && tl.tracks.main) || [])
+      .filter((c) => c && c.source_job_id);
+    if (!mains.length) {
+      alert("Add transcribed Main clips first, then Analyze whole edit.");
+      return;
+    }
+    const wrap = $("tlAnalyzeProgressWrap");
+    if (wrap) wrap.hidden = false;
+    const was = triggerBtn ? triggerBtn.textContent : "";
+    if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = "Analyzing…"; }
+    setAnalyzeProgressUI(10, "Joining the Main track's audio…");
+    try {
+      const body = { job_id: tl.job_id, timeline: serialize() };
+      // Same "Up to N" control the per-source Analyze uses. It is an element
+      // id, not a function -- and it defaults to 6, so it was never the cap
+      // that made six people look like two.
+      const sel = document.getElementById("analyzeMaxSpeakers");
+      const cap = sel && sel.value ? parseInt(sel.value, 10) : 0;
+      if (cap > 0) { body.max_speakers = cap; body.min_speakers = 1; }
+      const r = await fetch("/analyze-timeline-speakers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || "analysis failed");
+      // Six speakers need six colours. The project ships with Host and
+      // Guest because one interview has two, so without this everyone from
+      // the third person on falls back to the plain caption colour -- which
+      // is the bug this whole feature exists to remove.
+      tl.speaker_colors = Object.assign({}, tl.speaker_colors || {},
+                                        data.speaker_colors || {});
+      scheduleSave();
+      renderProps();
+      setAnalyzeProgressUI(100,
+        `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)` +
+        ` — one label space`);
+    } catch (e) {
+      setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + (e.message || e));
+      alert("Whole-edit analysis failed: " + (e.message || e));
+    } finally {
+      if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = was; }
+    }
+  }
+
   function wireTranscriptToolbar() {
     const restoreBtn = $("tlTranscriptRestoreBtn");
     const fillerBtn = $("tlTranscriptFillersBtn");
@@ -2337,6 +2395,12 @@
           return;
         }
         runAnalyzeForJobIds(ids, analyzeAllBtn).catch(() => {});
+      };
+    }
+    const analyzeEditBtn = $("tlAnalyzeEditBtn");
+    if (analyzeEditBtn) {
+      analyzeEditBtn.onclick = () => {
+        runAnalyzeWholeEdit(analyzeEditBtn).catch(() => {});
       };
     }
     window.onTimelineAnalyzeReady = (jobId) => {
