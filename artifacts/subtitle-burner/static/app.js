@@ -2610,6 +2610,31 @@ const reframeEnabled    = $("reframeEnabled");
 const reframeStatus     = $("reframeStatus");
 let _reframePollTimer = null;
 
+// What the detection actually did, in one line.
+//
+// The count on its own is not enough to act on: 2 and 3 look identical as
+// numbers, and the whole reason this exists is that 2 was wrong. Saying
+// which pass produced the answer -- and what the other pass found -- turns
+// it from a verdict into evidence you can disagree with.
+function describeSpeakerDetection(det) {
+  if (!det || det.mode !== "auto" || !Array.isArray(det.passes)) return "";
+  const counts = det.passes.map((p) => p.speaker_count);
+  if (det.passes.length < 2) return "";
+  // Plain words. "split_more found 4" is the parameter name leaking out.
+  const WORDS = { normal: "normal", split: "sensitive",
+                  split_more: "most sensitive", merge: "merged" };
+  const others = det.passes
+    .filter((p) => p.sensitivity !== (det.chosen && det.chosen.sensitivity))
+    .map((p) => `${WORDS[p.sensitivity] || p.sensitivity} found ${p.speaker_count}`)
+    .join(", ");
+  const agreed = new Set(counts).size === 1;
+  if (agreed) return ` — held steady across ${det.passes.length} passes`;
+  const doubt = det.confidence === "uncertain"
+    ? " — the count kept climbing, so treat this as a best guess" : "";
+  return ` — ${others}${doubt}`;
+}
+window.describeSpeakerDetection = describeSpeakerDetection;
+
 function renderIngestSpeakerCards(stats) {
   const wrap = $("ingestSpeakerCards");
   if (!wrap) return;
@@ -2683,7 +2708,8 @@ async function refreshReframeStatus() {
           faceNote = `, ${data.stats.face_samples || 0} face samples`;
         }
         reframeStatus.textContent =
-          `✓ ${data.stats.speaker_count} speakers${faceNote}`;
+          `✓ ${data.stats.speaker_count} speakers${faceNote}` +
+          describeSpeakerDetection(data.stats.speaker_detection);
         reframeStatus.style.color = "";
         if (data.stats.faces_warning && faceStatus !== "ok" && reframeStatus) {
           reframeStatus.title = String(data.stats.faces_warning);
@@ -2747,8 +2773,12 @@ function analyzeSpeakerOptions() {
     const n = parseInt(raw, 10);
     if (n > 0) { body.max_speakers = n; body.min_speakers = 1; }
   }
+  // "auto" is the default on both sides, so sending it is redundant -- but
+  // sending it anyway means the request says what it wants rather than
+  // relying on two defaults agreeing. They disagreed once already, which is
+  // how "Up to 6" came to mean something nobody intended.
   const sens = document.getElementById("analyzeSensitivity");
-  if (sens && sens.value && sens.value !== "normal") body.sensitivity = sens.value;
+  if (sens && sens.value) body.sensitivity = sens.value;
   return body;
 }
 window.analyzeSpeakerOptions = analyzeSpeakerOptions;

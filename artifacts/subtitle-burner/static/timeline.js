@@ -2428,12 +2428,10 @@
                                         data.speaker_colors || {});
       scheduleSave();
       renderProps();
-      // Name the setting that produced the number. A speaker count that
-      // changes between runs with no stated cause is how this got confusing.
-      const how = data.sensitivity && data.sensitivity !== "normal"
-        ? ` (${data.sensitivity === "split" ? "split similar voices"
-                                            : "merge similar voices"})`
-        : "";
+      // Show the evidence, not just the verdict. 2 and 3 look identical as
+      // numbers, and the whole reason this exists is that 2 was wrong.
+      const how = (typeof window.describeSpeakerDetection === "function")
+        ? window.describeSpeakerDetection(data.speaker_detection) : "";
       setAnalyzeProgressUI(100,
         `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)${how}`);
     } catch (e) {
