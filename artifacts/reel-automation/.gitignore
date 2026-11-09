@@ -1,0 +1,5 @@
+# Intermediate PNGs from the capture and shadow passes, and any render.
+# These are outputs, not source -- a committed one is stale the moment the
+# next job runs.
+build/
+*.mp4

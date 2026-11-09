@@ -3367,7 +3367,6 @@ def test_the_resolved_ffmpeg_can_burn_subtitles(app_mod):
 _NOT_IN_PYPROJECT = {
     "whisperx": "install size vs alignment quality -- _refine_word_alignment "
                 "degrades silently to Whisper's own word timings",
-    "playwright": "browser tests only; the app never imports it",
 }
 
 
