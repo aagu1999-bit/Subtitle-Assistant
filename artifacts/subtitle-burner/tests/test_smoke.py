@@ -5461,3 +5461,193 @@ console.log("[" + describeSpeakerDetection({mode: "fixed"}) + "]");
     # A single fixed pass has no second opinion to report, so it says nothing
     # rather than inventing reassurance.
     assert out[3] == "[]", out[3]
+
+
+# ---------------------------------------------------------------------------
+# The phone trap: held portrait, the Timeline was unreachable.
+#
+# Everything was dimmed, nothing responded, and pinch-zoom could not even be
+# used to escape. ROTATING TO LANDSCAPE FIXED IT, and that detail is the
+# whole diagnosis.
+#
+# Measured at iPhone-portrait size in a real browser:
+#
+#   #tlToolSheetScrim   hidden=true   BUT computed display: flex
+#                       fixed, inset 0, 390x664, z-205,
+#                       rgba(0,0,0,0.5), pointer-events auto
+#
+# `hidden` works only through the UA rule `[hidden] { display: none }`,
+# which has the lowest specificity there is. mobile.css had, inside
+# @media (max-width: 768px):
+#
+#   .tl-mobile-only { display: inline-flex !important; }
+#
+# ...which beat it, and FORCED every mobile-only element visible on a phone
+# whether or not it was hidden. Two of them are full-screen overlays. The
+# result was a sheet of glass over the whole editor, eating every tap, with
+# nothing to dismiss -- the overlay closes when tapped, but it was never
+# "open", so nothing was listening.
+#
+# Landscape "worked" only because an iPhone is wider than 768px that way,
+# so the media query did not apply and `hidden` behaved normally.
+# ---------------------------------------------------------------------------
+
+def _mobile_css():
+    return (BURNER / "static" / "mobile.css").read_text(encoding="utf-8")
+
+
+def test_a_phone_rule_cannot_override_the_hidden_attribute():
+    """The exact defect. `!important` display on a class that hidden
+    elements also carry makes `hidden` a no-op."""
+    css = _mobile_css()
+    assert ".tl-mobile-only:not([hidden])" in css, \
+        "the phone rule can force a hidden element visible again"
+    # The bare form may still exist where it HIDES (that is the desktop
+    # rule and it is correct); it must not exist where it reveals.
+    for sel, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        if ".tl-mobile-only" not in sel or "[hidden]" in sel:
+            continue
+        if "!important" not in body or "display" not in body:
+            continue
+        assert re.search(r"display\s*:\s*none", body), \
+            f"a bare .tl-mobile-only rule still reveals: {sel.strip()} {{{body}}}"
+
+
+def test_no_important_display_rule_can_unhide_an_element_that_ships_hidden():
+    """The general form, so the next one is caught rather than the last one.
+
+    Any element in the markup that carries BOTH `hidden` and a class must
+    not be matched by an `!important` display rule that forgets
+    `:not([hidden])` -- that combination is what turns a dormant overlay
+    into a sheet of glass.
+    """
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    # Comments stripped FIRST. A selector slice runs from the previous `}`,
+    # so it swallows any comment above the rule -- and the comment above
+    # this very fix contains the literal "[hidden]", which silently
+    # exempted the rule it was explaining. The test passed while the bug
+    # was reinstated. Caught by reinstating it.
+    css = re.sub(r"/\*.*?\*/", "", _mobile_css(), flags=re.S)
+    # Flatten @media wrappers. `([^{}]+)\{([^}]*)\}` cannot see inside a
+    # nested at-rule: it reads `@media (max-width: 768px) {` as the SELECTOR
+    # and everything to the first `}` as the body, so every rule in the
+    # phone media query -- which is the entire area this bug lives in --
+    # was invisible. The sweep passed while covering nothing. Caught by
+    # reinstating the bug and watching it still pass.
+    css = re.sub(r"@media[^{]*\{", "", css)
+
+    # Classes on elements that ship with the hidden attribute.
+    hidden_classes = set()
+    for tag in re.findall(r"<[a-zA-Z]+[^>]*\bhidden\b[^>]*>", html):
+        m = re.search(r'class="([^"]+)"', tag)
+        if m:
+            hidden_classes.update(m.group(1).split())
+
+    co = {}
+    for tag in re.findall(r"<[a-zA-Z]+[^>]*\bhidden\b[^>]*>", html):
+        m = re.search(r'class="([^"]+)"', tag)
+        if not m:
+            continue
+        names = m.group(1).split()
+        for n in names:
+            co.setdefault(n, set()).update(f".{o}" for o in names)
+
+    def html_classes_with(name):
+        return co.get(name, set())
+
+    offenders = []
+    for sel, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        if "display" not in body or "!important" not in body:
+            continue
+        sel = sel.strip()
+        for cls in hidden_classes:
+            if f".{cls}" not in sel:
+                continue
+            # Fine if it excludes hidden, or if it only ever HIDES things.
+            if "[hidden]" in sel:
+                continue
+            if re.search(r"display\s*:\s*none", body):
+                continue
+            # Also fine if a companion rule puts `hidden` back, which is how
+            # .phone-only was patched when this bit the first time.
+            # A companion rule that puts `hidden` back is an equally valid
+            # repair -- how .phone-only was patched when this first bit.
+            # It must be matched against the SELECTOR, not the raw slice.
+            bare = sel.split("\n")[-1].strip()
+            repair = re.escape(bare) + r"\[hidden\]\s*\{[^}]*display\s*:\s*none"
+            if re.search(repair, css):
+                continue
+            # ...or a repair keyed on another class the SAME element
+            # carries, which is how .phone-only was patched. Matched
+            # against classes that really co-occur, not any class at all.
+            if any(re.search(re.escape(f".{other}") + r"\[hidden\]\s*\{[^}]*"
+                             r"display\s*:\s*none", css)
+                   for other in html_classes_with(cls)
+                   if other != f".{cls}"):
+                continue
+            offenders.append((sel, cls))
+    assert not offenders, (
+        "these !important display rules can override `hidden` on elements "
+        f"that ship hidden: {offenders}")
+
+
+def test_the_page_still_allows_pinch_zoom():
+    """Blocking zoom fails WCAG 1.4.4 -- and it removed the last way out
+    when a full-screen overlay trapped the page."""
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    meta = re.search(r'<meta name="viewport"[^>]*>', html)
+    assert meta, "no viewport meta"
+    tag = meta.group(0)
+    assert "maximum-scale" not in tag, tag
+    assert "user-scalable=no" not in tag, tag
+    assert "width=device-width" in tag
+
+
+def test_the_scrim_can_be_dismissed_by_touch_not_only_by_click():
+    """On iOS Safari a `click` born from a touch on a plain, non-interactive
+    <div> is unreliable. A dismissable overlay that only answers a desktop
+    event is not dismissable on the device it matters on."""
+    js = (BURNER / "static" / "mobile.js").read_text(encoding="utf-8")
+    # From where the listeners are REGISTERED. Slicing from the first
+    # mention of the id lands in syncPhoneClass and proves nothing -- the
+    # same "matched its own neighbourhood" mistake as earlier in this file.
+    block = js[js.index('const scrim = document.getElementById("mobilePanelScrim");\n    if (scrim) {'):]
+    block = block[:1200]
+    assert 'addEventListener("pointerdown"' in block, \
+        "the scrim still listens for click only"
+    assert 'addEventListener("click"' in block, "click must still work too"
+    css = _mobile_css()
+    scrim = css[css.index(".mobile-panel-scrim"):]
+    scrim = scrim[:scrim.index("}")]
+    assert "touch-action" in scrim and "cursor" in scrim
+
+
+def test_the_screen_is_never_dimmed_for_a_panel_that_cannot_be_seen(app_mod):
+    """The second defect, found on the way to the first.
+
+    The bottom sheet lives inside the editor's .tab-content, so when that is
+    display:none the sheet has no box at all -- yet openMobilePanel still
+    raised a full-screen scrim over whatever happened to be on screen.
+    """
+    js = (BURNER / "static" / "mobile.js").read_text(encoding="utf-8")
+    assert "function mobilePanelCanBeSeen()" in js
+    body = js[js.index("function openMobilePanel"):]
+    body = body[:body.index("function closeMobilePanel")]
+    assert "mobilePanelCanBeSeen()" in body, \
+        "the scrim goes up without checking the panel is visible"
+    # And it must bail rather than merely log.
+    assert "closeMobilePanel()" in body
+
+    # The self-heal exists and is wired to the events that change layout.
+    assert "function healOrphanedMobilePanel()" in js
+    for evt in ("orientationchange", "resize"):
+        assert f'addEventListener("{evt}"' in js, evt
+
+
+def test_the_mobile_only_rule_still_shows_what_is_not_hidden():
+    """The guard must not have turned the phone chrome off wholesale --
+    mobile-only controls that are NOT hidden still have to appear."""
+    css = _mobile_css()
+    m = re.search(r"\.tl-mobile-only:not\(\[hidden\]\)\s*\{([^}]*)\}", css)
+    assert m, "the phone rule is gone entirely"
+    assert "display" in m.group(1) and "none" not in m.group(1), m.group(1)

@@ -46,6 +46,10 @@
   inset: 0;
   z-index: 180;
   background: rgba(0, 0, 0, 0.55);
+  /* Both of these are what make a tap on a bare <div> actually dismiss it
+     on iOS rather than being swallowed. */
+  cursor: pointer;
+  touch-action: manipulation;
 }
 
 .tl-left-sheet-head {
@@ -58,7 +62,20 @@
 }
 
 @media (max-width: 768px) {
-  .tl-mobile-only { display: inline-flex !important; }
+  /* :not([hidden]) is load-bearing, not tidiness.
+     `hidden` works only through the UA rule `[hidden] { display: none }`,
+     which has the lowest specificity there is -- so a bare
+     `display: inline-flex !important` here overrode it and FORCED every
+     mobile-only element visible on a phone, `hidden` or not. Two of them
+     are full-screen overlays: #tlToolSheetScrim (fixed, inset 0, z-205,
+     50% black, pointer-events auto) and #tlToolSheet. The result was a
+     phone in portrait with an invisible sheet of glass over the whole
+     timeline, eating every tap, with no way out -- the overlay is meant
+     to be dismissed by tapping it, but it was never open, so nothing
+     closed it.
+     Landscape "worked" only because an iPhone is wider than 768px that
+     way, so this media query did not apply and `hidden` behaved. */
+  .tl-mobile-only:not([hidden]) { display: inline-flex !important; }
   .desktop-only-hint { display: none !important; }
 
   body.studio-body {
@@ -504,7 +521,12 @@
   body.is-phone .phone-only { display: block !important; }
   body.is-phone .phone-only[hidden] { display: none !important; }
   body.is-phone .ingest-desktop-aside { display: none !important; }
-  body.is-phone .mobile-drop-hint { display: block !important; }
+  /* :not([hidden]) for the same reason as .tl-mobile-only above: an
+     !important display rule otherwise beats the `hidden` attribute, which
+     only has the UA stylesheet's specificity. .phone-only solves it one
+     line up with a companion [hidden] rule -- a local patch for a problem
+     that turned out to be general. */
+  body.is-phone .mobile-drop-hint:not([hidden]) { display: block !important; }
 
   body.is-phone #mobileHomeShell:not([hidden]) {
     display: block !important;
