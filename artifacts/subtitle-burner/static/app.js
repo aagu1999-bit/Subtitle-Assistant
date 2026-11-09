@@ -2728,6 +2728,31 @@ async function refreshReframeStatus() {
   } catch { /* offline — silent */ }
 }
 
+// What the two Analyze controls mean, in one place -- Ingest Analyze and the
+// Timeline's "Analyze whole edit" both send this, so they cannot drift.
+//
+// Worth stating because it is the thing that was misread: "Up to N" sends
+// max_speakers, which is a permissive RANGE. The clustering still chooses
+// its own number inside it, so "Up to 6" never asked for 6. "Exactly N"
+// sends num_speakers, which forces the split -- right once you know the
+// answer, wrong while you are still asking what it is.
+function analyzeSpeakerOptions() {
+  const body = {};
+  const sel = document.getElementById("analyzeMaxSpeakers");
+  const raw = sel && sel.value ? String(sel.value) : "";
+  if (raw.startsWith("exact:")) {
+    const n = parseInt(raw.slice(6), 10);
+    if (n > 0) body.num_speakers = n;
+  } else if (raw) {
+    const n = parseInt(raw, 10);
+    if (n > 0) { body.max_speakers = n; body.min_speakers = 1; }
+  }
+  const sens = document.getElementById("analyzeSensitivity");
+  if (sens && sens.value && sens.value !== "normal") body.sensitivity = sens.value;
+  return body;
+}
+window.analyzeSpeakerOptions = analyzeSpeakerOptions;
+
 async function startReframeAnalyze(triggerBtn, opts) {
   opts = opts || {};
   const jobId = opts.jobId || currentJobId;
@@ -2793,18 +2818,8 @@ async function startReframeAnalyze(triggerBtn, opts) {
     const res = await fetch("/analyze-reframe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify((() => {
-        const body = { job_id: jobId };
-        const sel = $("analyzeMaxSpeakers");
-        if (sel && sel.value) {
-          const n = parseInt(sel.value, 10);
-          if (n > 0) {
-            body.max_speakers = n;
-            body.min_speakers = 1;
-          }
-        }
-        return body;
-      })()),
+      body: JSON.stringify(Object.assign({ job_id: jobId },
+                                         analyzeSpeakerOptions())),
     });
     let data = null;
     try {

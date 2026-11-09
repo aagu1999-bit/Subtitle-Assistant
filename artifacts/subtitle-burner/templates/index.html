@@ -1106,13 +1106,26 @@
         <button id="reframeAnalyzeBtn" class="btn btn-secondary">Analyze speakers + faces</button>
         <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
           Speakers
-          <select id="analyzeMaxSpeakers" title="How many distinct voices to look for (split-screen still shows at most 2 at once)" style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+          <select id="analyzeMaxSpeakers" title="&quot;Up to N&quot; is a CEILING — it permits 1 to N and the clustering still picks its own number. &quot;Exactly N&quot; forces N, which is the one to use once you know the answer." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
             <option value="">Auto</option>
             <option value="2">Up to 2</option>
             <option value="3">Up to 3</option>
             <option value="4">Up to 4</option>
             <option value="6" selected>Up to 6</option>
             <option value="8">Up to 8</option>
+            <option value="exact:2">Exactly 2</option>
+            <option value="exact:3">Exactly 3</option>
+            <option value="exact:4">Exactly 4</option>
+            <option value="exact:5">Exactly 5</option>
+            <option value="exact:6">Exactly 6</option>
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
+          Sensitivity
+          <select id="analyzeSensitivity" title="It groups voices that sound alike. If it merged two people who sound different — or missed someone who only speaks briefly — pick &quot;Split similar voices&quot;." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+            <option value="merge">Merge similar voices</option>
+            <option value="normal" selected>Normal</option>
+            <option value="split">Split similar voices</option>
           </select>
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.88rem">

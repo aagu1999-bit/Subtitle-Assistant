@@ -4940,3 +4940,270 @@ def test_the_client_polls_rather_than_waiting_on_the_post():
     assert "st.running" in poll and "st.error" in poll
     # A poll with no ceiling is a spinner with no end.
     assert "TL_DIAR_MAX_MS" in poll
+
+
+# ---------------------------------------------------------------------------
+# Telling the analysis how hard to listen.
+#
+# A stitched multi-interview video came back with 2 speakers when there were
+# at least 3, and the voices were described as very different -- so the audio
+# is not genuinely ambiguous, something was suppressing the separation.
+#
+# It is not the video. pyannote embeds short windows of AUDIO and clusters
+# them; it never sees the picture, and there is no scene detection anywhere
+# in this app, so a cut between two stitched interviews is invisible to it.
+#
+# Two clustering parameters decide how readily it calls two voices one
+# person -- `threshold` and `min_cluster_size`, the latter absorbing a
+# speaker who simply said too little -- and neither was reachable. The
+# control that WAS reachable is a ceiling, not a target: "Up to 6" sends
+# max_speakers and the clustering still picks its own number inside 1..6.
+# ---------------------------------------------------------------------------
+
+class _FakePipeline:
+    """Stands in for pyannote, which is not installed here.
+
+    Mirrors the two calls the tuning makes -- parameters(instantiated=True)
+    and instantiate(params) -- and records what it was handed.
+    """
+
+    def __init__(self, params=None, raise_on_instantiate=False):
+        self._params = params if params is not None else {
+            "clustering": {"method": "centroid", "threshold": 0.70,
+                           "min_cluster_size": 12},
+            "segmentation": {"min_duration_off": 0.0},
+        }
+        self.raise_on_instantiate = raise_on_instantiate
+        self.instantiated = []
+
+    def parameters(self, instantiated=False):
+        import copy
+        return copy.deepcopy(self._params)
+
+    def instantiate(self, params):
+        if self.raise_on_instantiate:
+            raise ValueError("unsupported parameter block")
+        self.instantiated.append(params)
+        self._params = params
+
+
+def _clustering_after(app_mod, sensitivity):
+    pipe = _FakePipeline()
+    app_mod._apply_diarization_sensitivity(pipe, sensitivity)
+    return pipe.parameters()["clustering"]
+
+
+def test_the_sensitivities_are_actually_different_and_ordered(app_mod):
+    """A mapping that returned the same numbers for all three would pass
+    every other test here, so the ordering is the assertion."""
+    base = _FakePipeline().parameters()["clustering"]
+    split = _clustering_after(app_mod, "split")
+    merge = _clustering_after(app_mod, "merge")
+
+    # "Split" must make it EASIER to call two voices different people.
+    assert split["threshold"] < base["threshold"], (split, base)
+    assert split["min_cluster_size"] < base["min_cluster_size"], split
+    # "Merge" the other way.
+    assert merge["threshold"] > base["threshold"], (merge, base)
+    assert merge["min_cluster_size"] > base["min_cluster_size"], merge
+    # And normal changes nothing at all -- today's behaviour is the default.
+    pipe = _FakePipeline()
+    assert app_mod._apply_diarization_sensitivity(pipe, "normal") is None
+    assert pipe.instantiated == [], "normal must not retune anything"
+
+
+def test_min_cluster_size_stays_a_usable_integer(app_mod):
+    """It is a count of segments. 0 or a float would be a different bug."""
+    for sens in ("split", "merge"):
+        cl = _clustering_after(app_mod, sens)
+        assert isinstance(cl["min_cluster_size"], int)
+        assert cl["min_cluster_size"] >= 1
+
+
+def test_a_pyannote_that_cannot_be_tuned_still_analyses(app_mod):
+    """The failure to avoid is "a tuning knob took Analyze down".
+
+    This repo has lost that bet three times on moving dependencies --
+    mediapipe's solutions, torchaudio's AudioMetaData, torch.load's
+    weights_only default. So every failure path here leaves diarization
+    working at the model's own settings.
+    """
+    # Raises on instantiate.
+    pipe = _FakePipeline(raise_on_instantiate=True)
+    assert app_mod._apply_diarization_sensitivity(pipe, "split") is None
+
+    # Exposes no clustering parameters at all (a future rename).
+    pipe = _FakePipeline(params={"segmentation": {"min_duration_off": 0.0}})
+    assert app_mod._apply_diarization_sensitivity(pipe, "split") is None
+    assert pipe.instantiated == []
+
+    # parameters() itself blows up.
+    class _Hostile:
+        def parameters(self, instantiated=False):
+            raise RuntimeError("gone")
+
+        def instantiate(self, params):
+            raise AssertionError("must not be reached")
+
+    assert app_mod._apply_diarization_sensitivity(_Hostile(), "split") is None
+
+    # Clustering present but with nothing tunable in it.
+    pipe = _FakePipeline(params={"clustering": {"method": "centroid"}})
+    assert app_mod._apply_diarization_sensitivity(pipe, "split") is None
+    assert pipe.instantiated == []
+
+
+def test_a_tuning_does_not_leak_into_the_next_analysis(app_mod):
+    """The pipeline is a module-level cache shared by every Analyze. A
+    tuning left in place would quietly change the next run, which is the
+    kind of fault that looks like the model being inconsistent."""
+    pipe = _FakePipeline()
+    before = pipe.parameters()
+    restore = app_mod._apply_diarization_sensitivity(pipe, "split")
+    assert restore is not None
+    assert pipe.parameters()["clustering"]["threshold"] < \
+        before["clustering"]["threshold"]
+    app_mod._restore_diarization_params(pipe, restore)
+    assert pipe.parameters() == before, "the next Analyze inherits the tuning"
+
+
+def test_an_unknown_sensitivity_falls_back_to_normal(app_mod):
+    for bad in (None, "", "banana", 7, "AUTO"):
+        assert app_mod._normalize_sensitivity(bad) == "normal"
+    # The words the UI sends, and a few obvious synonyms.
+    assert app_mod._normalize_sensitivity("split") == "split"
+    assert app_mod._normalize_sensitivity("MERGE") == "merge"
+    assert app_mod._normalize_sensitivity("more") == "split"
+
+
+def test_both_analyze_endpoints_pass_the_setting_down(app_mod, temp_db,
+                                                      monkeypatch, tmp_path):
+    """Plumbing, end to end, because a control that reaches nothing is the
+    exact shape of the bug being fixed -- num_speakers was wired through
+    the whole server and no line of JavaScript ever sent it."""
+    import uuid
+    seen = {}
+
+    def fake_diarize(path, **kw):
+        seen.update(kw)
+        return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
+
+    monkeypatch.setattr(app_mod, "diarize_audio", fake_diarize)
+    monkeypatch.setattr(app_mod, "_reframe_deps_available", lambda: (True, ""))
+
+    # --- the timeline path -------------------------------------------------
+    pid = uuid.uuid4().hex
+    sid = uuid.uuid4().hex
+    src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=black:s=160x120:d=4:r=15",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+         "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)],
+        check=True)
+    base = {"status": "done", "progress": 100, "output": None, "error": None,
+            "audio": None, "emoji_rules": {}, "created_at": 0.0,
+            "words": None, "style": {}, "filename": "x.mp4"}
+    app_mod.jobs[pid] = dict(base)
+    app_mod.jobs[sid] = dict(base)
+    try:
+        c = app_mod.app.test_client()
+        r = c.post("/analyze-timeline-speakers", json={
+            "job_id": pid, "sensitivity": "split", "num_speakers": 3,
+            "timeline": _audio_tl([{"id": "m1", "source_job_id": sid,
+                                    "in": 0.0, "out": 3.0}])})
+        assert r.status_code == 202
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            st = c.get(f"/timeline-speakers/{pid}").get_json()
+            if not st["running"]:
+                break
+            time.sleep(0.1)
+        assert st.get("error") is None, st
+        assert seen.get("sensitivity") == "split", seen
+        assert seen.get("num_speakers") == 3, seen
+        # And the record says what produced it, so a changing count has a
+        # stated cause rather than looking like the model being flaky.
+        assert st["sensitivity"] == "split"
+    finally:
+        try:
+            src.unlink(missing_ok=True)
+        except OSError:
+            pass
+        for j in (pid, sid):
+            app_mod.jobs.pop(j, None)
+            app_mod._TL_DIAR_RUNS.pop(j, None)
+            try:
+                app_mod._tl_diar_path(j).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # --- the per-source path reaches analyze_reframe with it too ----------
+    seen.clear()
+    captured = {}
+    monkeypatch.setattr(app_mod, "analyze_reframe_job",
+                        lambda *a, **k: captured.setdefault("args", a))
+    jid = uuid.uuid4().hex
+    vid = app_mod.UPLOAD_DIR / f"{jid}.mp4"
+    vid.write_bytes(b"\x00" * 128)
+    app_mod.jobs[jid] = dict(base)
+    try:
+        r = app_mod.app.test_client().post("/analyze-reframe", json={
+            "job_id": jid, "sensitivity": "split"})
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["sensitivity"] == "split"
+        # (job_id, video_path, num, min, max, sensitivity)
+        assert captured["args"][5] == "split", captured["args"]
+    finally:
+        try:
+            vid.unlink(missing_ok=True)
+        except OSError:
+            pass
+        app_mod.jobs.pop(jid, None)
+
+
+def test_the_controls_exist_and_one_function_reads_them():
+    """Two Analyze buttons read the same two controls. They must not drift
+    about what "Up to 6" or "Split similar voices" means."""
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'id="analyzeSensitivity"' in html
+    assert ">Split similar voices<" in html and ">Merge similar voices<" in html
+    assert 'value="exact:3"' in html, "no way to force an exact count"
+
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function analyzeSpeakerOptions()" in js
+    fn = js[js.index("function analyzeSpeakerOptions()"):]
+    fn = fn[:fn.index("window.analyzeSpeakerOptions")]
+    # "Exactly N" must force a count, not widen a ceiling.
+    assert "num_speakers" in fn and "max_speakers" in fn
+    assert "analyzeSensitivity" in fn
+
+    tl = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    whole = tl[tl.index("async function runAnalyzeWholeEdit"):]
+    whole = whole[:whole.index("async function pollWholeEditAnalysis")]
+    assert "analyzeSpeakerOptions" in whole, \
+        "the timeline reads the controls its own way again"
+
+
+def test_exactly_n_forces_a_count_rather_than_raising_a_ceiling():
+    """The distinction the whole report turned on, checked in node."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    block = js[js.index("function analyzeSpeakerOptions()"):
+               js.index("window.analyzeSpeakerOptions")]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    harness = """
+var vals = {analyzeMaxSpeakers: "exact:3", analyzeSensitivity: "split"};
+global.document = {getElementById: (id) => ({value: vals[id]})};
+console.log(JSON.stringify(analyzeSpeakerOptions()));
+vals.analyzeMaxSpeakers = "6"; vals.analyzeSensitivity = "normal";
+console.log(JSON.stringify(analyzeSpeakerOptions()));
+"""
+    out = subprocess.run([node, "-e", block + harness],
+                         capture_output=True, text=True, check=True).stdout
+    exact, ceiling = [json.loads(line) for line in out.strip().splitlines()]
+    assert exact == {"num_speakers": 3, "sensitivity": "split"}, exact
+    # A ceiling must NOT send num_speakers, or every run forces a number the
+    # user was trying to discover.
+    assert ceiling == {"max_speakers": 6, "min_speakers": 1}, ceiling

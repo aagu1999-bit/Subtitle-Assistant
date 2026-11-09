@@ -2115,6 +2115,127 @@ def _diarization_annotation(diar_out):
     )
 
 
+# ---- How hard it listens ---------------------------------------------------
+#
+# pyannote decides WHO is speaking by embedding short windows of audio and
+# clustering them. It never sees the video, so a cut between two stitched
+# interviews is invisible to it: the only question it asks is "does this
+# voice sound like one I have already heard".
+#
+# Two clustering parameters decide how readily it says yes, and neither was
+# reachable from the app:
+#
+#   threshold         how close two voices must sound to be called one person
+#   min_cluster_size  a speaker with too few segments is ABSORBED into the
+#                     nearest cluster rather than given one of their own
+#
+# The second is the stronger suspect when a real third speaker goes missing
+# from a long edit: not that they sound similar, but that they said too
+# little to earn a cluster.
+#
+# Worth being clear about what the existing control does NOT do: the
+# Speakers dropdown sends max_speakers/min_speakers, which is a permissive
+# RANGE, not a target. "Up to 6" never asked for 6 -- the clustering still
+# picks its own number inside the range.
+_DIARIZATION_SENSITIVITY = {
+    # name: (threshold multiplier, min_cluster_size multiplier)
+    "merge": (1.12, 1.5),    # fewer, broader speakers
+    "normal": (1.0, 1.0),    # whatever the model ships with
+    "split": (0.88, 0.5),    # separate voices it would otherwise fold together
+}
+_DIARIZATION_SENSITIVITY_DEFAULT = "normal"
+
+
+def _normalize_sensitivity(value) -> str:
+    name = str(value or "").strip().lower()
+    aliases = {"": "normal", "auto": "normal", "default": "normal",
+               "more": "split", "high": "split", "fine": "split",
+               "less": "merge", "low": "merge", "coarse": "merge"}
+    name = aliases.get(name, name)
+    return name if name in _DIARIZATION_SENSITIVITY else _DIARIZATION_SENSITIVITY_DEFAULT
+
+
+def _pipeline_clustering_params(pipeline) -> dict | None:
+    """The pipeline's OWN current clustering parameters, or None.
+
+    Read rather than hard-coded on purpose. pyannote has renamed things
+    under us before -- that is how mediapipe, torchaudio and the torch.load
+    default each took a feature down -- so overriding only the keys that are
+    actually there means a future rename costs the tuning, not Analyze.
+    """
+    try:
+        params = pipeline.parameters(instantiated=True)
+    except Exception:                            # noqa: BLE001
+        return None
+    if not isinstance(params, dict):
+        try:
+            params = dict(params)
+        except Exception:                        # noqa: BLE001
+            return None
+    clustering = params.get("clustering")
+    if isinstance(clustering, dict) and clustering:
+        return params
+    return None
+
+
+def _apply_diarization_sensitivity(pipeline, sensitivity: str) -> dict | None:
+    """Retune the clustering for one run. Returns what to restore, or None.
+
+    Every failure path leaves diarization WORKING at the model's defaults
+    and says why. A tuning knob that can take Analyze down is worse than no
+    knob -- this repo has lost that bet three times on moving dependencies.
+    """
+    name = _normalize_sensitivity(sensitivity)
+    if name == _DIARIZATION_SENSITIVITY_DEFAULT:
+        return None
+    params = _pipeline_clustering_params(pipeline)
+    if params is None:
+        print(f"[diarize] sensitivity '{name}' ignored: this pyannote build "
+              "exposes no clustering parameters", flush=True)
+        return None
+
+    import copy
+    original = copy.deepcopy(params)
+    tuned = copy.deepcopy(params)
+    t_mul, c_mul = _DIARIZATION_SENSITIVITY[name]
+    cl = tuned["clustering"]
+    changed = []
+    if isinstance(cl.get("threshold"), (int, float)):
+        cl["threshold"] = round(float(cl["threshold"]) * t_mul, 6)
+        changed.append(f"threshold={cl['threshold']:.4f}")
+    if isinstance(cl.get("min_cluster_size"), int):
+        cl["min_cluster_size"] = max(1, int(round(cl["min_cluster_size"] * c_mul)))
+        changed.append(f"min_cluster_size={cl['min_cluster_size']}")
+    if not changed:
+        print(f"[diarize] sensitivity '{name}' ignored: no tunable clustering "
+              "parameters found", flush=True)
+        return None
+    try:
+        pipeline.instantiate(tuned)
+    except Exception as e:                       # noqa: BLE001
+        print(f"[diarize] sensitivity '{name}' could not be applied ({e}); "
+              "using the model defaults", flush=True)
+        try:
+            pipeline.instantiate(original)
+        except Exception:                        # noqa: BLE001
+            pass
+        return None
+    print(f"[diarize] sensitivity '{name}': {', '.join(changed)}", flush=True)
+    return original
+
+
+def _restore_diarization_params(pipeline, original) -> None:
+    """The pipeline is a module-level cache, so a tuning left in place would
+    silently change every later Analyze. Put it back."""
+    if not original:
+        return
+    try:
+        pipeline.instantiate(original)
+    except Exception as e:                       # noqa: BLE001
+        print(f"[diarize] could not restore clustering parameters: {e}",
+              flush=True)
+
+
 def _segments_from_diar_annotation(ann) -> list[dict]:
     """Convert Annotation (or serialized list) → [{start,end,speaker}]."""
     segments: list[dict] = []
@@ -2148,12 +2269,21 @@ def diarize_audio(
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    sensitivity: str | None = None,
 ) -> list[dict]:
     """Run pyannote speaker diarization and return a list of segments:
     [{start, end, speaker}]  where speaker is "SPEAKER_00", "SPEAKER_01", ...
 
-    Sorted by start. Skipping overlapped regions inside pyannote's output —
-    those are surfaced separately by ``find_overlap_regions``.
+    Sorted by start. EVERY track pyannote returns is kept, overlaps
+    included -- ``_segments_from_diar_annotation`` iterates them all, and
+    ``find_overlap_regions`` then derives the two-at-once windows from the
+    same list. (This used to claim overlapped regions were skipped. They
+    are not, and a comment that lies about where speakers go is expensive
+    when a speaker goes missing.)
+
+    *num_speakers* forces an exact count; *min/max_speakers* only permit a
+    RANGE, inside which the clustering still picks its own number.
+    *sensitivity* moves that choice -- see _DIARIZATION_SENSITIVITY.
 
     Speeds vs the old path:
       - cached pipeline (no per-run HF download / weight load)
@@ -2179,6 +2309,7 @@ def diarize_audio(
                 "Check that the video has an audio track."
             )
         pipeline = _get_diarization_pipeline()
+        restore = _apply_diarization_sensitivity(pipeline, sensitivity)
         call_kwargs: dict = {}
         if num_speakers is not None and int(num_speakers) > 0:
             call_kwargs["num_speakers"] = int(num_speakers)
@@ -2188,14 +2319,19 @@ def diarize_audio(
             call_kwargs["max_speakers"] = int(max_speakers)
 
         t0 = time.time()
-        waveform, sr = _load_wav_waveform(audio_path)
-        if waveform is not None:
-            diar = pipeline(
-                {"waveform": waveform, "sample_rate": sr},
-                **call_kwargs,
-            )
-        else:
-            diar = pipeline(str(audio_path), **call_kwargs)
+        try:
+            waveform, sr = _load_wav_waveform(audio_path)
+            if waveform is not None:
+                diar = pipeline(
+                    {"waveform": waveform, "sample_rate": sr},
+                    **call_kwargs,
+                )
+            else:
+                diar = pipeline(str(audio_path), **call_kwargs)
+        finally:
+            # The pipeline is a module-level cache shared by every Analyze,
+            # so a tuning left behind would quietly change the next run.
+            _restore_diarization_params(pipeline, restore)
         elapsed = time.time() - t0
         device = _diarization_device_resolved or "unknown"
         print(
@@ -2347,6 +2483,7 @@ def analyze_reframe(
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    sensitivity: str | None = None,
     face_sample_fps: float | None = None,
     progress_cb=None,
 ) -> dict:
@@ -2396,6 +2533,7 @@ def analyze_reframe(
     def _run_diar():
         return diarize_audio(
             video_path,
+            sensitivity=sensitivity,
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
@@ -5593,6 +5731,7 @@ def analyze_reframe_job(
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    sensitivity: str | None = None,
 ) -> None:
     """Background worker that runs diarization + face tracking and caches
     the result to uploads/<job>_reframe.json. Job status is reported via
@@ -5618,6 +5757,7 @@ def analyze_reframe_job(
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
+            sensitivity=sensitivity,
             progress_cb=_progress,
         )
         cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
@@ -11741,6 +11881,7 @@ def analyze_reframe_endpoint():
     num_speakers = _opt_int("num_speakers")
     min_speakers = _opt_int("min_speakers")
     max_speakers = _opt_int("max_speakers")
+    sensitivity = _normalize_sensitivity(data.get("sensitivity"))
 
     # Clear stale Analyze errors so polling doesn't immediately short-circuit
     # on a previous failure while the new worker is still starting.
@@ -11760,7 +11901,8 @@ def analyze_reframe_endpoint():
 
     t = threading.Thread(
         target=analyze_reframe_job,
-        args=(job_id, video_path, num_speakers, min_speakers, max_speakers),
+        args=(job_id, video_path, num_speakers, min_speakers, max_speakers,
+              sensitivity),
     )
     t.daemon = True
     t.start()
@@ -11771,6 +11913,7 @@ def analyze_reframe_endpoint():
         "diarization_model": DIARIZATION_MODEL,
         "faces_ok": deps["faces_ok"],
         "faces_note": faces_note,
+        "sensitivity": sensitivity,
     })
 
 
@@ -15355,6 +15498,7 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
                               *, num_speakers: int | None = None,
                               min_speakers: int | None = None,
                               max_speakers: int | None = None,
+                              sensitivity: str | None = None,
                               on_progress=None) -> dict:
     """Diarize the whole edit once and cache it. Returns the stored record.
 
@@ -15382,7 +15526,7 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
         _say(60, f"diarizing {layout['analysis_total']:.0f}s of audio — "
                  f"this can take a few minutes on a long edit")
         segments = diarize_audio(
-            wav, num_speakers=num_speakers,
+            wav, num_speakers=num_speakers, sensitivity=sensitivity,
             min_speakers=min_speakers, max_speakers=max_speakers)
     finally:
         _safe_unlink(wav)
@@ -15409,6 +15553,12 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
         "by_source": by_source,
         "speakers": speakers,
         "sources": sorted(by_source.keys()),
+        # What produced this number. A speaker count that changes between
+        # runs with no stated cause is how this became confusing in the
+        # first place.
+        "sensitivity": _normalize_sensitivity(sensitivity),
+        "num_speakers": num_speakers,
+        "max_speakers": max_speakers,
         "speaker_colors": _fill_speaker_colors(existing, speakers),
         "labels": {sp: _speaker_label_for_id(sp, i)
                    for i, sp in enumerate(speakers)},
@@ -15447,7 +15597,7 @@ def _tl_diar_run_state(job_id: str) -> dict | None:
 
 def analyze_timeline_speakers_job(job_id: str, timeline: dict,
                                   num_speakers=None, min_speakers=None,
-                                  max_speakers=None) -> None:
+                                  max_speakers=None, sensitivity=None) -> None:
     """Thread target. Every exit path MUST leave a terminal state.
 
     A spinner with no end is a worse outcome than an error, so the except
@@ -15465,7 +15615,7 @@ def analyze_timeline_speakers_job(job_id: str, timeline: dict,
         analyze_timeline_speakers(
             job_id, timeline, num_speakers=num_speakers,
             min_speakers=min_speakers, max_speakers=max_speakers,
-            on_progress=_progress)
+            sensitivity=sensitivity, on_progress=_progress)
     except Exception as e:                       # noqa: BLE001
         import traceback
         print(f"[timeline] whole-edit diarization failed: {e}", flush=True)
@@ -16625,7 +16775,8 @@ def analyze_timeline_speakers_endpoint():
     t = threading.Thread(
         target=analyze_timeline_speakers_job,
         args=(job_id, timeline, _opt_int("num_speakers"),
-              _opt_int("min_speakers"), _opt_int("max_speakers")))
+              _opt_int("min_speakers"), _opt_int("max_speakers"),
+              _normalize_sensitivity(data.get("sensitivity"))))
     t.daemon = True
     t.start()
     # started_at is the SERVER's clock, and the status reports the record's
@@ -16664,6 +16815,7 @@ def timeline_speakers_status(job_id: str):
             "created_at": rec.get("created_at"),
             "speaker_colors": rec.get("speaker_colors") or {},
             "labels": rec.get("labels") or {},
+            "sensitivity": rec.get("sensitivity") or "normal",
         })
     return jsonify(out)
 
