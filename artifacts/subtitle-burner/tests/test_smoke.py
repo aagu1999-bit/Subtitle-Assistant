@@ -1821,6 +1821,224 @@ def test_the_op_registry_is_the_only_list(app_mod):
     assert not missing, f"accepted by the server, ignored by the client: {missing}"
 
 
+# ---------------------------------------------------------------------------
+# "Split screen from 0:10 to 0:15" applied it to the whole clip.
+#
+# The effects lane was never at fault: _tl_effect_cut_points splits each keep
+# at effect boundaries and _tl_effects_overlapping scopes props per
+# sub-segment, and test_a_speakers_split_survives_the_whole_render_chain
+# proves a lane split stops at its own edge.
+#
+# The co-editor could not CREATE an effect. Of the ops it had, three touched
+# the lane -- clear_effects, delete_effect, set_effect_time -- and all three
+# act on an effect that already exists. Asked for a split over a window it
+# reached for the nearest thing it did have, apply_clip_style("split_stack"),
+# which restyles WHOLE Main clips and has no concept of time. Hence the
+# symptom. split_at_playhead made it worse: that is a CUT whose name reads
+# like split-screen, sitting in the same list.
+# ---------------------------------------------------------------------------
+
+def test_a_windowed_effect_can_be_asked_for_at_all(app_mod, temp_db, monkeypatch):
+    """The gap: 35 ops, and not one of them made an effect."""
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "add_effect", "type": "split_screen",
+                             "start": 10.0, "duration": 5.0,
+                             "layout": "stack", "mode": "speakers"}],
+                            "message": "ok"})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "split screen from 0:10 to 0:15",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert len(out["ops"]) == 1, out
+    op = out["ops"][0]
+    # The times are the whole point -- an op that arrived without them would
+    # land at the playhead and be indistinguishable from the bug.
+    assert op["op"] == "add_effect" and op["type"] == "split_screen"
+    assert op["start"] == 10.0 and op["duration"] == 5.0
+    assert op["layout"] == "stack" and op["mode"] == "speakers"
+
+
+def test_the_effect_creator_is_in_every_list_it_has_to_be_in(app_mod):
+    """Registry, prompt and client dispatcher, or it is accepted and ignored."""
+    assert "add_effect" in app_mod._co_editor_op_names()
+    shown = "\n".join(app_mod.CO_EDITOR_OP_EXAMPLES)
+    assert '"op": "add_effect"' in shown
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js[js.index("async function applyCoEditorOps"):][:26000]
+    assert 'name === "add_effect"' in body
+    assert "addEffectClip(" in body, "the branch must reach the real creator"
+
+
+def test_the_prompt_separates_cutting_from_split_screen(app_mod, temp_db,
+                                                        monkeypatch):
+    """The model's confusion IS the bug, so the prompt has to name it.
+
+    Two ops it used to reach for: split_at_playhead, whose name reads like
+    split-screen and is scissors, and apply_clip_style, which has no concept
+    of time. Both stay available for what they really do.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("p", p), {"ops": []})[1])
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "split screen for five seconds",
+        "timeline": _coeditor_timeline()})
+    p = seen["p"]
+    assert "split_at_playhead CUTS" in p, "nothing tells it that one is scissors"
+    assert "apply_clip_style" in p and "no concept of time" in p
+    assert "add_effect" in p
+
+
+def test_an_effect_the_lane_cannot_carry_is_refused_not_dropped(app_mod, temp_db,
+                                                                monkeypatch):
+    """_normalize_timeline drops an unknown effect type on the next save.
+
+    So an op that got past the server would place a clip that silently
+    vanishes -- the silent-sink failure this codebase has hit twice. Refuse
+    it here, and SAY so, because "applied 1 edit" followed by nothing is
+    indistinguishable from a bug.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "add_effect", "type": "barrel_roll",
+                             "start": 1.0, "duration": 1.0}], "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "barrel roll at one second",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert out["ops"] == []
+    assert "barrel_roll" in out["message"], out["message"]
+
+    # And every type it DOES accept must survive a save, or the op is a lie.
+    for t in app_mod.TL_EFFECT_TYPES:
+        op, note = app_mod._resolve_add_effect({"type": t, "start": 1.0})
+        assert op is not None, f"{t} refused by the resolver: {note}"
+        tl = app_mod._normalize_timeline({"tracks": {"effects": [
+            {"id": "x", "type": t, "start": 1.0, "out": 2.0}]}})
+        assert tl["tracks"]["effects"], f"{t} accepted but dropped on save"
+
+
+def test_a_clamped_duration_says_it_was_clamped(app_mod):
+    """A silently retimed effect looks exactly like the bug being fixed."""
+    op, note = app_mod._resolve_add_effect(
+        {"type": "punch_zoom", "start": 2.0, "duration": 30.0})
+    lo, hi = app_mod._EFFECT_LIMITS["punch_zoom"]
+    assert op["duration"] == hi
+    assert "30" in note and f"{hi:g}s" in note, note
+
+    # Inside the bounds nothing is said and nothing is changed.
+    op, note = app_mod._resolve_add_effect(
+        {"type": "split_screen", "start": 10.0, "duration": 5.0})
+    assert op["duration"] == 5.0 and note == ""
+
+    # No duration at all leaves it to the client's per-type default rather
+    # than inventing one here, where the two would drift.
+    op, note = app_mod._resolve_add_effect({"type": "ken_burns", "start": 0})
+    assert "duration" not in op and note == ""
+
+
+def test_the_old_whole_clip_style_path_is_untouched(app_mod, temp_db, monkeypatch):
+    """apply_clip_style("split_stack") is still a real thing to want.
+
+    It was the wrong answer for a time range, not the wrong op. Breaking it
+    on the way past would trade one bug for another.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"ops": [
+                            {"op": "apply_clip_style", "style": "split_stack"}],
+                            "message": ""})
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "make every shot a split stack",
+        "timeline": _coeditor_timeline()}).get_json()
+    assert [o["op"] for o in out["ops"]] == ["apply_clip_style"]
+    assert out["ops"][0]["style"] == "split_stack"
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert 'name === "apply_clip_style"' in js
+
+
+def test_a_windowed_split_leaves_the_footage_either_side_alone(app_mod, tmp_path):
+    """"It applied to everything" is a pixel claim, so it is checked in pixels.
+
+    The existing chain test samples inside the window and after it. The
+    report was about a split covering the WHOLE clip, so the frame BEFORE
+    the window is the half that was missing -- and it is the half a
+    whole-clip style would fail.
+    """
+    for mod in ("cv2", "flask"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import uuid
+
+    sid, rid = uuid.uuid4().hex, uuid.uuid4().hex
+    made = []
+    try:
+        src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=red:s=640x720:d=3:r=30",
+             "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=3:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+             "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+             "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+            check=True)
+        made.append(src)
+        made.append(_write_two_box_analysis(app_mod, sid))
+
+        base = {"status": "done", "progress": 100, "output": None, "error": None,
+                "audio": None, "emoji_rules": {}, "created_at": 0.0,
+                "words": None, "style": {}}
+        app_mod.jobs[sid] = {**base, "filename": "halves.mp4"}
+        app_mod.jobs[rid] = {**base, "filename": "split.mp4"}
+
+        # The shape the op produces: one window in the middle of the shot,
+        # with real footage on both sides of it.
+        timeline = {
+            "canvas": "9x16", "fps": 30, "fit": "cover", "bg": "#000000",
+            "tracks": {
+                "main": [{"id": "m1", "source_job_id": sid,
+                          "in": 0.0, "out": 3.0, "burn_captions": False}],
+                "effects": [{"id": "f1", "type": "split_screen",
+                             "start": 1.0, "out": 1.0, "mode": "speakers",
+                             "speakers": ["SPEAKER_00", "SPEAKER_01"],
+                             "layout": "auto"}],
+                "overlay": [], "text": [], "music": [],
+            },
+        }
+        app_mod.render_timeline_job(rid, timeline)
+        assert app_mod.jobs[rid]["status"] == "done", app_mod.jobs[rid].get("error")
+        out = app_mod.OUTPUT_DIR / f"{rid}.mp4"
+        made.append(out)
+
+        def split_like(t):
+            png = tmp_path / f"w{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(t),
+                            "-i", str(out), "-frames:v", "1", str(png)],
+                           check=True)
+            im = cv2.imread(str(png))
+            if im is None:
+                return None
+            top, bottom = im[480, 540], im[1440, 540]
+            # Two panels means red above and blue below. One uncut shot
+            # means both samples land in the same half of the 9:16 crop.
+            return bool(top[2] > 150 and top[0] < 80
+                        and bottom[0] > 150 and bottom[2] < 80)
+
+        assert split_like(1.5) is True, "the split is missing inside its window"
+        assert split_like(0.4) is False, \
+            "the split reached BACK before its start -- the reported bug"
+        assert split_like(2.6) is False, "the split leaked past its end"
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod._SPEAKER_FACE_CACHE.pop(sid, None)
+        app_mod.jobs.pop(sid, None)
+        app_mod.jobs.pop(rid, None)
+
+
 def test_the_coeditor_can_hear_the_answer_to_its_own_question(app_mod, temp_db,
                                                               monkeypatch):
     """It is told three times to ask for clarification. Nothing used to carry
@@ -3814,3 +4032,490 @@ def test_a_sliding_overlay_really_leaves_the_frame(app_mod, tmp_path):
     assert car[2.15] is None or car[2.15][0] < settled_left - 20, (
         f"the carousel card did not carry through: exit frame {car[2.15]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Diarizing the whole edit, not each clip it was cut from.
+#
+# Several interviews stitched into one Main track came back as TWO speakers,
+# not six -- and it was never a cap, since the UI defaults to "Up to 6".
+# Diarization runs per SOURCE clip and every run numbers from scratch, so
+# interview A and interview B each produce SPEAKER_00 and SPEAKER_01 for
+# different humans. Nothing namespaced them, so the project merged six
+# people into two and coloured person A and person D identically.
+#
+# The layout is the piece most likely to be wrong and needs no audio at all,
+# so it is tested hardest.
+# ---------------------------------------------------------------------------
+
+def _audio_tl(clips):
+    return {"canvas": "9x16", "tracks": {"main": clips, "overlay": [],
+                                         "effects": [], "text": [], "music": []}}
+
+
+def test_one_clip_with_no_cuts_is_one_piece_at_zero(app_mod):
+    out = app_mod._tl_audio_layout(_audio_tl(
+        [{"id": "m1", "source_job_id": "A", "in": 2.0, "out": 9.0}]))
+    assert len(out["pieces"]) == 1
+    p = out["pieces"][0]
+    assert (p["source_job_id"], p["src_in"], p["src_out"]) == ("A", 2.0, 9.0)
+    assert p["out_start"] == 0.0 and p["dur"] == 7.0
+    assert out["analysis_total"] == 7.0 and out["render_total"] == 7.0
+
+
+def test_cuts_split_a_clip_into_contiguous_pieces(app_mod):
+    """No gap and no overlap -- a gap is exactly where a drift comes from."""
+    out = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 10.0,
+         "cuts": [[3.0, 4.0], [7.0, 7.5]]}]))
+    pieces = out["pieces"]
+    assert [(p["src_in"], p["src_out"]) for p in pieces] == [
+        (0.0, 3.0), (4.0, 7.0), (7.5, 10.0)]
+    # The analysis clock has to be exactly cumulative, because that IS the
+    # concatenated audio the diarization timestamps will refer to.
+    assert [p["out_start"] for p in pieces] == [0.0, 3.0, 6.0]
+    assert out["analysis_total"] == pytest.approx(8.5)
+    for a, b in zip(pieces, pieces[1:]):
+        assert b["out_start"] == pytest.approx(a["out_start"] + a["dur"]), \
+            "a gap or overlap between pieces"
+
+
+def test_three_sources_come_back_in_order_with_their_own_ids(app_mod):
+    """The stitched-interview case: three clips, three sources, in order."""
+    out = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 4.0},
+        {"id": "m2", "source_job_id": "B", "in": 1.0, "out": 3.0},
+        {"id": "m3", "source_job_id": "C", "in": 5.0, "out": 8.0}]))
+    assert [p["source_job_id"] for p in out["pieces"]] == ["A", "B", "C"]
+    assert [p["out_start"] for p in out["pieces"]] == [0.0, 4.0, 6.0]
+    assert out["analysis_total"] == 9.0
+
+
+def test_a_crossfade_shortens_the_render_but_not_the_analysis(app_mod):
+    """Two clocks, deliberately.
+
+    The analysis audio is joined with hard cuts -- a crossfade there would
+    blend two people's voices at every boundary -- so its total is the plain
+    sum. The export crossfades, so it is shorter. Conflating them is the
+    drift that misattributes speakers.
+    """
+    out = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 4.0},
+        {"id": "m2", "source_job_id": "B", "in": 0.0, "out": 4.0,
+         "transition": {"type": "crossfade"}}]))
+    assert out["analysis_total"] == 8.0, "a crossfade must not shorten the audio"
+    assert out["render_total"] < 8.0, "the export is shortened by the xfade"
+
+    # And it is shortened by exactly the transition the renderer would use,
+    # because both go through _tl_transition_step rather than two copies of
+    # the same sum.
+    hard, tdur, offset, seg_start, new_cur = app_mod._tl_transition_step(
+        4.0, 4.0, "crossfade")
+    assert not hard
+    assert out["render_total"] == pytest.approx(8.0 - tdur)
+    assert out["pieces"][1]["render_start"] == pytest.approx(offset)
+
+
+def test_the_renderer_folds_with_the_same_arithmetic(app_mod, tmp_path):
+    """Asserted against _tl_build_main_track's own answer, so the two cannot
+    disagree about where a crossfaded clip starts."""
+    if not _have("flask"):
+        pytest.skip("flask not installed")
+    import uuid
+    jid = uuid.uuid4().hex
+    made = []
+    try:
+        segs = []
+        for i, colour in enumerate(("red", "blue")):
+            sp = tmp_path / f"seg{i}.mp4"
+            subprocess.run(
+                [FFMPEG, "-v", "error", "-y",
+                 "-f", "lavfi", "-i", f"color=c={colour}:s=320x240:d=2:r=30",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                 "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac", str(sp)],
+                check=True)
+            segs.append((sp, 2.0))
+        out = tmp_path / "folded.mp4"
+        made.append(out)
+        total, starts = app_mod._tl_build_main_track(
+            segs, ["crossfade"], out, jid)
+
+        layout = app_mod._tl_audio_layout(_audio_tl([
+            {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 2.0},
+            {"id": "m2", "source_job_id": "B", "in": 0.0, "out": 2.0,
+             "transition": {"type": "crossfade"}}]))
+        assert [p["render_start"] for p in layout["pieces"]] == \
+            pytest.approx(starts)
+        assert layout["render_total"] == pytest.approx(total)
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def test_a_transition_only_lands_at_the_start_of_a_clip(app_mod):
+    """A text-edit cut inside a clip is a hard cut, like the renderer's."""
+    out = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 9.0,
+         "cuts": [[4.0, 5.0]], "transition": {"type": "crossfade"}},
+        {"id": "m2", "source_job_id": "B", "in": 0.0, "out": 4.0,
+         "transition": {"type": "crossfade"}}]))
+    assert [p["transition"] for p in out["pieces"]] == \
+        ["crossfade", 0, "crossfade"]
+
+
+def test_the_global_labels_land_back_in_each_source_own_time(app_mod):
+    """The step that makes a whole-edit analysis useful to what exists.
+
+    Everything downstream asks "who is talking at time t in THIS clip", so
+    one global diarization is clipped per piece and translated back -- while
+    the labels stay global, which is the entire point.
+    """
+    layout = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 10.0, "out": 14.0},
+        {"id": "m2", "source_job_id": "B", "in": 30.0, "out": 34.0}]))
+    pieces = layout["pieces"]
+    # Four people across two interviews, in ONE label space.
+    segments = [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_02"},
+        {"start": 6.0, "end": 8.0, "speaker": "SPEAKER_03"},
+    ]
+    by = app_mod._tl_project_diarization_to_sources(segments, pieces)
+    assert set(by) == {"A", "B"}
+    # A's clip starts at 10s in its own source, so global 0-4 is 10-14 there.
+    assert [(s["start"], s["end"], s["speaker"]) for s in by["A"]] == [
+        (10.0, 12.0, "SPEAKER_00"), (12.0, 14.0, "SPEAKER_01")]
+    assert [(s["start"], s["end"], s["speaker"]) for s in by["B"]] == [
+        (30.0, 32.0, "SPEAKER_02"), (32.0, 34.0, "SPEAKER_03")]
+    # And the labels do NOT collide, which per-clip runs guaranteed they would.
+    assert not ({s["speaker"] for s in by["A"]}
+                & {s["speaker"] for s in by["B"]})
+
+
+def test_contiguous_pieces_of_one_source_are_put_back_together(app_mod):
+    """Two Main clips that pick up where the other left off are one stretch
+    of source audio, so one speaker must not arrive as two segments -- every
+    reader expects the shape a single-source run produces.
+
+    And a cut is NOT such a boundary: the 0.4s it removed really is a gap in
+    source time, and claiming the speaker talked through it would assert
+    something the analysis never said about material the user deleted.
+    """
+    layout = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 5.0},
+        {"id": "m2", "source_job_id": "A", "in": 5.0, "out": 10.0}]))
+    by = app_mod._tl_project_diarization_to_sources(
+        [{"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"}],
+        layout["pieces"])
+    assert len(by["A"]) == 1, by["A"]
+    assert by["A"][0]["start"] == 0.0 and by["A"][0]["end"] == pytest.approx(10.0)
+
+    layout = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 10.0,
+         "cuts": [[4.0, 4.4]]}]))
+    by = app_mod._tl_project_diarization_to_sources(
+        [{"start": 0.0, "end": 9.6, "speaker": "SPEAKER_00"}],
+        layout["pieces"])
+    assert [(s["start"], s["end"]) for s in by["A"]] == [(0.0, 4.0), (4.4, 10.0)]
+
+
+def test_a_piece_with_no_source_job_is_not_attributed(app_mod):
+    """An asset clip -- a still, a stock video -- has no transcript to colour."""
+    layout = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "asset_id": "deadbeef", "in": 0.0, "out": 3.0},
+        {"id": "m2", "source_job_id": "A", "in": 0.0, "out": 3.0}]))
+    assert layout["pieces"][0]["source_job_id"] is None
+    by = app_mod._tl_project_diarization_to_sources(
+        [{"start": 0.0, "end": 6.0, "speaker": "SPEAKER_00"}],
+        layout["pieces"])
+    # Its 3 seconds still occupy the clock, so A's words start at 0, not 3.
+    assert set(by) == {"A"}
+    assert by["A"][0]["start"] == 0.0 and by["A"][0]["end"] == pytest.approx(3.0)
+
+
+def test_an_empty_main_track_says_so_rather_than_diarizing_nothing(app_mod,
+                                                                   tmp_path):
+    with pytest.raises(RuntimeError, match="empty"):
+        app_mod._tl_concat_main_audio(_audio_tl([]), tmp_path / "x.wav")
+
+
+def test_the_joined_audio_is_as_long_as_the_layout_says(app_mod, tmp_path):
+    """What makes the diarization's timestamps line up at all.
+
+    Three distinct tones are not speech, so pyannote cannot be exercised
+    offline -- that gap is real and is flagged. What CAN be proven here is
+    the thing the timestamps depend on: the stream is exactly the length the
+    layout claims, piece by piece.
+    """
+    if not _have("flask"):
+        pytest.skip("flask not installed")
+    import uuid
+    ids = [uuid.uuid4().hex, uuid.uuid4().hex]
+    made = []
+    try:
+        for jid, freq in zip(ids, (220, 660)):
+            src = app_mod.UPLOAD_DIR / f"{jid}.mp4"
+            subprocess.run(
+                [FFMPEG, "-v", "error", "-y",
+                 "-f", "lavfi", "-i", "color=c=black:s=160x120:d=6:r=15",
+                 "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=6",
+                 "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)],
+                check=True)
+            made.append(src)
+            app_mod.jobs[jid] = {
+                "status": "done", "progress": 100, "output": None,
+                "error": None, "audio": None, "emoji_rules": {},
+                "created_at": 0.0, "words": None, "style": {},
+                "filename": f"{jid}.mp4"}
+
+        tl = _audio_tl([
+            {"id": "m1", "source_job_id": ids[0], "in": 1.0, "out": 4.0,
+             "cuts": [[2.0, 2.5]]},
+            {"id": "m2", "source_job_id": ids[1], "in": 0.0, "out": 2.0}])
+        wav = tmp_path / "joined.wav"
+        layout = app_mod._tl_concat_main_audio(tl, wav)
+        made.append(wav)
+        assert wav.exists() and wav.stat().st_size > 1000
+        # 1.0-2.0, 2.5-4.0, then 0-2.0 == 4.5s
+        assert layout["analysis_total"] == pytest.approx(4.5)
+        dur = app_mod._media_duration(wav)
+        assert dur == pytest.approx(layout["analysis_total"], abs=0.15), \
+            f"the joined audio is {dur}s, the layout says {layout['analysis_total']}s"
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for jid in ids:
+            app_mod.jobs.pop(jid, None)
+
+
+def test_a_source_with_no_audio_becomes_silence_not_a_shorter_stream(app_mod,
+                                                                    tmp_path):
+    """Skipping it would shift every speaker after it -- a failure that looks
+    like bad diarization rather than like a missing audio track."""
+    if not _have("flask"):
+        pytest.skip("flask not installed")
+    import uuid
+    jid = uuid.uuid4().hex
+    made = []
+    try:
+        src = app_mod.UPLOAD_DIR / f"{jid}.mp4"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-y", "-f", "lavfi",
+             "-i", "color=c=green:s=160x120:d=5:r=15",
+             "-pix_fmt", "yuv420p", "-an", str(src)], check=True)
+        made.append(src)
+        app_mod.jobs[jid] = {
+            "status": "done", "progress": 100, "output": None, "error": None,
+            "audio": None, "emoji_rules": {}, "created_at": 0.0,
+            "words": None, "style": {}, "filename": f"{jid}.mp4"}
+        wav = tmp_path / "silent.wav"
+        layout = app_mod._tl_concat_main_audio(
+            _audio_tl([{"id": "m1", "source_job_id": jid,
+                        "in": 0.0, "out": 4.0}]), wav)
+        made.append(wav)
+        assert layout["analysis_total"] == pytest.approx(4.0)
+        assert app_mod._media_duration(wav) == pytest.approx(4.0, abs=0.15)
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod.jobs.pop(jid, None)
+
+
+def test_a_global_label_overrides_the_colliding_per_clip_one(app_mod, tmp_path,
+                                                             monkeypatch):
+    """The collision, end to end at the caption level.
+
+    Words arrive already stamped by their own clip's Analyze -- and those
+    stamps are from runs that each started at SPEAKER_00. So in a stitched
+    edit person A and person D both carry "SPEAKER_00" and get the same
+    colour. _stamp_caption_words_from_source used to leave a stamped word
+    alone, which is right for a per-source analysis and wrong here.
+    """
+    seg_meta = [
+        {"source_job_id": "A", "src_in": 0.0, "src_out": 2.0,
+         "burn_captions": True},
+        {"source_job_id": "B", "src_in": 0.0, "src_out": 2.0,
+         "burn_captions": True},
+    ]
+    seg_starts = [0.0, 2.0]
+    words = [
+        {"word": "one", "start": 0.5, "end": 0.9, "speaker": "SPEAKER_00"},
+        {"word": "two", "start": 2.5, "end": 2.9, "speaker": "SPEAKER_00"},
+    ]
+    by_source = {
+        "A": [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        "B": [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_02"}],
+    }
+    app_mod._stamp_caption_words_from_source(words, seg_meta, seg_starts,
+                                             by_source)
+    assert words[0]["speaker"] == "SPEAKER_00"
+    assert words[1]["speaker"] == "SPEAKER_02", \
+        "the second interview kept the colliding label"
+
+    # Without a whole-edit analysis the old contract stands: a stamp made in
+    # source time is the better one and is not touched.
+    words2 = [{"word": "one", "start": 0.5, "end": 0.9,
+               "speaker": "SPEAKER_01"}]
+    app_mod._stamp_caption_words_from_source(words2, seg_meta, seg_starts, None)
+    assert words2[0]["speaker"] == "SPEAKER_01"
+
+
+def test_six_speakers_get_six_colours(app_mod):
+    """Two is what one interview has. The project ships with Host and Guest,
+    so without this everyone from the third person on falls back to the plain
+    caption colour -- the thing the global analysis exists to remove."""
+    filled = app_mod._fill_speaker_colors(
+        {"SPEAKER_00": "#FFD700", "SPEAKER_01": "#00E5FF"},
+        [f"SPEAKER_0{i}" for i in range(6)])
+    assert len(filled) == 6
+    assert len(set(filled.values())) == 6, f"duplicate colours: {filled}"
+    # The two the user chose are untouched.
+    assert filled["SPEAKER_00"] == "#FFD700" and filled["SPEAKER_01"] == "#00E5FF"
+    # Speaker colours off stays off -- turning them on is not this call.
+    assert app_mod._fill_speaker_colors({}, ["SPEAKER_00"]) == {}
+
+
+def test_the_palette_is_the_same_in_both_languages(app_mod):
+    """A third and fourth caption colour that disagreed between preview and
+    render is the same class of bug as three animation systems each with
+    their own idea of time."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    block = js[js.index("DEFAULT_SPEAKER_PALETTE = ["):]
+    block = block[:block.index("]")]
+    in_js = re.findall(r'"(#[0-9a-fA-F]{6})"', block)
+    assert in_js, "no palette found in the browser"
+    assert [c.lower() for c in in_js] == \
+        [c.lower() for c in app_mod.DEFAULT_SPEAKER_PALETTE]
+
+
+def test_the_whole_edit_endpoint_needs_a_main_track(app_mod, temp_db):
+    import uuid
+    jid = uuid.uuid4().hex
+    app_mod.jobs[jid] = {"status": "done", "progress": 100, "output": None,
+                         "error": None, "audio": None, "emoji_rules": {},
+                         "created_at": 0.0, "words": None, "style": {},
+                         "filename": "x.mp4"}
+    try:
+        c = app_mod.app.test_client()
+        r = c.post("/analyze-timeline-speakers",
+                   json={"job_id": jid, "timeline": _audio_tl([])})
+        assert r.status_code == 400 and "Main track" in r.get_json()["error"]
+        r = c.post("/analyze-timeline-speakers", json={"job_id": "nope"})
+        assert r.status_code == 404
+        # Nothing analysed yet is a plain answer, not an error.
+        assert c.get(f"/timeline-speakers/{jid}").get_json() == {"ready": False}
+    finally:
+        app_mod.jobs.pop(jid, None)
+
+
+def test_a_cached_whole_edit_analysis_is_read_back(app_mod):
+    import uuid
+    jid = uuid.uuid4().hex
+    p = app_mod._tl_diar_path(jid)
+    try:
+        p.write_text(json.dumps({
+            "speakers": ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"],
+            "sources": ["A", "B"], "analysis_total": 42.0,
+            "by_source": {"A": [{"start": 0, "end": 1,
+                                 "speaker": "SPEAKER_00"}]},
+        }), encoding="utf-8")
+        rec = app_mod._tl_load_timeline_diarization(jid)
+        assert rec and rec["speakers"][2] == "SPEAKER_02"
+        out = app_mod.app.test_client().get(
+            f"/timeline-speakers/{jid}").get_json()
+        assert out["ready"] is True and out["speaker_count"] == 3
+        assert out["sources"] == ["A", "B"]
+        # A file without by_source is not a usable analysis.
+        p.write_text(json.dumps({"speakers": ["SPEAKER_00"]}), encoding="utf-8")
+        assert app_mod._tl_load_timeline_diarization(jid) is None
+    finally:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def test_the_whole_edit_button_exists_and_is_wired():
+    """Three buttons, and the distinction between them is what caused the
+    confusion -- so the one that is actually global has to be reachable."""
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'id="tlAnalyzeEditBtn"' in html
+    assert "Analyze whole edit" in html
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert 'tlAnalyzeEditBtn' in js
+    assert "/analyze-timeline-speakers" in js
+    assert "runAnalyzeWholeEdit" in js
+
+
+def test_four_people_across_two_interviews_get_four_caption_colours(app_mod):
+    """The claim the whole feature exists for, end to end offline.
+
+    Chain: the whole-edit diarization is projected into each source's own
+    time, overrides the colliding per-clip stamps, the palette fills in the
+    speakers the project never had pickers for, and build_ass burns them.
+
+    Before this, interview A's SPEAKER_00 and interview B's SPEAKER_00 were
+    different humans with the same name -- so they burned in one colour, and
+    a test that only asked "did two colours appear" would have passed on the
+    two the project already had.
+    """
+    layout = app_mod._tl_audio_layout(_audio_tl([
+        {"id": "m1", "source_job_id": "A", "in": 0.0, "out": 4.0},
+        {"id": "m2", "source_job_id": "B", "in": 0.0, "out": 4.0}]))
+    pieces = layout["pieces"]
+    by_source = app_mod._tl_project_diarization_to_sources([
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_02"},
+        {"start": 6.0, "end": 8.0, "speaker": "SPEAKER_03"},
+    ], pieces)
+
+    seg_meta = [{"source_job_id": p["source_job_id"], "src_in": p["src_in"],
+                 "src_out": p["src_out"], "burn_captions": True}
+                for p in pieces]
+    seg_starts = [p["out_start"] for p in pieces]
+    # Every word arrives stamped the way its own clip's Analyze stamped it:
+    # two names for four people.
+    words = [
+        {"word": "one", "start": 0.5, "end": 0.9, "speaker": "SPEAKER_00"},
+        {"word": "two", "start": 2.5, "end": 2.9, "speaker": "SPEAKER_01"},
+        {"word": "three", "start": 4.5, "end": 4.9, "speaker": "SPEAKER_00"},
+        {"word": "four", "start": 6.5, "end": 6.9, "speaker": "SPEAKER_01"},
+    ]
+    app_mod._stamp_caption_words_from_source(words, seg_meta, seg_starts,
+                                             by_source)
+    assert [w["speaker"] for w in words] == [
+        "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", "SPEAKER_03"]
+
+    colours = app_mod._fill_speaker_colors(
+        dict(_TWO_COLOURS), ["SPEAKER_0%d" % i for i in range(4)])
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE,
+                            1080, 1920, speaker_colors=colours)
+    got = _spoken_colours(ass)
+    assert len(got) == 4, f"four people, {len(got)} colour(s): {got}"
+
+    # The discrimination: without the whole-edit analysis the same four words
+    # keep their colliding labels and burn in TWO colours. If this passed,
+    # the test above would be guarding nothing.
+    words_before = [
+        {"word": "one", "start": 0.5, "end": 0.9, "speaker": "SPEAKER_00"},
+        {"word": "two", "start": 2.5, "end": 2.9, "speaker": "SPEAKER_01"},
+        {"word": "three", "start": 4.5, "end": 4.9, "speaker": "SPEAKER_00"},
+        {"word": "four", "start": 6.5, "end": 6.9, "speaker": "SPEAKER_01"},
+    ]
+    app_mod._stamp_caption_words_from_source(words_before, seg_meta,
+                                             seg_starts, None)
+    ass_before = app_mod.build_ass(words_before, app_mod._TL_DEFAULT_CAPTION_STYLE,
+                                   1080, 1920, speaker_colors=colours)
+    assert len(_spoken_colours(ass_before)) == 2, \
+        "the bug does not reproduce, so the fix above proves nothing"

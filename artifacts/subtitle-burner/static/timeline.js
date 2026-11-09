@@ -2291,6 +2291,64 @@
     }
   }
 
+  // Diarize the WHOLE edit, not each clip it was cut from.
+  //
+  // "Analyze all Main" runs the per-source analysis once per source, and
+  // every run numbers its speakers from scratch -- so three interviews come
+  // back as SPEAKER_00/01 three times over and the project merges six people
+  // into two, colouring person A and person D identically. This joins the
+  // Main track's audio and diarizes it once, which is the only way to get
+  // one label space.
+  async function runAnalyzeWholeEdit(triggerBtn) {
+    if (!tl || !tl.job_id) {
+      alert("Open a timeline project first.");
+      return;
+    }
+    const mains = ((tl.tracks && tl.tracks.main) || [])
+      .filter((c) => c && c.source_job_id);
+    if (!mains.length) {
+      alert("Add transcribed Main clips first, then Analyze whole edit.");
+      return;
+    }
+    const wrap = $("tlAnalyzeProgressWrap");
+    if (wrap) wrap.hidden = false;
+    const was = triggerBtn ? triggerBtn.textContent : "";
+    if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = "Analyzing…"; }
+    setAnalyzeProgressUI(10, "Joining the Main track's audio…");
+    try {
+      const body = { job_id: tl.job_id, timeline: serialize() };
+      // Same "Up to N" control the per-source Analyze uses. It is an element
+      // id, not a function -- and it defaults to 6, so it was never the cap
+      // that made six people look like two.
+      const sel = document.getElementById("analyzeMaxSpeakers");
+      const cap = sel && sel.value ? parseInt(sel.value, 10) : 0;
+      if (cap > 0) { body.max_speakers = cap; body.min_speakers = 1; }
+      const r = await fetch("/analyze-timeline-speakers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || "analysis failed");
+      // Six speakers need six colours. The project ships with Host and
+      // Guest because one interview has two, so without this everyone from
+      // the third person on falls back to the plain caption colour -- which
+      // is the bug this whole feature exists to remove.
+      tl.speaker_colors = Object.assign({}, tl.speaker_colors || {},
+                                        data.speaker_colors || {});
+      scheduleSave();
+      renderProps();
+      setAnalyzeProgressUI(100,
+        `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)` +
+        ` — one label space`);
+    } catch (e) {
+      setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + (e.message || e));
+      alert("Whole-edit analysis failed: " + (e.message || e));
+    } finally {
+      if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = was; }
+    }
+  }
+
   function wireTranscriptToolbar() {
     const restoreBtn = $("tlTranscriptRestoreBtn");
     const fillerBtn = $("tlTranscriptFillersBtn");
@@ -2337,6 +2395,12 @@
           return;
         }
         runAnalyzeForJobIds(ids, analyzeAllBtn).catch(() => {});
+      };
+    }
+    const analyzeEditBtn = $("tlAnalyzeEditBtn");
+    if (analyzeEditBtn) {
+      analyzeEditBtn.onclick = () => {
+        runAnalyzeWholeEdit(analyzeEditBtn).catch(() => {});
       };
     }
     window.onTimelineAnalyzeReady = (jobId) => {
@@ -9367,6 +9431,39 @@
             if (!(c.out > (c.in || 0))) c.out = (c.in || 0) + 0.2;
             notes.push(`shot ${i} range`);
             applied++;
+          }
+        } else if (name === "add_effect") {
+          // The op the registry was missing. Of the three effect ops the
+          // co-editor had, all three acted on an effect that already
+          // existed -- so asked for a split screen over a time window it
+          // substituted apply_clip_style("split_stack"), which restyles
+          // whole Main clips. That is why a windowed split applied to
+          // everything.
+          //
+          // addEffectClip already anchors to the OUTPUT playhead, defaults
+          // the duration per type, and carries mode/speakers, so this is a
+          // thin call: the capability existed, nothing could ask for it.
+          const ftype = String(op.type || "");
+          if (!EFFECT_TYPES.some((t) => t.id === ftype)) {
+            notes.push(`no such effect: ${ftype || "(none)"}`);
+          } else {
+            const o = {};
+            if (op.start != null) o.start = Number(op.start);
+            if (op.duration != null) o.out = Number(op.duration);
+            else if (op.out != null) o.out = Number(op.out);
+            if (op.intensity) o.intensity = op.intensity;
+            if (op.direction) o.direction = op.direction;
+            if (op.layout) o.layout = op.layout;
+            if (op.preset) o.preset = op.preset;
+            if (op.mode) o.mode = op.mode;
+            if (Array.isArray(op.speakers)) o.speakers = op.speakers;
+            const ec = await addEffectClip(ftype, o);
+            if (ec) {
+              notes.push(`${ftype.replace(/_/g, " ")} at ${ec.start.toFixed(1)}s for ${ec.out.toFixed(1)}s`);
+              applied++;
+            } else {
+              notes.push(`could not place ${ftype}`);
+            }
           }
         } else if (name === "set_effect_time") {
           // Moving or stretching a camera move on the Effects lane.

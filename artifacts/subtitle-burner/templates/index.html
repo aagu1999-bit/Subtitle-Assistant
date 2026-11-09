@@ -1620,7 +1620,8 @@
               <span id="tlTranscriptMeta" class="muted tl-transcript-meta"></span>
               <div class="tl-transcript-actions">
                 <button type="button" id="tlAnalyzeBtn" class="btn btn-secondary btn-sm" title="PyAnnote speaker diarization (+ optional faces) for this clip’s source">Analyze speakers</button>
-                <button type="button" id="tlAnalyzeAllBtn" class="btn btn-secondary btn-sm" title="Analyze every unique Main source (multi-interview)">Analyze all Main</button>
+                <button type="button" id="tlAnalyzeAllBtn" class="btn btn-secondary btn-sm" title="Analyze every unique Main source separately — each run numbers its speakers from scratch, so two interviews both get a SPEAKER_00">Analyze all Main</button>
+                <button type="button" id="tlAnalyzeEditBtn" class="btn btn-secondary btn-sm" title="Join the Main track's audio and diarize it ONCE — one label space, so six people across several interviews come back as six speakers, not two">Analyze whole edit</button>
                 <button type="button" id="tlTranscriptFillersBtn" class="btn btn-secondary btn-sm" title="Strike common filler words (um, uh, like, you know…)">Cut fillers</button>
                 <button type="button" id="tlTranscriptRestoreBtn" class="btn btn-secondary btn-sm" title="Restore every struck word in this clip">Restore all</button>
               </div>

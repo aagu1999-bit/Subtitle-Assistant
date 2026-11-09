@@ -5043,6 +5043,14 @@ _EFFECT_LIMITS = {
     "split_screen": (1.0, 15.0),  # both speakers framed together
 }
 
+# Everything the effects lane will carry. _normalize_timeline drops any clip
+# whose type is not in here, so a resolver that accepted a wider set would
+# hand the client a clip that vanishes on the next save -- the silent-sink
+# failure this codebase has hit twice. One definition, both readers.
+TL_EFFECT_TYPES = (
+    "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen",
+)
+
 
 def _build_effect_suggestion_prompt(transcript: str, total: float,
                                     max_effects: int,
@@ -11784,6 +11792,46 @@ def analyze_deps_endpoint():
     })
 
 
+# The same palette the browser uses in static/app.js (DEFAULT_SPEAKER_PALETTE).
+# Two readers of one list, and a test asserts they match -- a third and a
+# fourth caption colour that disagreed between preview and render would be
+# the same class of bug as the three animation systems that each had their
+# own idea of time.
+DEFAULT_SPEAKER_PALETTE = [
+    "#FFD700", "#00E5FF", "#a3be8c", "#b48ead", "#d08770",
+    "#88c0d0", "#bf616a", "#5e81ac", "#ebcb8b", "#c084fc",
+]
+
+
+def _default_speaker_color(spk: str, index_fallback: int = 0) -> str:
+    """Stable colour per SPEAKER_NN, by id rather than by sort order."""
+    m = re.match(r"SPEAKER_(\d+)$", str(spk or "").strip(), re.I)
+    i = int(m.group(1)) if m else int(index_fallback or 0)
+    return DEFAULT_SPEAKER_PALETTE[abs(i) % len(DEFAULT_SPEAKER_PALETTE)]
+
+
+def _fill_speaker_colors(speaker_colors: dict, speakers: list) -> dict:
+    """Give every speaker the analysis found a colour of its own.
+
+    The project normally carries two -- Host and Guest -- because two is
+    what a single interview has. A stitched edit has six, and a speaker
+    with no entry falls back to the primary caption colour, so speakers
+    three onward would all look identical: the very thing the global
+    diarization exists to fix.
+
+    Only fills when the user already wants speaker colours at all. An empty
+    map means the feature is off, and turning it on for them is not this
+    function's call.
+    """
+    if not isinstance(speaker_colors, dict) or not speaker_colors:
+        return speaker_colors if isinstance(speaker_colors, dict) else {}
+    out = dict(speaker_colors)
+    for i, spk in enumerate(speakers or []):
+        if spk and spk not in out:
+            out[spk] = _default_speaker_color(spk, i)
+    return out
+
+
 def _speaker_label_for_id(spk: str, index_fallback: int = 0) -> str:
     """Stable Host/Guest labels by SPEAKER_NN id (not sort order)."""
     m = re.match(r"SPEAKER_(\d+)$", str(spk or "").strip(), re.I)
@@ -11870,7 +11918,8 @@ def assign_speakers_to_words(words: list, diarization: list) -> list:
 
 def _stamp_caption_words_from_source(caption_words: list,
                                       seg_meta: list,
-                                      seg_starts: list) -> int:
+                                      seg_starts: list,
+                                      diar_by_source: dict | None = None) -> int:
     """Colour-code Timeline captions from each source clip's diarization.
 
     assign_speakers_to_words does this in SOURCE time, where a word and a
@@ -11887,27 +11936,40 @@ def _stamp_caption_words_from_source(caption_words: list,
 
     Words that already carry a speaker are left alone: a stamp made in
     source time, before any cutting, is the better one.
+
+    EXCEPT when *diar_by_source* is given. That is the whole-edit
+    diarization projected back into each source's time, and its labels are
+    global. A word pre-stamped by its own clip's Analyze carries a label
+    from a run that started again at SPEAKER_00, so in a stitched edit
+    person A and person D are both "SPEAKER_00" and get the same caption
+    colour. The global label is the authoritative one, so here it REPLACES
+    what is there rather than deferring to it -- which is the only way the
+    collision actually goes away.
     """
     stamped = 0
+    global_diar = diar_by_source if isinstance(diar_by_source, dict) else {}
     for idx, meta in enumerate(seg_meta or []):
         sjid = meta.get("source_job_id")
         if not sjid:
             continue
-        cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
-        if not cache_path.exists():
-            continue
-        try:
-            diar_src = (json.loads(cache_path.read_text(encoding="utf-8"))
-                        .get("diarization") or [])
-        except (json.JSONDecodeError, OSError):
-            continue
+        diar_src = global_diar.get(sjid) or []
+        authoritative = bool(diar_src)
+        if not diar_src:
+            cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
+            if not cache_path.exists():
+                continue
+            try:
+                diar_src = (json.loads(cache_path.read_text(encoding="utf-8"))
+                            .get("diarization") or [])
+            except (json.JSONDecodeError, OSError):
+                continue
         if not diar_src:
             continue
         seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
         src_in = float(meta.get("src_in") or 0)
         src_out = float(meta.get("src_out") or 0)
         for w in caption_words:
-            if w.get("speaker"):
+            if w.get("speaker") and not authoritative:
                 continue
             try:
                 mid_out = (float(w["start"]) + float(w["end"])) / 2.0
@@ -13905,6 +13967,34 @@ def _tl_concat(paths: list, out_path: Path) -> None:
         _safe_unlink(list_path)
 
 
+def _tl_transition_step(cur_dur: float, nxt_dur: float,
+                        tname) -> tuple[bool, float, float, float, float]:
+    """The arithmetic of folding one more segment onto a growing track.
+
+    Returns (is_hard_cut, tdur, offset, new_seg_start, new_cur_dur).
+
+    Pulled out of _tl_build_main_track because a second reader appeared:
+    _tl_audio_layout has to know where every piece lands WITHOUT rendering,
+    so analysis can run before an export exists. Two hand-written copies of
+    "a crossfade shortens the total by its own duration" would drift, and a
+    drifting layout misattributes speakers -- which is invisible until the
+    wrong person's caption colour shows up on screen.
+
+    A transition is refused when the segments are too short to carry one;
+    the caller then does a hard cut, which is the same decision the
+    renderer made inline before.
+    """
+    max_tdur = min(0.8, cur_dur * 0.45, nxt_dur * 0.45)
+    is_hard_cut = not tname
+    if tname and (max_tdur < 0.12 or cur_dur < 0.28 or nxt_dur < 0.28):
+        is_hard_cut = True
+    if is_hard_cut:
+        return True, 0.0, 0.0, cur_dur, cur_dur + nxt_dur
+    tdur = max(0.12, max_tdur)
+    offset = max(0.0, cur_dur - tdur)
+    return False, tdur, offset, offset, cur_dur + nxt_dur - tdur
+
+
 def _tl_build_main_track(segments: list, transitions: list,
                          out_path: Path, job_id: str) -> tuple[float, list]:
     """Stitch normalized *segments* into one clip.
@@ -13943,28 +14033,22 @@ def _tl_build_main_track(segments: list, transitions: list,
             nxt_path, nxt_dur = segments[i]
             tname = transitions[i - 1] if i - 1 < len(transitions) else 0
             step_out = UPLOAD_DIR / f"{job_id}_tlmix{i:03d}.mp4"
-            max_tdur = min(0.8, cur_dur * 0.45, nxt_dur * 0.45)
-            is_hard_cut = not tname
-            if tname and (max_tdur < 0.12 or cur_dur < 0.28 or nxt_dur < 0.28):
+            # One arithmetic, shared with _tl_audio_layout -- see there.
+            is_hard_cut, tdur, offset, new_seg_start, new_cur_dur = \
+                _tl_transition_step(cur_dur, nxt_dur, tname)
+            if tname and is_hard_cut:
                 # Segments too short for a real crossfade — fall back to a
                 # hard cut instead of forcing a degenerate xfade duration.
                 print(f"[timeline] Transition {i}: segments too short — hard cut", flush=True)
-                is_hard_cut = True
             if not is_hard_cut:
                 xfade = TIMELINE_TRANSITIONS.get(str(tname), "fade")
-                tdur = max(0.12, max_tdur)
-                offset = max(0.0, cur_dur - tdur)
                 fc = (
                     f"[0:v][1:v]xfade=transition={xfade}:duration={tdur:.3f}:"
                     f"offset={offset:.3f},format=yuv420p[v];"
                     f"[0:a][1:a]acrossfade=d={tdur:.3f}[a]"
                 )
-                new_seg_start = offset
-                new_cur_dur = cur_dur + nxt_dur - tdur
             else:
                 fc = "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
-                new_seg_start = cur_dur
-                new_cur_dur = cur_dur + nxt_dur
             try:
                 _tl_run(
                     [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
@@ -15028,6 +15112,276 @@ def _tl_keep_ranges(t_in: float, t_out: float, cuts: list) -> list:
     return [(s, e) for s, e in keep if e - s >= 0.1]
 
 
+# ---------------------------------------------------------------------------
+# Diarizing the whole edit, rather than each clip it was cut from.
+#
+# Several interviews stitched into one Main track came back as TWO speakers,
+# not six. It was never a cap -- the UI defaults to "Up to 6".
+#
+# Diarization runs on each SOURCE clip's own audio, and every run numbers
+# from scratch:
+#
+#     interview A -> SPEAKER_00, SPEAKER_01
+#     interview B -> SPEAKER_00, SPEAKER_01   <- different humans, same names
+#     interview C -> SPEAKER_00, SPEAKER_01
+#
+# Nothing namespaced them, so the project merged six people into two and
+# coloured person A and person D identically. "Analyze all Main" did not
+# help: it analyses each source separately and the labels still collide.
+#
+# The fix: concatenate the Main track's AUDIO and diarize that once. One
+# stream, one label space, genuinely global.
+# ---------------------------------------------------------------------------
+
+def _tl_audio_layout(tl: dict) -> dict:
+    """Where every piece of the Main track lands, without rendering anything.
+
+    Returns {"pieces": [...], "analysis_total": s, "render_total": s}, each
+    piece carrying:
+
+        source_job_id, asset_id, src_in, src_out, dur,
+        out_start     -- its position in the CONCATENATED ANALYSIS AUDIO
+        render_start  -- its position in the exported video
+
+    Those two clocks are deliberately separate, and conflating them would be
+    a silent drift of exactly the kind that misattributes speakers:
+
+      * the analysis audio is joined with hard cuts, because a crossfade
+        would blend two people's voices at every boundary, so out_start is
+        plain cumulative duration and is EXACT by construction;
+      * the export crossfades, which shortens it, so render_start goes
+        through _tl_transition_step -- the same arithmetic
+        _tl_build_main_track uses, shared rather than copied.
+
+    Honest limit on render_start: the renderer subdivides each keep further
+    at effect-lane boundaries, so a crossfade's duration is computed from
+    the first SUB-segment rather than the whole keep. Where an effect edge
+    lands inside the first moments of a crossfaded clip the two can differ
+    by a fraction of a second. Nothing here depends on that -- the speaker
+    labels are projected back into each source's own time base, which needs
+    only out_start -- but it is why render_start is reported separately
+    instead of being passed off as the render's own answer.
+    """
+    main = ((tl or {}).get("tracks") or {}).get("main") or []
+    pieces: list[dict] = []
+    for c in main:
+        if not isinstance(c, dict):
+            continue
+        try:
+            t_in = max(0.0, float(c.get("in", 0) or 0))
+            t_out = float(c.get("out", t_in + 2))
+        except (TypeError, ValueError):
+            continue
+        if t_out <= t_in:
+            continue
+        keeps = _tl_keep_ranges(t_in, t_out, c.get("cuts") or [])
+        tr = c.get("transition") or {}
+        tr = tr.get("type") if (isinstance(tr, dict) and tr.get("type")) else 0
+        for k, (ks, ke) in enumerate(keeps):
+            pieces.append({
+                "source_job_id": c.get("source_job_id"),
+                "asset_id": c.get("asset_id"),
+                "src_in": round(ks, 4),
+                "src_out": round(ke, 4),
+                "dur": round(ke - ks, 4),
+                # The renderer only puts a transition at the start of a
+                # clip's FIRST kept piece; a text-edit cut inside a clip is
+                # always a hard cut.
+                "transition": tr if k == 0 else 0,
+            })
+
+    analysis_cursor = 0.0
+    render_cur = 0.0
+    for i, p in enumerate(pieces):
+        p["out_start"] = round(analysis_cursor, 4)
+        analysis_cursor += p["dur"]
+        if i == 0:
+            p["render_start"] = 0.0
+            render_cur = p["dur"]
+            continue
+        _hard, _tdur, _off, seg_start, new_cur = _tl_transition_step(
+            render_cur, p["dur"], p["transition"])
+        p["render_start"] = round(seg_start, 4)
+        render_cur = new_cur
+
+    return {
+        "pieces": pieces,
+        "analysis_total": round(analysis_cursor, 4),
+        "render_total": round(render_cur if pieces else 0.0, 4),
+    }
+
+
+def _tl_concat_main_audio(tl: dict, dest: Path) -> dict:
+    """Join the Main track's audio into one 16 kHz mono WAV for diarization.
+
+    Audio only, so it is cheap: no video decode, no video encode. The
+    layout's out_start is the time base of the result, which is what makes
+    the diarization's timestamps mean anything afterwards.
+
+    A piece whose source has no audio becomes SILENCE of the same length
+    rather than being skipped. Skipping it would shorten the stream and
+    shift every speaker after it -- a failure that looks like bad
+    diarization rather than like a missing audio track.
+    """
+    layout = _tl_audio_layout(tl)
+    pieces = layout["pieces"]
+    if not pieces:
+        raise RuntimeError("The Main track is empty — nothing to analyse.")
+
+    parts: list[Path] = []
+    try:
+        for i, p in enumerate(pieces):
+            part = UPLOAD_DIR / f"{dest.stem}_p{i:03d}.wav"
+            src = _timeline_clip_source(p, prefer_proxy=False)
+            made = False
+            if src and src.exists():
+                proc = subprocess.run(
+                    [FFMPEG, "-v", "error", "-y",
+                     "-ss", f"{p['src_in']:.3f}", "-t", f"{p['dur']:.3f}",
+                     "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                     "-c:a", "pcm_s16le", str(part)],
+                    capture_output=True, text=True)
+                made = proc.returncode == 0 and part.exists() \
+                    and part.stat().st_size > 1024
+            if not made:
+                _tl_run(
+                    [FFMPEG, "-v", "error", "-y", "-f", "lavfi",
+                     "-i", "anullsrc=r=16000:cl=mono",
+                     "-t", f"{p['dur']:.3f}", "-c:a", "pcm_s16le", str(part)],
+                    f"Silence for piece {i}")
+            parts.append(part)
+
+        list_path = dest.with_suffix(".concat.txt")
+        list_path.write_text(
+            "\n".join(f"file '{q.absolute()}'" for q in parts) + "\n")
+        try:
+            _tl_run([FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                     "-i", str(list_path), "-c", "copy", str(dest)],
+                    "Concat analysis audio")
+        finally:
+            _safe_unlink(list_path)
+    finally:
+        for q in parts:
+            _safe_unlink(q)
+    return layout
+
+
+def _tl_project_diarization_to_sources(segments: list, pieces: list) -> dict:
+    """Turn ONE global diarization into a per-source one with global labels.
+
+    This is the step that makes a global analysis useful to everything that
+    already exists. Every reader in the app -- caption colouring, the
+    speaker->face map, the aim -- asks "who is talking at time t in THIS
+    source clip". So rather than keep the answer in output time and teach
+    each of them a new clock, each global segment is clipped to the pieces
+    it overlaps and translated back into that piece's source time.
+
+    The labels stay global, which is the entire point: person A from
+    interview 1 and person D from interview 3 keep different names, where
+    per-clip runs called them both SPEAKER_00.
+    """
+    by_source: dict[str, list] = {}
+    for seg in segments or []:
+        try:
+            gs = float(seg.get("start", 0))
+            ge = float(seg.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        spk = str(seg.get("speaker") or "")
+        if ge <= gs or not spk:
+            continue
+        for p in pieces:
+            sjid = p.get("source_job_id")
+            if not sjid:
+                continue
+            p0 = float(p["out_start"])
+            p1 = p0 + float(p["dur"])
+            lo, hi = max(gs, p0), min(ge, p1)
+            if hi - lo < 0.02:
+                continue
+            off = float(p["src_in"]) - p0
+            by_source.setdefault(sjid, []).append({
+                "start": round(lo + off, 3),
+                "end": round(hi + off, 3),
+                "speaker": spk,
+            })
+
+    # Pieces from one source are adjacent in source time whenever a text-edit
+    # cut split them, so the same speaker arrives as two touching segments.
+    # Merging keeps the output the same shape a single-source run produces.
+    for sjid, segs in by_source.items():
+        segs.sort(key=lambda s: s["start"])
+        merged: list[dict] = []
+        for s in segs:
+            if (merged and merged[-1]["speaker"] == s["speaker"]
+                    and s["start"] - merged[-1]["end"] <= 0.12):
+                merged[-1]["end"] = max(merged[-1]["end"], s["end"])
+            else:
+                merged.append(dict(s))
+        by_source[sjid] = merged
+    return by_source
+
+
+def _tl_diar_path(job_id: str) -> Path:
+    """Deliberately NOT <job>_reframe.json.
+
+    That file is per-source and keeps working; this one is per-project and
+    holds a label space that spans every source in the edit. Two different
+    things with two different lifetimes.
+    """
+    return UPLOAD_DIR / f"{job_id}_tldiar.json"
+
+
+def _tl_load_timeline_diarization(job_id: str) -> dict | None:
+    """The cached whole-edit analysis, or None."""
+    if not job_id:
+        return None
+    p = _tl_diar_path(job_id)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) and data.get("by_source") else None
+
+
+def analyze_timeline_speakers(job_id: str, timeline: dict,
+                              *, num_speakers: int | None = None,
+                              min_speakers: int | None = None,
+                              max_speakers: int | None = None) -> dict:
+    """Diarize the whole edit once and cache it. Returns the stored record."""
+    tl = _normalize_timeline(timeline)
+    wav = UPLOAD_DIR / f"{job_id}_tlaudio.wav"
+    try:
+        layout = _tl_concat_main_audio(tl, wav)
+        segments = diarize_audio(
+            wav, num_speakers=num_speakers,
+            min_speakers=min_speakers, max_speakers=max_speakers)
+    finally:
+        _safe_unlink(wav)
+
+    pieces = layout["pieces"]
+    by_source = _tl_project_diarization_to_sources(segments, pieces)
+    speakers = sorted({s["speaker"] for s in segments if s.get("speaker")})
+    record = {
+        "created_at": time.time(),
+        "layout": pieces,
+        "analysis_total": layout["analysis_total"],
+        "render_total": layout["render_total"],
+        "segments": segments,
+        "by_source": by_source,
+        "speakers": speakers,
+        "sources": sorted(by_source.keys()),
+    }
+    _tl_diar_path(job_id).write_text(
+        json.dumps(record), encoding="utf-8")
+    print(f"[timeline] whole-edit diarization: {len(speakers)} speakers across "
+          f"{len(record['sources'])} source clip(s), "
+          f"{layout['analysis_total']:.1f}s of audio", flush=True)
+    return record
+
+
 def _normalize_timeline(timeline: dict) -> dict:
     """Validate + coerce a timeline doc to a safe canonical form."""
     tl = dict(timeline or {})
@@ -15088,7 +15442,7 @@ def _normalize_timeline(timeline: dict) -> dict:
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
     # Effect-lane clips: type + start + out(duration). Coerce common shapes.
-    _fx_types = {"split_screen", "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color"}
+    _fx_types = set(TL_EFFECT_TYPES)
     cleaned_fx = []
     for fx in tracks["effects"]:
         if not isinstance(fx, dict):
@@ -15434,7 +15788,17 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         # Stamp remapped caption words from each segment's Analyze diarization
         # (source time → output time). Prefer already-stamped word.speaker.
-        _stamp_caption_words_from_source(caption_words, seg_meta, seg_starts)
+        # The whole-edit analysis when one has been run: one label space
+        # across every source, so two people from two different interviews
+        # cannot both be SPEAKER_00. Absent, this is exactly what it was.
+        _tl_diar = _tl_load_timeline_diarization(job_id)
+        _tl_diar_by_source = (_tl_diar or {}).get("by_source") or {}
+        if _tl_diar_by_source:
+            print(f"[timeline] captions using the whole-edit diarization: "
+                  f"{len((_tl_diar or {}).get('speakers') or [])} speakers",
+                  flush=True)
+        _stamp_caption_words_from_source(caption_words, seg_meta, seg_starts,
+                                         _tl_diar_by_source)
 
         # ---- Background: the one pass where the video is NOT the bottom ----
         # Everything else here composites onto the baked main track. This
@@ -15555,8 +15919,18 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     speaker_colors["SPEAKER_01"] = speaker_colors["Guest"]
             else:
                 speaker_colors = {}
+            # A stitched edit has more than Host and Guest.
+            speaker_colors = _fill_speaker_colors(
+                speaker_colors, (_tl_diar or {}).get("speakers") or [])
             diar = None
-            if speaker_colors:
+            # build_ass uses this only to attribute words that arrived with
+            # no speaker -- and it is in ONE source's time base while the
+            # words are in output time, which is only ever approximately
+            # right. With a whole-edit analysis every attributable word is
+            # already stamped, in the correct clock, so handing over a
+            # source-time fallback could only overwrite a right answer with
+            # a wrong one.
+            if speaker_colors and not _tl_diar_by_source:
                 for meta in seg_meta:
                     if not meta.get("source_job_id"):
                         continue
@@ -16084,6 +16458,94 @@ def timeline_render():
     t.daemon = True
     t.start()
     return jsonify({"job_id": job_id})
+
+
+@app.route("/analyze-timeline-speakers", methods=["POST"])
+def analyze_timeline_speakers_endpoint():
+    """Diarize the WHOLE edit once, in one label space.
+
+    The third of three buttons, and the distinction between them is exactly
+    what caused the confusion this fixes:
+
+      Analyze speakers   -- one source clip, its own labels
+      Analyze all Main   -- every source clip, each with its OWN labels,
+                            which is why six people came back as two
+      Analyze whole edit -- the Main track's audio joined and diarized once
+
+    Synchronous on purpose: it decodes no video and encodes nothing, so it
+    is a fraction of the cost of the per-source analyses, and the caller
+    needs the speaker list to colour them.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown project — open a timeline first"}), 404
+    timeline = data.get("timeline") or jobs[job_id].get("timeline") or {}
+    main = ((timeline.get("tracks") or {}).get("main") or [])
+    if not main:
+        return jsonify({"error": "Add at least one clip to the Main track first."}), 400
+
+    ok, msg = _reframe_deps_available()
+    if not ok:
+        deps = _probe_analyze_deps()
+        return jsonify({"error": msg, "deps": {
+            "hf_token": deps["hf_token"], "pyannote": deps["pyannote"],
+            "diarization_ok": deps["diarization_ok"]}}), 400
+
+    def _opt_int(key: str) -> int | None:
+        raw = data.get(key)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    try:
+        rec = analyze_timeline_speakers(
+            job_id, timeline,
+            num_speakers=_opt_int("num_speakers"),
+            min_speakers=_opt_int("min_speakers"),
+            max_speakers=_opt_int("max_speakers"))
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:                      # noqa: BLE001
+        print(f"[timeline] whole-edit diarization failed: {e}", flush=True)
+        return jsonify({"error": f"Whole-edit analysis failed: {e}"}), 500
+
+    # Hand back colours for every speaker found, so the UI can show six
+    # pickers rather than Host and Guest.
+    colours = _fill_speaker_colors(
+        dict(_normalize_timeline(timeline).get("speaker_colors") or {})
+        or {s: _default_speaker_color(s, i)
+            for i, s in enumerate(rec["speakers"])},
+        rec["speakers"])
+    return jsonify({
+        "ok": True,
+        "speakers": rec["speakers"],
+        "speaker_count": len(rec["speakers"]),
+        "sources": rec["sources"],
+        "pieces": len(rec["layout"]),
+        "analysed_seconds": rec["analysis_total"],
+        "speaker_colors": colours,
+        "labels": {s: _speaker_label_for_id(s, i)
+                   for i, s in enumerate(rec["speakers"])},
+    })
+
+
+@app.route("/timeline-speakers/<job_id>", methods=["GET"])
+def timeline_speakers_status(job_id: str):
+    """What the last whole-edit analysis found, if any."""
+    rec = _tl_load_timeline_diarization(job_id)
+    if not rec:
+        return jsonify({"ready": False})
+    return jsonify({
+        "ready": True,
+        "speakers": rec.get("speakers") or [],
+        "speaker_count": len(rec.get("speakers") or []),
+        "sources": rec.get("sources") or [],
+        "analysed_seconds": rec.get("analysis_total"),
+        "created_at": rec.get("created_at"),
+    })
 
 
 @app.route("/timeline/list", methods=["GET"])
@@ -17857,6 +18319,8 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "enable_punch_zoom", "target": "selected", "intensity": "med"}',
     '{"op": "run_polish", "pacing": "fast", "broll_mode": "pip", "face_reframe": true}',
     '{"op": "set_shot_range", "index": 0, "in": 2.0, "out": 9.5}',
+    '{"op": "add_effect", "type": "split_screen", "start": 10.0, "duration": 5.0, "layout": "stack", "mode": "speakers"}',
+    '{"op": "add_effect", "type": "punch_zoom", "start": 4.2, "duration": 1.2, "intensity": "med"}',
     '{"op": "set_effect_time", "index": 0, "start": 4.2, "duration": 1.2}',
     '{"op": "set_punch_aim", "index": 0, "at": "speaker"}',
     '{"op": "delete_effect", "index": 0}',
@@ -18005,6 +18469,93 @@ def _resolve_add_text_message(op: dict) -> tuple[dict | None, str]:
     clip["fit"] = "contain"          # never crop someone's words
     return {"op": "add_text_message", "clip": clip,
             "count": len(clean)}, ""
+
+
+def _resolve_add_effect(op: dict) -> tuple[dict | None, str]:
+    """Make the effects lane reachable by prompt.
+
+    The gap this closes: of the ops the co-editor had, three TOUCHED an
+    effect -- clear_effects, delete_effect, set_effect_time -- and none
+    CREATED one. Asked for a split screen from 0:10 to 0:15 it reached for
+    the nearest thing it did have, apply_clip_style("split_stack"), which
+    styles whole Main clips and has no concept of time. Hence the report:
+    "ask for a split over a window, get it over the entire clip."
+
+    The lane itself was never at fault -- _tl_effect_cut_points splits each
+    keep at effect boundaries and scopes props per sub-segment. Nothing
+    could ask it to.
+
+    Durations are clamped to the same per-type bounds the AI placer uses, so
+    a 30-second punch zoom is not a thing the prompt can produce. A clamp
+    that changed what was asked for says so, because a silently retimed
+    effect looks like the bug above all over again.
+    """
+    ftype = str(op.get("type") or op.get("effect") or "").strip().lower()
+    aliases = {
+        "punch": "punch_zoom", "zoom": "punch_zoom", "punchzoom": "punch_zoom",
+        "split": "split_screen", "splitscreen": "split_screen",
+        "split_stack": "split_screen", "stack": "split_screen",
+        "kenburns": "ken_burns", "drift": "ken_burns",
+        "grade": "color", "color_grade": "color",
+        "zoom_1.5x": "zoom_1_5", "zoom_15": "zoom_1_5", "zoom_2": "zoom_2x",
+    }
+    ftype = aliases.get(ftype, ftype)
+    if ftype not in TL_EFFECT_TYPES:
+        return None, (f"{ftype or 'that'} is not an effect this lane carries "
+                      f"({', '.join(TL_EFFECT_TYPES)})")
+
+    try:
+        start = max(0.0, float(op.get("start", 0) or 0))
+    except (TypeError, ValueError):
+        return None, "the effect needs a start time in seconds"
+
+    raw_dur = op.get("duration", op.get("out"))
+    note = ""
+    if raw_dur is None:
+        dur = None          # the client's per-type default
+    else:
+        try:
+            dur = float(raw_dur)
+        except (TypeError, ValueError):
+            return None, "the effect's duration must be a number of seconds"
+        lo, hi = _EFFECT_LIMITS.get(ftype, (0.2, 120.0))
+        clamped = max(lo, min(hi, dur))
+        if abs(clamped - dur) > 0.01:
+            note = (f"a {ftype} runs {lo:g}-{hi:g}s, so {dur:g}s became "
+                    f"{clamped:g}s")
+        dur = clamped
+
+    out = {"op": "add_effect", "type": ftype, "start": round(start, 3)}
+    if dur is not None:
+        out["duration"] = round(dur, 3)
+
+    intensity = str(op.get("intensity") or "").strip().lower()
+    if intensity in ("low", "med", "medium", "high"):
+        out["intensity"] = "med" if intensity == "medium" else intensity
+    direction = str(op.get("direction") or "").strip().lower()
+    if direction in ("in", "out"):
+        out["direction"] = direction
+    preset = str(op.get("preset") or "").strip().lower()
+    if ftype == "color" and preset in ("none", "neutral", "warm", "cool",
+                                       "vivid", "bw"):
+        out["preset"] = preset
+
+    if ftype == "split_screen":
+        layout = str(op.get("layout") or "").strip().lower()
+        if layout in ("auto", "stack", "side", "side_by_side"):
+            out["layout"] = "side" if layout == "side_by_side" else layout
+        # mode:"speakers" is what makes a split frame two PEOPLE out of one
+        # clip rather than stack two different sources. Both fields have to
+        # survive: addEffectClip builds from a fixed field list and dropped
+        # them before this was threaded through.
+        mode = str(op.get("mode") or "").strip().lower()
+        if mode in ("speakers", "sources"):
+            out["mode"] = mode
+        spk = op.get("speakers")
+        if isinstance(spk, list) and spk:
+            out["speakers"] = [str(x) for x in spk[:2]]
+
+    return out, note
 
 
 def _resolve_set_background(op: dict) -> tuple[dict | None, str]:
@@ -18309,9 +18860,22 @@ Rules:
 - "split here" → split_at_playhead (uses current playhead).
 - "polish / polish cut / run polish" → run_polish. pacing: fast|informative|cinematic. broll_mode: pip|center. Optional keywords array. Not the same as ▶ Render.
 - The Effects lane holds timed camera moves, each with its own start and
-  duration. Use set_effect_time to move or stretch one, set_punch_aim to
-  change where a punch zoom pushes toward, and delete_effect to remove one.
-  Indexes there refer to effect_clips, not to shots.
+  duration. Use add_effect to CREATE one, set_effect_time to move or stretch
+  one, set_punch_aim to change where a punch zoom pushes toward, and
+  delete_effect to remove one. Indexes there refer to effect_clips, not to
+  shots.
+- ANY effect that should run over a stretch of the video is add_effect, with
+  a start and a duration in seconds. Types: punch_zoom, zoom_1_5, zoom_2x,
+  ken_burns, color, split_screen. "Split screen from 0:10 to 0:15" is
+  {{"op": "add_effect", "type": "split_screen", "start": 10, "duration": 5}}.
+  For a split that frames two PEOPLE out of one clip, add "mode": "speakers".
+- Two ops are NOT split screen and are a common mix-up:
+  * split_at_playhead CUTS one clip into two pieces at the playhead. It is
+    scissors. It makes no split screen and takes no times.
+  * apply_clip_style (including style "split_stack") restyles WHOLE Main
+    clips and has no concept of time, so it cannot do "from 0:10 to 0:15".
+  If the user names a time, a range, "for N seconds", "at the hook", or any
+  moment at all, the answer is add_effect.
 - set_punch_aim takes explicit x/y in 0..1 (0,0 is top-left) or at:"speaker",
   which aims at the detected face at that moment.
 - add_carousel places several photos that hand over in place, each sliding in.
@@ -18372,6 +18936,16 @@ Rules:
             continue
         if name == "set_punch_aim":
             op = _resolve_punch_aim(op, main, effects)
+            if op is None:
+                continue
+        elif name == "add_effect":
+            # Validates the type against the one list the effects lane
+            # accepts, so an op the client would silently drop never leaves
+            # here, and clamps the duration to the same bounds the AI
+            # placer uses.
+            op, note = _resolve_add_effect(op)
+            if note:
+                blocked.append(note)
             if op is None:
                 continue
         elif name == "make_image":
