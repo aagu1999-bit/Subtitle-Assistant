@@ -14403,13 +14403,24 @@ _OVERLAY_SWIPE_FROM = {
 _OVERLAY_MOTION_EASE = "out_cubic"
 
 
-def overlay_motion_tracks(motion) -> dict:
+def overlay_motion_tracks(motion, duration: float | None = None,
+                          carousel: bool = False) -> dict:
     """A motion block as keyframe tracks: offsets in CANVAS FRACTIONS.
 
     Fractions rather than pixels because the preview positions boxes in
     percentages and the renderer in pixels. Keeping the shared number
     unitless means both multiply by their own canvas and cannot disagree
     about the one thing they both compute.
+
+    With `motion.out` > 0 and a known *duration*, the track gains two more
+    keyframes and the card leaves the way it arrived. Without them it holds
+    at home and cuts -- which is what every overlay made before this did,
+    so the default changes nothing.
+
+    *carousel* flips the exit. A lone card RETREATS, going back the way it
+    came, which reads as putting it away. A carousel member CARRIES ON
+    THROUGH and exits the far side, because the next photo is about to take
+    that space and a retreat would look like it changed its mind.
 
     Mirrors motionTracks() in static/keyframes-motion.js.
     """
@@ -14419,14 +14430,39 @@ def overlay_motion_tracks(motion) -> dict:
     if not (sx or sy):
         return {}
     try:
-        slide = max(0.05, float(motion.get("in", 0.35)))
+        slide_in = max(0.05, float(motion.get("in", 0.35)))
     except (TypeError, ValueError):
-        slide = 0.35
+        slide_in = 0.35
+    try:
+        slide_out = max(0.0, float(motion.get("out", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        slide_out = 0.0
+
+    span = float(duration) if duration and duration > 0 else 0.0
+    # A clip too short for both moves gets them squeezed rather than
+    # dropped, the same way punch_zoom_tracks handles its rise and fall.
+    # Otherwise trimming a clip short makes its entrance vanish, which
+    # looks like the effect broke.
+    if span and slide_out > 0 and slide_in + slide_out > span:
+        squeeze = span / (slide_in + slide_out)
+        slide_in *= squeeze
+        slide_out *= squeeze
+    leaves = bool(span and slide_out > 0)
+
+    def _points(offset: float) -> list:
+        pts = [[0.0, float(offset)], [slide_in, 0.0]]
+        if leaves:
+            # Hold at home until it is time to go, then off the chosen side.
+            exit_off = -float(offset) if carousel else float(offset)
+            pts.append([max(slide_in, span - slide_out), 0.0])
+            pts.append([span, exit_off])
+        return pts
+
     tracks = {}
     if sx:
-        tracks["x"] = [[0.0, float(sx)], [slide, 0.0]]
+        tracks["x"] = _points(sx)
     if sy:
-        tracks["y"] = [[0.0, float(sy)], [slide, 0.0]]
+        tracks["y"] = _points(sy)
     return tracks
 
 
@@ -14520,7 +14556,8 @@ def punch_zoom_tracks(cfg, dur: float | None = None) -> tuple[list, str] | None:
 
 
 def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
-                            W: int, H: int) -> tuple[str, str]:
+                            W: int, H: int, duration: float | None = None,
+                            carousel: bool = False) -> tuple[str, str]:
     """(x, y) expressions for an overlay that slides into place.
 
     overlay's x and y are per-frame expressions -- `eval` defaults to `frame`
@@ -14532,7 +14569,7 @@ def _tl_overlay_motion_expr(motion, x: int, y: int, start: float,
     canvas dimension, which puts the photo properly off-frame whatever its box
     size, instead of peeking in at the edge.
     """
-    tracks = overlay_motion_tracks(motion)
+    tracks = overlay_motion_tracks(motion, duration, carousel)
     if not tracks:
         return str(x), str(y)
 
@@ -14815,7 +14852,12 @@ def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
     prep += f",tpad=start_duration={start:.3f}"
     prep += f"[ov{n}]"
     filt.append(prep)
-    x_expr, y_expr = _tl_overlay_motion_expr(ov.get("motion"), x, y, start, W, H)
+    # `length` is this clip's time on screen, which is what a slide-out is
+    # measured back from. A carousel member is known by the id
+    # _build_carousel_clips stamps on every photo in the group.
+    x_expr, y_expr = _tl_overlay_motion_expr(
+        ov.get("motion"), x, y, start, W, H,
+        duration=length, carousel=bool(ov.get("carousel_id")))
     filt.append(
         f"{cur}[ov{n}]overlay=x='{x_expr}':y='{y_expr}':"
         f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"

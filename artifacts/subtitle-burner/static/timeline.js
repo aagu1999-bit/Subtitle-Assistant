@@ -4010,7 +4010,7 @@
     if (o.wrap) {
       // Mirrors _tl_overlay_motion_expr in app.py: same cubic ease, same
       // full-dimension offset.
-      const mo = overlayMotionOffset(item, localT);
+      const mo = overlayMotionOffset(item, localT, dur);
       o.wrap.style.left = ((item.x != null ? item.x : 0.5) + mo.dx) * 100 + "%";
       o.wrap.style.top = ((item.y != null ? item.y : 0.1) + mo.dy) * 100 + "%";
 
@@ -4088,10 +4088,13 @@
   // track, and app.py compiles the same track into the ffmpeg expression.
   // Two hand-written copies of one ease is how this app ended up with a Ken
   // Burns that accumulates server-side and is linear in the browser.
-  function overlayMotionOffset(item, localT) {
+  function overlayMotionOffset(item, localT, dur) {
     const m = item && item.motion;
     if (!m || !window.KeyframeMotion) return { dx: 0, dy: 0 };
-    return window.KeyframeMotion.motionOffsetAt(m, localT);
+    // dur and carousel_id drive the slide-OUT; without a duration the card
+    // holds at home and cuts, exactly as app.py does.
+    return window.KeyframeMotion.motionOffsetAt(
+      m, localT, dur, !!item.carousel_id);
   }
 
   // Runs every frame so punch + Ken Burns animate; compose both scales.
@@ -5039,6 +5042,35 @@
       const fitOpts = [["cover", "Cover / Crop"], ["contain", "Contain / Fit"], ["fill", "Stretch"]];
       ovBody += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
       ovBody += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
+      // How the clip ARRIVES and LEAVES. The engine has had this since the
+      // carousel shipped and the panel never exposed it, so the only way to
+      // set a swipe was to ask the co-editor for one.
+      //
+      // Labelled by what the viewer sees, not by the data. `swipe_left`
+      // means "travels left, enters from the RIGHT" -- the gesture, like a
+      // carousel moving under your thumb -- so a dropdown reading
+      // "swipe_left" is backwards to everyone who did not write it.
+      const mo = c.motion || {};
+      ovBody += `<label class="tl-prop-sectlabel">Arrive / leave</label>`;
+      ovBody += propSelect("__motion_type", "Entrance", mo.type || "none", [
+        ["none", "None (just appears)"],
+        ["swipe_left", "\u2190 Slide in from the right"],
+        ["swipe_right", "\u2192 Slide in from the left"],
+        ["swipe_up", "\u2191 Slide in from below"],
+        ["swipe_down", "\u2193 Slide in from above"],
+      ]);
+      if (mo.type && mo.type !== "none") {
+        ovBody += `<div class="tl-prop-grid">` +
+          propNum("__motion_in", "Slide in (s)", mo.in != null ? mo.in : 0.35, 0.05, 3, 0.05) +
+          propNum("__motion_out", "Slide out (s)", mo.out != null ? mo.out : 0, 0, 3, 0.05) +
+          `</div>`;
+        ovBody += `<p class="muted" style="font-size:.72rem;line-height:1.45;margin:2px 0 8px">` +
+          `Slide out 0 = cuts away. Otherwise it leaves the way it came in. ` +
+          (c.carousel_id
+            ? `This one is part of a carousel, so it carries on through instead \u2014 the next photo takes its place.`
+            : ``) +
+          `</p>`;
+      }
       ovBody += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
       html += propSection("🖼 Overlay layout", ovBody, true);
       const ovKb = c.ken_burns || {};
@@ -5674,6 +5706,21 @@
           } else {
             c.out = (c.in || 0) + Math.max(0.2, v);
           }
+        } else if (key === "__motion_type" || key === "__motion_in" || key === "__motion_out") {
+          if (key === "__motion_type") {
+            if (!v || v === "none") {
+              delete c.motion;              // no block at all, not type:"none"
+            } else {
+              c.motion = Object.assign({ in: 0.35, out: 0 }, c.motion || {}, { type: v });
+            }
+          } else if (c.motion) {
+            c.motion[key === "__motion_in" ? "in" : "out"] = Math.max(0, Number(v) || 0);
+          }
+          renderProps();
+          renderTimeline();
+          updateStageCompositor();
+          scheduleSave();
+          return;
         } else if (key === "__split_mode") {
           if (v === "speakers") {
             c.mode = "speakers";
