@@ -5651,3 +5651,97 @@ def test_the_mobile_only_rule_still_shows_what_is_not_hidden():
     m = re.search(r"\.tl-mobile-only:not\(\[hidden\]\)\s*\{([^}]*)\}", css)
     assert m, "the phone rule is gone entirely"
     assert "display" in m.group(1) and "none" not in m.group(1), m.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The co-editor you could not type into.
+#
+# On a phone the drawer is a bottom sheet, and its CSS comment has always
+# said "above nav / context strip" -- but it was pinned `bottom: 0`, which
+# is not above the nav, it is UNDER it. The bottom nav is fixed in the same
+# band, so measured at iPhone portrait (390x664):
+#
+#   #coEditorInput     612 -> 652
+#   #mobileBottomNav   603 -> 664   (fixed, z-200)
+#
+# The text box and Send sat inside the nav's 61px strip. There was nowhere
+# visible to type, and focusing an input you cannot see is what made the
+# keyboard feel uncontrollable too.
+# ---------------------------------------------------------------------------
+
+_NAV_CLEARANCE = "calc(64px + env(safe-area-inset-bottom, 0px))"
+
+
+def test_the_coeditor_sheet_clears_the_bottom_nav():
+    """The failure was geometric, so the assertion is about the offset."""
+    css = _mobile_css()
+    rule = re.search(
+        r"body\.is-phone \.co-editor-drawer\s*\{([^}]*)\}", css)
+    assert rule, "the phone rule for the co-editor drawer is gone"
+    body = rule.group(1)
+    bottom = re.search(r"(?<!-)\bbottom\s*:\s*([^;]+);", body)
+    assert bottom, f"no bottom offset: {body}"
+    value = bottom.group(1).strip()
+    assert value != "0", "the drawer is pinned under the bottom nav again"
+    assert "64px" in value and "safe-area-inset-bottom" in value, value
+
+
+def test_every_phone_bottom_sheet_clears_the_nav_the_same_way():
+    """Three places already encode the nav's height. They must agree, or
+    one sheet ends up under it while the others do not -- which is exactly
+    how this happened: the body padding and the context strip cleared the
+    nav and the co-editor did not."""
+    css = re.sub(r"/\*.*?\*/", "", _mobile_css(), flags=re.S)
+    uses = re.findall(r"calc\(\s*64px\s*\+\s*env\(safe-area-inset-bottom[^)]*\)\s*\)",
+                      css)
+    assert len(uses) >= 3, (
+        "the nav-clearance expression is used fewer times than expected; "
+        f"found {len(uses)}")
+
+
+def test_the_keyboard_inset_is_measured_rather_than_assumed():
+    """iOS does not resize the layout viewport when the keyboard opens, so a
+    fixed bottom sheet stays put and the keyboard covers it -- you can focus
+    a box you cannot see. visualViewport is the only thing that reports it,
+    and nothing in this app used it before."""
+    js = (BURNER / "static" / "mobile.js").read_text(encoding="utf-8")
+    assert "visualViewport" in js, "nothing measures the keyboard"
+    assert "--kb-inset" in js
+    assert 'classList.toggle("kb-open"' in js
+    # A threshold, not "> 0": a collapsing Safari toolbar is not a keyboard.
+    fn = js[js.index("function syncKeyboardInset()"):]
+    fn = fn[:fn.index("\n  }") + 4]
+    m = re.search(r"inset\s*>\s*(\d+)", fn)
+    assert m and int(m.group(1)) >= 50, f"threshold too low: {fn}"
+
+    css = _mobile_css()
+    assert "body.is-phone.kb-open .co-editor-drawer" in css, \
+        "nothing lifts the drawer above the keyboard"
+    rule = re.search(r"body\.is-phone\.kb-open \.co-editor-drawer\s*\{([^}]*)\}",
+                     css).group(1)
+    assert "--kb-inset" in rule, rule
+
+
+def test_the_keyboard_can_be_put_away_again():
+    """"I cannot bring up and lower my keyboard." Sending kept focus, so the
+    keyboard stayed over the answer with no obvious way down."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("const input = $(\"coEditorInput\");\n    const prompt ="):]
+    fn = fn[:2000]
+    assert ".blur()" in fn, "sending leaves the keyboard up over the reply"
+    assert "is-phone" in fn, "it must only put the keyboard away on a phone"
+
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    tag = re.search(r'<input[^>]*id="coEditorInput"[^>]*>', html).group(0)
+    assert 'enterkeyhint="send"' in tag, tag
+
+
+def test_the_drawer_cannot_grow_taller_than_the_space_above_the_nav():
+    """A sheet taller than the room left pushes its own head off the top of
+    a short phone, which is the same failure in the other direction."""
+    css = _mobile_css()
+    rule = re.search(r"body\.is-phone \.co-editor-drawer\s*\{([^}]*)\}",
+                     css).group(1)
+    assert "max-height" in rule, rule
+    mh = re.search(r"max-height\s*:\s*([^;]+);", rule).group(1)
+    assert "64px" in mh and "dvh" in mh, mh

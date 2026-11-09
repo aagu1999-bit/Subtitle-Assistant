@@ -9948,6 +9948,12 @@
     const prompt = (input && input.value || "").trim();
     if (!prompt) return;
     if (input) input.value = "";
+    // Put the keyboard away on a phone once the prompt is sent. It covers
+    // most of the screen, and the answer -- which is the point -- appears
+    // behind it otherwise, with no obvious way to lower it again.
+    if (input && document.body.classList.contains("is-phone")) {
+      try { input.blur(); } catch (e) { /* non-fatal */ }
+    }
     appendCoMsg("user", prompt);
     rememberCoTurn("user", prompt);
     appendCoMsg("bot", "Thinking…");

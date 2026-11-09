@@ -10,6 +10,30 @@
     return MQ.matches;
   }
 
+  // ---- Where the on-screen keyboard actually is -------------------------
+  //
+  // iOS does not resize the layout viewport when the keyboard opens, so a
+  // position:fixed bottom sheet stays put and the keyboard covers it --
+  // you can focus a text box you cannot see. visualViewport is the only
+  // thing that reports the real inset. Published as --kb-inset so CSS can
+  // use it; where the API is missing nothing is set and the sheets fall
+  // back to sitting above the nav.
+  function syncKeyboardInset() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    document.documentElement.style.setProperty("--kb-inset", inset + "px");
+    // A threshold, not "> 0": a few pixels of rounding or a collapsing
+    // Safari toolbar is not a keyboard.
+    document.body.classList.toggle("kb-open", inset > 120);
+  }
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", syncKeyboardInset);
+    window.visualViewport.addEventListener("scroll", syncKeyboardInset);
+    syncKeyboardInset();
+  }
+
   // Orientation and resize change whether the sheet can be laid out at all,
   // so they are exactly when an orphaned scrim should clear itself.
   window.addEventListener("orientationchange", () =>

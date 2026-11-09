@@ -489,20 +489,35 @@
     height: 18px;
   }
 
-  /* Co-editor as phone bottom sheet above nav / context strip */
+  /* Co-editor as phone bottom sheet above nav / context strip.
+     The comment always said "above nav". `bottom: 0` is not above it: the
+     bottom nav is fixed in the same band, so the drawer's compose row --
+     the text box and Send -- landed INSIDE the nav's 61px strip and there
+     was no visible way to type. Clearing the nav uses the same expression
+     the body padding and the context strip already use, so the three
+     cannot drift apart. */
   body.is-phone .co-editor-drawer {
     left: 0;
     right: 0;
-    bottom: 0;
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     width: 100%;
     max-width: none;
     height: min(62dvh, 480px);
+    /* Never taller than the room left above the nav, or the head scrolls
+       off the top of the screen on a short phone. */
+    max-height: calc(100dvh - 64px - env(safe-area-inset-bottom, 0px) - 8px);
     border-radius: 16px 16px 0 0;
     border-left: 0;
     border-right: 0;
-    border-bottom: 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
     z-index: 220;
+  }
+  /* With the keyboard up, the nav is buried anyway -- what matters is
+     clearing the keyboard itself. --kb-inset is measured from
+     visualViewport in mobile.js; without that API this rule never
+     applies and the drawer just sits above the nav as before. */
+  body.is-phone.kb-open .co-editor-drawer {
+    bottom: var(--kb-inset, 0px);
+    max-height: calc(100dvh - var(--kb-inset, 0px) - 8px);
   }
   body.is-phone .co-editor-head .muted {
     display: none;
