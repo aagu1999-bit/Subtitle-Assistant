@@ -3675,3 +3675,142 @@ def test_the_checkpoint_is_never_loaded_with_the_check_disabled(app_mod):
         "app.py loads a checkpoint with the safe unpickler disabled: "
         f"{offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# An overlay that slides back out.
+#
+# The motion track arrived and stopped: [[0, offset], [slide, 0]]. A card
+# could glide in beautifully and then vanish on a single frame, which is the
+# part that reads as unfinished. The original design had an `out` field and
+# it was never built.
+#
+# A lone card RETREATS the way it came -- it was shown, now it is put away.
+# A carousel member CARRIES ON THROUGH and exits the far side, because the
+# next photo is about to take that space and a retreat would look like it
+# changed its mind.
+# ---------------------------------------------------------------------------
+
+def test_without_an_out_the_track_is_exactly_what_it_always_was(app_mod):
+    """Every overlay that already exists must render identically.
+
+    This is the compatibility claim, and it is cheap to assert exactly
+    rather than hope.
+    """
+    m = {"type": "swipe_left", "in": 0.35}
+    assert app_mod.overlay_motion_tracks(m) == {"x": [[0.0, 1.0], [0.35, 0.0]]}
+    # Even with a duration known, out=0 means cut.
+    assert app_mod.overlay_motion_tracks(m, 3.0) == {"x": [[0.0, 1.0], [0.35, 0.0]]}
+
+
+def test_a_lone_card_retreats_the_way_it_came(app_mod):
+    """swipe_left enters from the right, so it must leave to the right."""
+    tr = app_mod.overlay_motion_tracks(
+        {"type": "swipe_left", "in": 0.35, "out": 0.4}, 3.0)["x"]
+    assert tr[0] == [0.0, 1.0], "does not start off-frame right"
+    assert tr[1][1] == 0.0, "does not arrive home"
+    assert tr[-1] == [3.0, 1.0], f"does not retreat right: {tr[-1]}"
+    # And it holds at home in between rather than drifting.
+    assert tr[-2][1] == 0.0 and tr[-2][0] == pytest.approx(2.6)
+
+
+def test_a_carousel_member_carries_on_through(app_mod):
+    """Same entrance, opposite exit -- that IS the distinction."""
+    m = {"type": "swipe_left", "in": 0.35, "out": 0.4}
+    lone = app_mod.overlay_motion_tracks(m, 3.0)["x"]
+    carousel = app_mod.overlay_motion_tracks(m, 3.0, carousel=True)["x"]
+    assert lone[:-1] == carousel[:-1], "they should differ only in the exit"
+    assert lone[-1][1] == 1.0 and carousel[-1][1] == -1.0
+    assert lone[-1][1] == -carousel[-1][1], "exits are not opposite"
+
+
+def test_a_short_clip_squeezes_rather_than_loses_its_entrance(app_mod):
+    """Trimming a clip shorter than in+out must not make the slide vanish.
+
+    Dropping the entrance would look like the effect broke. punch_zoom_tracks
+    squeezes for the same reason.
+    """
+    tr = app_mod.overlay_motion_tracks(
+        {"type": "swipe_left", "in": 0.35, "out": 0.4}, 0.5)["x"]
+    assert tr[0] == [0.0, 1.0]
+    assert tr[-1][0] == pytest.approx(0.5), "exit runs past the clip's end"
+    assert 0 < tr[1][0] < 0.5, f"entrance was dropped, not squeezed: {tr}"
+
+
+def test_the_vertical_swipes_get_an_exit_too(app_mod):
+    """y is a separate branch in the builder and could easily be forgotten."""
+    tr = app_mod.overlay_motion_tracks(
+        {"type": "swipe_up", "in": 0.3, "out": 0.3}, 2.0)
+    assert "y" in tr and "x" not in tr
+    assert tr["y"][-1] == [2.0, 1.0]
+
+
+@needs_ffmpeg
+def test_a_sliding_overlay_really_leaves_the_frame(app_mod, tmp_path):
+    """Pixels, because this is motion.
+
+    The swipe was once declared working off its filter string while the
+    preview sat frozen, so a slide-out is only real if the card is actually
+    gone. Measured the same way as the entrance test: find the card's
+    leftmost column, and watch it travel off the edge.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import cv2
+    import numpy as np
+
+    W, H = 360, 640
+    base = tmp_path / "sl_base.mp4"
+    card = tmp_path / "sl_card.png"
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", f"color=c=0x202020:size={W}x{H}:rate=30:duration=3",
+                    "-pix_fmt", "yuv420p", str(base)], check=True)
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=c=0xFF00AA:size=200x200:d=1",
+                    "-frames:v", "1", str(card)], check=True)
+
+    def card_columns(frame):
+        r, g, b = (frame[:, :, i].astype(int) for i in (2, 1, 0))
+        cols = np.where(((r > 150) & (g < 110) & (b > 110)).any(axis=0))[0]
+        return (int(cols[0]), int(cols[-1])) if len(cols) else None
+
+    def render(motion, carousel=False):
+        clip = {"src": str(card), "start": 0.2, "in": 0, "out": 2.0,
+                "x": 0.25, "y": 0.3, "w": 0.5, "fit": "cover",
+                "motion": motion}
+        if carousel:
+            clip["carousel_id"] = "grp1"
+        out = tmp_path / ("car.mp4" if carousel else "lone.mp4")
+        real = app_mod._timeline_clip_source
+        app_mod._timeline_clip_source = (
+            lambda c, **kw: card if c.get("src") else real(c, **kw))
+        try:
+            app_mod._tl_composite_overlays(base, [clip], W, H, out, fps=30)
+        finally:
+            app_mod._timeline_clip_source = real
+        cap = cv2.VideoCapture(str(out))
+        seen = {}
+        for t in (0.9, 2.15):      # settled mid-life, then deep in the exit
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            seen[t] = card_columns(frame) if ok else None
+        cap.release()
+        return seen
+
+    motion = {"type": "swipe_left", "in": 0.3, "out": 0.4}
+    lone = render(motion)
+    assert lone[0.9] is not None, "the card never arrived"
+    settled_left = lone[0.9][0]
+
+    # Deep in the exit it must have moved RIGHT, back the way it came.
+    assert lone[2.15] is None or lone[2.15][0] > settled_left + 20, (
+        f"the card did not retreat: settled at {settled_left}, "
+        f"exit frame {lone[2.15]}"
+    )
+
+    # A carousel member goes the other way -- that IS the distinction.
+    car = render(motion, carousel=True)
+    assert car[0.9] is not None and car[0.9][0] == settled_left
+    assert car[2.15] is None or car[2.15][0] < settled_left - 20, (
+        f"the carousel card did not carry through: exit frame {car[2.15]}"
+    )

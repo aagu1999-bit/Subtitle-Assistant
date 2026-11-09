@@ -26,20 +26,50 @@
   // curve the swipe always had.
   var MOTION_EASE = "out_cubic";
 
-  function motionTracks(motion) {
+  // With motion.out > 0 and a known duration the card leaves the way it
+  // arrived; without them it holds at home and cuts, which is what every
+  // overlay made before this did. `carousel` flips the exit: a lone card
+  // RETREATS the way it came, a carousel member CARRIES ON THROUGH because
+  // the next photo is about to take that space.
+  //
+  // Mirrors overlay_motion_tracks() in app.py. The two must agree exactly
+  // -- a preview that disagrees with the render is the bug this whole
+  // keyframe layer exists to prevent.
+  function motionTracks(motion, duration, carousel) {
     if (!motion) return null;
     var dir = SWIPE_FROM[motion.type];
     if (!dir) return null;
-    var slide = Math.max(0.05, Number(motion.in) || 0.35);
+    var slideIn = Math.max(0.05, Number(motion.in) || 0.35);
+    var slideOut = Math.max(0, Number(motion.out) || 0);
+    var span = (duration && duration > 0) ? Number(duration) : 0;
+    // Squeeze rather than drop, so trimming a clip short does not make its
+    // entrance vanish and look like the effect broke.
+    if (span && slideOut > 0 && slideIn + slideOut > span) {
+      var squeeze = span / (slideIn + slideOut);
+      slideIn *= squeeze;
+      slideOut *= squeeze;
+    }
+    var leaves = !!(span && slideOut > 0);
+
+    function points(offset) {
+      var pts = [[0, offset], [slideIn, 0]];
+      if (leaves) {
+        var exitOff = carousel ? -offset : offset;
+        pts.push([Math.max(slideIn, span - slideOut), 0]);
+        pts.push([span, exitOff]);
+      }
+      return pts;
+    }
+
     var tracks = {};
-    if (dir[0]) tracks.x = [[0, dir[0]], [slide, 0]];
-    if (dir[1]) tracks.y = [[0, dir[1]], [slide, 0]];
+    if (dir[0]) tracks.x = points(dir[0]);
+    if (dir[1]) tracks.y = points(dir[1]);
     return tracks;
   }
 
   /** Offset in canvas fractions at localT seconds into the clip. */
-  function motionOffsetAt(motion, localT) {
-    var tracks = motionTracks(motion);
+  function motionOffsetAt(motion, localT, duration, carousel) {
+    var tracks = motionTracks(motion, duration, carousel);
     if (!tracks) return { dx: 0, dy: 0 };
     var K = root.Keyframes;
     return {
