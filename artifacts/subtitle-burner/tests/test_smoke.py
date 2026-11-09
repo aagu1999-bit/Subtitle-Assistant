@@ -701,13 +701,17 @@ def test_aiming_at_the_speaker_resolves_to_a_point(app_mod, monkeypatch):
     tl = _coeditor_timeline()
     main, effects = tl["tracks"]["main"], tl["tracks"]["effects"]
 
-    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: {"x": 0.61, "y": 0.27})
+    # Patched at _speaker_anchor_at, which is what the resolver now calls:
+    # aiming by biggest face was the bug, so the seam moved. Whether it
+    # really picks the talker is tested on a real fixture further down.
+    monkeypatch.setattr(app_mod, "_speaker_anchor_at",
+                        lambda j, t, words=None: {"x": 0.61, "y": 0.27})
     got = app_mod._resolve_punch_aim({"op": "set_punch_aim", "index": 0, "at": "speaker"},
                                      main, effects)
     assert got == {"op": "set_punch_aim", "index": 0, "x": 0.61, "y": 0.27}
 
     # No face data: drop the op rather than ship one that aims at nothing.
-    monkeypatch.setattr(app_mod, "_face_anchor_at", lambda j, t: None)
+    monkeypatch.setattr(app_mod, "_speaker_anchor_at", lambda j, t, words=None: None)
     assert app_mod._resolve_punch_aim(
         {"op": "set_punch_aim", "index": 0, "at": "speaker"}, main, effects) is None
 
@@ -2440,3 +2444,776 @@ def test_the_coeditor_knows_it_can_make_pictures(app_mod):
     body = js[js.index("async function applyCoEditorOps"):][:26000]
     for n in ("make_image", "add_text_message"):
         assert f'name === "{n}"' in body, f"{n} accepted but never placed"
+
+
+# ---------------------------------------------------------------------------
+# Aiming a push at whoever is actually talking.
+#
+# The bug these guard: `at: "speaker"` went through _face_anchor_at, whose
+# whole selection rule was `max(faces, key=w*h)`. In a two-person interview
+# that is whoever sits nearer the lens -- permanently, whether or not they
+# are the one speaking. So "aim it at me" stared at one person for the
+# entire video, and a test that only asserted "an anchor came back" would
+# have passed throughout.
+#
+# The fixture therefore has to be one where the two answers DIFFER: two
+# faces in every frame, one of them visibly bigger, and the diarization
+# handing the smaller one a window of its own. Aiming by size gives the big
+# face at every instant; aiming by speaker has to move.
+# ---------------------------------------------------------------------------
+
+# Deliberately not round numbers, so a hardcoded 0.5 or a silently-centred
+# fallback cannot pass by coincidence.
+_NEAR_FACE = {"cx": 0.2600, "cy": 0.4500, "w": 0.30, "h": 0.40}   # bigger
+_FAR_FACE = {"cx": 0.7800, "cy": 0.3900, "w": 0.14, "h": 0.18}    # smaller
+
+
+def _write_reframe(app_mod, job_id, *, diarization):
+    """A two-person reframe cache: both faces always visible, A then B.
+
+    _assign_speakers_to_faces attributes a speaker to the HIGHEST-SCORING
+    face inside the windows where that speaker talks alone, so the fixture
+    scores the talking head above the listening one. That is a real
+    limitation of the existing mapping worth naming: it separates two
+    people only insofar as detector confidence tracks who is speaking. It
+    is not something this change introduced, and the stills path
+    (_speaker_still_for_time) has always relied on exactly the same rule.
+    """
+    samples = []
+    t = 0.25
+    while t < 8.0:
+        talking_near = t < 4.0
+        samples.append({"t": round(t, 2), "faces": [
+            dict(_NEAR_FACE, score=0.95 if talking_near else 0.55),
+            dict(_FAR_FACE, score=0.55 if talking_near else 0.95),
+        ]})
+        t += 0.5
+    path = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    path.write_text(json.dumps({
+        "faces": samples,
+        "diarization": diarization,
+        "duration": 8.0,
+    }), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def two_speakers(app_mod):
+    """A job whose analysis says A talks 0-4s and B talks 4-8s."""
+    job_id = "pytest_twospk_aim"
+    path = _write_reframe(app_mod, job_id, diarization=[
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 4.0},
+        {"speaker": "SPEAKER_01", "start": 4.0, "end": 8.0},
+    ])
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    try:
+        yield job_id
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_aim_follows_whoever_is_talking(app_mod, two_speakers):
+    """At a moment in A's window it aims at A; in B's window, at B."""
+    early = app_mod._speaker_anchor_at(two_speakers, 2.0)
+    late = app_mod._speaker_anchor_at(two_speakers, 6.0)
+    assert early and late, "analysis was present, so an anchor was expected"
+
+    # The near face is A's. The far face is B's. The aim has to cross.
+    assert early["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.02), early
+    assert late["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), late
+    assert late["x"] - early["x"] > 0.3, (early, late)
+
+
+def test_biggest_face_is_the_wrong_answer_here(app_mod, two_speakers):
+    """Pins the discrimination: size-based aiming never leaves the near face.
+
+    Without this, the test above could pass against a fixture where both
+    rules happen to agree, and would then be guarding nothing.
+    """
+    by_size_early = app_mod._face_anchor_at(two_speakers, 2.0)
+    by_size_late = app_mod._face_anchor_at(two_speakers, 6.0)
+    assert by_size_early["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    assert by_size_late["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    # Same answer at both instants -- it cannot follow anyone.
+    assert by_size_late == by_size_early
+
+
+def test_per_word_speakers_outrank_the_diarization_for_aim(app_mod, two_speakers):
+    """Word-level labels are the better signal and must win.
+
+    _active_speaker_for_time prefers them; this proves the aim path passes
+    them through rather than silently dropping the argument.
+    """
+    words = [{"start": 1.90, "end": 2.10, "speaker": "SPEAKER_01"}]
+    aimed = app_mod._speaker_anchor_at(two_speakers, 2.0, words=words)
+    # Diarization says A at t=2.0; the word says B, so B's face wins.
+    assert aimed["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), aimed
+
+
+def test_the_aim_falls_back_to_the_biggest_face_without_diarization(app_mod):
+    """One person on camera, or no speaker analysis: biggest face is right.
+
+    The fallback has to return something rather than nothing, or wiring the
+    speaker path in would have broken aiming for every single-speaker clip.
+    """
+    job_id = "pytest_nodiar_aim"
+    path = _write_reframe(app_mod, job_id, diarization=[])
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    try:
+        aimed = app_mod._speaker_anchor_at(job_id, 6.0)
+        assert aimed is not None, "faces were present; aiming should still work"
+        assert aimed == app_mod._face_anchor_at(job_id, 6.0)
+        assert aimed["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.001)
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_aim_is_none_when_no_analysis_has_run(app_mod):
+    """No reframe cache at all -> no anchor, rather than a centred guess."""
+    assert app_mod._speaker_anchor_at("pytest_job_that_does_not_exist", 1.0) is None
+    assert app_mod._speaker_anchor_at(None, 1.0) is None
+
+
+def test_set_punch_aim_at_speaker_resolves_to_the_talker(app_mod, two_speakers):
+    """The co-editor path, end to end: `at: "speaker"` must mean the talker.
+
+    This is the op the model actually emits for "aim it at me", so it is
+    the one that has to resolve correctly -- not just the helper under it.
+    """
+    main = [{"source_job_id": two_speakers, "in": 0.0, "out": 8.0}]
+    effects = [
+        {"type": "punch_zoom", "start": 2.0, "out": 1.0},
+        {"type": "punch_zoom", "start": 6.0, "out": 1.0},
+    ]
+    first = app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 0, "at": "speaker"}, main, effects)
+    second = app_mod._resolve_punch_aim(
+        {"op": "set_punch_aim", "index": 1, "at": "speaker"}, main, effects)
+    assert first["x"] == pytest.approx(_NEAR_FACE["cx"], abs=0.02), first
+    assert second["x"] == pytest.approx(_FAR_FACE["cx"], abs=0.02), second
+
+
+def test_the_speaker_face_map_is_cached_per_analysis(app_mod, two_speakers):
+    """It is O(faces x speakers x segments) and runs once per effect.
+
+    A long edit aims a dozen pushes from one analysis; recomputing the
+    mapping for each was tens of thousands of interval comparisons a push.
+    """
+    rd = app_mod._load_reframe_cache(two_speakers)
+    calls = {"n": 0}
+    real = app_mod._assign_speakers_to_faces
+
+    def counted(diar, faces):
+        calls["n"] += 1
+        return real(diar, faces)
+
+    app_mod._assign_speakers_to_faces = counted
+    try:
+        for _ in range(5):
+            app_mod._speaker_face_map(two_speakers, rd)
+        assert calls["n"] == 1, f"recomputed {calls['n']} times"
+    finally:
+        app_mod._assign_speakers_to_faces = real
+
+
+# ---------------------------------------------------------------------------
+# The pin has to reach the machine that installs.
+#
+# The deployed app died with `module 'mediapipe' has no attribute
+# 'solutions'` while pyproject.toml and requirements.txt both said
+# `mediapipe>=0.10.5,<0.10.22`. The pin was never wrong -- uv.lock simply
+# had no mediapipe entry at all (44 locked packages, zero matches) and
+# predated the pin by two weeks. Replit installs from the lock, so the
+# declaration was decorative.
+#
+# test_mediapipe_still_exposes_the_solutions_api checks the LOCAL install,
+# which was correctly pinned, so it could never catch this. This checks
+# the artifact a deploy actually reads.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = BURNER.parent.parent
+
+
+def _locked_version(name):
+    """The version uv.lock pins for *name*, or None if it locks none."""
+    lock = REPO_ROOT / "uv.lock"
+    if not lock.exists():
+        pytest.skip("uv.lock not in this checkout")
+    block = None
+    for chunk in lock.read_text(encoding="utf-8").split("[[package]]"):
+        if re.search(rf'^\s*name = "{re.escape(name)}"\s*$', chunk, re.M):
+            block = chunk
+            break
+    if block is None:
+        return None
+    m = re.search(r'^\s*version = "([^"]+)"', block, re.M)
+    return m.group(1) if m else None
+
+
+def test_the_lockfile_honours_the_mediapipe_pin():
+    """uv.lock must resolve mediapipe, and resolve it under the ceiling.
+
+    Both halves matter and they fail for different reasons: a missing
+    entry means the lock never saw the dependency, and a too-new version
+    means it saw it and ignored the ceiling. Either way a fresh build
+    lands on a release without `mp.solutions`.
+    """
+    declared = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    ceiling = re.search(r'"mediapipe>=[\d.]+,<([\d.]+)"', declared)
+    assert ceiling, "pyproject.toml no longer declares an upper bound on mediapipe"
+    limit = tuple(int(p) for p in ceiling.group(1).split("."))
+
+    locked = _locked_version("mediapipe")
+    assert locked is not None, (
+        "uv.lock has no mediapipe entry, so the pin never reaches a build "
+        "that installs from the lock"
+    )
+    got = tuple(int(p) for p in re.findall(r"\d+", locked)[:3])
+    assert got < limit, f"uv.lock pins mediapipe {locked}, at or above the {ceiling.group(1)} ceiling"
+
+
+def test_the_lockfile_carries_the_vision_dependencies():
+    """opencv too -- the matte and every face read go through cv2.
+
+    It went missing from the lock for the same reason mediapipe did, and
+    without it Analyze and the background both fail on a fresh build.
+    """
+    assert _locked_version("opencv-python-headless") is not None, \
+        "uv.lock has no opencv-python-headless entry"
+
+
+# ---------------------------------------------------------------------------
+# Analyze -> two speakers -> two caption colours.
+#
+# Listed in the brief as unverified, and it turns out to work -- so these
+# pin it rather than fix it. Worth pinning because the chain is long and
+# every link is silent on failure: a missed stamp does not raise, it just
+# paints both people the same colour, which looks like a styling choice.
+# ---------------------------------------------------------------------------
+
+# #FFD700 -> ASS is &HBBGGRR&, so gold becomes &H00D7FF&.
+_GOLD_HEX, _GOLD_ASS = "#FFD700", "&H00D7FF&"
+_CYAN_HEX, _CYAN_ASS = "#00E5FF", "&HFFE500&"
+_TWO_COLOURS = {"SPEAKER_00": _GOLD_HEX, "SPEAKER_01": _CYAN_HEX}
+
+
+def _spoken_colours(ass):
+    """Every distinct \\c colour tag in the dialogue, in order."""
+    return sorted(set(re.findall(r"\\c(&H[0-9A-Fa-f]{6}&)", ass)))
+
+
+def test_two_speakers_get_two_caption_colours(app_mod):
+    """Words already carrying a speaker: the preferred path."""
+    words = [
+        {"word": "my", "start": 0.0, "end": 0.3, "speaker": "SPEAKER_00"},
+        {"word": "turn", "start": 0.4, "end": 0.7, "speaker": "SPEAKER_00"},
+        {"word": "now", "start": 4.0, "end": 4.3, "speaker": "SPEAKER_01"},
+        {"word": "mine", "start": 4.4, "end": 4.8, "speaker": "SPEAKER_01"},
+    ]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS)
+    got = _spoken_colours(ass)
+    assert _GOLD_ASS in got and _CYAN_ASS in got, got
+    # Both present is the whole claim -- one colour twice would look
+    # deliberate on screen and pass any "did it render" check.
+    assert len(got) >= 2, got
+
+
+def test_unstamped_words_get_their_colour_from_the_diarization(app_mod):
+    """The fallback: no word.speaker, so build_ass matches on midpoints."""
+    words = [{"word": w, "start": s, "end": s + 0.3} for w, s in
+             [("my", 0.0), ("turn", 0.4), ("now", 4.0), ("mine", 4.4)]]
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 2.0},
+            {"speaker": "SPEAKER_01", "start": 3.5, "end": 6.0}]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS, diarization=diar)
+    got = _spoken_colours(ass)
+    assert _GOLD_ASS in got and _CYAN_ASS in got, got
+
+
+def test_one_speaker_is_not_painted_two_colours(app_mod):
+    """A solo clip must not pick up the second speaker's colour.
+
+    The mirror of the test above: a matcher loose enough to colour
+    everything would pass both of those and still be wrong.
+    """
+    words = [{"word": w, "start": s, "end": s + 0.3} for w, s in
+             [("all", 0.0), ("mine", 0.4), ("here", 0.8)]]
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 6.0}]
+    ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE, 1080, 1920,
+                            speaker_colors=_TWO_COLOURS, diarization=diar)
+    assert _CYAN_ASS not in _spoken_colours(ass), _spoken_colours(ass)
+
+
+def test_timeline_captions_map_back_to_source_time_for_speakers(app_mod):
+    """Cut, trimmed and concatenated words still find the right speaker.
+
+    This is the link with the most room to be wrong, and the one that was
+    buried inline in render_timeline_job. The export's clock is not the
+    clip's: a word at 1.0s in the output came from 61.0s in the source
+    here, and only (src_in, src_out) plus the segment's output start can
+    undo that. Two segments with DIFFERENT shifts, because a single
+    segment would pass with the shift ignored entirely.
+    """
+    job_id = "pytest_tlstamp_src"
+    cache = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    cache.write_text(json.dumps({"diarization": [
+        {"speaker": "SPEAKER_00", "start": 60.0, "end": 64.0},
+        {"speaker": "SPEAKER_01", "start": 120.0, "end": 124.0},
+    ]}), encoding="utf-8")
+    try:
+        # Segment 0: source 60-64s, laid at output 0s.
+        # Segment 1: source 120-124s, laid at output 4s.
+        seg_meta = [
+            {"source_job_id": job_id, "src_in": 60.0, "src_out": 64.0},
+            {"source_job_id": job_id, "src_in": 120.0, "src_out": 124.0},
+        ]
+        seg_starts = [0.0, 4.0]
+        words = [
+            {"word": "first", "start": 1.0, "end": 1.4},   # -> source 61.2s
+            {"word": "second", "start": 5.0, "end": 5.4},  # -> source 121.2s
+        ]
+        n = app_mod._stamp_caption_words_from_source(words, seg_meta, seg_starts)
+        assert n == 2, f"stamped {n} of 2"
+        assert words[0]["speaker"] == "SPEAKER_00", words[0]
+        assert words[1]["speaker"] == "SPEAKER_01", words[1]
+
+        # And the colours actually differ once that reaches build_ass.
+        ass = app_mod.build_ass(words, app_mod._TL_DEFAULT_CAPTION_STYLE,
+                                1080, 1920, speaker_colors=_TWO_COLOURS)
+        got = _spoken_colours(ass)
+        assert _GOLD_ASS in got and _CYAN_ASS in got, got
+    finally:
+        cache.unlink(missing_ok=True)
+
+
+def test_an_existing_speaker_stamp_is_not_overwritten(app_mod):
+    """A stamp made in source time, before any cutting, is the better one."""
+    job_id = "pytest_tlstamp_keep"
+    cache = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    cache.write_text(json.dumps({"diarization": [
+        {"speaker": "SPEAKER_01", "start": 0.0, "end": 10.0},
+    ]}), encoding="utf-8")
+    try:
+        words = [{"word": "mine", "start": 1.0, "end": 1.4,
+                  "speaker": "SPEAKER_00"}]
+        n = app_mod._stamp_caption_words_from_source(
+            words,
+            [{"source_job_id": job_id, "src_in": 0.0, "src_out": 10.0}],
+            [0.0],
+        )
+        assert n == 0
+        assert words[0]["speaker"] == "SPEAKER_00"
+    finally:
+        cache.unlink(missing_ok=True)
+
+
+def test_speaker_stamping_survives_a_missing_analysis(app_mod):
+    """No Analyze run for the source clip: no colours, not an exception.
+
+    Captions are the last pass of a long render. Raising here would cost
+    the whole export over an optional nicety.
+    """
+    words = [{"word": "hello", "start": 0.5, "end": 0.9}]
+    assert app_mod._stamp_caption_words_from_source(
+        words, [{"source_job_id": "pytest_no_such_analysis",
+                 "src_in": 0.0, "src_out": 2.0}], [0.0]) == 0
+    assert "speaker" not in words[0]
+    # And no source job at all (a generated clip, a title card).
+    assert app_mod._stamp_caption_words_from_source(
+        words, [{"src_in": 0.0, "src_out": 2.0}], [0.0]) == 0
+
+
+# ---------------------------------------------------------------------------
+# A broken mediapipe must cost faces, not Analyze -- and must say so.
+#
+# The matte's guard was fixed to check mp.solutions rather than trust the
+# import. Analyze's guard was not, and it is the one the UI reads to tell
+# the user what is about to run: on mediapipe 0.10.22+ it answered
+# faces_ok=True, the endpoint promised "face/reframe crops will run", and
+# the tracker died on the attribute a minute later. The failure was caught
+# downstream, so this was a wrong message rather than a crash -- but a
+# wrong message is what sent someone to click Render last time.
+# ---------------------------------------------------------------------------
+
+class _NoSolutions:
+    """mediapipe as it is from 0.10.22: imports fine, API gone."""
+    __version__ = "0.10.26"
+
+
+class _OnlyFaces:
+    """A hypothetical install with one half of the API but not the other."""
+    __version__ = "0.10.21"
+
+    class solutions:  # noqa: N801
+        face_detection = object()
+
+
+def test_the_api_check_names_the_pin_not_the_attribute(app_mod, monkeypatch):
+    """The message has to point at the remedy, not the symptom."""
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    ok, why = app_mod._mediapipe_solutions_api("face_detection")
+    assert not ok
+    assert "face_detection" in why
+    assert "0.10.22" in why, why          # the version that removed it
+    assert "0.10.26" in why, why          # what is actually installed
+    assert "reinstall" in why.lower(), why  # what to do about it
+
+
+def test_the_api_check_is_per_feature(app_mod, monkeypatch):
+    """selfie_segmentation and face_detection are asked for separately.
+
+    One guard answering for both is how they drifted in the first place.
+    """
+    monkeypatch.setitem(sys.modules, "mediapipe", _OnlyFaces())
+    assert app_mod._mediapipe_solutions_api("face_detection")[0] is True
+    assert app_mod._mediapipe_solutions_api("selfie_segmentation")[0] is False
+
+
+def test_analyze_reports_faces_unavailable_on_a_too_new_mediapipe(app_mod, monkeypatch):
+    """faces_ok must be False, and diarization must be unaffected.
+
+    This is the test that would have caught the guard drift: the old probe
+    returned faces_ok=True here, because `import mediapipe` worked.
+    """
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    deps = app_mod._probe_analyze_deps()
+    assert deps["faces_ok"] is False
+    assert "0.10.22" in (deps["faces_error"] or ""), deps["faces_error"]
+    # The diarization half is independent and must not be dragged down:
+    # "no mediapipe" is not a reason to refuse speaker labels.
+    assert "mediapipe" not in (deps["error"] or "").lower(), deps["error"]
+
+
+def test_analyze_still_runs_for_speakers_without_faces(app_mod, monkeypatch):
+    """_reframe_deps_available is what gates the endpoint. Faces are optional."""
+    monkeypatch.setattr(app_mod, "_probe_analyze_deps", lambda: {
+        "diarization_ok": True, "faces_ok": False,
+        "hf_token": True, "pyannote": "ok",
+        "mediapipe": "no solutions.face_detection",
+        "error": None, "faces_error": "no solutions.face_detection",
+    })
+    ok, msg = app_mod._reframe_deps_available()
+    assert ok is True, msg
+
+
+def test_the_matte_guard_still_refuses_a_too_new_mediapipe(app_mod, monkeypatch):
+    """Sharing the check must not have loosened the matte's guard."""
+    monkeypatch.setitem(sys.modules, "mediapipe", _NoSolutions())
+    ok, why = app_mod._segment_deps_available()
+    assert ok is False
+    assert "selfie_segmentation" in why, why
+
+
+# ---------------------------------------------------------------------------
+# "Split the screen when two people talk" -- which has never rendered.
+#
+# _tl_split_segment stacks two DIFFERENT sources. Two people talking over
+# each other is not that shape: one camera, one file, two faces inside the
+# same frame. So an Analyze-suggested split_screen landed as a clip with no
+# second media, _timeline_clip_source returned None, and the renderer fell
+# straight through to an ordinary segment. The suggestion rendered as
+# nothing at all, silently, which is why nobody filed it as broken.
+#
+# The boxes it needs were already being computed. Getting them to the
+# renderer meant going through four places that each drop unknown fields:
+# _sanitize_effect_suggestions (builds a fresh dict), addEffectClip (fixed
+# field list), applyEffectSuggestion (explicit opts) and
+# _tl_props_from_lane_effects. _normalize_timeline and serialize() spread,
+# so those two were already fine.
+# ---------------------------------------------------------------------------
+
+_BOX_LEFT = (0.25, 0.50, 0.10, 0.15)    # cx, cy, w, h
+_BOX_RIGHT = (0.75, 0.50, 0.10, 0.15)
+
+
+def _write_two_box_analysis(app_mod, job_id, *, boxes=(_BOX_LEFT, _BOX_RIGHT),
+                            overlaps=None):
+    """A cache whose two speakers sit at known, far-apart screen positions.
+
+    Each sample holds only the talking speaker's face, so
+    _assign_speakers_to_faces lands each one on their own box exactly.
+    """
+    diar = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 4.0},
+            {"speaker": "SPEAKER_01", "start": 4.0, "end": 8.0}]
+    samples = []
+    t = 0.25
+    while t < 8.0:
+        box = boxes[0] if t < 4.0 else boxes[1]
+        samples.append({"t": round(t, 2), "faces": [
+            {"cx": box[0], "cy": box[1], "w": box[2], "h": box[3], "score": 0.9},
+        ]})
+        t += 0.5
+    path = app_mod.UPLOAD_DIR / f"{job_id}_reframe.json"
+    payload = {"faces": samples, "diarization": diar, "duration": 8.0}
+    if overlaps is not None:
+        payload["overlaps"] = overlaps
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+    return path
+
+
+def test_speaker_split_boxes_come_back_left_to_right(app_mod):
+    """Frame order, not speaking order.
+
+    Ordering by who talks first would let the two halves swap sides between
+    one split and the next, which reads as a jump cut rather than an edit.
+    So the box with the smaller cx is always first -- including when the
+    `speakers` list names them the other way round.
+    """
+    job_id = "pytest_split_lr"
+    path = _write_two_box_analysis(app_mod, job_id)
+    try:
+        boxes = app_mod._tl_speaker_split_boxes(job_id)
+        assert boxes and len(boxes) == 2, boxes
+        assert boxes[0][0] < boxes[1][0], boxes
+        assert boxes[0][0] == pytest.approx(_BOX_LEFT[0], abs=0.02)
+        assert boxes[1][0] == pytest.approx(_BOX_RIGHT[0], abs=0.02)
+
+        # Named in reverse: same frame order out.
+        rev = app_mod._tl_speaker_split_boxes(job_id, ["SPEAKER_01", "SPEAKER_00"])
+        assert rev[0][0] < rev[1][0], rev
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_a_split_is_refused_when_it_would_show_one_face_twice(app_mod):
+    """Two speakers, one detected position: not a two-up.
+
+    The detector routinely sees only the person facing the camera. Showing
+    the same crop in both panels looks like a rendering fault, so the split
+    is declined and the shot plays uncut instead.
+    """
+    job_id = "pytest_split_same"
+    path = _write_two_box_analysis(
+        app_mod, job_id, boxes=(_BOX_LEFT, (0.27, 0.50, 0.10, 0.15)))
+    try:
+        assert app_mod._tl_speaker_split_boxes(job_id) is None
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_a_split_is_refused_without_an_analysis(app_mod):
+    assert app_mod._tl_speaker_split_boxes("pytest_no_analysis_at_all") is None
+    assert app_mod._tl_speaker_split_boxes(None) is None
+
+
+def test_the_speaker_crop_fits_the_panel_and_stays_in_frame(app_mod):
+    """The crop carries the panel's aspect so the scale after it loses nothing.
+
+    And a face near an edge must clamp inward rather than ask ffmpeg for
+    pixels that are not there, which fails the whole render.
+    """
+    # Portrait canvas, stacked: each panel is 1080x960.
+    w, h, x, y = app_mod._tl_speaker_crop_px(
+        (0.5, 0.5, 0.10, 0.15), 1280, 720, 1080, 960)
+    assert w % 2 == 0 and h % 2 == 0 and x % 2 == 0 and y % 2 == 0
+    assert 0 <= x and x + w <= 1280
+    assert 0 <= y and y + h <= 720
+    assert w / h == pytest.approx(1080 / 960, rel=0.02), (w, h)
+    # Taller than the face, so it is a head-and-shoulders crop not a mugshot.
+    assert h > 0.15 * 720 * 2
+
+    # Hard against the left edge and the top.
+    w2, h2, x2, y2 = app_mod._tl_speaker_crop_px(
+        (0.02, 0.02, 0.10, 0.15), 1280, 720, 1080, 960)
+    assert x2 == 0 and y2 == 0
+    assert x2 + w2 <= 1280 and y2 + h2 <= 720
+
+
+def test_the_split_suggestion_asks_for_the_mode_that_renders(app_mod):
+    """_overlap_split_suggestions must emit mode "speakers".
+
+    Without it the applied clip has no second media and no boxes, and the
+    renderer falls through -- the exact silent no-op this fixes.
+    """
+    job_id = "pytest_split_sugg"
+    path = _write_two_box_analysis(app_mod, job_id, overlaps=[
+        {"start": 3.0, "end": 5.5, "speakers": ["SPEAKER_00", "SPEAKER_01"]},
+    ])
+    try:
+        out = app_mod._overlap_split_suggestions(job_id, 8.0)
+        assert out, "an overlap longer than the floor should suggest a split"
+        assert out[0]["type"] == "split_screen"
+        assert out[0]["mode"] == "speakers", out[0]
+        assert out[0]["speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+    finally:
+        path.unlink(missing_ok=True)
+        app_mod._SPEAKER_FACE_CACHE.pop(job_id, None)
+
+
+def test_the_sanitiser_keeps_what_makes_a_split_a_split(app_mod):
+    """It builds a fresh dict from a fixed field list -- a fourth silent sink.
+
+    mode, speakers and face_anchor were all dropped on the way to the
+    client, so the suggestion arrived stripped of everything that told the
+    renderer what to do with it.
+    """
+    raw = [{
+        "type": "split_screen", "start_time": 3.0, "end_time": 5.5,
+        "mode": "speakers", "speakers": ["SPEAKER_00", "SPEAKER_01"],
+        "face_anchor": {"x": 0.3, "y": 0.4},
+    }]
+    out = app_mod._sanitize_effect_suggestions(raw, 10.0)
+    assert out and out[0]["mode"] == "speakers", out
+    assert out[0]["speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert out[0]["face_anchor"]["x"] == pytest.approx(0.3)
+
+    # Allowlisted, not spread: a model-authored row cannot smuggle fields in.
+    sneaky = app_mod._sanitize_effect_suggestions(
+        [{"type": "punch_zoom", "start_time": 0.0, "end_time": 1.0,
+          "mode": "rm -rf", "asset_id": "../../etc/passwd",
+          "source_job_id": "whatever"}], 10.0)
+    assert "asset_id" not in sneaky[0] and "source_job_id" not in sneaky[0]
+    assert "mode" not in sneaky[0], sneaky[0]
+
+
+def test_the_renderer_reads_mode_and_speakers_off_the_lane(app_mod):
+    """_tl_props_from_lane_effects is the last place they can be dropped."""
+    _ken, _punch, _color, split = app_mod._tl_props_from_lane_effects([
+        {"type": "split_screen", "start": 1.0, "out": 2.0,
+         "mode": "speakers", "speakers": ["SPEAKER_01", "SPEAKER_00"],
+         "layout": "stack"},
+    ])
+    assert split and split["enabled"] is True
+    assert split["mode"] == "speakers", split
+    assert split["speakers"] == ["SPEAKER_01", "SPEAKER_00"], split
+
+
+@needs_ffmpeg
+def test_the_two_up_really_contains_both_boxes(app_mod, tmp_path):
+    """Pixels, not a filter string.
+
+    The source is red on the left half and blue on the right, with a face
+    box in each. A correct two-up puts red in one panel and blue in the
+    other; a crop that ignored the boxes would put the same colour in both,
+    and reading the filter graph would not tell the difference.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import cv2
+
+    src = tmp_path / "halves.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=red:s=640x720:d=2:r=30",
+         "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=2:r=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+         "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+        check=True)
+
+    out = tmp_path / "twoup.mp4"
+    # 9:16 canvas -> "auto" means stacked, so panel 0 is the TOP half.
+    dur = app_mod._tl_split_speakers_segment(
+        src, 0.0, 1.5, [_BOX_LEFT, _BOX_RIGHT], "auto",
+        1080, 1920, 30, out)
+    assert dur == pytest.approx(1.5)
+    assert out.exists() and out.stat().st_size > 1000
+
+    png = tmp_path / "f.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", "0.5", "-i", str(out),
+                    "-frames:v", "1", str(png)], check=True)
+    img = cv2.imread(str(png))
+    assert img is not None and img.shape[0] == 1920 and img.shape[1] == 1080
+
+    # BGR. Sample the middle of each panel.
+    top = img[480, 540]
+    bottom = img[1440, 540]
+    assert top[2] > 150 and top[0] < 80, f"top panel is not the red half: {top}"
+    assert bottom[0] > 150 and bottom[2] < 80, f"bottom panel is not the blue half: {bottom}"
+
+
+@needs_ffmpeg
+def test_a_speakers_split_survives_the_whole_render_chain(app_mod, tmp_path):
+    """Through render_timeline_job, because the chain is where it died.
+
+    Every piece of this worked in isolation before: the boxes were computed,
+    the suggestion was made, the clip was added. What failed was the
+    handover -- four field lists in a row, each dropping what it did not
+    recognise -- so the only test that could have caught it is one that
+    starts from a timeline and ends at pixels.
+    """
+    for mod in ("cv2", "flask"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import uuid
+
+    sid, rid = uuid.uuid4().hex, uuid.uuid4().hex
+    made = []
+    try:
+        src = app_mod.UPLOAD_DIR / f"{sid}.mp4"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=red:s=640x720:d=4:r=30",
+             "-f", "lavfi", "-i", "color=c=blue:s=640x720:d=4:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+             "-filter_complex", "[0:v][1:v]hstack=inputs=2,format=yuv420p[v]",
+             "-map", "[v]", "-map", "2:a", "-c:a", "aac", "-shortest", str(src)],
+            check=True)
+        made.append(src)
+        made.append(_write_two_box_analysis(app_mod, sid))
+
+        base = {"status": "done", "progress": 100, "output": None, "error": None,
+                "audio": None, "emoji_rules": {}, "created_at": 0.0,
+                "words": None, "style": {}}
+        app_mod.jobs[sid] = {**base, "filename": "halves.mp4"}
+        app_mod.jobs[rid] = {**base, "filename": "split.mp4"}
+
+        timeline = {
+            "canvas": "9x16", "fps": 30, "fit": "cover", "bg": "#000000",
+            "tracks": {
+                "main": [{"id": "m1", "source_job_id": sid,
+                          "in": 0.0, "out": 2.0, "burn_captions": False}],
+                # No source_job_id and no asset_id: before this change the
+                # renderer saw nothing to split with and produced the plain
+                # shot, which is what the suggestion had always done.
+                "effects": [{"id": "f1", "type": "split_screen",
+                             "start": 0.2, "out": 1.4, "mode": "speakers",
+                             "speakers": ["SPEAKER_00", "SPEAKER_01"],
+                             "layout": "auto"}],
+                "overlay": [], "text": [], "music": [],
+            },
+        }
+        app_mod.render_timeline_job(rid, timeline)
+        assert app_mod.jobs[rid]["status"] == "done", app_mod.jobs[rid].get("error")
+
+        out = app_mod.OUTPUT_DIR / f"{rid}.mp4"
+        made.append(out)
+        assert out.exists() and out.stat().st_size > 10_000
+
+        def frame(t):
+            png = tmp_path / f"c{t}.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(t),
+                            "-i", str(out), "-frames:v", "1", str(png)],
+                           check=True)
+            return cv2.imread(str(png))
+
+        inside = frame(0.8)
+        assert inside is not None, "no frame inside the split window"
+        top, bottom = inside[480, 540], inside[1440, 540]
+        assert top[2] > 150 and top[0] < 80, f"top panel: {top}"
+        assert bottom[0] > 150 and bottom[2] < 80, f"bottom panel: {bottom}"
+
+        # Outside the window the shot is uncut, so both samples read the
+        # same half of the 9:16 crop rather than two different colours.
+        outside = frame(1.85)
+        if outside is not None:
+            o_top, o_bottom = outside[480, 540], outside[1440, 540]
+            split_like = (o_top[2] > 150 and o_top[0] < 80
+                          and o_bottom[0] > 150 and o_bottom[2] < 80)
+            assert not split_like, "the split leaked past its own window"
+    finally:
+        for f in made:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        app_mod._SPEAKER_FACE_CACHE.pop(sid, None)
+        app_mod.jobs.pop(sid, None)
+        app_mod.jobs.pop(rid, None)

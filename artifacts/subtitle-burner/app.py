@@ -1005,6 +1005,36 @@ threading.Thread(target=_get_whisper_model, daemon=True).start()
 _FFPROBE_DEEP = ["-analyzeduration", "200M", "-probesize", "200M"]
 
 
+def _probe_video_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) of the first video stream, or None.
+
+    Cropping two speaker boxes out of one frame needs real pixels: the
+    boxes arrive as fractions of the frame and a panel has an aspect ratio
+    to respect, and neither sum works in normalised coordinates.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0:s=x",
+             str(path)],
+            stderr=subprocess.STDOUT, text=True, timeout=30,
+        ).strip().splitlines()
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    for line in out:
+        bits = line.strip().split("x")
+        if len(bits) >= 2:
+            try:
+                w, h = int(bits[0]), int(bits[1])
+            except ValueError:
+                continue
+            if w > 0 and h > 0:
+                return w, h
+    return None
+
+
 def _probe_media_streams(path: Path) -> dict:
     """Return stream/format info from a deep ffprobe.
 
@@ -1500,6 +1530,45 @@ def _refine_word_alignment(audio_path: Path, words: list[dict]) -> list[dict]:
         return words
 
 
+# MediaPipe removed the legacy `mp.solutions` API in this release, and this
+# app is written against it. The pin lives in pyproject.toml and
+# requirements.txt; this constant is here so the runtime message names the
+# same version the pin does.
+_MEDIAPIPE_SOLUTIONS_REMOVED_IN = "0.10.22"
+
+
+def _mediapipe_solutions_api(attr: str) -> tuple[bool, str]:
+    """(ok, msg) for whether mediapipe.solutions.<attr> is really there.
+
+    Importing is not enough, and that distinction has now cost this repo
+    twice. On mediapipe 0.10.22+ the import succeeds, a guard that stops
+    there says yes, and the caller dies on the attribute -- which is how a
+    deploy that ignored the pin turned an optional background into
+    "Render failed: module 'mediapipe' has no attribute 'solutions'".
+
+    One function so there is a single place that knows about the removal:
+    the matte needs solutions.selfie_segmentation and the face tracker
+    needs solutions.face_detection, and the two guards had drifted -- the
+    matte's was fixed and Analyze's still trusted the bare import.
+    """
+    try:
+        import mediapipe
+    except ImportError as e:
+        return False, f"mediapipe failed to import: {e}"
+    except Exception as e:
+        return False, f"mediapipe import raised {type(e).__name__}: {e}"
+    sols = getattr(mediapipe, "solutions", None)
+    if sols is None or not hasattr(sols, attr):
+        ver = getattr(mediapipe, "__version__", "unknown")
+        return False, (
+            f"this mediapipe ({ver}) has no solutions.{attr} -- it was "
+            f"removed in {_MEDIAPIPE_SOLUTIONS_REMOVED_IN}. The app pins "
+            f"mediapipe<{_MEDIAPIPE_SOLUTIONS_REMOVED_IN}; the server needs "
+            "its dependencies reinstalled so the pin takes effect."
+        )
+    return True, ""
+
+
 def _segment_deps_available() -> tuple[bool, str]:
     """Return (ok, msg) for the person-matte path.
 
@@ -1507,30 +1576,9 @@ def _segment_deps_available() -> tuple[bool, str]:
     OpenCV but no pyannote, no torch and no Hugging Face token, so it can work
     on installs where the full reframe pipeline can't.
     """
-    try:
-        import mediapipe  # noqa: F401
-    except ImportError as e:
-        return False, f"mediapipe failed to import: {e}"
-    except Exception as e:
-        return False, f"mediapipe import raised {type(e).__name__}: {e}"
-    # Importing is not enough. MediaPipe REMOVED mp.solutions in 0.10.22, so
-    # on a newer install the import succeeds, this function used to say yes,
-    # and the caller then died on the attribute -- which is how a deploy that
-    # ignored the pin turned an optional background into
-    # "Render failed: module 'mediapipe' has no attribute 'solutions'".
-    #
-    # Check the API actually used, not that a name resolves. This is the same
-    # mistake the repo has already recorded once: the library dropped what the
-    # app is built on and nothing noticed.
-    if not hasattr(mediapipe, "solutions") or not hasattr(
-            getattr(mediapipe, "solutions", None), "selfie_segmentation"):
-        ver = getattr(mediapipe, "__version__", "unknown")
-        return False, (
-            f"this mediapipe ({ver}) has no solutions.selfie_segmentation -- "
-            "it was removed in 0.10.22. The app pins mediapipe<0.10.22; the "
-            "server needs its dependencies reinstalled so the pin takes "
-            "effect."
-        )
+    ok, why = _mediapipe_solutions_api("selfie_segmentation")
+    if not ok:
+        return False, why
     try:
         import cv2  # noqa: F401
     except ImportError as e:
@@ -1816,16 +1864,18 @@ def _probe_analyze_deps() -> dict:
     except Exception as e:
         out["pyannote"] = f"{type(e).__name__}: {e}"
 
-    try:
-        import mediapipe  # noqa: F401
-        out["mediapipe"] = "ok"
-        out["faces_ok"] = True
-    except ImportError as e:
-        out["mediapipe"] = f"import failed: {e}"
-        out["faces_error"] = out["mediapipe"]
-    except Exception as e:
-        out["mediapipe"] = f"{type(e).__name__}: {e}"
-        out["faces_error"] = out["mediapipe"]
+    # detect_face_tracks goes through mp.solutions.face_detection, so that
+    # is what has to exist -- not just the module. A bare import check said
+    # yes on mediapipe 0.10.22+, the endpoint then promised the user "faces
+    # will run", and the tracker died on the attribute a minute later. The
+    # failure was already caught downstream, so this costs a message rather
+    # than a crash, but the message was the wrong one: it blamed a missing
+    # attribute instead of naming the pin and the remedy.
+    faces_ok, faces_why = _mediapipe_solutions_api("face_detection")
+    out["mediapipe"] = "ok" if faces_ok else faces_why
+    out["faces_ok"] = faces_ok
+    if not faces_ok:
+        out["faces_error"] = faces_why
 
     if out["pyannote"] != "ok":
         out["error"] = f"pyannote.audio unavailable ({out['pyannote']})"
@@ -4988,17 +5038,25 @@ def _overlap_split_suggestions(job_id: str, total: float) -> list[dict]:
             ),
             "source": "diarization",
             "speakers": spk_pair,
+            # Without this the applied clip has no second media, and the
+            # renderer quietly falls through to an ordinary segment -- so
+            # every split-screen Analyze has ever suggested rendered as
+            # nothing at all.
+            "mode": "speakers",
             "face_anchor": face_a,
         })
     return out
 
 
 def _face_anchor_at(job_id: str, t: float) -> dict | None:
-    """Normalised (x, y) of the most prominent face nearest time *t*.
+    """Normalised (x, y) of the BIGGEST face nearest time *t*.
 
-    Zooming into the middle of the frame is only right by accident; the
-    reframe analysis already tracked faces, so a punch can push toward the
-    person actually talking. Returns None when no analysis has been run.
+    Zooming into the middle of the frame is only right by accident, so the
+    reframe analysis' tracked faces give a push something to aim at. But
+    "biggest" is not "talking": with two people on camera it picks whoever
+    sits nearer the lens and keeps picking them. Use _speaker_anchor_at,
+    which asks the diarization who is speaking and only falls back here.
+    Returns None when no analysis has been run.
     """
     cache = UPLOAD_DIR / f"{job_id}_reframe.json"
     if not cache.exists():
@@ -5016,6 +5074,70 @@ def _face_anchor_at(job_id: str, t: float) -> dict | None:
         return {"x": round(float(face["cx"]), 4), "y": round(float(face["cy"]), 4)}
     except (KeyError, TypeError, ValueError):
         return None
+
+
+# One reframe cache serves every effect in a single request, and
+# _assign_speakers_to_faces is O(faces x speakers x diar segments) — for a
+# 60s two-hander that is tens of thousands of interval comparisons, which
+# is not something to redo per punch. Keyed on the cache file's mtime so a
+# re-run of Analyze invalidates it.
+_SPEAKER_FACE_CACHE: dict[str, tuple[float, dict, dict]] = {}
+
+
+def _speaker_face_map(job_id: str, rd: dict) -> tuple[dict, dict]:
+    """(positions, bboxes) from _assign_speakers_to_faces, memoised per job."""
+    try:
+        stamp = (UPLOAD_DIR / f"{job_id}_reframe.json").stat().st_mtime
+    except OSError:
+        stamp = 0.0
+    hit = _SPEAKER_FACE_CACHE.get(job_id)
+    if hit and hit[0] == stamp:
+        return hit[1], hit[2]
+    positions, bboxes = _assign_speakers_to_faces(
+        rd.get("diarization") or [], rd.get("faces") or []
+    )
+    _SPEAKER_FACE_CACHE[job_id] = (stamp, positions, bboxes)
+    return positions, bboxes
+
+
+def _speaker_anchor_at(job_id: str | None, t: float,
+                       words: list | None = None) -> dict | None:
+    """Normalised (x, y) of whoever is TALKING at time *t*.
+
+    This is what "aim it at me" means, and what _face_anchor_at cannot do:
+    the biggest face in a two-person interview is whoever sits nearer the
+    camera, permanently, whether or not they are the one speaking. A push
+    aimed by face size stares at the same person for the whole video.
+
+    None of the machinery here is new. Diarization already says who talks
+    when; _assign_speakers_to_faces already says where each speaker's face
+    sits, counting only windows where they speak alone so overlap does not
+    smear the two together. _speaker_still_for_time already chains the two
+    correctly for screenshots. The aim path simply never called any of it.
+
+    Falls back to _face_anchor_at, which is the right answer whenever there
+    is one person on camera or no diarization to go on.
+    """
+    if not job_id:
+        return None
+    rd = _load_reframe_cache(job_id)
+    if not rd:
+        return None
+    if (rd.get("diarization") or []) and (rd.get("faces") or []):
+        try:
+            spk = _active_speaker_for_time(rd, float(t), words=words)
+        except (TypeError, ValueError):
+            spk = None
+        if spk:
+            positions, _bboxes = _speaker_face_map(job_id, rd)
+            pos = positions.get(spk)
+            if pos:
+                try:
+                    return {"x": round(float(pos[0]), 4),
+                            "y": round(float(pos[1]), 4)}
+                except (TypeError, ValueError, IndexError):
+                    pass
+    return _face_anchor_at(job_id, t)
 
 
 def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
@@ -5050,7 +5172,7 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
             t = s + hi                   # too long to be an accent: trim
         intensity = str(e.get("intensity", "med")).lower()
         direction = str(e.get("direction", "in")).lower()
-        cleaned.append({
+        row = {
             "type": kind,
             "start_time": round(s, 3),
             "end_time": round(t, 3),
@@ -5059,7 +5181,31 @@ def _sanitize_effect_suggestions(raw: list, total: float) -> list[dict]:
             "quote": str(e.get("quote", ""))[:300],
             "reason": str(e.get("reason", ""))[:500],
             "source": str(e.get("source", "gemini")),
-        })
+        }
+        # A fourth silent sink. This builds a fresh dict from a fixed field
+        # list, so anything _overlap_split_suggestions attached -- which
+        # speaker to frame, where their face is, that this is a both-people
+        # split at all -- was dropped on the way out and the suggestion
+        # arrived at the client as a bare split_screen with no second media.
+        # Allowlisted rather than spread: the rest of a model-authored row is
+        # not to be trusted into the timeline.
+        mode = str(e.get("mode") or "").strip().lower()
+        if mode in ("speakers",):
+            row["mode"] = mode
+        spk = [str(x) for x in (e.get("speakers") or [])
+               if isinstance(x, (str, int))][:2]
+        if spk:
+            row["speakers"] = spk
+        anch = e.get("face_anchor")
+        if isinstance(anch, dict):
+            try:
+                row["face_anchor"] = {
+                    "x": min(1.0, max(0.0, float(anch.get("x", 0.5)))),
+                    "y": min(1.0, max(0.0, float(anch.get("y", 0.5)))),
+                }
+            except (TypeError, ValueError):
+                pass
+        cleaned.append(row)
 
     # Earliest first, then drop anything that collides with a kept effect —
     # two camera moves running at once read as a glitch, not as emphasis.
@@ -8256,7 +8402,7 @@ def suggest_effects():
     # the reframe analysis has face data to aim with.
     for fx in cleaned:
         if fx["type"] in ("punch_zoom", "zoom_1_5", "zoom_2x"):
-            anchor = _face_anchor_at(job_id, fx["start_time"])
+            anchor = _speaker_anchor_at(job_id, fx["start_time"], words=words)
             if anchor:
                 fx["anchor"] = anchor
     # Record each proposal here rather than client-side: this is where the
@@ -11562,6 +11708,68 @@ def assign_speakers_to_words(words: list, diarization: list) -> list:
     return out
 
 
+def _stamp_caption_words_from_source(caption_words: list,
+                                      seg_meta: list,
+                                      seg_starts: list) -> int:
+    """Colour-code Timeline captions from each source clip's diarization.
+
+    assign_speakers_to_words does this in SOURCE time, where a word and a
+    diarization segment share a clock. Timeline captions do not: the words
+    have been cut, trimmed and concatenated, so a word at 7.2s in the
+    export may be 61.4s in the clip it came from. The only way back is
+    through each segment's own (src_in, src_out) and its start in the
+    output, which is what this undoes -- per segment, since each one
+    carries a different shift.
+
+    Lived inline in render_timeline_job, where a mis-attribution would
+    have shown up as the wrong person's colour on screen and nothing else.
+    Returns the number of words it stamped.
+
+    Words that already carry a speaker are left alone: a stamp made in
+    source time, before any cutting, is the better one.
+    """
+    stamped = 0
+    for idx, meta in enumerate(seg_meta or []):
+        sjid = meta.get("source_job_id")
+        if not sjid:
+            continue
+        cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
+        if not cache_path.exists():
+            continue
+        try:
+            diar_src = (json.loads(cache_path.read_text(encoding="utf-8"))
+                        .get("diarization") or [])
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not diar_src:
+            continue
+        seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
+        src_in = float(meta.get("src_in") or 0)
+        src_out = float(meta.get("src_out") or 0)
+        for w in caption_words:
+            if w.get("speaker"):
+                continue
+            try:
+                mid_out = (float(w["start"]) + float(w["end"])) / 2.0
+            except (TypeError, ValueError, KeyError):
+                continue
+            local = mid_out - seg_start
+            # Outside this segment's slice of the output, so another
+            # segment's diarization owns the word (or none does).
+            if local < -0.05 or local > (src_out - src_in) + 0.05:
+                continue
+            src_mid = src_in + max(0.0, local)
+            for seg in diar_src:
+                try:
+                    if float(seg.get("start", 0)) <= src_mid <= float(seg.get("end", 0)):
+                        w["speaker"] = seg.get("speaker")
+                        stamped += 1
+                        break
+                except (TypeError, ValueError):
+                    continue
+    return stamped
+
+
 def _stamp_job_speakers(job_id: str, diarization: list | None = None) -> int:
     """Persist speaker labels onto the job's words. Returns # words stamped."""
     job = jobs.get(job_id)
@@ -13025,6 +13233,157 @@ def _tl_declick_af(dur: float, d: float = 0.02) -> str:
     """Short fade-in + fade-out so segment joins don't pop."""
     d = min(d, max(0.005, dur / 4))
     return f"afade=t=in:st=0:d={d:.3f},afade=t=out:st={max(0.0, dur - d):.3f}:d={d:.3f}"
+
+
+def _tl_speaker_split_boxes(source_job_id: str | None,
+                             speakers: list | None = None,
+                             ) -> list[tuple[float, float, float, float]] | None:
+    """Two face boxes from ONE clip, for a both-people-at-once split.
+
+    _tl_split_segment stacks two DIFFERENT sources. "Split when two people
+    talk" is not that: there is one camera, one file, and two faces inside
+    the same frame. What it needs is two crop boxes, which
+    _assign_speakers_to_faces already computes -- per speaker, counting
+    only the windows where that speaker talks alone.
+
+    Returns the boxes left-to-right by their position in the source frame.
+    Ordering by who talks first would let the two halves swap sides between
+    one split and the next, which reads as a jump cut rather than an edit.
+
+    None when there is no analysis, fewer than two speakers located, or the
+    two boxes sit on top of each other -- the last case being a detector
+    that only ever saw one person, where a two-up would show the same face
+    twice.
+    """
+    rd = _load_reframe_cache(source_job_id)
+    if not rd:
+        return None
+    diar = rd.get("diarization") or []
+    if not diar or not (rd.get("faces") or []):
+        return None
+    _positions, bboxes = _speaker_face_map(source_job_id, rd)
+    wanted = [str(x) for x in (speakers or []) if str(x) in bboxes]
+    if len(wanted) < 2:
+        # Fall back to first appearance in the diarization, which is the
+        # same ordering _assign_speakers_to_faces uses for its own tie-break.
+        wanted = []
+        for seg in diar:
+            spk = str(seg.get("speaker") or "")
+            if spk in bboxes and spk not in wanted:
+                wanted.append(spk)
+    if len(wanted) < 2:
+        return None
+    boxes = [tuple(float(v) for v in bboxes[spk]) for spk in wanted[:2]]
+    boxes.sort(key=lambda b: b[0])
+
+    # Both boxes have to be places a face was actually seen.
+    #
+    # _assign_speakers_to_faces INVENTS a separation when every speaker
+    # lands on the same cluster: it nudges them +/-0.15 along x so two
+    # stills do not come back identical. That is a fair hedge for a
+    # screenshot and a bad one here -- it would crop the same person twice,
+    # offset, which looks like a rendering fault rather than an edit. And
+    # because the nudge is 0.3 wide, checking that the two boxes differ
+    # cannot catch it; the fabricated pair are the furthest apart of all.
+    #
+    # So verify against the raw samples instead. A real box sits on top of
+    # a detection; a nudged one sits 0.15 away from every one of them.
+    seen = [float(f.get("cx", -1))
+            for sample in (rd.get("faces") or [])
+            for f in (sample.get("faces") or [])]
+    if not seen:
+        return None
+    for box in boxes:
+        if not any(abs(cx - box[0]) < 0.08 for cx in seen):
+            return None
+    if abs(boxes[0][0] - boxes[1][0]) < 0.06:
+        return None
+    return boxes
+
+
+def _tl_speaker_crop_px(box, src_w: int, src_h: int, pw: int, ph: int,
+                        pad: float = 3.2, lift: float = 0.38):
+    """A head-and-shoulders crop around *box*, already in the panel's aspect.
+
+    Giving the crop the panel's aspect ratio up front means the scale that
+    follows does not throw part of it away. *pad* is how much taller than
+    the face to take, *lift* where the face sits vertically -- above centre,
+    because a crop centred on a face puts the chin in the middle and wastes
+    the frame on chest.
+
+    Returns even (w, h, x, y) in pixels, inside the frame.
+    """
+    cx, cy, _fw, fh = (float(v) for v in box)
+    face_h = max(8.0, fh * src_h)
+    crop_h = min(float(src_h), face_h * pad)
+    crop_w = crop_h * (float(pw) / float(ph))
+    if crop_w > src_w:
+        crop_w = float(src_w)
+        crop_h = min(float(src_h), crop_w * float(ph) / float(pw))
+    x = cx * src_w - crop_w / 2.0
+    y = cy * src_h - crop_h * lift
+    x = max(0.0, min(float(src_w) - crop_w, x))
+    y = max(0.0, min(float(src_h) - crop_h, y))
+
+    def _even(v: float) -> int:
+        n = int(v)
+        return n - (n % 2)
+
+    return max(2, _even(crop_w)), max(2, _even(crop_h)), _even(x), _even(y)
+
+
+def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
+                               boxes: list, layout: str,
+                               W: int, H: int, fps: int, out_path: Path,
+                               color: dict | None = None) -> float:
+    """Both speakers side by side, cropped out of the SAME clip.
+
+    One input, split into two streams, each cropped to its speaker's box
+    and scaled into its panel. Audio comes from the single source, so there
+    is nothing to sync -- which is the quiet advantage over a two-source
+    split, where the second panel's audio has to be thrown away.
+    """
+    if layout == "auto":
+        layout = "stack" if H >= W else "side"
+    if layout == "side":
+        pw, ph, stack = W // 2, H, "hstack"
+    else:
+        pw, ph, stack = W, H // 2, "vstack"
+    pw -= pw % 2
+    ph -= ph % 2
+
+    size = _probe_video_size(src)
+    if not size:
+        raise RuntimeError(f"Could not read frame size for split: {src}")
+    src_w, src_h = size
+
+    parts = ["[0:v:0]split=2[sa][sb]"]
+    for i, (label, box) in enumerate(zip(("sa", "sb"), boxes[:2])):
+        cw, ch, cxp, cyp = _tl_speaker_crop_px(box, src_w, src_h, pw, ph)
+        parts.append(
+            f"[{label}]crop={cw}:{ch}:{cxp}:{cyp},"
+            f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+            f"crop={pw}:{ph},setsar=1,fps={fps}[p{i}]"
+        )
+    cf = _tl_color_filter(color)
+    post = ("," + cf) if cf else ""
+    parts.append(f"[p0][p1]{stack}=inputs=2{post},format=yuv420p[v]")
+    fc = ";".join(parts)
+
+    has_audio = _has_audio_stream(src)
+    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+    if not has_audio:
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+            "-map", "[v]", "-map", "0:a:0" if has_audio else "1:a:0",
+            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2"]
+    if has_audio:
+        cmd += ["-af", _tl_declick_af(dur)]
+    cmd += ["-shortest", str(out_path)]
+    _tl_run(cmd, "Speaker split-screen")
+    return dur
 
 
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
@@ -14654,6 +15013,13 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "in": float(fx.get("in") or 0),
                 "layout": fx.get("layout") or "auto",
                 "placement": fx.get("placement") or "second_bottom",
+                # mode "speakers" means both panels come from the clip
+                # underneath, so no second media is needed or wanted. It
+                # rides the free-form effects JSON, which _normalize_timeline
+                # spreads with `row = dict(fx)` -- no whitelist to update.
+                "mode": str(fx.get("mode") or "").strip().lower(),
+                "speakers": [str(x) for x in (fx.get("speakers") or [])
+                             if isinstance(x, (str, int))],
             }
     return ken, punch, color, split
 
@@ -14766,9 +15132,22 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     color = fx_color if fx_color else clip_color
                     split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
                     split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
+                    # Both-speakers split: one source, two crop boxes. Only
+                    # when no second media was picked, so an explicit choice
+                    # always wins over the automatic one.
+                    spk_boxes = None
+                    if (split and split.get("enabled") and not split_src
+                            and split.get("mode") == "speakers"):
+                        spk_boxes = _tl_speaker_split_boxes(
+                            c.get("source_job_id"), split.get("speakers"))
 
                     seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
-                    if split_src:
+                    if spk_boxes:
+                        dur = _tl_split_speakers_segment(
+                            src, sub_ks, sub_dur, spk_boxes,
+                            (split or {}).get("layout", "auto"),
+                            W, H, fps, seg_path, color=color)
+                    elif split_src:
                         # Second-source in-point advances with source time on A
                         # for video; stills/GIFs stay pinned at 0 (looped).
                         base_in = max(0.0, float((split or {}).get("in", 0)))
@@ -14853,40 +15232,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         # Stamp remapped caption words from each segment's Analyze diarization
         # (source time → output time). Prefer already-stamped word.speaker.
-        for idx, meta in enumerate(seg_meta):
-            sjid = meta.get("source_job_id")
-            if not sjid:
-                continue
-            cache_path = UPLOAD_DIR / f"{sjid}_reframe.json"
-            if not cache_path.exists():
-                continue
-            try:
-                diar_src = (json.loads(cache_path.read_text(encoding="utf-8")).get("diarization") or [])
-            except (json.JSONDecodeError, OSError):
-                continue
-            if not diar_src:
-                continue
-            seg_start = seg_starts[idx] if idx < len(seg_starts) else 0.0
-            src_in = float(meta.get("src_in") or 0)
-            src_out = float(meta.get("src_out") or 0)
-            for w in caption_words:
-                if w.get("speaker"):
-                    continue
-                try:
-                    mid_out = (float(w["start"]) + float(w["end"])) / 2.0
-                except (TypeError, ValueError, KeyError):
-                    continue
-                local = mid_out - seg_start
-                if local < -0.05 or local > (src_out - src_in) + 0.05:
-                    continue
-                src_mid = src_in + max(0.0, local)
-                for seg in diar_src:
-                    try:
-                        if float(seg.get("start", 0)) <= src_mid <= float(seg.get("end", 0)):
-                            w["speaker"] = seg.get("speaker")
-                            break
-                    except (TypeError, ValueError):
-                        continue
+        _stamp_caption_words_from_source(caption_words, seg_meta, seg_starts)
 
         # ---- Background: the one pass where the video is NOT the bottom ----
         # Everything else here composites onto the baked main track. This
@@ -17167,7 +17513,8 @@ def ai_edit_seed():
         effects = _ensure_effects_span_timeline(effects, 0.0, total, win_words, max_fx)
         for fx in effects:
             if fx.get("type") in ("punch_zoom", "zoom_1_5", "zoom_2x"):
-                anchor = _face_anchor_at(work_job_id, fx["start_time"])
+                anchor = _speaker_anchor_at(work_job_id, fx["start_time"],
+                                            words=win_words)
                 if anchor:
                     fx["anchor"] = anchor
         structure = result.get("structure") or {}
@@ -17541,7 +17888,7 @@ def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
             t = float(effects[idx].get("start") or 0)
         except (TypeError, ValueError):
             t = 0.0
-        anchor = _face_anchor_at(job_id, t)
+        anchor = _speaker_anchor_at(job_id, t)
         if not anchor:
             return None
         return {"op": "set_punch_aim", "index": idx,

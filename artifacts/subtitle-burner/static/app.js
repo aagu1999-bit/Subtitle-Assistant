@@ -2667,7 +2667,14 @@ async function refreshReframeStatus() {
         const faceHits = data.stats.face_hit_frames;
         let faceNote = "";
         if (faceStatus === "skipped") {
-          faceNote = " · faces skipped (speakers still OK — check mediapipe)";
+          // The warning now names the installed mediapipe and the pin, which
+          // is something you can act on. "Check mediapipe" in a title
+          // tooltip nobody hovers was the reason the deploy stayed broken.
+          const why = String(data.stats.faces_warning || "").trim();
+          faceNote = why
+            ? ` · faces skipped, speakers still OK — ${
+                why.length > 140 ? why.slice(0, 137) + "…" : why}`
+            : " · faces skipped (speakers still OK — check mediapipe)";
         } else if (faceStatus === "no_detections") {
           faceNote = " · 0 faces found (detector ran — try Re-analyze / better light)";
         } else if (typeof faceHits === "number") {

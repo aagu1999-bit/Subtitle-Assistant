@@ -1934,7 +1934,14 @@
           const faceStatus = data.stats.faces_status || (data.stats.faces_skipped ? "skipped" : "ok");
           const faceHits = data.stats.face_hit_frames;
           let faceNote = "";
-          if (faceStatus === "skipped") faceNote = " · faces skipped";
+          if (faceStatus === "skipped") {
+            // Same reasoning as the Ingest panel: show the reason, since it
+            // now names the version and the remedy rather than a symptom.
+            const why = String(data.stats.faces_warning || "").trim();
+            faceNote = why
+              ? ` · faces skipped — ${why.length > 110 ? why.slice(0, 107) + "…" : why}`
+              : " · faces skipped";
+          }
           else if (faceStatus === "no_detections") faceNote = " · 0 faces found";
           else if (typeof faceHits === "number") faceNote = `, ${faceHits} face frames`;
           else if (data.stats.face_samples) faceNote = `, ${data.stats.face_samples} face samples`;
@@ -2644,6 +2651,13 @@
       aim: opts.aim || opts.anchor || null,
       placement: opts.placement || (ftype === "split_screen" ? "second_bottom" : null),
     };
+    // Built from a fixed field list, so anything not named here is dropped
+    // before the clip exists -- which is where a both-speakers split lost
+    // the only two fields that make it one.
+    if (opts.mode) ec.mode = String(opts.mode);
+    if (Array.isArray(opts.speakers) && opts.speakers.length) {
+      ec.speakers = opts.speakers.slice(0, 2).map(String);
+    }
     if (opts.quote) ec.quote = opts.quote;
     if (opts.reason) ec.reason = opts.reason;
     reanchor(ec);
@@ -4882,6 +4896,22 @@
       } else if (c.type === "ken_burns") {
         html += `<div class="tl-prop-grid">${propSelect("direction", "Direction", c.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       } else if (c.type === "split_screen") {
+        // Two different things wear the same name. A split can pair this
+        // clip with OTHER media, or it can frame the two people already
+        // inside this one clip. Only the first ever had a control, so the
+        // second was unreachable even though Analyze suggests it.
+        const splitMode = c.mode === "speakers" ? "speakers" : "media";
+        html += propSelect("__split_mode", "Split shows", splitMode, [
+          ["media", "This clip + other media"],
+          ["speakers", "Both speakers in this clip"],
+        ]);
+        if (splitMode === "speakers") {
+          html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto (stacked in a reel)"], ["side", "Side by side"], ["stack", "Top / bottom"]])}</div>`;
+          const named = Array.isArray(c.speakers) && c.speakers.length
+            ? c.speakers.join(" + ")
+            : "the first two speakers found";
+          html += `<p class="muted" style="font-size:.72rem">Crops ${named} out of this clip and shows them together, left to right as they sit in the frame. Needs Analyze speakers to have run — without face data this renders as the uncut shot.</p>`;
+        } else {
         const splitOpts = [["", "— pick second media —"]].concat(
           sources.map((s) => [
             `job:${s.job_id}`,
@@ -4923,6 +4953,7 @@
             [["second_top", "Top"], ["second_bottom", "Bottom (default)"]]);
         }
         html += `<p class="muted" style="font-size:.72rem">Main stays the other half. Audio always comes from Main. Videos, stills, and GIFs from Media all work as the second panel.</p>`;
+        }
       } else if (c.type === "color") {
         html += `<div class="tl-swatches" id="tlFxSwatches">` +
           COLOR_PRESETS.map(([v, t2]) =>
@@ -5643,6 +5674,23 @@
           } else {
             c.out = (c.in || 0) + Math.max(0.2, v);
           }
+        } else if (key === "__split_mode") {
+          if (v === "speakers") {
+            c.mode = "speakers";
+            // A second source would win over the automatic boxes on the
+            // server, so clear it rather than leave a silent override.
+            c.source_job_id = null;
+            c.asset_id = null;
+            c.in = 0;
+            if (!c.layout) c.layout = "auto";
+          } else {
+            delete c.mode;
+          }
+          renderProps();
+          renderTimeline();
+          updateStageCompositor();
+          scheduleSave();
+          return;
         } else if (key === "__split_media") {
           if (typeof v === "string" && v.startsWith("job:")) {
             c.source_job_id = v.slice(4);
@@ -6003,6 +6051,13 @@
       aim: fx.anchor || null,
       quote: fx.quote || null,
       reason: fx.reason || null,
+      // A both-speakers split carries which people to frame. Dropping
+      // these left the applied clip with no second media and no boxes, so
+      // the renderer fell through to an ordinary segment and every
+      // split-screen Analyze suggested rendered as nothing.
+      mode: fx.mode || null,
+      speakers: Array.isArray(fx.speakers) ? fx.speakers.slice(0, 2) : null,
+      layout: fx.mode === "speakers" ? "auto" : null,
     });
     if (!ec) return;
     if (fxSuggest) fxSuggest.state[fxKey(fx)] = "applied";
