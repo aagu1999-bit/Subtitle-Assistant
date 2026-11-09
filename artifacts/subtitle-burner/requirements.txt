@@ -41,6 +41,13 @@ pyannote.audio>=3.1.0
 mediapipe>=0.10.5,<0.10.22
 opencv-python-headless>=4.10.0
 
+# Fetch source footage from a URL instead of uploading it. Unpinned on
+# purpose: extractors break whenever a site changes and the fix only ships
+# in a newer release. Was declared in pyproject.toml only -- the mirror of
+# the gap that pruned pyannote, and it would have left anyone installing
+# from this file without URL ingest.
+yt-dlp
+
 # NOT a dependency, deliberately: `imageio-ffmpeg`.
 #
 # app.py prefers its bundled ffmpeg binary when present, but the system

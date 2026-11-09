@@ -3343,3 +3343,127 @@ def test_the_resolved_ffmpeg_can_burn_subtitles(app_mod):
                          capture_output=True, text=True, timeout=60)
     assert re.search(r"^\s*\S+\s+subtitles\s", out.stdout, re.M), \
         "the resolved ffmpeg has no subtitles filter -- captions would burn as nothing"
+
+
+# ---------------------------------------------------------------------------
+# Two dependency lists that disagree is how the app keeps losing pieces.
+#
+# Three outages, one shape. `uv sync` installs what pyproject.toml declares
+# and PRUNES everything else, and requirements.txt had packages pyproject
+# never mentioned:
+#
+#   mediapipe       pinned in both, absent from uv.lock -> background died
+#   imageio-ffmpeg  declared nowhere at all             -> every render died
+#   pyannote.audio  requirements.txt only               -> speakers died
+#
+# Each time the package was genuinely required and genuinely undeclared
+# somewhere, and nothing failed until production did. These tests make the
+# divergence itself the failure, so it is caught in CI rather than by a
+# creator whose render just stopped working.
+# ---------------------------------------------------------------------------
+
+# Packages intentionally in requirements.txt but NOT pyproject.toml. Each
+# needs a reason, so that an accident cannot hide here as a decision.
+_NOT_IN_PYPROJECT = {
+    "whisperx": "install size vs alignment quality -- _refine_word_alignment "
+                "degrades silently to Whisper's own word timings",
+    "playwright": "browser tests only; the app never imports it",
+}
+
+
+def _canon(name):
+    """PEP 503 normalisation: pyannote.audio and pyannote-audio are one name."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _requirements_names():
+    text = (BURNER / "requirements.txt").read_text(encoding="utf-8")
+    out = set()
+    for line in text.splitlines():
+        line = line.split("#")[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~\[;]", line)[0]
+        if name.strip():
+            out.add(_canon(name))
+    return out
+
+
+def _pyproject_names():
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"dependencies\s*=\s*\[(.*?)\n\]", text, re.S)
+    assert block, "pyproject.toml has no dependencies array"
+    out = set()
+    for line in block.group(1).splitlines():
+        line = line.split("#")[0].strip()
+        m = re.match(r'"([^"<>=!~\[;]+)', line)
+        if m:
+            out.add(_canon(m.group(1)))
+    return out
+
+
+def test_requirements_and_pyproject_do_not_silently_diverge():
+    """Anything the app needs must be in the file the installer reads.
+
+    This is the test that would have caught all three outages. It fails the
+    moment a package is added to one list and not the other, which is the
+    only moment at which the mistake is cheap.
+    """
+    missing = _requirements_names() - _pyproject_names() - set(_NOT_IN_PYPROJECT)
+    assert not missing, (
+        "declared in requirements.txt but not pyproject.toml, so `uv sync` "
+        f"will PRUNE them from a deployed environment: {sorted(missing)}. "
+        "Add them to pyproject.toml, or record them in _NOT_IN_PYPROJECT "
+        "with the reason they are deliberately absent."
+    )
+
+
+def test_pyproject_and_requirements_do_not_diverge_the_other_way_either():
+    """The mirror. A one-way check guards half the door.
+
+    A package in pyproject.toml but not requirements.txt leaves anyone
+    installing with `pip install -r requirements.txt` missing it -- the same
+    failure, pointed the other way.
+    """
+    missing = _pyproject_names() - _requirements_names()
+    assert not missing, (
+        "declared in pyproject.toml but not requirements.txt, so a pip "
+        f"install from that file silently omits them: {sorted(missing)}"
+    )
+
+
+def test_the_deliberate_exclusions_are_real():
+    """An allowlist that outlives its entries starts hiding things.
+
+    If a package is removed from requirements.txt, its exemption here is
+    stale and the next reader cannot tell an obsolete entry from a live
+    decision.
+    """
+    reqs = _requirements_names()
+    stale = [n for n in _NOT_IN_PYPROJECT if _canon(n) not in reqs]
+    assert not stale, f"exempted but no longer in requirements.txt: {stale}"
+
+
+def test_the_lockfile_carries_the_speaker_stack():
+    """pyannote must reach the artifact a deploy installs from.
+
+    The declaration is worthless if the lock does not carry it -- exactly
+    how the mediapipe pin was true in two files and false in practice for
+    weeks.
+    """
+    assert _locked_version("pyannote-audio") is not None, (
+        "uv.lock has no pyannote-audio entry, so Analyze speakers will not "
+        "install on a fresh build"
+    )
+    # Diarization runs on torch; without it pyannote imports and then fails.
+    assert _locked_version("torch") is not None, "uv.lock has no torch entry"
+
+
+def test_the_lockfile_carries_the_polish_engines():
+    """Polish degrades rather than crashes, which makes a loss easy to miss.
+
+    /polish/ping reports which engines exist, so a pruned auto-editor leaves
+    the button present and inert -- indistinguishable from broken.
+    """
+    for pkg in ("auto-editor", "moviepy"):
+        assert _locked_version(pkg) is not None, f"uv.lock has no {pkg} entry"

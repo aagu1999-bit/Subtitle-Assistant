@@ -21,6 +21,27 @@ dependencies = [
     # AttributeError at runtime.
     "mediapipe>=0.10.5,<0.10.22",
     "opencv-python-headless>=4.10.0",
-    # WhisperX is deliberately absent: it pulls torch (~2-3 GB) and the
-    # alignment degrades to Whisper's own timings without it.
+    # Speaker diarization: who is talking, and when. Everything downstream of
+    # that question depends on it -- speaker caption colours, aiming a punch
+    # at whoever is speaking, the two-person split-screen, and speaker-based
+    # 9:16 reframing. /analyze-reframe refuses to start without it, so a
+    # missing pyannote takes the whole Analyze step down, faces included.
+    #
+    # This was declared only in requirements.txt until an environment sync
+    # pruned it and every speaker feature went dormant in production. One
+    # list is the fix; see the matching note in requirements.txt.
+    "pyannote.audio>=3.1.0",
+    # Polish: the source rough-cut that trims silence before any captions are
+    # burned. /polish/ping probes for both and reports which engines exist,
+    # so losing them degrades rather than crashes -- but the button stops
+    # doing anything, which is indistinguishable from broken.
+    "auto-editor>=29.0.0",
+    "moviepy>=2.0.0",
+    # WhisperX is deliberately absent, but NOT for the reason this comment
+    # used to give. It said "it pulls torch (~2-3 GB)" -- and pyannote above
+    # pulls torch too, so that was never the deciding factor. The real trade
+    # is install size against alignment quality: without WhisperX, word
+    # timings fall back to Whisper's own, which drift slightly against the
+    # audio. _refine_word_alignment already degrades silently to exactly
+    # that, so its absence costs tightness, not captions.
 ]
