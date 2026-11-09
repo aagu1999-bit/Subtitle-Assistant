@@ -2858,6 +2858,10 @@
     if (Array.isArray(opts.speakers) && opts.speakers.length) {
       ec.speakers = opts.speakers.slice(0, 2).map(String);
     }
+    // Per-panel backgrounds. Named here because this is a FIXED field list:
+    // anything not mentioned is dropped before the clip exists, which is
+    // where a both-speakers split lost mode/speakers the first time.
+    if (Array.isArray(opts.panels)) ec.panels = opts.panels;
     if (opts.quote) ec.quote = opts.quote;
     if (opts.reason) ec.reason = opts.reason;
     reanchor(ec);
@@ -5144,6 +5148,7 @@
           ["media", "This clip + other media"],
           ["speakers", "Both speakers in this clip"],
         ]);
+        html += panelBackgroundControls(c);
         if (splitMode === "speakers") {
           html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto (stacked in a reel)"], ["side", "Side by side"], ["stack", "Top / bottom"]])}</div>`;
           const named = Array.isArray(c.speakers) && c.speakers.length
@@ -5904,6 +5909,38 @@
   function propCheck(key, label, val) {
     return `<div class="tl-prop-row"><label class="tl-prop-inline"><input type="checkbox" data-key="${key}" ${val ? "checked" : ""}> ${label}</label></div>`;
   }
+  // A picture behind the person in ONE half of a split.
+  //
+  // The whole-project background runs as its own pass over the finished
+  // frame, after the two panels are already stacked -- so it lands on both
+  // halves and there is no way to reach one of them from there. These are
+  // composited inside the panel's own branch instead.
+  //
+  // Indexed by what the viewer sees: 0 is the top half when stacked, the
+  // left when side by side. That has to match the renderer, which maps the
+  // same way even when `placement` swaps the inputs round.
+  function panelBackgroundControls(c) {
+    const stills = assets.filter((a) => a.kind === "image");
+    const opts = [["", "— keep the real background —"]].concat(
+      stills.map((a) => [a.asset_id, a.filename || a.keyword || `image · ${a.ext}`]));
+    let lay = c.layout || "auto";
+    if (lay === "auto") lay = (tl && tl.canvas === "16x9") ? "side" : "stack";
+    const names = lay === "side" ? ["left", "right"] : ["top", "bottom"];
+    const panels = Array.isArray(c.panels) ? c.panels : [];
+    let out = "";
+    for (let i = 0; i < 2; i++) {
+      const cur = (panels[i] && panels[i].background) || {};
+      out += propSelect(`__panel_bg_${i}`,
+                        `Behind the ${names[i]} half`, cur.asset_id || "", opts);
+    }
+    if (!stills.length) {
+      out += `<p class="muted" style="font-size:.72rem;line-height:1.45">Upload a picture under <strong>Media → Assets</strong> to use one here.</p>`;
+    } else {
+      out += `<p class="muted" style="font-size:.72rem;line-height:1.45">Cuts the person out of that half only and paints the picture behind them. Needs the same person-detection the project background uses.</p>`;
+    }
+    return out;
+  }
+
   function propSelect(key, label, val, opts) {
     const o = opts.map(([v, t]) => `<option value="${v}" ${v === val ? "selected" : ""}>${t}</option>`).join("");
     return `<div class="tl-prop-row"><label>${label}</label><select data-key="${key}">${o}</select></div>`;
@@ -5955,6 +5992,22 @@
           renderProps();
           renderTimeline();
           updateStageCompositor();
+          scheduleSave();
+          return;
+        } else if (/^__panel_bg_\d$/.test(key)) {
+          // A picture behind the person in ONE half. Indexed by what the
+          // viewer sees -- 0 is the top (stacked) or left (side by side) --
+          // which is the mapping the renderer uses too, even when
+          // `placement` swaps the inputs round.
+          const i = Number(key.slice(-1));
+          const panels = Array.isArray(c.panels) ? c.panels.slice() : [];
+          while (panels.length < 2) panels.push(null);
+          panels[i] = v ? { background: { asset_id: v, fit: "cover" } } : null;
+          // Drop the key entirely when neither half wants one, so a split
+          // nobody has touched stays exactly what it was.
+          if (panels.some(Boolean)) c.panels = panels;
+          else delete c.panels;
+          renderProps();
           scheduleSave();
           return;
         } else if (key === "__split_mode") {

@@ -13828,10 +13828,56 @@ def _tl_speaker_crop_px(box, src_w: int, src_h: int, pw: int, ph: int,
     return max(2, _even(crop_w)), max(2, _even(crop_h)), _even(x), _even(y)
 
 
+def _tl_panel_background_branch(idx: int, panel_label: str, matte_label: str,
+                                bg_input: int, pw: int, ph: int,
+                                fit: str = "cover") -> tuple[list, str]:
+    """Put a picture behind the subject in ONE panel of a split.
+
+    The whole-frame background pass (_tl_composite_background) runs after
+    the two panels have already been stacked, so it mattes the combined
+    image and lands on both halves at once. There is no way to reach one
+    panel from there -- which is why "change the background on only one
+    side" was not expressible, however it was asked for.
+
+    Here the replacement happens INSIDE a branch, before the stack:
+
+        [bg]        the picture, filled to the panel
+        [fg]        this panel with its matte as alpha
+        [bg][fg]    overlay
+
+    The matte arrives already cropped and scaled the same way the picture
+    it describes was -- see the callers -- so it lines up by construction
+    rather than by arithmetic that could drift.
+
+    Returns (filter parts, output label).
+    """
+    out = f"q{idx}"
+    parts = [
+        f"[{bg_input}:v]{_tl_overlay_scale_filter(pw, ph, fit)},setsar=1[pbg{idx}]",
+        f"[{panel_label}][{matte_label}]alphamerge[pfg{idx}]",
+        f"[pbg{idx}][pfg{idx}]overlay=0:0:format=auto[{out}]",
+    ]
+    return parts, out
+
+
+def _tl_panel_bg_spec(panel_bgs, i: int) -> dict | None:
+    """The background for panel *i*, or None. Tolerates a short/ragged list."""
+    if not isinstance(panel_bgs, (list, tuple)) or i >= len(panel_bgs):
+        return None
+    spec = panel_bgs[i]
+    if not isinstance(spec, dict):
+        return None
+    bg = spec.get("background") if "background" in spec else spec
+    if not isinstance(bg, dict):
+        return None
+    return bg if _tl_bg_source(bg) else None
+
+
 def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
                                boxes: list, layout: str,
                                W: int, H: int, fps: int, out_path: Path,
-                               color: dict | None = None) -> float:
+                               color: dict | None = None,
+                               panel_bgs: list | None = None) -> float:
     """Both speakers side by side, cropped out of the SAME clip.
 
     One input, split into two streams, each cropped to its speaker's box
@@ -13853,24 +13899,78 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
         raise RuntimeError(f"Could not read frame size for split: {src}")
     src_w, src_h = size
 
-    parts = ["[0:v:0]split=2[sa][sb]"]
-    for i, (label, box) in enumerate(zip(("sa", "sb"), boxes[:2])):
-        cw, ch, cxp, cyp = _tl_speaker_crop_px(box, src_w, src_h, pw, ph)
-        parts.append(
-            f"[{label}]crop={cw}:{ch}:{cxp}:{cyp},"
-            f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
-            f"crop={pw}:{ph},setsar=1,fps={fps}[p{i}]"
-        )
-    cf = _tl_color_filter(color)
-    post = ("," + cf) if cf else ""
-    parts.append(f"[p0][p1]{stack}=inputs=2{post},format=yuv420p[v]")
-    fc = ";".join(parts)
+    # Which panels want a picture behind the person. Resolved before the
+    # graph is built because a matte that cannot be made must cost the
+    # background and nothing else -- the panel then renders as plain
+    # footage rather than failing the segment.
+    wanted = {i: _tl_panel_bg_spec(panel_bgs, i) for i in (0, 1)}
+    wanted = {i: bg for i, bg in wanted.items() if bg}
+    mattes: dict[int, Path] = {}
+    if wanted:
+        ok, why = _segment_deps_available()
+        matte = _tl_matte_video(src, src_w, src_h, fps, dur, start=t_in) if ok else None
+        if matte:
+            # ONE matte of the source serves both panels: each branch puts
+            # it through the same crop+scale as its own picture, so it
+            # lines up by construction.
+            for i in wanted:
+                mattes[i] = matte
+        else:
+            reason = why if not ok else "the subject could not be separated"
+            print(f"[background] panel background skipped -- {reason}", flush=True)
+            _tl_background_skipped.append(reason)
 
     has_audio = _has_audio_stream(src)
+    # Input 0 is the source; a silent source adds an anullsrc at 1. Every
+    # extra file appends after that. Indices are handed out by one counter
+    # rather than recomputed per panel, because an off-by-one here maps a
+    # matte onto the wrong stream and the result still renders -- silently
+    # wrong is the expensive kind.
+    extra_files: list[str] = []
+
+    def _add_input(path) -> int:
+        idx = 1 + (0 if has_audio else 1) + len(extra_files)
+        extra_files.append(str(path))
+        return idx
+
+    parts = ["[0:v:0]split=2[sa][sb]"]
+    panel_out = {}
+    for i, (label, box) in enumerate(zip(("sa", "sb"), boxes[:2])):
+        cw, ch, cxp, cyp = _tl_speaker_crop_px(box, src_w, src_h, pw, ph)
+        chain = (f"crop={cw}:{ch}:{cxp}:{cyp},"
+                 f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+                 f"crop={pw}:{ph},setsar=1,fps={fps}")
+        parts.append(f"[{label}]{chain}[p{i}]")
+        panel_out[i] = f"p{i}"
+        if i in mattes:
+            m_idx = _add_input(mattes[i])
+            bg_idx = _add_input(_tl_bg_source(wanted[i]))
+            # The matte gets the panel's OWN chain, so it describes exactly
+            # the pixels it is the alpha for -- no separate arithmetic to
+            # drift out of step with the crop.
+            parts.append(f"[{m_idx}:v]{chain},format=gray[pm{i}]")
+            br, out_label = _tl_panel_background_branch(
+                i, f"p{i}", f"pm{i}", bg_idx, pw, ph,
+                str(wanted[i].get("fit") or "cover"))
+            parts += br
+            panel_out[i] = out_label
+    cf = _tl_color_filter(color)
+    post = ("," + cf) if cf else ""
+    parts.append(
+        f"[{panel_out[0]}][{panel_out[1]}]{stack}=inputs=2{post},format=yuv420p[v]")
+    fc = ";".join(parts)
+
     cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
     if not has_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    for f in extra_files:
+        # A still picture has to be looped to cover the window; the matte is
+        # already a clip of exactly the right length.
+        if Path(f).suffix.lower().lstrip(".") in ASSET_EXT_STILL:
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", f]
+        else:
+            cmd += ["-i", f]
     cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
             "-map", "[v]", "-map", "0:a:0" if has_audio else "1:a:0",
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
@@ -13885,7 +13985,8 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
 def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                       dur: float, layout: str, W: int, H: int, fps: int,
                       out_path: Path, color: dict | None = None,
-                      placement: str | None = None) -> float:
+                      placement: str | None = None,
+                      panel_bgs: list | None = None) -> float:
     """Render a split-screen segment: two sources shown at once.
 
     layout 'side' = left/right halves; 'stack' = top/bottom halves; 'auto'
@@ -13930,12 +14031,60 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     hasA = _has_audio_stream(srcA)
     cf = _tl_color_filter(color)
     post = ("," + cf) if cf else ""
-    if second_first:
-        order = "[p1][p0]"
-    else:
-        order = "[p0][p1]"
-    fc = (f"{panel(0)};{panel(1)};"
-          f"{order}{stack}=inputs=2{post},format=yuv420p[v]")
+
+    # panel_bgs is indexed by what the VIEWER sees -- 0 is the top/left
+    # half -- not by input order, which `placement` can swap. Mapping it
+    # here keeps "panel 1" meaning the same thing in both split modes.
+    visual_to_input = {0: 1, 1: 0} if second_first else {0: 0, 1: 1}
+    srcs = {0: srcA, 1: srcB}
+    wanted = {}
+    for vis in (0, 1):
+        bg = _tl_panel_bg_spec(panel_bgs, vis)
+        if bg:
+            wanted[visual_to_input[vis]] = bg
+
+    mattes: dict[int, Path] = {}
+    if wanted:
+        ok, why = _segment_deps_available()
+        for in_idx, _bg in wanted.items():
+            src = srcs[in_idx]
+            start = inA if in_idx == 0 else (0.0 if (is_still or is_gif) else inB)
+            m = _tl_matte_video(src, pw, ph, fps, dur, start=start) if ok else None
+            if m:
+                mattes[in_idx] = m
+            else:
+                reason = why if not ok else "the subject could not be separated"
+                print(f"[background] panel background skipped -- {reason}",
+                      flush=True)
+                _tl_background_skipped.append(reason)
+
+    extra_files: list[str] = []
+
+    def _add_input(path) -> int:
+        idx = 2 + (0 if hasA else 1) + len(extra_files)
+        extra_files.append(str(path))
+        return idx
+
+    parts = [panel(0), panel(1)]
+    panel_out = {0: "p0", 1: "p1"}
+    for in_idx in (0, 1):
+        if in_idx not in mattes:
+            continue
+        m_idx = _add_input(mattes[in_idx])
+        bg_idx = _add_input(_tl_bg_source(wanted[in_idx]))
+        # The matte was made at panel size, so it only needs the fps/sar
+        # normalisation the panel itself got.
+        parts.append(f"[{m_idx}:v]scale={pw}:{ph},setsar=1,fps={fps},format=gray[pm{in_idx}]")
+        br, out_label = _tl_panel_background_branch(
+            in_idx, f"p{in_idx}", f"pm{in_idx}", bg_idx, pw, ph,
+            str(wanted[in_idx].get("fit") or "cover"))
+        parts += br
+        panel_out[in_idx] = out_label
+
+    order = (f"[{panel_out[1]}][{panel_out[0]}]" if second_first
+             else f"[{panel_out[0]}][{panel_out[1]}]")
+    parts.append(f"{order}{stack}=inputs=2{post},format=yuv420p[v]")
+    fc = ";".join(parts)
     cmd = [FFMPEG, "-y",
            "-ss", f"{inA:.3f}", "-i", str(srcA)]
     if is_still:
@@ -13949,6 +14098,11 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     audio_idx = "2:a:0" if not hasA else "0:a:0"
+    for f in extra_files:
+        if Path(f).suffix.lower().lstrip(".") in ASSET_EXT_STILL:
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", f]
+        else:
+            cmd += ["-i", f]
     cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
             "-map", "[v]", "-map", audio_idx,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
@@ -14007,7 +14161,8 @@ def _matte_refine(mask):
 
 
 def _tl_matte_video(src: Path, W: int, H: int, fps: int,
-                    dur: float | None = None) -> Path | None:
+                    dur: float | None = None,
+                    start: float = 0.0) -> Path | None:
     """A greyscale matte video for the person in *src*. Cached.
 
     White where the subject is, black where the background is, which is what
@@ -14029,7 +14184,7 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
     try:
         st = Path(src).stat()
         key = hashlib.md5(
-            f"{src}|{st.st_mtime_ns}|{st.st_size}|{W}x{H}|{fps}|{dur}".encode()
+            f"{src}|{st.st_mtime_ns}|{st.st_size}|{W}x{H}|{fps}|{start}|{dur}".encode()
         ).hexdigest()[:16]
     except OSError:
         return None
@@ -14049,6 +14204,15 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
     cap = cv2.VideoCapture(str(src))
     if not cap.isOpened():
         return None
+    # A split at 0:20 for 5s needs frames 20-25. Without a start the whole
+    # clip gets matted to use five seconds of it -- on a 90s source that is
+    # ~19s of segmentation thrown away. Seek by milliseconds rather than by
+    # frame index, which is what OpenCV is reliable about across containers.
+    if start and start > 0:
+        try:
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(start) * 1000.0)
+        except Exception:                        # noqa: BLE001
+            pass
     limit = int(dur * fps) if dur and dur > 0 else 0
     proc = subprocess.Popen(
         [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
@@ -15972,6 +16136,13 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "mode": str(fx.get("mode") or "").strip().lower(),
                 "speakers": [str(x) for x in (fx.get("speakers") or [])
                              if isinstance(x, (str, int))],
+                # Per-panel backgrounds, indexed by what the viewer sees:
+                # 0 is the top (stacked) or left (side-by-side) half.
+                # Named here ON PURPOSE -- this fresh dict is a fixed field
+                # list, and it is where `mode` and `speakers` were silently
+                # dropped the first time round.
+                "panels": (fx.get("panels")
+                           if isinstance(fx.get("panels"), list) else None),
             }
     return ken, punch, color, split
 
@@ -16098,7 +16269,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                         dur = _tl_split_speakers_segment(
                             src, sub_ks, sub_dur, spk_boxes,
                             (split or {}).get("layout", "auto"),
-                            W, H, fps, seg_path, color=color)
+                            W, H, fps, seg_path, color=color,
+                            panel_bgs=(split or {}).get("panels"))
                     elif split_src:
                         # Second-source in-point advances with source time on A
                         # for video; stills/GIFs stay pinned at 0 (looped).
@@ -16111,7 +16283,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                         dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
                                                 (split or {}).get("layout", "auto"),
                                                 W, H, fps, seg_path, color=color,
-                                                placement=(split or {}).get("placement"))
+                                                placement=(split or {}).get("placement"),
+                                                panel_bgs=(split or {}).get("panels"))
                     else:
                         dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
                                                     seg_path, ken=ken, color=color, punch=punch)

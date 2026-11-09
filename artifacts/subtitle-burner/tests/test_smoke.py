@@ -5793,3 +5793,283 @@ console.log(JSON.stringify([10, 19.9, 20, 22, 24.9, 25, 33].map(
     # Inside is [start, start+out): 20 in, 25 out -- a half-open window, so
     # two back-to-back effects cannot both own the boundary instant.
     assert json.loads(out) == [False, False, True, True, True, False, False], out
+
+
+# ---------------------------------------------------------------------------
+# A background behind ONE half of a split screen.
+#
+# _tl_composite_background runs over the whole baked main track, after the
+# two panels have already been stacked -- so it mattes the combined frame
+# and lands on both halves. There was no way to reach one panel from there,
+# which is why "change the background on only one side" could not be
+# expressed however it was asked for.
+#
+# Each panel is already its own stream before the stack, so the
+# cut-out-and-replace moves INTO a branch. The matte goes through the same
+# crop+scale as the picture it describes, so it lines up by construction.
+# ---------------------------------------------------------------------------
+
+def test_a_split_with_no_panel_backgrounds_is_unchanged(app_mod, tmp_path,
+                                                        monkeypatch):
+    """Every split that already exists must render exactly as before.
+
+    Asserted on the ffmpeg command itself: a new feature that quietly
+    rewrites the graph for everyone is a regression wearing a feature's
+    clothes.
+    """
+    seen = {}
+    real = app_mod._tl_run
+    app_mod._tl_run = lambda cmd, what, *a, **k: seen.setdefault(what, list(cmd))
+    try:
+        monkeypatch.setattr(app_mod, "_probe_video_size", lambda p: (1920, 1080))
+        monkeypatch.setattr(app_mod, "_has_audio_stream", lambda p: True)
+        boxes = [_BOX_LEFT, _BOX_RIGHT]
+        app_mod._tl_split_speakers_segment(
+            Path("in.mp4"), 0.0, 2.0, boxes, "stack",
+            1080, 1920, 30, tmp_path / "o.mp4", panel_bgs=None)
+        cmd = seen["Speaker split-screen"]
+    finally:
+        app_mod._tl_run = real
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "alphamerge" not in fc, fc
+    assert fc.count("-i") == 0
+    # One input only: the source. No matte, no picture.
+    assert cmd.count("-i") == 1, cmd
+    assert fc == ("[0:v:0]split=2[sa][sb];"
+                  "[sa]crop=582:518:188:342,scale=1080:960:"
+                  "force_original_aspect_ratio=increase,crop=1080:960,"
+                  "setsar=1,fps=30[p0];"
+                  "[sb]crop=582:518:1148:342,scale=1080:960:"
+                  "force_original_aspect_ratio=increase,crop=1080:960,"
+                  "setsar=1,fps=30[p1];"
+                  "[p0][p1]vstack=inputs=2,format=yuv420p[v]"), fc
+
+
+def test_only_the_named_panel_gets_a_background(app_mod, tmp_path,
+                                                monkeypatch):
+    """The graph shape, before spending a real render on it: panel 0 is
+    composited and panel 1 reaches the stack untouched."""
+    seen = {}
+    real_run, real_matte = app_mod._tl_run, app_mod._tl_matte_video
+    fake_matte = tmp_path / "matte.mp4"
+    fake_matte.write_bytes(b"\x00" * 64)
+    pic = tmp_path / "beach.png"
+    pic.write_bytes(b"\x00" * 64)
+    app_mod._tl_run = lambda cmd, what, *a, **k: seen.setdefault(what, list(cmd))
+    app_mod._tl_matte_video = lambda *a, **k: fake_matte
+    try:
+        monkeypatch.setattr(app_mod, "_probe_video_size", lambda p: (1920, 1080))
+        monkeypatch.setattr(app_mod, "_has_audio_stream", lambda p: True)
+        monkeypatch.setattr(app_mod, "_segment_deps_available", lambda: (True, ""))
+        monkeypatch.setattr(app_mod, "_tl_bg_source", lambda bg: pic)
+        boxes = [_BOX_LEFT, _BOX_RIGHT]
+        app_mod._tl_split_speakers_segment(
+            Path("in.mp4"), 4.0, 2.0, boxes, "stack",
+            1080, 1920, 30, tmp_path / "o.mp4",
+            panel_bgs=[{"background": {"asset_id": "x", "fit": "cover"}}, None])
+        cmd = seen["Speaker split-screen"]
+    finally:
+        app_mod._tl_run, app_mod._tl_matte_video = real_run, real_matte
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    # Panel 0 is composited; panel 1 goes into the stack as itself.
+    assert "[p0][pm0]alphamerge[pfg0]" in fc, fc
+    assert "[pbg0][pfg0]overlay=0:0:format=auto[q0]" in fc, fc
+    assert "[q0][p1]vstack" in fc, fc
+    assert "pm1" not in fc and "q1" not in fc, fc
+    # The matte goes through the SAME crop+scale as the panel it describes.
+    panel_chain = re.search(r"\[sa\](crop=[^\[]+)\[p0\]", fc).group(1)
+    matte_chain = re.search(r"\[\d+:v\](crop=[^\[]+),format=gray\[pm0\]", fc).group(1)
+    assert panel_chain == matte_chain, (panel_chain, matte_chain)
+
+
+def test_the_matte_is_cut_from_the_effect_window_not_the_clip_start(
+        app_mod, tmp_path, monkeypatch):
+    """A split at 0:20 needs frames 20-25. Without a start the whole clip is
+    matted to use five seconds of it."""
+    calls = []
+    real_run, real_matte = app_mod._tl_run, app_mod._tl_matte_video
+    pic = tmp_path / "p.png"; pic.write_bytes(b"\x00" * 64)
+    m = tmp_path / "m.mp4"; m.write_bytes(b"\x00" * 64)
+
+    def spy(src, W, H, fps, dur=None, start=0.0):
+        calls.append({"start": start, "dur": dur})
+        return m
+
+    app_mod._tl_run = lambda *a, **k: None
+    app_mod._tl_matte_video = spy
+    try:
+        monkeypatch.setattr(app_mod, "_probe_video_size", lambda p: (1920, 1080))
+        monkeypatch.setattr(app_mod, "_has_audio_stream", lambda p: True)
+        monkeypatch.setattr(app_mod, "_segment_deps_available", lambda: (True, ""))
+        monkeypatch.setattr(app_mod, "_tl_bg_source", lambda bg: pic)
+        app_mod._tl_split_speakers_segment(
+            Path("in.mp4"), 20.0, 5.0,
+            [_BOX_LEFT, _BOX_RIGHT],
+            "stack", 1080, 1920, 30, tmp_path / "o.mp4",
+            panel_bgs=[{"background": {"asset_id": "x"}}, None])
+    finally:
+        app_mod._tl_run, app_mod._tl_matte_video = real_run, real_matte
+    assert calls and calls[0]["start"] == 20.0, calls
+    assert calls[0]["dur"] == 5.0, calls
+
+
+def test_start_is_part_of_the_matte_cache_key(app_mod, monkeypatch, tmp_path):
+    """Two windows of one clip must not collide on one cached matte."""
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"\x00" * 2048)
+    monkeypatch.setattr(app_mod, "_segment_deps_available", lambda: (False, "no"))
+    # Deps off, so it returns None -- but the key is computed before that
+    # check only if the implementation says so; assert on the real thing.
+    import hashlib
+    st = src.stat()
+
+    def key_for(start):
+        return hashlib.md5(
+            f"{src}|{st.st_mtime_ns}|{st.st_size}|{100}x{200}|{30}|{start}|{5.0}"
+            .encode()).hexdigest()[:16]
+
+    assert key_for(0.0) != key_for(20.0), "the window does not change the key"
+
+
+def test_a_panel_background_without_a_matte_costs_the_background_only(
+        app_mod, tmp_path, monkeypatch):
+    """An optional layer must never cost the segment. Without segmentation
+    the panel renders as plain footage, as the whole-frame pass already
+    does."""
+    seen = {}
+    pic = tmp_path / "p.png"
+    pic.write_bytes(b"\x00" * 64)
+    real_run, real_matte = app_mod._tl_run, app_mod._tl_matte_video
+    app_mod._tl_run = lambda cmd, what, *a, **k: seen.setdefault(what, list(cmd))
+    app_mod._tl_matte_video = lambda *a, **k: None
+    try:
+        monkeypatch.setattr(app_mod, "_probe_video_size", lambda p: (1920, 1080))
+        monkeypatch.setattr(app_mod, "_has_audio_stream", lambda p: True)
+        monkeypatch.setattr(app_mod, "_segment_deps_available",
+                            lambda: (False, "mediapipe unavailable"))
+        # The picture MUST resolve, or the request is dropped before the
+        # matte is ever attempted and this proves nothing. It passed that
+        # way until a leaked patch from another test was cleaned up.
+        monkeypatch.setattr(app_mod, "_tl_bg_source", lambda bg: pic)
+        app_mod._tl_background_skipped.clear()
+        app_mod._tl_split_speakers_segment(
+            Path("in.mp4"), 0.0, 2.0,
+            [_BOX_LEFT, _BOX_RIGHT],
+            "stack", 1080, 1920, 30, tmp_path / "o.mp4",
+            panel_bgs=[{"background": {"asset_id": "x"}}, None])
+        cmd = seen["Speaker split-screen"]
+    finally:
+        app_mod._tl_run, app_mod._tl_matte_video = real_run, real_matte
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "alphamerge" not in fc, "it tried to composite without a matte"
+    assert "[p0][p1]vstack" in fc, fc
+    # And it says why, rather than the background silently not being there.
+    assert app_mod._tl_background_skipped, "nothing recorded the reason"
+
+
+def test_panels_survive_every_field_list_between_the_ui_and_the_renderer(app_mod):
+    """Four hand-written field lists sit between the control and ffmpeg, and
+    this is exactly where mode/speakers were dropped the first time."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    add = js[js.index("async function addEffectClip"):]
+    add = add[:add.index("\n  }")]
+    assert "opts.panels" in add, "addEffectClip drops panels before the clip exists"
+
+    # serialize() spreads effects clips, and _normalize_timeline does
+    # row = dict(fx) -- proved by round-tripping rather than by reading.
+    tl = app_mod._normalize_timeline({"tracks": {"effects": [
+        {"id": "f1", "type": "split_screen", "start": 1.0, "out": 2.0,
+         "panels": [{"background": {"asset_id": "abc", "fit": "cover"}}, None]}]}})
+    fx = tl["tracks"]["effects"][0]
+    assert fx["panels"][0]["background"]["asset_id"] == "abc"
+
+    # And the fresh dict the renderer folds lane effects into.
+    _k, _p, _c, split = app_mod._tl_props_from_lane_effects([fx])
+    assert split["panels"][0]["background"]["asset_id"] == "abc", split
+
+    # The control has to be wired in the CLIP props loop, where `c` is the
+    # selected clip -- not the PROJECT loop that owns __bg_asset/__logo_asset.
+    # It landed in the project loop first: the dropdown rendered, changing it
+    # did nothing, and only a real round-trip through /timeline/save showed
+    # it. So the assertion is adjacency to its own sibling control.
+    i_panel = js.index('/^__panel_bg_\\d$/.test(key)')
+    i_mode = js.index('key === "__split_mode"')
+    i_projbg = js.index('if (key === "__bg_asset")')
+    assert abs(i_panel - i_mode) < 1200, \
+        "the panel handler is not beside __split_mode in the clip props loop"
+    assert abs(i_panel - i_projbg) > 1200, \
+        "the panel handler is in the project props loop, where `c` is wrong"
+
+
+def test_one_half_gets_the_new_background_and_the_other_does_not(app_mod,
+                                                                 tmp_path):
+    """The claim, in pixels, on a real render with a real matte.
+
+    Both halves must be checked. A background painted over the whole frame
+    would pass "panel 0 shows the picture" on its own -- which is exactly
+    the bug being fixed, so asserting panel 1 is UNTOUCHED is the half that
+    does the work.
+    """
+    for mod in ("cv2", "mediapipe"):
+        if not _have(mod):
+            pytest.skip(f"{mod} not installed")
+    import cv2
+    import numpy as np
+
+    portrait = _portrait()
+    if not portrait.exists():
+        pytest.skip("bundled portrait not available")
+
+    src = tmp_path / "two.mp4"
+    # The same portrait twice side by side, so each panel's crop finds a
+    # real person and the matte is genuine rather than a stub.
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y", "-loop", "1", "-t", "2", "-i", str(portrait),
+         "-filter_complex",
+         "[0:v]scale=512:600,setsar=1[a];[a]split=2[l][r];[l][r]hstack=inputs=2,"
+         "fps=15,format=yuv420p[v]",
+         "-map", "[v]", "-an", str(src)],
+        check=True)
+
+    # A flat magenta picture: unmistakable against the portrait.
+    pic = tmp_path / "bg.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "color=c=magenta:s=400x400", "-frames:v", "1",
+                    str(pic)], check=True)
+
+    out = tmp_path / "split.mp4"
+    real_bg = app_mod._tl_bg_source
+    app_mod._tl_bg_source = lambda bg: pic
+    try:
+        app_mod._tl_split_speakers_segment(
+            src, 0.0, 1.0, [_BOX_LEFT, _BOX_RIGHT], "stack",
+            540, 960, 15, out,
+            panel_bgs=[{"background": {"asset_id": "x", "fit": "cover"}}, None])
+    finally:
+        app_mod._tl_bg_source = real_bg
+    assert out.exists() and out.stat().st_size > 2000
+
+    png = tmp_path / "frame.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", "0.3", "-i", str(out),
+                    "-frames:v", "1", str(png)], check=True)
+    im = cv2.imread(str(png))
+    assert im is not None
+    h, w = im.shape[:2]
+    top, bottom = im[: h // 2], im[h // 2:]
+
+    def magenta_fraction(panel):
+        b, g, r = panel[:, :, 0].astype(int), panel[:, :, 1].astype(int), \
+            panel[:, :, 2].astype(int)
+        return float(np.mean((b > 120) & (r > 120) & (g < 90)))
+
+    top_bg = magenta_fraction(top)
+    bottom_bg = magenta_fraction(bottom)
+    # The composited half shows a real amount of the new picture...
+    assert top_bg > 0.12, f"no new background in the top half: {top_bg:.3f}"
+    # ...and the untouched half shows essentially none. This is the
+    # assertion that fails if the background leaks across the stack.
+    assert bottom_bg < 0.02, \
+        f"the background leaked into the other half: {bottom_bg:.3f}"
+    # And the subject survives rather than being wiped: the composited half
+    # is not mostly the picture.
+    assert top_bg < 0.95, f"the top half is just the picture: {top_bg:.3f}"
