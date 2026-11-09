@@ -5651,3 +5651,145 @@ def test_the_mobile_only_rule_still_shows_what_is_not_hidden():
     m = re.search(r"\.tl-mobile-only:not\(\[hidden\]\)\s*\{([^}]*)\}", css)
     assert m, "the phone rule is gone entirely"
     assert "display" in m.group(1) and "none" not in m.group(1), m.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The co-editor you could not type into.
+#
+# On a phone the drawer is a bottom sheet, and its CSS comment has always
+# said "above nav / context strip" -- but it was pinned `bottom: 0`, which
+# is not above the nav, it is UNDER it. The bottom nav is fixed in the same
+# band, so measured at iPhone portrait (390x664):
+#
+#   #coEditorInput     612 -> 652
+#   #mobileBottomNav   603 -> 664   (fixed, z-200)
+#
+# The text box and Send sat inside the nav's 61px strip. There was nowhere
+# visible to type, and focusing an input you cannot see is what made the
+# keyboard feel uncontrollable too.
+# ---------------------------------------------------------------------------
+
+_NAV_CLEARANCE = "calc(64px + env(safe-area-inset-bottom, 0px))"
+
+
+def test_the_coeditor_sheet_clears_the_bottom_nav():
+    """The failure was geometric, so the assertion is about the offset."""
+    css = _mobile_css()
+    rule = re.search(
+        r"body\.is-phone \.co-editor-drawer\s*\{([^}]*)\}", css)
+    assert rule, "the phone rule for the co-editor drawer is gone"
+    body = rule.group(1)
+    bottom = re.search(r"(?<!-)\bbottom\s*:\s*([^;]+);", body)
+    assert bottom, f"no bottom offset: {body}"
+    value = bottom.group(1).strip()
+    assert value != "0", "the drawer is pinned under the bottom nav again"
+    assert "64px" in value and "safe-area-inset-bottom" in value, value
+
+
+def test_every_phone_bottom_sheet_clears_the_nav_the_same_way():
+    """Three places already encode the nav's height. They must agree, or
+    one sheet ends up under it while the others do not -- which is exactly
+    how this happened: the body padding and the context strip cleared the
+    nav and the co-editor did not."""
+    css = re.sub(r"/\*.*?\*/", "", _mobile_css(), flags=re.S)
+    uses = re.findall(r"calc\(\s*64px\s*\+\s*env\(safe-area-inset-bottom[^)]*\)\s*\)",
+                      css)
+    assert len(uses) >= 3, (
+        "the nav-clearance expression is used fewer times than expected; "
+        f"found {len(uses)}")
+
+
+def test_the_keyboard_inset_is_measured_rather_than_assumed():
+    """iOS does not resize the layout viewport when the keyboard opens, so a
+    fixed bottom sheet stays put and the keyboard covers it -- you can focus
+    a box you cannot see. visualViewport is the only thing that reports it,
+    and nothing in this app used it before."""
+    js = (BURNER / "static" / "mobile.js").read_text(encoding="utf-8")
+    assert "visualViewport" in js, "nothing measures the keyboard"
+    assert "--kb-inset" in js
+    assert 'classList.toggle("kb-open"' in js
+    # A threshold, not "> 0": a collapsing Safari toolbar is not a keyboard.
+    fn = js[js.index("function syncKeyboardInset()"):]
+    fn = fn[:fn.index("\n  }") + 4]
+    m = re.search(r"inset\s*>\s*(\d+)", fn)
+    assert m and int(m.group(1)) >= 50, f"threshold too low: {fn}"
+
+    css = _mobile_css()
+    assert "body.is-phone.kb-open .co-editor-drawer" in css, \
+        "nothing lifts the drawer above the keyboard"
+    rule = re.search(r"body\.is-phone\.kb-open \.co-editor-drawer\s*\{([^}]*)\}",
+                     css).group(1)
+    assert "--kb-inset" in rule, rule
+
+
+def test_the_keyboard_can_be_put_away_again():
+    """"I cannot bring up and lower my keyboard." Sending kept focus, so the
+    keyboard stayed over the answer with no obvious way down."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("const input = $(\"coEditorInput\");\n    const prompt ="):]
+    fn = fn[:2000]
+    assert ".blur()" in fn, "sending leaves the keyboard up over the reply"
+    assert "is-phone" in fn, "it must only put the keyboard away on a phone"
+
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    tag = re.search(r'<input[^>]*id="coEditorInput"[^>]*>', html).group(0)
+    assert 'enterkeyhint="send"' in tag, tag
+
+
+def test_the_drawer_cannot_grow_taller_than_the_space_above_the_nav():
+    """A sheet taller than the room left pushes its own head off the top of
+    a short phone, which is the same failure in the other direction."""
+    css = _mobile_css()
+    rule = re.search(r"body\.is-phone \.co-editor-drawer\s*\{([^}]*)\}",
+                     css).group(1)
+    assert "max-height" in rule, rule
+    mh = re.search(r"max-height\s*:\s*([^;]+);", rule).group(1)
+    assert "64px" in mh and "dvh" in mh, mh
+
+
+# ---------------------------------------------------------------------------
+# The preview claimed a windowed split covered the whole shot.
+#
+# Asked for a split from 0:20 to 0:25, the co-editor placed it correctly
+# (`add_effect`, #36), the props panel showed Start 20 / 5s, and the render
+# windows it -- test_a_windowed_split_leaves_the_footage_either_side_alone
+# proves that in pixels. But SELECTING the effect clip drew the divider and
+# the "2nd" badge at every playhead position, with no time check at all. At
+# 0:33 that is indistinguishable from a split applied to the entire clip.
+#
+# The data was right and the render was right. The preview was the thing
+# saying otherwise -- the worst place for the lie to live, because it is
+# the only part anyone looks at.
+# ---------------------------------------------------------------------------
+
+def test_the_selected_split_guide_is_scoped_to_its_own_window():
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    sel = js[js.index('if (selected) {\n      const c = findClip(selected.track, selected.id);'):]
+    sel = sel[:sel.index("// Split-screen guide whenever")]
+    assert 'c.type === "split_screen"' in sel, "the selected branch moved"
+    assert "effectCoversPlayhead(" in sel, \
+        "the selected split guide is drawn with no time check again"
+    # And it must say where the effect IS rather than drawing nothing at all.
+    assert "addEffectElsewhereHint(" in sel
+
+
+def test_the_two_guide_paths_share_one_window_arithmetic():
+    """The selected path and the live path disagreed, and that disagreement
+    WAS the bug. One function, two readers."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function effectCoversPlayhead(c, ot)"):]
+    fn = fn[:fn.index("\n  }") + 4]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    harness = """
+function clipDuration(c) { return Number(c.out) || 0; }
+const fx = {start: 20, out: 5};
+console.log(JSON.stringify([10, 19.9, 20, 22, 24.9, 25, 33].map(
+  (t) => effectCoversPlayhead(fx, t))));
+"""
+    out = subprocess.run([node, "-e", fn + harness],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    # Inside is [start, start+out): 20 in, 25 out -- a half-open window, so
+    # two back-to-back effects cannot both own the boundary instant.
+    assert json.loads(out) == [False, False, True, True, True, False, False], out

@@ -3803,6 +3803,32 @@
     v.style.filter = cssFilterForColor(color);
   }
 
+  // Does this effect clip cover the playhead? Same arithmetic as
+  // activeEffectsAt, pulled out so the selected-clip path cannot drift from
+  // the live path -- they disagreed, and that disagreement was the bug.
+  function effectCoversPlayhead(c, ot) {
+    if (!c || ot == null) return false;
+    const s = Number(c.start) || 0;
+    return ot >= s && ot < s + clipDuration(c);
+  }
+
+  // Say where it IS, rather than drawing it where it is not.
+  function addEffectElsewhereHint(c, ot) {
+    const layer = $("tlOverlayLayer");
+    if (!layer) return;
+    const s = Number(c.start) || 0;
+    const e = s + clipDuration(c);
+    const tag = document.createElement("div");
+    tag.style.cssText =
+      "position:absolute;left:50%;top:10px;transform:translateX(-50%);" +
+      "padding:4px 10px;font-size:11px;font-weight:600;border-radius:999px;" +
+      "background:rgba(0,0,0,.66);color:#c8cdd8;pointer-events:none;" +
+      "white-space:nowrap";
+    tag.textContent = `⬓ Split screen runs ${fmtTime(s)}–${fmtTime(e)} — ` +
+      `scrub there to see it`;
+    layer.appendChild(tag);
+  }
+
   function activeEffectsAt(ot) {
     if (!tl || ot == null) return [];
     return (tl.tracks.effects || []).filter((c) => {
@@ -4740,7 +4766,17 @@
         if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
         else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
         else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c.split);
-        else if (selected.track === "effects" && c.type === "split_screen") addSplitGuide(c);
+        else if (selected.track === "effects" && c.type === "split_screen") {
+          // ONLY where the effect actually runs. Selecting the clip used to
+          // draw the divider and the "2nd" badge at every playhead
+          // position, so a split correctly placed at 0:20 for 5s looked --
+          // at 0:33 -- exactly like a split applied to the whole shot. The
+          // data was right and the render was right; the preview was the
+          // thing saying otherwise, which is the worst place for the lie to
+          // live, because it is the only part anyone looks at.
+          if (effectCoversPlayhead(c, ot)) addSplitGuide(c);
+          else addEffectElsewhereHint(c, ot);
+        }
       }
     }
     // Split-screen guide whenever an effects-lane split is active at playhead
@@ -9948,6 +9984,12 @@
     const prompt = (input && input.value || "").trim();
     if (!prompt) return;
     if (input) input.value = "";
+    // Put the keyboard away on a phone once the prompt is sent. It covers
+    // most of the screen, and the answer -- which is the point -- appears
+    // behind it otherwise, with no obvious way to lower it again.
+    if (input && document.body.classList.contains("is-phone")) {
+      try { input.blur(); } catch (e) { /* non-fatal */ }
+    }
     appendCoMsg("user", prompt);
     rememberCoTurn("user", prompt);
     appendCoMsg("bot", "Thinking…");
