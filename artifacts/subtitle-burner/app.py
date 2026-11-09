@@ -3,6 +3,7 @@ Subtitle Burner - A Flask web app that adds word-by-word highlighted
 captions to videos using Whisper for transcription and FFmpeg for rendering.
 """
 import errno
+import importlib
 import os
 import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -1782,6 +1783,106 @@ def _pyannote_gate_help(err_str: str = "", *, token: str | None = None) -> str:
     )
 
 
+# Types that pyannote 3.x checkpoints contain and PyTorch 2.6+ will not
+# unpickle by default.
+#
+# From 2.6, torch.load defaults to weights_only=True, which permits only a
+# small set of tensor types -- a good default that this model's files
+# predate. The refusals arrive ONE AT A TIME, each load failing on the next
+# name, so they are registered as a reviewed set rather than discovered
+# over four redeploys.
+#
+# This list is deliberately fixed and explicit. Allowlisting whatever the
+# error happens to name, or loading with weights_only=False, would let a
+# checkpoint run arbitrary code on load -- which is the thing the default
+# exists to stop. If a load still fails, the error below says exactly which
+# name to add here, and adding it is a decision someone makes on purpose.
+_PYANNOTE_SAFE_GLOBALS = [
+    ("torch.torch_version", "TorchVersion"),
+    ("omegaconf.base", "Metadata"),
+    ("omegaconf.base", "ContainerMetadata"),
+    ("omegaconf.nodes", "AnyNode"),
+    ("omegaconf.nodes", "ValueNode"),
+    ("omegaconf.listconfig", "ListConfig"),
+    ("omegaconf.dictconfig", "DictConfig"),
+    ("pyannote.audio.core.model", "Introspection"),
+    ("pyannote.audio.core.task", "Specifications"),
+    ("pyannote.audio.core.task", "Problem"),
+    ("pyannote.audio.core.task", "Resolution"),
+]
+
+
+def _allow_pyannote_checkpoint_globals(torch) -> int:
+    """Allowlist the types pyannote checkpoints carry. Returns how many.
+
+    Each name is imported defensively: these live in two third-party
+    packages across several versions, and a rename upstream must cost the
+    allowlisting, not the whole Analyze step.
+    """
+    add = getattr(getattr(torch, "serialization", None), "add_safe_globals", None)
+    if not callable(add):
+        return 0          # torch < 2.6: no safe-globals API, old default
+    found = []
+    for mod_name, attr in _PYANNOTE_SAFE_GLOBALS:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        obj = getattr(mod, attr, None)
+        if obj is not None:
+            found.append(obj)
+    if found:
+        try:
+            add(found)
+        except Exception as e:
+            print(f"[diarize] add_safe_globals failed: {e}", flush=True)
+            return 0
+    return len(found)
+
+
+def _is_weights_only_error(err: BaseException) -> bool:
+    """Is this the PyTorch 2.6 safe unpickler refusing the checkpoint?
+
+    Matched on the message: PyTorch raises a plain UnpicklingError, which
+    is indistinguishable by type from a genuinely corrupt file.
+    """
+    text = str(err)
+    return ("weights_only" in text
+            or "Weights only load failed" in text
+            or "Unsupported global" in text
+            or "WeightsUnpickler" in text)
+
+
+def _weights_only_help(err: BaseException) -> str:
+    """Turn PyTorch's wall of text into the one line that matters.
+
+    Its own message offers weights_only=False, which would let the file run
+    code on load. The actionable fix is naming the missing type, so that is
+    what this says.
+    """
+    import re as _re
+    m = _re.search(r"Unsupported global: GLOBAL ([\w.]+)", str(err))
+    missing = m.group(1) if m else None
+    lines = [
+        "The speaker model's file uses a type PyTorch will not load by "
+        "default (it defaults to weights_only=True since 2.6).",
+    ]
+    if missing:
+        mod, _, attr = missing.rpartition(".")
+        lines.append(
+            f"Missing from the allowlist: {missing}. Add "
+            f'("{mod}", "{attr}") to _PYANNOTE_SAFE_GLOBALS in app.py.'
+        )
+    else:
+        lines.append("The error did not name the type; see the detail below.")
+    lines.append(
+        "Do NOT fix this by loading with weights_only=False -- that lets the "
+        "file execute code on load, which is what the default prevents."
+    )
+    lines.append(f"PyTorch said: {str(err)[:300]}")
+    return " ".join(lines)
+
+
 def _get_diarization_pipeline():
     """Load pyannote once and reuse across Analyze runs (model load is slow)."""
     global _diarization_pipeline, _diarization_device_resolved
@@ -1794,6 +1895,10 @@ def _get_diarization_pipeline():
         import torch
 
         torch.set_num_threads(_diarization_torch_threads())
+        n_allowed = _allow_pyannote_checkpoint_globals(torch)
+        if n_allowed:
+            print(f"[diarize] allowlisted {n_allowed} checkpoint types for "
+                  "torch.load(weights_only=True)", flush=True)
         _patch_huggingface_hub()
         token = (
             os.environ.get(HUGGINGFACE_TOKEN_ENV)
@@ -1812,6 +1917,8 @@ def _get_diarization_pipeline():
                 )
         except Exception as err:
             err_str = str(err)
+            if _is_weights_only_error(err):
+                raise RuntimeError(_weights_only_help(err)) from err
             if (
                 "gated" in err_str.lower()
                 or "401" in err_str
