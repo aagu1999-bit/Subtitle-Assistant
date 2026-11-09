@@ -55,6 +55,15 @@ dependencies = [
     # doing anything, which is indistinguishable from broken.
     "auto-editor>=29.0.0",
     "moviepy>=2.0.0",
+    # Headless Chromium for artifacts/reel-automation: it screenshots a web
+    # element to a transparent PNG. It was a test-only dependency until that
+    # pipeline imported it at runtime, at which point leaving it undeclared
+    # would have repeated the imageio-ffmpeg outage exactly -- present by
+    # accident, pruned by the next sync.
+    #
+    # The pip package does not bring the browser; a machine that runs the
+    # capture also needs `playwright install chromium`.
+    "playwright>=1.40.0",
     # WhisperX is deliberately absent, but NOT for the reason this comment
     # used to give. It said "it pulls torch (~2-3 GB)" -- and pyannote above
     # pulls torch too, so that was never the deciding factor. The real trade
