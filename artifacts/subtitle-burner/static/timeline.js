@@ -2403,13 +2403,13 @@
     if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = "Analyzing…"; }
     setAnalyzeProgressUI(2, "Starting…");
     try {
-      const body = { job_id: tl.job_id, timeline: serialize() };
-      // Same "Up to N" control the per-source Analyze uses. It is an element
-      // id, not a function -- and it defaults to 6, so it was never the cap
-      // that made six people look like two.
-      const sel = document.getElementById("analyzeMaxSpeakers");
-      const cap = sel && sel.value ? parseInt(sel.value, 10) : 0;
-      if (cap > 0) { body.max_speakers = cap; body.min_speakers = 1; }
+      // The same two controls the per-source Analyze reads, through the one
+      // function that interprets them -- so the two buttons cannot disagree
+      // about what "Up to 6" or "Split similar voices" means.
+      const opts = (typeof window.analyzeSpeakerOptions === "function")
+        ? window.analyzeSpeakerOptions() : {};
+      const body = Object.assign({ job_id: tl.job_id, timeline: serialize() },
+                                 opts);
 
       // The POST only STARTS the analysis and returns at once. It used to
       // run the whole thing inline, so on a long edit the request sat open
@@ -2428,9 +2428,14 @@
                                         data.speaker_colors || {});
       scheduleSave();
       renderProps();
+      // Name the setting that produced the number. A speaker count that
+      // changes between runs with no stated cause is how this got confusing.
+      const how = data.sensitivity && data.sensitivity !== "normal"
+        ? ` (${data.sensitivity === "split" ? "split similar voices"
+                                            : "merge similar voices"})`
+        : "";
       setAnalyzeProgressUI(100,
-        `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)` +
-        ` — one label space`);
+        `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)${how}`);
     } catch (e) {
       const msg = (e && e.message) || String(e);
       setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + msg);
