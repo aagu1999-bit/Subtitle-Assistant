@@ -10,6 +10,13 @@
     return MQ.matches;
   }
 
+  // Orientation and resize change whether the sheet can be laid out at all,
+  // so they are exactly when an orphaned scrim should clear itself.
+  window.addEventListener("orientationchange", () =>
+    setTimeout(healOrphanedMobilePanel, 250));
+  window.addEventListener("resize", () =>
+    setTimeout(healOrphanedMobilePanel, 250));
+
   function syncPhoneClass() {
     document.body.classList.toggle("is-phone", isPhone());
     if (!isPhone()) {
@@ -61,24 +68,65 @@
     syncMobileHomeVisibility(tab);
   }
 
+  // Can the bottom sheet actually be SEEN right now?
+  //
+  // This is the question nothing used to ask, and it is the whole bug. The
+  // sheet lives inside the editor's .tab-content, so when that is
+  // display:none the sheet has no box at all -- 0x0 -- while
+  // openMobilePanel still put up a full-screen 55%-black scrim over
+  // whatever happened to be on screen. On an iPhone in portrait that is a
+  // dead, dimmed page with no X anywhere, because the element holding the
+  // X is the one with no box.
+  function mobilePanelCanBeSeen() {
+    const el = document.getElementById("tlLeftPanel")
+      || document.querySelector(".tl-left");
+    if (!el) return false;
+    // offsetParent is null for display:none at any level; the rect catches
+    // a parent that is laid out but collapsed.
+    if (!el.offsetParent && getComputedStyle(el).position !== "fixed") return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1;
+  }
+
   function openMobilePanel(ltab) {
     if (!isPhone()) return;
     closeToolSheet();
     document.body.classList.add("tl-mobile-panel-open");
-    const scrim = document.getElementById("mobilePanelScrim");
-    if (scrim) scrim.hidden = false;
     if (ltab && typeof window.setTimelineLeftTab === "function") {
-      window.setTimelineLeftTab(ltab, { pin: true });
+      window.setTimelineLeftTab(ltab, { pin: true, openSheet: false });
     } else if (ltab) {
       const tab = document.querySelector(`.tl-lefttab[data-ltab="${ltab}"]`);
       if (tab) tab.click();
     }
+    // Only dim the screen once the sheet is really there. The class goes on
+    // first because the sheet's own transform depends on it; the scrim
+    // comes up only if that produced something visible.
+    if (!mobilePanelCanBeSeen()) {
+      closeMobilePanel();
+      return;
+    }
+    const scrim = document.getElementById("mobilePanelScrim");
+    if (scrim) scrim.hidden = false;
+    // A layout can settle a frame late. Re-check rather than leave a scrim
+    // over nothing if it does not.
+    setTimeout(healOrphanedMobilePanel, 400);
   }
 
   function closeMobilePanel() {
     document.body.classList.remove("tl-mobile-panel-open");
     const scrim = document.getElementById("mobilePanelScrim");
     if (scrim) scrim.hidden = true;
+  }
+
+  // A scrim with nothing behind it is a trap: it swallows every tap and
+  // offers no way out. Rotating to landscape used to be the only escape,
+  // and only by accident -- it makes isPhone() false, and syncPhoneClass
+  // tears the whole thing down. This makes the recovery deliberate, and
+  // makes it work without turning the phone sideways.
+  function healOrphanedMobilePanel() {
+    if (!document.body.classList.contains("tl-mobile-panel-open")) return;
+    if (mobilePanelCanBeSeen()) return;
+    closeMobilePanel();
   }
 
   function cyclePreviewSize() {
@@ -778,7 +826,17 @@
     const closeBtn = document.getElementById("tlMobilePanelClose");
     if (closeBtn) closeBtn.addEventListener("click", closeMobilePanel);
     const scrim = document.getElementById("mobilePanelScrim");
-    if (scrim) scrim.addEventListener("click", closeMobilePanel);
+    if (scrim) {
+      // pointerdown as well as click. On iOS Safari a `click` born from a
+      // touch on a plain, non-interactive <div> is unreliable -- which is
+      // why this scrim's one escape hatch did nothing on the device it
+      // mattered on, while it dismissed fine in a desktop browser.
+      scrim.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        closeMobilePanel();
+      });
+      scrim.addEventListener("click", closeMobilePanel);
+    }
 
     const moreBtn = document.getElementById("tlToolbarMoreBtn");
     if (moreBtn) {
