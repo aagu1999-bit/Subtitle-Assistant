@@ -41,6 +41,19 @@ pyannote.audio>=3.1.0
 mediapipe>=0.10.5,<0.10.22
 opencv-python-headless>=4.10.0
 
+# NOT a dependency, deliberately: `imageio-ffmpeg`.
+#
+# app.py prefers its bundled ffmpeg binary when present, but the system
+# ffmpeg is the supported one -- on Replit that is replit.nix's
+# `pkgs.ffmpeg-full`, which has libass (the subtitles filter) and, being part
+# of the image, cannot be pruned by a dependency sync. The pip binary can be,
+# and was: it went missing under a running server and every render failed on
+# spawn until the resolution was taught to check the path and re-resolve.
+#
+# So do not add it here expecting it to be required, and do not remove the
+# preference in app.py expecting it to be dead -- it is the fallback for
+# environments with no system ffmpeg at all.
+
 # Tighter word timestamps. Whisper infers word times from decoder attention and
 # they drift; WhisperX aligns them against a phoneme model, and every caption
 # highlight and effect here is anchored to a word time. On by default when
