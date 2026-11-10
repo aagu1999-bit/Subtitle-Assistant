@@ -2855,6 +2855,10 @@
     // before the clip exists -- which is where a both-speakers split lost
     // the only two fields that make it one.
     if (opts.mode) ec.mode = String(opts.mode);
+    // Split ratio. Named here because this is a FIXED field list: anything
+    // not mentioned is dropped before the clip exists, which is where
+    // mode/speakers and later panels were each lost in turn.
+    if (opts.ratio) ec.ratio = String(opts.ratio);
     if (Array.isArray(opts.speakers) && opts.speakers.length) {
       ec.speakers = opts.speakers.slice(0, 2).map(String);
     }
@@ -5143,13 +5147,19 @@
         // clip with OTHER media, or it can frame the two people already
         // inside this one clip. Only the first ever had a control, so the
         // second was unreachable even though Analyze suggests it.
-        const splitMode = c.mode === "speakers" ? "speakers" : "media";
+        const splitMode = (c.mode === "speakers" || c.mode === "wide_punch")
+          ? c.mode : "media";
         html += propSelect("__split_mode", "Split shows", splitMode, [
           ["media", "This clip + other media"],
           ["speakers", "Both speakers in this clip"],
+          ["wide_punch", "Wide shot + close-up (one clip)"],
         ]);
+        html += splitRatioControl(c);
         html += panelBackgroundControls(c);
-        if (splitMode === "speakers") {
+        if (splitMode === "wide_punch") {
+          html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto (stacked)"], ["side", "Side by side"], ["stack", "Top / bottom"]])}</div>`;
+          html += `<p class="muted" style="font-size:.72rem">Takes two crops of this one clip at the same instant: a pulled-back strip, and a close-up. Needs no Analyze and no faces \u2014 it works on footage with no talking at all. Side by side the strip becomes a narrow slice and shows less than the close-up rather than more, so stacked is the one to use.</p>`;
+        } else if (splitMode === "speakers") {
           html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto (stacked in a reel)"], ["side", "Side by side"], ["stack", "Top / bottom"]])}</div>`;
           const named = Array.isArray(c.speakers) && c.speakers.length
             ? c.speakers.join(" + ")
@@ -5919,6 +5929,27 @@
   // Indexed by what the viewer sees: 0 is the top half when stacked, the
   // left when side by side. That has to match the renderer, which maps the
   // same way even when `placement` swaps the inputs round.
+  // Strip size. Presets rather than a slider: most values in between read
+  // as a mistake, and this gets picked on a phone. Labels follow the layout
+  // so "thin strip" says where it actually goes -- the same thing the
+  // existing placement control does.
+  const SPLIT_RATIOS = ["thin", "third", "even", "two_thirds", "wide"];
+  const SPLIT_RATIO_PCT = { thin: 25, third: 34, even: 50, two_thirds: 66, wide: 75 };
+
+  function splitRatioControl(c) {
+    const side = (c.layout || "auto") === "side";
+    const first = side ? "left" : "top";
+    const cur = SPLIT_RATIOS.indexOf(String(c.ratio || "")) >= 0 ? String(c.ratio) : "even";
+    const opts = SPLIT_RATIOS.map((k) => {
+      const pct = SPLIT_RATIO_PCT[k];
+      const label = k === "even"
+        ? "Even halves (50 / 50)"
+        : `${pct}% ${first}  \u00b7  ${100 - pct}% ${side ? "right" : "bottom"}`;
+      return [k, label];
+    });
+    return propSelect("ratio", `Split at (${first} panel)`, cur, opts);
+  }
+
   function panelBackgroundControls(c) {
     const stills = assets.filter((a) => a.kind === "image");
     const opts = [["", "— keep the real background —"]].concat(
@@ -6011,14 +6042,18 @@
           scheduleSave();
           return;
         } else if (key === "__split_mode") {
-          if (v === "speakers") {
-            c.mode = "speakers";
+          if (v === "speakers" || v === "wide_punch") {
+            c.mode = v;
             // A second source would win over the automatic boxes on the
             // server, so clear it rather than leave a silent override.
             c.source_job_id = null;
             c.asset_id = null;
             c.in = 0;
             if (!c.layout) c.layout = "auto";
+            // A wide strip over a close-up is uneven by definition; at 50/50
+            // it reads as a mistake rather than as framing. Only seed it,
+            // so a ratio already chosen is never overwritten.
+            if (v === "wide_punch" && !c.ratio) c.ratio = "third";
           } else {
             delete c.mode;
           }
