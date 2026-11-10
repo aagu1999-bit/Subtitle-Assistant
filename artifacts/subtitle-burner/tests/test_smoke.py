@@ -7340,3 +7340,67 @@ def test_learning_a_look_is_reachable(app_mod):
     css = (BURNER / "static" / "style.css").read_text(encoding="utf-8")
     for cls in (".ll-m", ".ll-j", ".ll-a"):
         assert cls in css, f"{cls} has no styling, so the tiers look alike"
+
+
+# --- making a look, where looks are chosen -------------------------------
+# #46 shipped the reference analysis reachable only through
+# Library → Look → scroll. The #46 test proved it was not HIDDEN, which is
+# a different question from whether anyone would find it.
+
+def test_the_pack_picker_offers_to_learn_one(app_mod):
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    fn = js[js.index("async function renderAiEditPacks"):]
+    fn = fn[:fn.index("\nfunction closeAiEditPlan")]
+
+    assert 'id="aiEditLearnPack"' in fn or 'learn.id = "aiEditLearnPack"' in fn
+    assert "openLearnLook" in fn, "the card reaches nothing"
+    # It must not be mistaken for a pack: the active-state sweep keys off
+    # data-pack, so the card deliberately has none.
+    learn = fn[fn.index("const learn = document.createElement"):]
+    learn = learn[:learn.index("host.appendChild(learn)")]
+    assert "learn.dataset.pack" not in learn, \
+        "the learn card carries data-pack and could be selected as a look"
+    # Saving refreshes the list, or the new pack is invisible until reload.
+    assert "renderAiEditPacks()" in learn, "the list is not refreshed after saving"
+
+
+def test_the_learn_panel_is_moved_not_duplicated(app_mod):
+    """Two copies would mean two elements sharing every id in the panel,
+    and getElementById would silently start answering about whichever came
+    first in the document."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("function wireLearnLook"):]
+    assert "window.openLearnLook" in body
+    assert "host.appendChild(panel)" in body, "the panel is not moved to the host"
+    # Asserted on the restore ITSELF, not the helper's name: renaming the
+    # function left every caller still saying "returnHome", so a bare
+    # name check passed on code that would throw at runtime.
+    assert "home.appendChild(panel)" in body, "the panel is never put back"
+    assert "closeBtn.onclick = returnHome" in body, "closing does not restore it"
+
+    # And whoever borrows it gives it back when their surface goes away.
+    # Without this, closing the AI Edit modal after saving leaves the panel
+    # parked inside it and Library -> Look comes up empty.
+    assert "window.learnLookReturnHome" in body
+    close = js[js.index("function closeAiEditPlan"):]
+    close = close[:close.index("\n}")]
+    assert "learnLookReturnHome" in close, \
+        "closing the modal strands the panel inside it"
+    # cloneNode would be the duplicating mistake.
+    assert "cloneNode" not in body, "the panel is cloned, duplicating its ids"
+
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    for el in ("learnLookPanel", "learnLookFile", "learnLookSheet"):
+        assert html.count(f'id="{el}"') == 1, f"{el} is declared more than once"
+
+
+def test_the_strip_control_is_named_for_what_it_does(app_mod):
+    """The instructions I wrote for this control said "strip size"; the
+    control said "Split at (top panel)". The word people reach for is the
+    one it should carry."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function splitRatioControl"):]
+    fn = fn[:fn.index("function panelBackgroundControls")]
+    assert 'c.mode === "wide_punch"' in fn
+    assert "Strip size" in fn, "wide/close mode still says 'Split at'"
+    assert "Split at" in fn, "the media split lost its own wording"

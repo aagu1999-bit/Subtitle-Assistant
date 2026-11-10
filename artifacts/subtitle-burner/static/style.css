@@ -2009,3 +2009,18 @@ header.app-header {
   color: #94a3b8;
 }
 .ll-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+/* "Learn from a reel" sits in the pack grid but is an action, not a look —
+   a dashed outline says so without needing a label to explain it. */
+.ai-edit-pack-learn {
+  border-style: dashed;
+  border-color: rgba(99, 102, 241, 0.55);
+  background: transparent;
+}
+.ai-edit-pack-learn:hover {
+  border-color: #6366f1;
+  background: rgba(99, 102, 241, 0.1);
+}
+.ai-edit-pack-learn strong { color: #c7d2fe; }
+.ai-edit-learn-host:empty { display: none; }
+.ai-edit-learn-host { margin-top: 10px; }
