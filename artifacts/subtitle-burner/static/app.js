@@ -8292,21 +8292,86 @@ if (capcutTemplateEl) {
 }
 
 // ---- Custom Brand Preset Saver ----
-window.saveCustomBrandPreset = function(name = "custom") {
+// A saved look now goes to the SERVER as a style pack, not only to this
+// browser's localStorage. That matters for two reasons: localStorage dies with
+// the cache and is invisible to every other device, and a server-side pack
+// shows up in the AI Edit pack picker beside Pulse/Clarity/..., so a look you
+// kept can drive a whole edit instead of only the caption controls.
+// localStorage is still written, as a fallback for when the save fails.
+window.saveCustomBrandPreset = async function (name) {
+  let style = {};
   try {
-    const style = typeof getStyle === "function" ? getStyle() : {};
-    localStorage.setItem("_customBrandPreset", JSON.stringify(style));
-    console.log("Custom brand preset saved:", name);
-    brandPresetNote("Brand preset saved.");
+    style = typeof getStyle === "function" ? getStyle() : {};
   } catch (e) {
-    console.error("Failed to save preset", e);
-    brandPresetNote("Could not save the brand preset: " + e.message);
+    brandPresetNote("Could not read the current settings: " + e.message);
+    return null;
+  }
+  if (!style || !Object.keys(style).length) {
+    brandPresetNote("There are no caption settings to save yet.");
+    return null;
+  }
+
+  // Keep the local copy regardless, so a server failure costs nothing.
+  try { localStorage.setItem("_customBrandPreset", JSON.stringify(style)); } catch (e) {}
+
+  let label = (name && name !== "custom") ? String(name) : "";
+  if (!label) {
+    label = (window.prompt("Name this look (it will appear in the AI Edit packs):",
+                           "My look") || "").trim();
+    if (!label) { brandPresetNote("Saved in this browser only (no name given)."); return null; }
+  }
+
+  try {
+    const res = await fetch("/style-packs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: label, style: style }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      throw new Error(data.error || ("HTTP " + res.status));
+    }
+    brandPresetNote('Saved as "' + label + '" — it is now one of the AI Edit packs.');
+    return data.id || null;
+  } catch (e) {
+    console.error("Failed to save style pack", e);
+    brandPresetNote("Saved in this browser only — the server refused: " + e.message);
+    return null;
+  }
+};
+
+/** Saved packs from the server, newest first. [] on any failure. */
+window.listSavedStylePacks = async function () {
+  try {
+    const res = await fetch("/style-packs");
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.packs || []).filter((p) => p.source && p.source !== "builtin");
+  } catch (e) {
+    return [];
+  }
+};
+
+window.deleteSavedStylePack = async function (id) {
+  try {
+    const res = await fetch("/style-packs/" + encodeURIComponent(id), { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
+    brandPresetNote("Deleted.");
+    return true;
+  } catch (e) {
+    brandPresetNote("Could not delete it: " + e.message);
+    return false;
   }
 };
 
 const saveBrandPresetBtn = $("saveBrandPresetBtn");
 if (saveBrandPresetBtn) {
-  saveBrandPresetBtn.onclick = () => window.saveCustomBrandPreset("custom");
+  saveBrandPresetBtn.onclick = async () => {
+    saveBrandPresetBtn.disabled = true;
+    try { await window.saveCustomBrandPreset(); }
+    finally { saveBrandPresetBtn.disabled = false; }
+  };
 }
 const loadBrandPresetBtn = $("loadBrandPresetBtn");
 if (loadBrandPresetBtn) {
@@ -8495,13 +8560,38 @@ function applyStyleToControls(style) {
   return missing;
 }
 
-window.loadCustomBrandPreset = function () {
-  let data;
+window.loadCustomBrandPreset = async function () {
+  // Server-side packs first: they survive a cleared cache and are the ones
+  // the AI Edit picker shows, so loading anything else would be confusing.
+  let style = null;
   try {
-    data = localStorage.getItem("_customBrandPreset");
+    const res = await fetch("/style-packs");
+    if (res.ok) {
+      const body = await res.json();
+      const saved = body.saved || {};
+      const ids = Object.keys(saved);
+      if (ids.length === 1) {
+        style = saved[ids[0]].style || null;
+      } else if (ids.length > 1) {
+        const menu = ids.map((id, i) => (i + 1) + ") " + (saved[id].label || id)).join("\n");
+        const pick = window.prompt("Which look?\n" + menu, "1");
+        const idx = parseInt(pick, 10) - 1;
+        if (!(idx >= 0 && idx < ids.length)) return;   // cancelled
+        style = saved[ids[idx]].style || null;
+      }
+    }
   } catch (e) {
-    brandPresetNote("Couldn't read saved presets in this browser.");
-    return;
+    // Fall through to the browser copy.
+  }
+
+  let data = style ? JSON.stringify(style) : null;
+  if (!data) {
+    try {
+      data = localStorage.getItem("_customBrandPreset");
+    } catch (e) {
+      brandPresetNote("Couldn't read saved presets in this browser.");
+      return;
+    }
   }
   if (!data) { brandPresetNote("No saved brand preset yet."); return; }
   try {

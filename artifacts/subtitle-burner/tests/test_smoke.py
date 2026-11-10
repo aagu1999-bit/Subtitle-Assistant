@@ -12,6 +12,7 @@ import importlib.util
 import json
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -6073,3 +6074,219 @@ def test_one_half_gets_the_new_background_and_the_other_does_not(app_mod,
     # And the subject survives rather than being wiped: the composited half
     # is not mostly the picture.
     assert top_bg < 0.95, f"the top half is just the picture: {top_bg:.3f}"
+
+
+# --- style packs: somewhere for a look to live ---------------------------
+# AI_EDIT_STYLE_PACKS held six looks and nothing could add a seventh. Brand
+# presets went to localStorage -- one browser, invisible to the server, gone
+# with the cache -- and STUDIO_TEMPLATES is a client-side array, so a look the
+# user kept could never drive an edit. These tests guard the two ways that can
+# go wrong: a saved pack failing to reach the renderer, and a saved pack
+# quietly changing what a built-in means.
+
+def _saved_pack_style():
+    return {"font_name": "Bebas Neue", "font_size": 71,
+            "highlight_color": "#ABCDEF", "group_size": 1}
+
+
+def test_the_builtin_packs_resolve_exactly_as_before(app_mod, temp_db):
+    """The resolver replaced a direct dict lookup in the AI Edit pipeline.
+
+    Every built-in must come back byte-identical, with and without saved packs
+    in the table -- otherwise this refactor silently retuned six looks people
+    already use.
+    """
+    client = app_mod.app.test_client()
+    for key, ref in app_mod.AI_EDIT_STYLE_PACKS.items():
+        expect = dict(ref)
+        expect["_id"] = key
+        assert app_mod._resolve_style_pack(key) == expect, key
+
+    # Again with a saved pack present, which is when shadowing would bite.
+    client.post("/style-packs", json={"label": "Mine", "style": _saved_pack_style()})
+    for key, ref in app_mod.AI_EDIT_STYLE_PACKS.items():
+        expect = dict(ref)
+        expect["_id"] = key
+        assert app_mod._resolve_style_pack(key) == expect, f"{key} after a save"
+
+    # And an unknown id still lands on pulse rather than raising.
+    assert app_mod._resolve_style_pack("no-such-pack")["_id"] == "pulse"
+    assert app_mod._resolve_style_pack("")["_id"] == "pulse"
+
+
+def test_a_saved_pack_cannot_overwrite_a_builtin(app_mod, temp_db):
+    """Otherwise picking "Clarity" would stop meaning Clarity for everyone."""
+    client = app_mod.app.test_client()
+    res = client.post("/style-packs", json={
+        "label": "Hijack", "id": "clarity", "style": {"font_size": 9}})
+    assert res.status_code == 400
+    assert "built-in" in (res.get_json() or {}).get("error", "")
+    assert app_mod._resolve_style_pack("clarity")["label"] == "Clarity"
+    assert app_mod._resolve_style_pack("clarity")["style"]["size"] == 64
+
+    # The slug of a label that collides is pushed out of the way instead.
+    assert app_mod._slug_pack_id("Clarity") != "clarity"
+    assert client.post("/style-packs", json={
+        "label": "Clarity", "style": {"font_size": 9}}).status_code == 200
+    assert app_mod._resolve_style_pack("clarity")["style"]["size"] == 64
+
+    # Deleting one is refused too, so the table cannot be emptied of them.
+    assert client.delete("/style-packs/clarity").status_code == 400
+
+
+def test_a_saved_pack_reaches_the_renderer_as_the_style_used(app_mod, temp_db,
+                                                             monkeypatch):
+    """The handover is the whole feature, and it is where this breaks.
+
+    A pack is saved through HTTP, resolved by id inside /ai-edit-seed, and its
+    caption style has to land on the produced timeline. Four hand-written field
+    lists sit between those two points; the same handover has already eaten
+    `mode`, `speakers` and `panels`.
+    """
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda prompt: {"effects": [], "hook": None})
+    client = app_mod.app.test_client()
+    app_mod.jobs["spk_src"] = {
+        "status": "awaiting_edit", "filename": "x.mp4",
+        "words": [{"word": w, "start": i * 0.5, "end": i * 0.5 + 0.45}
+                  for i, w in enumerate("one two three four five six".split() * 8)],
+    }
+    try:
+        saved = client.post("/style-packs", json={
+            "label": "Mine", "style": _saved_pack_style()}).get_json()
+        assert saved["id"] == "mine"
+
+        def seed(pack_id):
+            res = client.post("/ai-edit-seed", json={
+                "source_job_id": "spk_src", "style_pack": pack_id,
+                "full_video": True, "insert_media": False})
+            assert res.status_code == 200, res.get_json()
+            return res.get_json()["timeline"]
+
+        tl = seed("mine")
+        style = tl["style"]
+        # The saved values, not the built-in default's.
+        assert style.get("font_name") == "Bebas Neue", style
+        assert int(style.get("font_size")) == 71, style
+        assert str(style.get("highlight_color")).upper() == "#ABCDEF", style
+        # And the badge names the pack that was really used, so the timeline
+        # does not claim to be a built-in.
+        assert tl["ai_edit"]["style_pack_id"] == "mine"
+        assert tl["ai_edit"]["style_pack"] == "Mine"
+
+        # A built-in through the same path is untouched by any of this.
+        clarity = seed("clarity")["style"]
+        assert clarity.get("font_name") == "Montserrat Thin Black"
+        assert int(clarity.get("font_size")) == 64
+    finally:
+        app_mod.jobs.pop("spk_src", None)
+
+
+def test_the_pack_picker_lists_saved_packs_beside_the_builtins(app_mod, temp_db):
+    """The picker renders whatever this endpoint returns, so the list IS the UI.
+
+    `source` is what lets a saved pack be told apart from a built-in; without
+    it the two are indistinguishable and neither can be offered for deletion.
+    """
+    client = app_mod.app.test_client()
+    before = client.get("/ai-edit/style-packs").get_json()["packs"]
+    assert [p["id"] for p in before] == list(app_mod.AI_EDIT_STYLE_PACKS)
+    assert {p["source"] for p in before} == {"builtin"}
+
+    client.post("/style-packs", json={"label": "My Reel Look",
+                                      "style": _saved_pack_style()})
+    after = client.get("/ai-edit/style-packs").get_json()["packs"]
+    mine = [p for p in after if p["source"] != "builtin"]
+    assert len(mine) == 1, after
+    assert mine[0]["id"] == "my-reel-look"
+    assert mine[0]["label"] == "My Reel Look"
+    # Every built-in is still listed: a saved pack adds, it does not replace.
+    assert set(app_mod.AI_EDIT_STYLE_PACKS).issubset({p["id"] for p in after})
+
+
+def test_saving_the_same_name_twice_updates_one_pack(app_mod, temp_db):
+    """Otherwise tweaking a look ten times leaves ten near-identical packs."""
+    client = app_mod.app.test_client()
+    first = client.post("/style-packs", json={
+        "label": "My Look", "style": {"font_size": 60}}).get_json()
+    second = client.post("/style-packs", json={
+        "label": "My Look", "style": {"font_size": 72}}).get_json()
+    assert first["id"] == second["id"]
+    assert len(app_mod._db_load_style_packs()) == 1
+    assert app_mod._resolve_style_pack(first["id"])["style"]["font_size"] == 72
+    # created_at survives an update; only updated_at moves.
+    with sqlite3.connect(str(temp_db)) as conn:
+        created, updated = conn.execute(
+            "SELECT created_at, updated_at FROM style_packs WHERE pack_id = ?",
+            (first["id"],)).fetchone()
+    assert updated >= created
+
+
+def test_one_unreadable_saved_pack_does_not_take_the_picker_down(app_mod, temp_db):
+    """A bad row must cost that row, not every pack in the app.
+
+    This is the same trade as the matte and the diarization ladder: a broken
+    optional thing degrades, it does not fail the surface around it.
+    """
+    client = app_mod.app.test_client()
+    client.post("/style-packs", json={"label": "Good", "style": {"font_size": 64}})
+    with sqlite3.connect(str(temp_db)) as conn:
+        conn.execute(
+            "INSERT INTO style_packs (pack_id, label, pack, source, created_at,"
+            " updated_at) VALUES ('broken', 'Broken', '{not json', 'manual', 1, 2)")
+        conn.commit()
+
+    loaded = app_mod._db_load_style_packs()
+    assert "good" in loaded and "broken" not in loaded
+    packs = client.get("/ai-edit/style-packs").get_json()["packs"]
+    ids = [p["id"] for p in packs]
+    assert "good" in ids
+    assert set(app_mod.AI_EDIT_STYLE_PACKS).issubset(set(ids))
+
+
+def test_a_saved_pack_can_be_deleted(app_mod, temp_db):
+    client = app_mod.app.test_client()
+    pid = client.post("/style-packs", json={
+        "label": "Throwaway", "style": {"font_size": 64}}).get_json()["id"]
+    assert client.delete("/style-packs/" + pid).status_code == 200
+    assert app_mod._db_load_style_packs() == {}
+    # A second delete is a 404, not a silent success.
+    assert client.delete("/style-packs/" + pid).status_code == 404
+    # And the id now resolves to the fallback rather than a stale copy.
+    assert app_mod._resolve_style_pack(pid)["_id"] == "pulse"
+
+
+def test_saving_a_look_refuses_to_store_nothing(app_mod, temp_db):
+    """A pack with no style would silently render as the default forever."""
+    client = app_mod.app.test_client()
+    assert client.post("/style-packs", json={"style": {"font_size": 1}}).status_code == 400
+    assert client.post("/style-packs", json={"label": "Empty"}).status_code == 400
+    assert client.post("/style-packs", json={"label": "Empty", "style": {}}).status_code == 400
+    assert app_mod._db_load_style_packs() == {}
+
+
+def test_the_branding_save_button_persists_to_the_server(app_mod):
+    """localStorage was the whole store, so a look died with the cache.
+
+    Asserted on the source because the defect is a missing side effect: the
+    old function wrote one key and told the user it was saved. The button has
+    to await the save too, or the note fires before the POST resolves.
+    """
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    start = js.index("window.saveCustomBrandPreset")
+    body = js[start:js.index("window.listSavedStylePacks")]
+    assert '"/style-packs"' in body, "the save never reaches the server"
+    assert 'method: "POST"' in body
+    # The local copy is kept deliberately as a fallback, not as the store.
+    assert "localStorage.setItem" in body
+
+    btn = js[js.index('const saveBrandPresetBtn'):]
+    btn = btn[:btn.index("const loadBrandPresetBtn")]
+    assert "await window.saveCustomBrandPreset" in btn, \
+        "the click handler does not await the save"
+
+    loader = js[js.index("window.loadCustomBrandPreset"):]
+    loader = loader[:loader.index("// ---- Auto-Fetch B-Roll")]
+    assert '"/style-packs"' in loader, "the loader never asks the server"
+    assert 'localStorage.getItem("_customBrandPreset")' in loader, \
+        "the browser copy is no longer a fallback"

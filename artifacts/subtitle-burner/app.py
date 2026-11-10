@@ -600,6 +600,22 @@ def _db_init() -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_suggestions_job ON suggestions(job_id)"
             )
+            # Style packs the user keeps. AI_EDIT_STYLE_PACKS holds six built-in
+            # looks and nothing could ever add a seventh: brand presets went to
+            # localStorage (one browser, invisible to the server, gone with the
+            # cache) and STUDIO_TEMPLATES is a client-side array. This is the
+            # first durable, server-side home for a look, which is what both
+            # "save my own template" and a reference-derived sheet need.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS style_packs (
+                    pack_id    TEXT PRIMARY KEY,
+                    label      TEXT,
+                    pack       TEXT,
+                    source     TEXT,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
             conn.commit()
 
 
@@ -650,6 +666,145 @@ def _db_delete_job(job_id: str) -> None:
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
             conn.commit()
+
+
+# ---- Style packs -------------------------------------------------------------
+# A pack is the shape AI_EDIT_STYLE_PACKS already uses: label, blurb, canvas,
+# caption_preset, style{...}, color_grade{...}. Saved packs live in SQLite and
+# are resolved ahead of the built-ins by id, so everything that already accepts
+# a style_pack id accepts a saved one with no further change.
+
+def _builtin_pack_ids() -> set:
+    """Ids a saved pack may not shadow, or picking "Clarity" would silently
+    stop meaning Clarity for everyone. Read live rather than cached: a cached
+    copy is exactly the kind of module state that leaks between tests.
+    """
+    return set(AI_EDIT_STYLE_PACKS.keys())
+
+
+def _slug_pack_id(label: str) -> str:
+    """A stable id from a label, so saving the same name twice updates it."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(label or "").strip().lower()).strip("-")
+    slug = slug[:48] or "pack"
+    if slug in _builtin_pack_ids():
+        slug = f"{slug}-mine"
+    return slug
+
+
+def _db_save_style_pack(pack_id: str, label: str, pack: dict,
+                        source: str = "manual") -> str:
+    """Upsert a saved pack. Returns the id actually written."""
+    pack_id = str(pack_id or "").strip().lower()
+    if not pack_id or pack_id in _builtin_pack_ids():
+        raise ValueError(
+            f"'{pack_id}' is a built-in style pack and cannot be overwritten"
+        )
+    now = time.time()
+    body = json.dumps(pack)
+    with _db_lock:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            prior = conn.execute(
+                "SELECT created_at FROM style_packs WHERE pack_id = ?", (pack_id,)
+            ).fetchone()
+            created = float(prior[0]) if prior and prior[0] else now
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO style_packs
+                    (pack_id, label, pack, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (pack_id, str(label or pack_id), body, str(source or "manual"),
+                 created, now),
+            )
+            conn.commit()
+    return pack_id
+
+
+def _db_load_style_packs() -> dict:
+    """All saved packs as {id: pack}, each carrying _id / _source / label."""
+    if not DB_PATH.exists():
+        return {}
+    out = {}
+    try:
+        with _db_lock:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                rows = conn.execute(
+                    "SELECT pack_id, label, pack, source, updated_at "
+                    "FROM style_packs ORDER BY updated_at DESC"
+                ).fetchall()
+    except sqlite3.Error as e:
+        # A missing or unreadable table must not take the pack picker down:
+        # the built-ins still work, which is today's behaviour.
+        print(f"[style-packs] could not read saved packs: {e}", flush=True)
+        return {}
+    for pack_id, label, body, source, updated in rows:
+        try:
+            pack = json.loads(body) if body else None
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(pack, dict):
+            continue
+        pack = dict(pack)
+        pack["_id"] = pack_id
+        pack["_source"] = source or "manual"
+        pack["_updated_at"] = updated
+        if label:
+            pack["label"] = label
+        out[pack_id] = pack
+    return out
+
+
+def _db_delete_style_pack(pack_id: str) -> bool:
+    pack_id = str(pack_id or "").strip().lower()
+    if not pack_id or pack_id in _builtin_pack_ids():
+        return False
+    with _db_lock:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            cur = conn.execute(
+                "DELETE FROM style_packs WHERE pack_id = ?", (pack_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+
+def _resolve_style_pack(pack_id: str) -> dict:
+    """Saved packs first, then the built-ins, then `pulse`.
+
+    The returned dict is a copy carrying `_id`, so no caller can mutate the
+    built-in table -- which `dict(AI_EDIT_STYLE_PACKS.get(...))` relied on
+    callers remembering.
+    """
+    pid = str(pack_id or "").strip().lower()
+    saved = _db_load_style_packs()
+    pack = saved.get(pid) or AI_EDIT_STYLE_PACKS.get(pid)
+    if pack is None:
+        pack = AI_EDIT_STYLE_PACKS["pulse"]
+        pid = "pulse"
+    pack = dict(pack)
+    pack["_id"] = pid
+    return pack
+
+
+def _list_style_packs() -> list:
+    """Built-ins then saved, for the picker. Saved packs are marked."""
+    packs = []
+    for key, pack in AI_EDIT_STYLE_PACKS.items():
+        packs.append({
+            "id": key,
+            "label": pack.get("label", key),
+            "blurb": pack.get("blurb", ""),
+            "canvas": pack.get("canvas", "9x16"),
+            "source": "builtin",
+        })
+    for key, pack in _db_load_style_packs().items():
+        packs.append({
+            "id": key,
+            "label": pack.get("label", key),
+            "blurb": pack.get("blurb", ""),
+            "canvas": pack.get("canvas", "9x16"),
+            "source": pack.get("_source", "manual"),
+        })
+    return packs
 
 
 def _load_jobs_from_db() -> None:
@@ -18628,15 +18783,72 @@ def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
 
 @app.route("/ai-edit/style-packs", methods=["GET"])
 def ai_edit_style_packs():
-    packs = []
-    for key, pack in AI_EDIT_STYLE_PACKS.items():
-        packs.append({
-            "id": key,
-            "label": pack.get("label", key),
-            "blurb": pack.get("blurb", ""),
-            "canvas": pack.get("canvas", "9x16"),
-        })
-    return jsonify({"packs": packs})
+    return jsonify({"packs": _list_style_packs()})
+
+
+@app.route("/style-packs", methods=["GET"])
+def list_style_packs_route():
+    """The same list, plus the full body of each saved pack for editing."""
+    return jsonify({
+        "packs": _list_style_packs(),
+        "saved": _db_load_style_packs(),
+    })
+
+
+@app.route("/style-packs", methods=["POST"])
+def save_style_pack_route():
+    """Keep a look as a named pack.
+
+    Accepts either a whole pack (`pack`) or just a caption style (`style`),
+    which is what the Branding tab's getStyle() produces. Short and long
+    caption keys are interchangeable -- _normalize_caption_style mirrors both
+    ways -- so a style blob from either surface is a valid pack body.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    label = str(data.get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "A name is required"}), 400
+    if len(label) > 80:
+        label = label[:80]
+
+    pack = data.get("pack")
+    if not isinstance(pack, dict):
+        style = data.get("style")
+        if not isinstance(style, dict) or not style:
+            return jsonify({"error": "Nothing to save: send `pack` or `style`"}), 400
+        pack = {"style": style}
+    else:
+        pack = dict(pack)
+
+    pack["label"] = label
+    if not str(pack.get("blurb") or "").strip():
+        pack["blurb"] = "Saved from your own settings"
+    if not pack.get("canvas"):
+        pack["canvas"] = "9x16"
+    # Never persist the transient markers the resolver adds.
+    for k in ("_id", "_source", "_updated_at"):
+        pack.pop(k, None)
+
+    pack_id = str(data.get("id") or "").strip().lower() or _slug_pack_id(label)
+    try:
+        pack_id = _db_save_style_pack(
+            pack_id, label, pack, source=str(data.get("source") or "manual")
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.Error as e:
+        return jsonify({"error": f"Could not save the pack: {e}"}), 500
+    return jsonify({"ok": True, "id": pack_id, "pack": pack})
+
+
+@app.route("/style-packs/<pack_id>", methods=["DELETE"])
+def delete_style_pack_route(pack_id):
+    if str(pack_id or "").strip().lower() in _builtin_pack_ids():
+        return jsonify({"error": "Built-in style packs cannot be deleted"}), 400
+    removed = _db_delete_style_pack(pack_id)
+    if not removed:
+        return jsonify({"error": "No such saved pack"}), 404
+    return jsonify({"ok": True, "id": pack_id})
 
 
 @app.route("/recommended-cuts", methods=["POST"])
@@ -18685,9 +18897,12 @@ def ai_edit_seed():
     if not words:
         return jsonify({"error": "Transcript not available"}), 400
 
-    pack_id = (data.get("style_pack") or "pulse").lower()
-    pack = dict(AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"])
-    pack["_id"] = pack_id
+    # Saved packs resolve ahead of the built-ins, so a pack the user kept (or
+    # one derived from a reference) drives this whole pipeline -- cuts, caption
+    # style, grade, photo-match -- exactly as a built-in does. An unknown id
+    # still falls back to `pulse`, and `_id` reflects what was really used.
+    pack = _resolve_style_pack(data.get("style_pack") or "pulse")
+    pack_id = pack["_id"]
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in ("low", "med", "high"):
         intensity = "med"
