@@ -13952,6 +13952,139 @@ def _tl_speaker_split_boxes(source_job_id: str | None,
     return boxes
 
 
+def _tl_dominant_face_box(source_job_id: str | None):
+    """The biggest face, averaged over the samples that saw one.
+
+    A much weaker question than "which speaker is this" -- no diarization,
+    no speaker-to-face assignment, just where a person tends to be. That is
+    all a close-up panel needs, and it means the wide/close split works on
+    footage with no speech at all.
+
+    None when there is no analysis or no face was ever found.
+    """
+    rd = _load_reframe_cache(source_job_id)
+    if not rd:
+        return None
+    picks = []
+    for sample in (rd.get("faces") or []):
+        faces = sample.get("faces") or []
+        if not faces:
+            continue
+        big = max(faces, key=lambda f: float(f.get("w") or 0) * float(f.get("h") or 0))
+        try:
+            picks.append((float(big["cx"]), float(big["cy"]),
+                          float(big.get("w") or 0.2), float(big.get("h") or 0.2)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not picks:
+        return None
+    n = float(len(picks))
+    return tuple(sum(v[i] for v in picks) / n for i in range(4))
+
+
+# The wide/close pair, expressed as a fraction of the SOURCE rather than as
+# a face size. _tl_speaker_crop_px derives its crop height from `fh * pad`,
+# which was tuned for head-and-shoulders stills; left at those defaults a
+# "close-up" came out 82% of the frame width -- a 1.2x push that does not
+# read as a different shot at all. With pad=1.0 the box's height IS the crop
+# height, so these two numbers are the framing, legibly.
+_WIDE_BOX = (0.5, 0.34, 1.0, 1.0)      # whole frame; the panel aspect trims it
+_WIDE_CROP = {"pad": 1.0, "lift": 0.5}  # band centred on cy, not lifted
+_PUNCH_FRAC = 0.45                      # crop height as a fraction of source
+_PUNCH_CROP = {"pad": 1.0, "lift": 0.42}
+_PUNCH_FALLBACK_CX = 0.5
+_PUNCH_FALLBACK_CY = 0.42
+
+
+def _tl_framing_boxes(source_job_id: str | None) -> tuple[list, list]:
+    """Two crops of ONE frame: a pulled-back strip, and a close-up.
+
+    This is the look where a thin wide band sits over a punched-in shot of
+    the subject -- the band says where you are, the main panel says who you
+    are, with no cut between them. Both come from the same instant of the
+    same file.
+
+    Unlike _tl_speaker_split_boxes this NEVER returns None. It needs no
+    diarization and no faces, because the footage it is for -- a DJ set, a
+    performance, a walk-and-talk -- often has no speech to diarize. A face,
+    when one happens to have been found, only moves the close-up off centre.
+
+    Returns (boxes, crop_opts). Index 0 is the strip: the top panel when
+    stacked, the left one side by side.
+    """
+    face = _tl_dominant_face_box(source_job_id)
+    if face:
+        cx, cy = float(face[0]), float(face[1])
+        fw = float(face[2])
+    else:
+        cx, cy, fw = _PUNCH_FALLBACK_CX, _PUNCH_FALLBACK_CY, 0.30
+    punch = (cx, cy, fw, _PUNCH_FRAC)
+    return [_WIDE_BOX, punch], [dict(_WIDE_CROP), dict(_PUNCH_CROP)]
+
+
+# How much of the frame the FIRST panel takes. Named rather than a free
+# slider: most values between these look like a mistake, and a split is
+# picked on a phone. 0.5 is what every split rendered before this existed.
+_SPLIT_RATIOS = {
+    "thin": 0.25,
+    "third": 0.34,
+    "even": 0.5,
+    "two_thirds": 0.66,
+    "wide": 0.75,
+}
+_SPLIT_RATIO_DEFAULT = "even"
+
+
+def _split_ratio_value(ratio) -> float:
+    """A preset name, or a raw fraction, to a number in [0.15, 0.85].
+
+    Accepts a number so a co-editor op or a saved project can carry one,
+    but the UI only ever sends a name.
+    """
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        return max(0.15, min(0.85, float(ratio)))
+    key = str(ratio or "").strip().lower()
+    if key in _SPLIT_RATIOS:
+        return _SPLIT_RATIOS[key]
+    try:
+        return max(0.15, min(0.85, float(key)))
+    except (TypeError, ValueError):
+        return _SPLIT_RATIOS[_SPLIT_RATIO_DEFAULT]
+
+
+def _tl_panel_sizes(layout: str, W: int, H: int,
+                    ratio=None) -> list[tuple[int, int]]:
+    """Per-panel (w, h) for a two-up stack. Index 0 is what the viewer sees
+    first: the top panel when stacked, the left one side by side.
+
+    The second panel is the REMAINDER, not its own rounding of the ratio:
+    rounding each independently leaves a one-pixel seam, or an odd height
+    that ffmpeg refuses outright. vstack needs both widths equal and hstack
+    both heights equal, which is why only one axis is ever divided.
+
+    At the default ratio this returns exactly what the old
+    `pw, ph = W, H // 2` produced, so an existing split is untouched.
+    """
+    frac = _split_ratio_value(ratio)
+    if layout == "side":
+        w0 = int(W * frac)
+        w0 -= w0 % 2
+        w1 = W - w0
+        w1 -= w1 % 2
+        w0 = max(2, w0)
+        w1 = max(2, w1)
+        h = H - (H % 2)
+        return [(w0, h), (w1, h)]
+    h0 = int(H * frac)
+    h0 -= h0 % 2
+    h1 = H - h0
+    h1 -= h1 % 2
+    h0 = max(2, h0)
+    h1 = max(2, h1)
+    w = W - (W % 2)
+    return [(w, h0), (w, h1)]
+
+
 def _tl_speaker_crop_px(box, src_w: int, src_h: int, pw: int, ph: int,
                         pad: float = 3.2, lift: float = 0.38):
     """A head-and-shoulders crop around *box*, already in the panel's aspect.
@@ -14032,7 +14165,9 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
                                boxes: list, layout: str,
                                W: int, H: int, fps: int, out_path: Path,
                                color: dict | None = None,
-                               panel_bgs: list | None = None) -> float:
+                               panel_bgs: list | None = None,
+                               ratio=None,
+                               crop_opts: list | None = None) -> float:
     """Both speakers side by side, cropped out of the SAME clip.
 
     One input, split into two streams, each cropped to its speaker's box
@@ -14042,12 +14177,11 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
     """
     if layout == "auto":
         layout = "stack" if H >= W else "side"
-    if layout == "side":
-        pw, ph, stack = W // 2, H, "hstack"
-    else:
-        pw, ph, stack = W, H // 2, "vstack"
-    pw -= pw % 2
-    ph -= ph % 2
+    stack = "hstack" if layout == "side" else "vstack"
+    # Per panel, not one size for both: a wide context strip over a close-up
+    # is an UNEVEN split, and at 50/50 that look reads as a mistake rather
+    # than as framing. `even` reproduces the old `W, H // 2` exactly.
+    sizes = _tl_panel_sizes(layout, W, H, ratio)
 
     size = _probe_video_size(src)
     if not size:
@@ -14091,7 +14225,15 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
     parts = ["[0:v:0]split=2[sa][sb]"]
     panel_out = {}
     for i, (label, box) in enumerate(zip(("sa", "sb"), boxes[:2])):
-        cw, ch, cxp, cyp = _tl_speaker_crop_px(box, src_w, src_h, pw, ph)
+        pw, ph = sizes[i]
+        # Per-panel crop shaping. Absent -- every speakers split -- this is
+        # the head-and-shoulders default the function has always used, so
+        # that path is byte-identical.
+        co = (crop_opts[i] if (crop_opts and i < len(crop_opts)
+                               and isinstance(crop_opts[i], dict)) else {})
+        cw, ch, cxp, cyp = _tl_speaker_crop_px(
+            box, src_w, src_h, pw, ph,
+            **{k: float(v) for k, v in co.items() if k in ("pad", "lift")})
         chain = (f"crop={cw}:{ch}:{cxp}:{cyp},"
                  f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
                  f"crop={pw}:{ph},setsar=1,fps={fps}")
@@ -14141,7 +14283,8 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
                       dur: float, layout: str, W: int, H: int, fps: int,
                       out_path: Path, color: dict | None = None,
                       placement: str | None = None,
-                      panel_bgs: list | None = None) -> float:
+                      panel_bgs: list | None = None,
+                      ratio=None) -> float:
     """Render a split-screen segment: two sources shown at once.
 
     layout 'side' = left/right halves; 'stack' = top/bottom halves; 'auto'
@@ -14163,23 +14306,28 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
         # Legacy swap flag → concrete placement
         place = "second_top" if layout != "side" else "second_left"
     if layout == "side":
-        pw, ph = W // 2, H
         stack = "hstack"
         # Default: Main left, second right
         second_first = place in ("second_left", "left", "main_right")
     else:
-        pw, ph = W, H // 2
         stack = "vstack"
         # Default: Main top, second bottom
         second_first = place in ("second_top", "top", "main_bottom")
-    pw -= pw % 2
-    ph -= ph % 2
+    # Sizes come back in VIEWER order -- index 0 is the top/left panel --
+    # but the panels below are built per INPUT, and `placement` can swap
+    # which input lands first. Mapping it here is what keeps an uneven
+    # ratio pinned to the half the user pointed at rather than to whichever
+    # file happens to be input 0.
+    _sizes = _tl_panel_sizes(layout, W, H, ratio)
+    _v2i = {0: 1, 1: 0} if second_first else {0: 0, 1: 1}
+    in_size = {_v2i[v]: _sizes[v] for v in (0, 1)}
 
     ext_b = srcB.suffix.lower().lstrip(".")
     is_still = ext_b in ASSET_EXT_STILL
     is_gif = ext_b in ASSET_EXT_GIF
 
     def panel(idx):
+        pw, ph = in_size[idx]
         return (f"[{idx}:v:0]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
                 f"crop={pw}:{ph},setsar=1,fps={fps}[p{idx}]")
 
@@ -14204,7 +14352,8 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
         for in_idx, _bg in wanted.items():
             src = srcs[in_idx]
             start = inA if in_idx == 0 else (0.0 if (is_still or is_gif) else inB)
-            m = _tl_matte_video(src, pw, ph, fps, dur, start=start) if ok else None
+            mw, mh = in_size[in_idx]
+            m = _tl_matte_video(src, mw, mh, fps, dur, start=start) if ok else None
             if m:
                 mattes[in_idx] = m
             else:
@@ -14227,6 +14376,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
             continue
         m_idx = _add_input(mattes[in_idx])
         bg_idx = _add_input(_tl_bg_source(wanted[in_idx]))
+        pw, ph = in_size[in_idx]
         # The matte was made at panel size, so it only needs the fps/sar
         # normalisation the panel itself got.
         parts.append(f"[{m_idx}:v]scale={pw}:{ph},setsar=1,fps={fps},format=gray[pm{in_idx}]")
@@ -16289,6 +16439,11 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 # rides the free-form effects JSON, which _normalize_timeline
                 # spreads with `row = dict(fx)` -- no whitelist to update.
                 "mode": str(fx.get("mode") or "").strip().lower(),
+                # How much of the frame the first panel takes. Named here
+                # ON PURPOSE: this is a freshly built dict, and it is where
+                # `mode`, `speakers` and `panels` were each silently dropped
+                # in turn. A missing ratio means the old even split.
+                "ratio": fx.get("ratio") or _SPLIT_RATIO_DEFAULT,
                 "speakers": [str(x) for x in (fx.get("speakers") or [])
                              if isinstance(x, (str, int))],
                 # Per-panel backgrounds, indexed by what the viewer sees:
@@ -16414,18 +16569,37 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     # when no second media was picked, so an explicit choice
                     # always wins over the automatic one.
                     spk_boxes = None
-                    if (split and split.get("enabled") and not split_src
-                            and split.get("mode") == "speakers"):
-                        spk_boxes = _tl_speaker_split_boxes(
-                            c.get("source_job_id"), split.get("speakers"))
+                    spk_crops = None
+                    spk_layout = (split or {}).get("layout", "auto")
+                    split_mode = (split or {}).get("mode") or ""
+                    if split and split.get("enabled") and not split_src:
+                        if split_mode == "speakers":
+                            spk_boxes = _tl_speaker_split_boxes(
+                                c.get("source_job_id"), split.get("speakers"))
+                        elif split_mode == "wide_punch":
+                            # A pulled-back strip over a close-up, both from
+                            # this clip. Never None: it needs no diarization
+                            # and no faces, which is the whole reason it
+                            # exists -- the footage this is for (a set, a
+                            # performance) often has no speech at all.
+                            spk_boxes, spk_crops = _tl_framing_boxes(
+                                c.get("source_job_id"))
+                            # Only reads stacked. Side by side the strip is a
+                            # narrow vertical slice, which shows LESS of the
+                            # room than the close-up rather than more, so
+                            # "auto" does not consult the canvas here.
+                            if spk_layout == "auto":
+                                spk_layout = "stack"
 
                     seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
                     if spk_boxes:
                         dur = _tl_split_speakers_segment(
                             src, sub_ks, sub_dur, spk_boxes,
-                            (split or {}).get("layout", "auto"),
+                            spk_layout,
                             W, H, fps, seg_path, color=color,
-                            panel_bgs=(split or {}).get("panels"))
+                            panel_bgs=(split or {}).get("panels"),
+                            ratio=(split or {}).get("ratio"),
+                            crop_opts=spk_crops)
                     elif split_src:
                         # Second-source in-point advances with source time on A
                         # for video; stills/GIFs stay pinned at 0 (looped).
@@ -16439,7 +16613,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                                                 (split or {}).get("layout", "auto"),
                                                 W, H, fps, seg_path, color=color,
                                                 placement=(split or {}).get("placement"),
-                                                panel_bgs=(split or {}).get("panels"))
+                                                panel_bgs=(split or {}).get("panels"),
+                                                ratio=(split or {}).get("ratio"))
                     else:
                         dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
                                                     seg_path, ken=ken, color=color, punch=punch)

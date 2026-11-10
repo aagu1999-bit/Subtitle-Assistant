@@ -6290,3 +6290,269 @@ def test_the_branding_save_button_persists_to_the_server(app_mod):
     assert '"/style-packs"' in loader, "the loader never asks the server"
     assert 'localStorage.getItem("_customBrandPreset")' in loader, \
         "the browser copy is no longer a fallback"
+
+
+# --- split ratio: the wide strip over the close-up -----------------------
+# Both split builders hard-coded `pw, ph = W, H // 2`, so the only split the
+# app could make was even halves. A pulled-back strip over a punched-in shot
+# -- one camera, two crops -- is uneven by definition, and at 50/50 it reads
+# as a mistake rather than as framing.
+
+def _captured_filtergraph(app_mod, monkeypatch, **kwargs):
+    """Run the speakers split with ffmpeg stubbed and return its graph."""
+    seen = {}
+
+    def fake_run(cmd, label):
+        seen["fc"] = cmd[cmd.index("-filter_complex") + 1]
+
+    monkeypatch.setattr(app_mod, "_tl_run", fake_run)
+    monkeypatch.setattr(app_mod, "_probe_video_size", lambda s: (1080, 1920))
+    monkeypatch.setattr(app_mod, "_has_audio_stream", lambda s: True)
+    monkeypatch.setattr(app_mod, "_tl_declick_af", lambda d: "anull")
+    boxes = kwargs.pop("boxes", [(0.3, 0.4, 0.2, 0.25), (0.7, 0.4, 0.2, 0.25)])
+    app_mod._tl_split_speakers_segment(
+        Path("in.mp4"), 0.0, 5.0, boxes, kwargs.pop("layout", "stack"),
+        1080, 1920, 30, Path("out.mp4"), **kwargs)
+    return seen["fc"]
+
+
+def test_an_even_split_renders_exactly_what_it_always_did(app_mod, monkeypatch):
+    """Every split that already exists has to be provably untouched.
+
+    The ratio work replaced one shared `pw, ph` with per-panel sizes, which
+    is precisely the kind of change that moves a number by one pixel and is
+    never noticed. So the default is asserted character for character, not
+    approximately.
+    """
+    base = _captured_filtergraph(app_mod, monkeypatch)
+    named = _captured_filtergraph(app_mod, monkeypatch, ratio="even")
+    assert base == named, "'even' is not the same as no ratio at all"
+    # Both panels are half the canvas, as before.
+    assert base.count("crop=1080:960") == 4, base
+    assert "vstack=inputs=2" in base
+
+    # And an uneven ratio really does something, or the test above proves
+    # only that nothing happens.
+    third = _captured_filtergraph(app_mod, monkeypatch, ratio="third")
+    assert third != base
+    assert "crop=1080:652" in third and "crop=1080:1268" in third, third
+
+
+@pytest.mark.parametrize("layout,W,H", [
+    ("stack", 1080, 1920), ("stack", 1920, 1080), ("stack", 1080, 1080),
+    ("side", 1080, 1920), ("side", 1920, 1080),
+    # Odd canvases are where the even-ing actually bites. With an even H
+    # the remainder of an even h0 is already even, so the guard on the
+    # SECOND panel is dead code for every real canvas -- and a version of
+    # this test without these two rows passed with that guard deleted.
+    ("stack", 1080, 1921), ("side", 1081, 1920),
+])
+def test_panel_sizes_are_even_and_fill_the_canvas(app_mod, layout, W, H):
+    """An odd panel height is not a slightly wrong number -- it is an ffmpeg
+    failure, and a one-pixel shortfall is a seam down the middle of the
+    export. Both panels are therefore derived from one subtraction rather
+    than from two independent roundings.
+    """
+    for name in ("thin", "third", "even", "two_thirds", "wide"):
+        sizes = app_mod._tl_panel_sizes(layout, W, H, name)
+        assert len(sizes) == 2
+        for w, h in sizes:
+            assert w % 2 == 0 and h % 2 == 0, (name, sizes)
+            assert w >= 2 and h >= 2, (name, sizes)
+        if layout == "side":
+            # hstack needs matching heights; the widths carry the ratio.
+            assert sizes[0][1] == sizes[1][1], (name, sizes)
+            assert sizes[0][0] + sizes[1][0] == W - (W % 2), (name, sizes)
+        else:
+            # vstack needs matching widths.
+            assert sizes[0][0] == sizes[1][0], (name, sizes)
+            assert sizes[0][1] + sizes[1][1] == H - (H % 2), (name, sizes)
+
+    # The ratio is honoured in the right direction, and the named presets
+    # are ordered. A mapping that returned the same numbers for all five
+    # would pass every assertion above.
+    axis = 0 if layout == "side" else 1
+    firsts = [app_mod._tl_panel_sizes(layout, W, H, n)[0][axis]
+              for n in ("thin", "third", "even", "two_thirds", "wide")]
+    assert firsts == sorted(firsts), firsts
+    assert firsts[0] < firsts[-1], firsts
+
+
+def test_an_unknown_ratio_falls_back_rather_than_raising(app_mod):
+    for junk in (None, "", "enormous", {}, [], True):
+        assert app_mod._split_ratio_value(junk) == 0.5, junk
+    # A raw fraction is accepted, for a saved project or a co-editor op,
+    # and clamped so a split can never be a sliver.
+    assert app_mod._split_ratio_value(0.3) == 0.3
+    assert app_mod._split_ratio_value("0.3") == 0.3
+    # BOTH paths clamp. A number and a numeric string take different
+    # branches, and an earlier version of this test only ever exercised the
+    # number -- so removing the string branch's clamp broke nothing and the
+    # test still passed.
+    assert app_mod._split_ratio_value(0.01) == 0.15
+    assert app_mod._split_ratio_value(99) == 0.85
+    assert app_mod._split_ratio_value("0.01") == 0.15
+    assert app_mod._split_ratio_value("99") == 0.85
+
+
+def test_the_wide_close_pair_needs_no_analysis_at_all(app_mod):
+    """This is the whole reason the mode exists.
+
+    The speakers split returns None without diarization AND faces, and the
+    renderer then falls through to the uncut shot -- silently. The footage
+    this look is for (a DJ set, a performance) often has no speech to
+    diarize, so a framing split that needed Analyze could never be reached
+    on it.
+    """
+    boxes, crops = app_mod._tl_framing_boxes(None)
+    assert boxes is not None and len(boxes) == 2
+    assert len(crops) == 2
+
+    # The close-up must actually be closer, or this is two identical crops
+    # stacked -- which is what it would look like if the pair collapsed.
+    sizes = app_mod._tl_panel_sizes("stack", 1080, 1920, "third")
+    widths = [
+        app_mod._tl_speaker_crop_px(boxes[i], 1080, 1920, *sizes[i], **crops[i])[0]
+        for i in (0, 1)
+    ]
+    assert widths[0] > widths[1] * 1.25, (
+        f"the strip sees {widths[0] / widths[1]:.2f}x the close-up's width; "
+        "that is not a wide shot next to a close-up")
+
+
+def test_a_found_face_moves_the_closeup_without_opening_it_out(app_mod, monkeypatch):
+    """A detected face should re-aim the close-up, never resize it.
+
+    Face boxes vary hugely with distance from camera, and feeding that
+    straight through made the "close-up" as wide as the strip on a big
+    detection -- losing the contrast that is the entire effect.
+    """
+    monkeypatch.setattr(app_mod, "_load_reframe_cache", lambda j: {
+        "faces": [{"faces": [{"cx": 0.8, "cy": 0.25, "w": 0.5, "h": 0.6}]}],
+    })
+    boxes, crops = app_mod._tl_framing_boxes("job")
+    assert boxes[1][0] == pytest.approx(0.8), "the close-up ignored the face"
+    assert boxes[1][1] == pytest.approx(0.25)
+
+    sizes = app_mod._tl_panel_sizes("stack", 1080, 1920, "third")
+    w_strip = app_mod._tl_speaker_crop_px(boxes[0], 1080, 1920, *sizes[0], **crops[0])[0]
+    w_close = app_mod._tl_speaker_crop_px(boxes[1], 1080, 1920, *sizes[1], **crops[1])[0]
+    assert w_strip > w_close * 1.25, (w_strip, w_close)
+
+
+def test_no_face_data_leaves_the_closeup_centred(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_load_reframe_cache", lambda j: None)
+    assert app_mod._tl_framing_boxes("job")[0][1][0] == pytest.approx(0.5)
+    # An analysis that ran but found nobody is the same case, not a crash.
+    monkeypatch.setattr(app_mod, "_load_reframe_cache",
+                        lambda j: {"faces": [{"faces": []}]})
+    assert app_mod._tl_framing_boxes("job")[0][1][0] == pytest.approx(0.5)
+
+
+def test_the_ratio_survives_the_handover_to_the_renderer(app_mod):
+    """Four hand-written field lists sit between the control and ffmpeg.
+
+    That handover has already eaten `mode`, `speakers` and `panels`, one
+    per feature. `_tl_props_from_lane_effects` builds a FRESH dict, so a
+    field missing from it is dropped after surviving everything else.
+    """
+    fx = [{"id": "e1", "type": "split_screen", "start": 0, "out": 4,
+           "mode": "wide_punch", "ratio": "third", "layout": "auto"}]
+    _ken, _punch, _color, split = app_mod._tl_props_from_lane_effects(fx)
+    assert split and split["enabled"]
+    assert split["mode"] == "wide_punch"
+    assert split["ratio"] == "third", "the ratio was dropped on the way through"
+
+    # And an old clip with no ratio still means even halves.
+    _k, _p, _c, plain = app_mod._tl_props_from_lane_effects(
+        [{"id": "e2", "type": "split_screen", "start": 0, "out": 4}])
+    assert app_mod._split_ratio_value(plain["ratio"]) == 0.5
+
+    # _normalize_timeline spreads effects clips, so the field rides free
+    # there -- proved rather than trusted.
+    tl = app_mod._normalize_timeline({
+        "canvas": "9x16",
+        "tracks": {"main": [], "overlay": [], "text": [], "music": [],
+                   "effects": fx},
+    })
+    assert tl["tracks"]["effects"][0]["ratio"] == "third"
+
+
+def test_the_client_names_ratio_in_its_fixed_field_list(app_mod):
+    """addEffectClip builds from a FIXED list: anything unnamed is dropped
+    before the clip exists, which is where mode/speakers went the first
+    time and panels the second.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    body = js[js.index("async function addEffectClip"):js.index("reanchor(ec);")]
+    assert "opts.ratio" in body, "ratio is dropped before the clip exists"
+
+    # The control exists and offers the mode, or the capability is
+    # unreachable -- the exact shape of the add_effect and panels gaps.
+    props = js[js.index('propSelect("__split_mode"'):]
+    props = props[:props.index("panelBackgroundControls(c)")]
+    assert "wide_punch" in props
+
+    handler = js[js.index('key === "__split_mode"'):]
+    handler = handler[:handler.index('key === "__split_media"')]
+    assert "wide_punch" in handler, "picking the mode would not store it"
+    assert 'c.ratio = "third"' in handler, \
+        "wide_punch seeds no ratio, so it would render as even halves"
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
+def test_the_strip_sees_what_the_closeup_cannot(app_mod, tmp_path, monkeypatch):
+    """The claim is a pixel claim, so it gets a real render.
+
+    A marker is painted down the far-left edge of the source, outside the
+    close-up's crop but inside the full-width strip. The strip must contain
+    it and the close-up must not. Asserting only the first would pass two
+    identical crops stacked -- which is exactly what a collapsed pair looks
+    like, and the thing this is built against.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import cv2
+    import numpy as np
+
+    src = tmp_path / "src.mp4"
+    out = tmp_path / "out.mp4"
+    # Grey frame, a magenta bar down the left edge, a white block centred.
+    vf = ("drawbox=x=0:y=0:w=90:h=1920:color=magenta@1:t=fill,"
+          "drawbox=x=440:y=700:w=200:h=500:color=white@1:t=fill")
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=gray:s=1080x1920:d=1:r=30", "-vf", vf,
+                    "-pix_fmt", "yuv420p", str(src)], check=True)
+
+    monkeypatch.setattr(app_mod, "_load_reframe_cache", lambda j: None)
+    boxes, crops = app_mod._tl_framing_boxes(None)
+    app_mod._tl_split_speakers_segment(
+        src, 0.0, 0.9, boxes, "stack", 1080, 1920, 30, out,
+        ratio="third", crop_opts=crops)
+    assert out.exists() and out.stat().st_size > 1000
+
+    png = tmp_path / "f.png"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", "0.4", "-i", str(out),
+                    "-frames:v", "1", str(png)], check=True)
+    im = cv2.imread(str(png))
+    assert im is not None
+    h, w = im.shape[:2]
+    assert (w, h) == (1080, 1920), (w, h)
+
+    seam = app_mod._tl_panel_sizes("stack", 1080, 1920, "third")[0][1]
+    strip, close = im[:seam], im[seam:]
+
+    def magenta(panel):
+        b, g, r = (panel[:, :, i].astype(int) for i in range(3))
+        return float(np.mean((b > 110) & (r > 110) & (g < 90)))
+
+    s, c = magenta(strip), magenta(close)
+    # The strip is full width, so the left-edge marker survives into it.
+    assert s > 0.03, f"the strip did not see the wide-only marker: {s:.4f}"
+    # The close-up is cropped in past it. This is the half that fails if
+    # both panels end up showing the same crop.
+    assert c < 0.005, f"the close-up is not punched in: {c:.4f}"
+
+    # And the strip really is the smaller panel, measured on the frame
+    # rather than read off the filter string.
+    assert 0.30 < seam / h < 0.38, seam / h
