@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_version }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='timeline.css') }}?v={{ asset_version }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='mobile.css') }}?v={{ asset_version }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='studio-revamp.css') }}?v={{ asset_version }}">
 </head>
 <body class="studio-body">
 
@@ -85,9 +86,9 @@
 <!-- Empty state: hero welcome shown when there are no jobs yet -->
 <div id="emptyState" class="empty-state">
   <div class="empty-hero">
-    <div class="empty-logo">🎬</div>
-    <h1>Subtitle Burner</h1>
-    <p class="empty-tagline">What are you making?</p>
+    <div class="empty-logo">Studio</div>
+    <h1>What are you making?</h1>
+    <p class="empty-tagline">Pick a template — or drop a video to caption and edit.</p>
 
     <!-- Template gallery. Cards are STRUCTURES; each one's settings live on
          the screen it opens, so adding templates never bloats this grid.
@@ -273,30 +274,29 @@
 <header class="app-header" id="appHeader">
   <button type="button" id="backHomeBtn" class="btn btn-secondary btn-sm"
     title="Back to templates" style="margin-right:10px">← Home</button>
-  <div class="logo">🎬 Subtitle Assistant Studio</div>
+  <div class="logo">Studio</div>
   <div class="workflow-steps" id="workflowSteps">
-    <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
-    <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
-    <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
+    <button class="main-tab active" data-tab="ingest">Media</button>
+    <button class="main-tab" data-tab="highlights">Shorts</button>
+    <button class="main-tab" data-tab="editor">Edit</button>
   </div>
   <div class="header-actions">
-    <button class="btn-export" id="headerExportBtn" type="button">⚡ Instant Export MP4</button>
+    <button class="btn-export" id="headerExportBtn" type="button" title="Quick caption burn — prefer Edit → Render for full Timeline">Export</button>
   </div>
 </header>
 
 <!-- Main app shell: full-width main area (hidden until a job exists) -->
 <div id="appShell" class="app-shell hidden">
   <main class="main-area" style="width:100%;">
-    <!-- Primary story: Ingest → AI Shorts → Timeline. Transcript + Branding stay as panels opened via Edit words / Caption look. -->
+    <!-- Destinations: Media · Shorts · Edit · Projects. Secondary panels via ready CTAs. -->
     <nav class="main-tabs" id="mainTabs">
-      <button class="main-tab active" data-tab="ingest">1. 📁 Ingest</button>
-      <button class="main-tab" data-tab="highlights">2. 🔥 AI Shorts</button>
-      <button class="main-tab" data-tab="editor">3. 🎬 Timeline</button>
-      <button class="main-tab" data-tab="compilation" title="Queue clips from AI Shorts">🎞 Compilation <span id="compileBadge" class="tab-badge hidden">0</span></button>
-      <!-- Secondary panels — not numbered steps; opened from ready CTAs -->
-      <!-- Edit Words retired — phrase editing lives in Timeline Transcript. -->
-      <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav" aria-hidden="true" tabindex="-1">✂️ Edit words</button>
-      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav" aria-hidden="true" tabindex="-1">🎨 Caption look</button>
+      <button class="main-tab active" data-tab="ingest">Media</button>
+      <button class="main-tab" data-tab="highlights">Shorts</button>
+      <button class="main-tab" data-tab="editor">Edit</button>
+      <button class="main-tab" data-tab="compilation" title="Recap, interviews, compilation queue">Projects <span id="compileBadge" class="tab-badge hidden">0</span></button>
+      <!-- Secondary panels — opened from ready CTAs, not primary nav -->
+      <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav" aria-hidden="true" tabindex="-1">Edit words</button>
+      <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav" aria-hidden="true" tabindex="-1">Caption look</button>
       <button class="main-tab hidden" data-tab="result" id="tabResult">Result</button>
     </nav>
 
@@ -331,7 +331,7 @@
               </label>
             </div>
             <p class="muted desktop-only-hint" style="font-size:.72rem;margin:8px 0 0;line-height:1.4">
-              Upload only transcribes. Find Shorts from the ready panel or <strong>AI Shorts</strong> tab — nothing auto-runs after Whisper.
+              Upload only transcribes. Find Shorts from the ready panel or the <strong>Shorts</strong> tab — nothing auto-runs after Whisper.
             </p>
           </section>
 
@@ -367,38 +367,39 @@
             <p id="retryTranscribeHint" class="muted hidden" style="font-size:.72rem;margin:6px 0 0;line-height:1.4">If Retry keeps saying “no audio,” the file on the server is usually truncated — use <strong>Re-drop video</strong> and wait until upload hits 100%.</p>
           </div>
           <section id="readyActions" class="panel hidden" style="margin-top:14px;padding:14px">
-            <div class="section-title" style="margin-bottom:6px">✅ Transcript ready</div>
+            <div class="section-title" style="margin-bottom:6px">Ready</div>
             <p id="readyActionsHint" class="muted" style="font-size:.78rem;line-height:1.45;margin:0 0 10px">
-              Next: edit phrases in Timeline, set caption look, or find shorts.
+              Open <strong>Edit</strong> to cut, caption, and Render. Everything else is optional.
             </p>
-            <div style="display:flex;flex-wrap:wrap;gap:8px">
-              <button type="button" id="readyOpenLongFormBtn" class="btn btn-primary btn-sm hidden" title="Open a 16:9 Timeline for the full upload — windowed B-roll, Main cutaways">Edit as Long-form (16:9)</button>
-              <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Edit in Timeline</button>
-              <button type="button" id="readyAiEditFullBtn" class="btn btn-primary btn-sm" title="Run AI Edit on the entire transcript — cuts, zooms, captions — without chopping into Shorts first">✨ AI Edit full video</button>
-              <button type="button" id="readyInstantExportBtn" class="btn btn-primary btn-sm" title="Burn captions with the current Caption look into an MP4">⚡ Instant Export</button>
+            <div class="ready-primary-row">
+              <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Open Edit →</button>
+              <button type="button" id="readyOpenLongFormBtn" class="btn btn-secondary btn-sm hidden" title="Open a 16:9 Timeline for the full upload">Long-form 16:9</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
-              <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
             </div>
+            <details class="ready-more">
+              <summary>More options</summary>
+              <div class="ready-more-actions">
+                <button type="button" id="readyAiEditFullBtn" class="btn btn-secondary btn-sm" title="Run AI Edit on the entire transcript">AI Edit full video</button>
+                <button type="button" id="readyInstantExportBtn" class="btn btn-secondary btn-sm" title="Quick caption burn — prefer Edit → Render for full projects">Quick Export</button>
+                <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
+              </div>
+            </details>
           </section>
         </div>
         <div class="ingest-desktop-aside" style="flex:1;min-width:300px;">
           <section class="panel">
-            <div class="section-title">✨ Suggested next steps</div>
-            <div style="font-size:0.8rem;color:#c8cdd8;line-height:1.65;background:rgba(30,41,59,0.4);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-              <div style="margin-bottom:10px"><strong>1. Edit in Timeline</strong> — phrase transcript, Look (captions + audio), speakers, Effects. Long uploads (≥4 min): <strong>Edit as Long-form (16:9)</strong>.</div>
-              <div style="margin-bottom:10px"><strong>2. AI Edit full video</strong> — run cuts/zooms/captions on the <em>entire</em> upload (optional purpose). Shorts chops are separate.</div>
-              <div style="margin-bottom:10px"><strong>3. Find Shorts</strong> — optional Gemini clip suggestions on the AI Shorts tab (never auto-runs on upload).</div>
-              <div class="muted" style="font-size:.74rem;margin-top:8px;line-height:1.45">
-                Speaker Analyze lives on a selected Main clip in Timeline (Transcript / Project).
+            <div class="section-title">Next</div>
+            <div class="ingest-guide">
+              <div style="margin-bottom:8px"><strong>Edit</strong> — timeline, captions, effects, then ▶ Render.</div>
+              <div style="margin-bottom:8px"><strong>Shorts</strong> — optional clip suggestions (never auto-runs).</div>
+              <div><strong>Projects</strong> — Recap, interviews, compilation queue.</div>
+            </div>
+            <details class="ux-advanced">
+              <summary>Pipeline details</summary>
+              <div class="ingest-guide" style="margin-top:0">
+                Whisper on upload · Timeline edit · optional PyAnnote Analyze · FFmpeg Render
               </div>
-            </div>
-            <div class="section-title" style="margin-top:20px">⚡ Pipeline</div>
-            <div style="font-size:0.76rem;color:#94a3b8;line-height:1.6;background:rgba(30,41,59,0.4);padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-              • <b>Whisper / Faster-Whisper</b> — Word alignment on upload<br>
-              • <b>Timeline</b> — Phrase edit, Look, Effects, speakers<br>
-              • <b>PyAnnote</b> — Optional Analyze in Timeline<br>
-              • <b>FFmpeg + ASS</b> — Timeline Render
-            </div>
+            </details>
             <div id="ingestSpeakerCards" class="hidden" aria-hidden="true"></div>
             <div id="speakerColorPickers" class="hidden" aria-hidden="true">
               <input type="color" id="hostColor" data-speaker-color="SPEAKER_00" value="#FFD700">
@@ -422,7 +423,7 @@
       <h2 style="margin:0;font-size:1rem">🎨 Captions</h2>
     </summary>
     <div style="display:flex;justify-content:flex-end;margin:-4px 0 8px">
-      <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Ingest</button>
+      <button type="button" id="brandingBackIngestBtn" class="btn btn-secondary btn-sm">← Back to Media</button>
     </div>
     <p class="muted" style="font-size:.78rem;margin:0 0 12px;line-height:1.45">
       <strong>Caption + brand look only</strong> — fonts, colors, karaoke, logo.
@@ -586,10 +587,11 @@
 
   </details>
 
-  <!-- Audio Enhancement panel -->
-  <details class="panel" id="captionLookAudioSection" open>
+  <!-- Audio Enhancement — collapsed by default (advanced / less frequent) -->
+  <details class="panel" id="captionLookAudioSection">
     <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
       <h2 style="margin:0;font-size:1rem">🔊 Audio Enhancement</h2>
+      <span class="muted" style="font-size:.72rem;font-weight:500">optional</span>
     </summary>
     <p class="muted panel-desc" style="margin-top:8px">
       Applied on <strong>Timeline → Render</strong> (and Instant Export / Export clip). Preview cut does not bake these filters.
@@ -958,7 +960,7 @@
             <h2>Source Video</h2>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
               <span class="muted" style="font-size:.82rem">Click a subtitle row to jump</span>
-              <button type="button" id="transcriptBackIngestBtn" class="btn btn-secondary btn-sm">← Ingest</button>
+              <button type="button" id="transcriptBackIngestBtn" class="btn btn-secondary btn-sm">← Media</button>
               <button type="button" id="transcriptCaptionLookBtn" class="btn btn-secondary btn-sm">Caption look</button>
             </div>
           </div>
@@ -1244,9 +1246,9 @@
     <div class="tab-content hidden" data-tab-group="highlights">
     <section id="highlightsPanel" class="panel" style="margin-top:0">
       <h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span>✨ AI Shorts</span>
+        <span>Shorts</span>
         <span class="muted" style="font-size:.78rem;font-weight:normal">Chop long videos into individual clips</span>
-        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:#6c5cff33;border:1px solid #6c5cff88;color:#c8c0ff">Long-form · AI Shorts available</span>
+        <span id="hlLongFormBadge" class="pill" style="display:none;font-size:.72rem;background:rgba(200,245,66,.12);border:1px solid rgba(200,245,66,.35);color:#c8f542">Long-form · Shorts available</span>
       </h2>
       {% if not gemini_enabled %}
       <div id="hlGeminiDisabled" class="panel" style="margin:0 0 14px;border-color:#bf616a;background:#1a1216">
@@ -1473,9 +1475,9 @@
     <div id="multiInterviewArc" style="margin-bottom:12px"></div>
     <div id="multiInterviewThemes" style="margin-top:14px;display:flex;flex-direction:column;gap:10px"></div>
   </section>
-  <section id="compilePanel" class="panel" style="margin-top:14px;border-color:#6c5cff">
+  <section id="compilePanel" class="panel" style="margin-top:14px">
     <h2 style="display:flex;align-items:center;justify-content:space-between">
-      <span>🎞 Compilation queue</span>
+      <span>Compilation queue</span>
       <span id="compileCount" class="muted" style="font-size:.8rem;font-weight:normal"></span>
     </h2>
     <p class="muted panel-desc">
@@ -1489,7 +1491,7 @@
       <input type="text" id="compileLabel" placeholder="Compilation name (optional)" style="flex:1;min-width:180px;padding:8px 10px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:8px;font-size:.9rem">
       <button id="compilePreviewAllBtn" class="btn btn-secondary" title="Play every queued clip in order, end to end. Click again to stop.">▶ Preview all</button>
       <button id="compileToTimelineBtn" class="btn btn-secondary" title="Open Timeline with every queued clip on the Main track — edit there, then Preview cut / Render (or Stitch Main)">🎬 Send to timeline</button>
-      <button id="compileGoBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff" title="Stitch queue into one job, then optionally open Timeline">Compile</button>
+      <button id="compileGoBtn" class="btn btn-primary" title="Stitch queue into one job, then optionally open Timeline">Compile</button>
       <button id="compileClearBtn" class="btn btn-secondary">Clear all</button>
     </div>
     <div id="compileStatus" class="muted" style="font-size:.85rem;margin-top:10px"></div>
@@ -2086,12 +2088,12 @@
     <span class="ico">🔥</span><span class="lbl">Shorts</span>
   </button>
   <button type="button" class="mobile-nav-btn" data-tab="editor">
-    <span class="ico">🎬</span><span class="lbl">Timeline</span>
+    <span class="ico">🎬</span><span class="lbl">Edit</span>
   </button>
   <button type="button" class="mobile-nav-btn" data-tab="compilation">
-    <span class="ico">🎞</span><span class="lbl">Queue</span>
+    <span class="ico">🎞</span><span class="lbl">Projects</span>
   </button>
-  <button type="button" class="mobile-nav-btn" id="mobileExportBtn" data-action="export" title="Instant Export MP4">
+  <button type="button" class="mobile-nav-btn" id="mobileExportBtn" data-action="export" title="Quick Export (prefer Edit → Render)">
     <span class="ico">⚡</span><span class="lbl">Export</span>
   </button>
 </nav>
