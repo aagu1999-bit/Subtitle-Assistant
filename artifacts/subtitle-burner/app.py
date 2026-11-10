@@ -5483,10 +5483,114 @@ TL_EFFECT_TYPES = (
 )
 
 
+def _pack_device_budget(pack: dict, duration_s: float) -> list[dict]:
+    """A pack's graphic devices as a CAP for an edit of this length.
+
+    ``per_min`` is a budget, not a schedule. It says how often a reference
+    reaches for a kind of graphic; it does not say when. Placement still has
+    to find a moment the transcript supports, and the budget only decides how
+    many it may take. A device measured at 0.8 a minute over a 90-second edit
+    gets at most one, or none if nothing earns it.
+
+    Until this existed the ``devices`` key was written onto every learned pack
+    and read by nothing -- the rate was measured, stored, and went nowhere.
+    """
+    out: list[dict] = []
+    minutes = max(0.0, float(duration_s or 0)) / 60.0
+    for d in (pack.get("devices") or []):
+        if not isinstance(d, dict):
+            continue
+        kind = str(d.get("kind") or "").strip().lower()
+        if kind not in REF_DEVICES:
+            continue
+        try:
+            per_min = float(d.get("per_min") or 0)
+        except (TypeError, ValueError):
+            continue
+        if per_min <= 0:
+            continue
+        # Rounded, with one as the floor for a device that was seen at all.
+        # Flooring would mean anything measured under one a minute could
+        # never appear on a short edit -- a measurement thrown away rather
+        # than respected.
+        cap = max(1, int(per_min * minutes + 0.5))
+        aid = str(d.get("asset_id") or "").strip().lower()
+        out.append({
+            "kind": kind,
+            "op": REF_DEVICES[kind],
+            "per_min": round(per_min, 2),
+            "max": cap,
+            "asset_id": aid if re.fullmatch(r"[a-f0-9]{32}", aid) else None,
+        })
+    out.sort(key=lambda d: d["per_min"], reverse=True)
+    return out[:6]
+
+
+def _sanitize_graphic_suggestions(raw, total: float,
+                                  budget: list[dict]) -> list[dict]:
+    """Model-named graphic moments, held to the reference's own cap.
+
+    Two things are thrown away here. A kind the pack never measured -- the
+    budget IS the vocabulary, and an invented kind is a budget for nothing.
+    And anything over the cap for its kind: the cap is enforced on the way
+    out rather than trusted from the prompt, because a model told "at most
+    one" returns three often enough to matter.
+    """
+    caps = {d["kind"]: d for d in (budget or [])}
+    if not caps or not isinstance(raw, list):
+        return []
+    used: dict[str, int] = {}
+    out: list[dict] = []
+    for g in raw:
+        if not isinstance(g, dict):
+            continue
+        kind = str(g.get("kind") or "").strip().lower()
+        spec = caps.get(kind)
+        if not spec:
+            continue
+        if used.get(kind, 0) >= int(spec["max"]):
+            continue
+        try:
+            s = float(g.get("start_time"))
+            e = float(g.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        s = max(0.0, min(s, max(0.0, float(total) - 0.5)))
+        e = min(float(total), e)
+        if e - s < 0.8:
+            e = min(float(total), s + 2.5)
+        if e - s < 0.8:
+            continue
+        if e - s > 6.0:
+            e = s + 6.0
+        # Two graphics over one moment reads as a mistake, not as density.
+        if any(x["end_time"] > s + 0.05 and x["start_time"] < e - 0.05
+               for x in out):
+            continue
+        used[kind] = used.get(kind, 0) + 1
+        out.append({
+            "kind": kind,
+            "op": spec["op"],
+            "asset_id": spec.get("asset_id"),
+            "start_time": round(s, 3),
+            "end_time": round(e, 3),
+            "quote": str(g.get("quote") or "")[:200],
+            "reason": str(g.get("reason") or "")[:300],
+        })
+    out.sort(key=lambda x: x["start_time"])
+    return out
+
+
 def _build_effect_suggestion_prompt(transcript: str, total: float,
                                     max_effects: int,
-                                    purpose: str | None = None) -> str:
-    """Ask Gemini where camera moves would earn their keep."""
+                                    purpose: str | None = None,
+                                    devices: list | None = None) -> str:
+    """Ask Gemini where camera moves -- and a look's graphics -- belong.
+
+    With no ``devices`` the returned text is byte-identical to what it was
+    before the device budget existed, which is asserted rather than assumed:
+    every edit that does not use a learned pack must be provably untouched.
+    """
     purpose = (purpose or "").strip()
     purpose_block = ""
     if purpose:
@@ -5533,8 +5637,39 @@ Report it in "structure" below — this is separate from the camera-move effects
     "hook_quote": "the exact words that make this the hook",
     "hook_reason": "why this should open the edit"
   }"""
+    devices_block = ""
+    devices_shape = ""
+    if devices:
+        lines = "\n".join(
+            f'- "{d["kind"]}": at most {d["max"]} in this edit'
+            + (" — the picture for it already exists"
+               if d.get("asset_id") else " — no picture bound to it yet")
+            for d in devices
+        )
+        devices_block = f"""
+GRAPHICS THIS LOOK USES — measured from a reference video. These are the kinds
+of on-screen graphic this edit is meant to reach for, and the most it may have
+of each:
+{lines}
+Choose only moments that genuinely want one: a line stating a fact worth
+putting on screen, a quoted message, a list, a named thing. Return FEWER than
+the cap, or none at all, when no moment earns it — a card dropped on an
+unremarkable sentence is worse than no card.
+These are separate from the camera moves and do NOT count toward the
+{max_effects} limit.
+"""
+        devices_shape = """,
+  "graphics": [
+    {
+      "kind": "document_card",
+      "start_time": 31.0,
+      "end_time": 34.0,
+      "quote": "the exact words the graphic belongs over",
+      "reason": "why this line is the one that wants a card"
+    }
+  ]"""
     return f"""You are an expert video editor deciding where camera moves belong in a talking-head edit. The transcript below has [mm:ss] timestamps. The video is {total:.1f} seconds long.
-{purpose_block}{long_note}{hook_block}
+{purpose_block}{long_note}{hook_block}{devices_block}
 Choose at most {max_effects} moments. Fewer is better — a move that isn't motivated is worse than no move at all. Never cover the whole video; these are accents.
 
 Effects you may place (pick the RIGHT tool — do not overuse punch_zoom):
@@ -5583,7 +5718,7 @@ Return JSON in exactly this shape:
       "quote": "the exact words of the hot take",
       "reason": "blunt hot take — the strongest line in this stretch"
     }}
-  ]{hook_shape}
+  ]{hook_shape}{devices_shape}
 }}
 
 TRANSCRIPT:
@@ -17261,6 +17396,107 @@ def upload_asset():
     })
 
 
+def _verify_image_asset(path: Path) -> tuple[bool, str]:
+    """Is this really a picture? Decided by OPENING it, not by its header.
+
+    _download_url_to_asset names the file from the Content-Type header, so a
+    PDF, an HTML sign-in page or an expired-link redirect served as
+    "image/jpeg" would be written out as a .jpg and then sit in the picker as
+    an asset that renders as nothing at all. A broken asset is worse than a
+    refusal, because the refusal says what happened and the asset does not.
+    """
+    ext = path.suffix.lower().lstrip(".")
+    if ext not in ASSET_EXT_IMAGE:
+        return False, f"that URL served a .{ext}, which is not a picture"
+    try:
+        from PIL import Image
+    except Exception:                                 # noqa: BLE001
+        # No Pillow: the extension is all there is to go on. Keeping the
+        # asset is the better failure here -- refusing every import because
+        # the checker is missing would be worse than not checking.
+        return True, ""
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        with Image.open(path) as im:      # verify() spends the file object
+            w, h = im.size
+    except Exception:                                 # noqa: BLE001
+        return False, ("that URL did not return a picture -- what came back "
+                       "could not be opened as an image. An export link that "
+                       "has expired, or one that needs a sign-in, does this.")
+    if w < 16 or h < 16:
+        return False, f"that picture is only {w}x{h} -- too small to place"
+    return True, ""
+
+
+def _filename_from_url(url: str, suffix: str) -> str:
+    """A name a person would recognise, taken from the URL's own path."""
+    name = ""
+    try:
+        from urllib.parse import urlparse, unquote
+        name = unquote(Path(urlparse(url).path).name or "")
+    except Exception:                                 # noqa: BLE001
+        name = ""
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:60].strip("_.")
+    if not name or "." not in name:
+        name = f"import{suffix.lower() or '.jpg'}"
+    return name
+
+
+@app.route("/import-asset-url", methods=["POST"])
+def import_asset_url():
+    """A picture at a URL in, an asset out.
+
+    Canva -- and every other design tool -- hands back a download URL for an
+    export. Downloading it by hand and uploading it again is two steps that
+    accomplish nothing, so this does both: ``_download_url_to_asset`` already
+    caps the transfer at 12 MB and picks the extension from the content type,
+    and the rest is the same contract ``/upload-asset`` satisfies, so the
+    imported picture appears in every picker like anything uploaded.
+
+    ``source`` is recorded ("canva" by default from the Canva flow) so where
+    a card came from is answerable later.
+    """
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "No url provided"}), 400
+    if not re.match(r"^https?://", url, re.I):
+        return jsonify({"error": "Only http(s) URLs can be imported"}), 400
+    asset_id = uuid.uuid4().hex
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    path = _download_url_to_asset(url, ASSET_DIR / asset_id)
+    if not path:
+        return jsonify({
+            "error": "nothing could be downloaded from that URL -- it may be "
+                     "private, expired, or larger than 12 MB",
+        }), 400
+    ok, why = _verify_image_asset(path)
+    if not ok:
+        _safe_unlink(path)
+        return jsonify({"error": why}), 400
+    kind = _probe_asset_kind(path) or _asset_kind(path.suffix) or "image"
+    source = str(data.get("source") or "url").strip().lower()[:24]
+    if not re.fullmatch(r"[a-z0-9_-]{1,24}", source):
+        source = "url"
+    filename = str(data.get("filename") or "").strip()[:80] \
+        or _filename_from_url(url, path.suffix)
+    _write_asset_meta(asset_id, filename=filename, source=source, kind=kind,
+                      origin_url=url[:500])
+    project_id = str(data.get("project_id") or "").strip()
+    if project_id and re.fullmatch(r"[a-f0-9]{32}", project_id):
+        _write_asset_meta(asset_id, project_id=project_id)
+    else:
+        project_id = ""
+    return jsonify({
+        "asset_id": asset_id,
+        "kind": kind,
+        "filename": filename,
+        "source": source,
+        "project_id": project_id or None,
+    })
+
+
 @app.route("/list-assets", methods=["GET"])
 def list_assets():
     """List uploaded timeline assets, newest first.
@@ -18273,13 +18509,76 @@ def _clip_color_from_pack(pack: dict) -> dict:
     return {"preset": preset}
 
 
+def _tl_map_through_ranges(t: float, rngs: list) -> float | None:
+    """Source time -> output time through a reordered list of source ranges.
+
+    The hook pull replays the source as three windows in a new order, so a
+    thing seeded at raw offset `t - t_in` would afterwards land on whatever
+    now plays at that offset instead of on the beat it was anchored to.
+    """
+    cursor = 0.0
+    for rs, re_ in rngs or []:
+        span = float(re_) - float(rs)
+        if span < 0.1:
+            continue
+        if float(rs) - 0.05 <= t <= float(re_) + 0.05:
+            return cursor + max(0.0, min(t, float(re_)) - float(rs))
+        cursor += span
+    return None
+
+
+def _graphic_meta(g: dict) -> dict:
+    """What a graphic was asked for, for the receipt."""
+    return {
+        "kind": g.get("kind"),
+        "op": g.get("op"),
+        "start_time": g.get("start_time"),
+        "end_time": g.get("end_time"),
+        "quote": g.get("quote") or "",
+        "reason": g.get("reason") or "",
+    }
+
+
+def _graphic_fallback_asset(g: dict) -> tuple[str, str]:
+    """An UNBOUND device, through whatever its op can still do.
+
+    `make_image` can generate a picture from the line it sits over. The other
+    ops cannot work from a moment alone -- a text thread needs the words of
+    the exchange, a carousel needs photos, a background and a split need a
+    frame -- so those come back unplaced, saying what they are waiting for,
+    rather than approximated. An approximated card is the exact thing a
+    learned look is supposed to stop happening.
+    """
+    op = str(g.get("op") or "")
+    kind = str(g.get("kind") or "a device")
+    desc = str(g.get("quote") or g.get("reason") or "").strip()
+    if op != "make_image":
+        return "", (f"no picture is bound to '{kind}', and {op} cannot be "
+                    f"built from the moment alone -- bind one on the look")
+    if not desc:
+        return "", "nothing was quoted for the card to be about"
+    if not _gemini_image_ready():
+        return "", ("no picture is bound to it, and generating one needs "
+                    "GEMINI_API_KEY, which is not set on this server")
+    tmp = CACHE_DIR / f"device_{uuid.uuid4().hex[:10]}"
+    try:
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        made = gemini_image(f"{_IMAGE_STYLE_PROMPTS['graphic']} {desc}", tmp)
+    except Exception:                                 # noqa: BLE001
+        made = None
+    if not made:
+        return "", "the picture for it could not be generated"
+    return _save_generated_asset(made, f"{kind}: {desc[:60]}"), ""
+
+
 def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             pack: dict, intensity: str,
                             cuts: list, effects: list,
                             label: str = "",
                             words: list | None = None,
                             insert_media: bool = True,
-                            hook: dict | None = None) -> dict:
+                            hook: dict | None = None,
+                            graphics: list | None = None) -> dict:
     """Assemble a Captions-style seeded timeline project from a style pack."""
     main_id = _uid_short()
     grade = _clip_color_from_pack(pack)
@@ -18405,6 +18704,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
     # the edit even though it happens mid-transcript (classic hook-first cut).
     hook_pulled = False
     hook_quote = None
+    hook_ranges: list | None = None
     if hook:
         try:
             hook_s = max(t_in, float(hook.get("start_time")))
@@ -18455,6 +18755,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                         target["split"] = {"enabled": True}
                 pieces = new_pieces
                 hook_pulled = True
+                hook_ranges = ranges
                 hook_quote = str(hook.get("hook_quote") or hook.get("quote") or "")[:200] or None
 
                 # Effects-lane entries were seeded in *pre-pull* output time
@@ -18462,21 +18763,10 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                 # the same three-window reorder so it still lands on the beat
                 # it was anchored to instead of drifting into whatever now
                 # plays at that raw offset.
-                def _map_through_ranges(t: float, rngs: list[tuple[float, float]]) -> float | None:
-                    cursor = 0.0
-                    for rs, re__ in rngs:
-                        span = re__ - rs
-                        if span < 0.1:
-                            continue
-                        if rs - 0.05 <= t <= re__ + 0.05:
-                            return cursor + max(0.0, min(t, re__) - rs)
-                        cursor += span
-                    return None
-
                 remapped = []
                 for entry in effects_track:
                     fs = entry["start"] + t_in
-                    new_start = _map_through_ranges(fs, ranges)
+                    new_start = _tl_map_through_ranges(fs, ranges)
                     if new_start is None:
                         continue  # fell in a range too short to keep (<0.1s)
                     entry["start"] = round(new_start, 3)
@@ -18619,6 +18909,88 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             except Exception:
                 pass
 
+    # The look's graphic devices, finally placed. A BOUND device carries the
+    # picture that was designed for it -- made once, on brand, identical
+    # every time, which is the half a reference cannot give you. An unbound
+    # one falls back to its op, and where the op needs something the server
+    # has not got, the graphic comes back UNPLACED WITH THE REASON rather
+    # than quietly not happening. Quietly not happening is how `devices`
+    # spent its whole life measured and read by nothing.
+    #
+    # They land on the overlay lane, which already does timing, position,
+    # fades, behind/in-front and motion -- so nothing new is rendered. The
+    # only new thing here is *choosing the picture*.
+    graphic_report: list[dict] = []
+    for gi, g in enumerate(graphics or []):
+        if not isinstance(g, dict):
+            continue
+        try:
+            gs = max(t_in, float(g.get("start_time")))
+            ge = min(t_out, float(g.get("end_time")))
+        except (TypeError, ValueError):
+            continue
+        if ge - gs < 0.5:
+            continue
+        start = gs - t_in
+        if hook_ranges:
+            mapped = _tl_map_through_ranges(gs, hook_ranges)
+            if mapped is None:
+                graphic_report.append({
+                    **_graphic_meta(g), "placed": False,
+                    "why": "the stretch it belonged to was dropped by the hook pull",
+                })
+                continue
+            start = mapped
+        aid = str(g.get("asset_id") or "").strip().lower()
+        if aid and _find_asset_path(aid):
+            source = "device_bound"
+        else:
+            aid, why = _graphic_fallback_asset(g)
+            if not aid:
+                graphic_report.append({
+                    **_graphic_meta(g), "placed": False, "why": why,
+                })
+                continue
+            source = "device_generated"
+        cap_y = 82.0
+        try:
+            cap_y = float((pack.get("style") or {}).get("position_y") or cap_y)
+        except (TypeError, ValueError):
+            pass
+        face_cx, face_cy = _face_hint_for_job(job_id)
+        pos = _caption_aware_overlay_layout(
+            gi, "center", face_cx=face_cx, face_cy=face_cy,
+            caption_y_pct=cap_y,
+        )
+        overlay_track.append({
+            "id": _uid_short(),
+            "asset_id": aid,
+            "keyword": str(g.get("kind") or "")[:40],
+            "source": source,
+            "device_kind": g.get("kind"),
+            "in": 0,
+            "out": round(min(6.0, max(1.2, ge - gs)), 3),
+            "start": round(max(0.0, start), 3),
+            "x": pos["x"], "y": pos["y"], "w": pos["w"], "h": pos["h"],
+            "opacity": 1.0,
+            # contain, never cover: a designed card that has been cropped to
+            # fill a box is a card with its edges cut off.
+            "fit": "contain",
+            "fade_in": 0.18, "fade_out": 0.25,
+            "border_px": 0,
+            "layout": pos.get("layout") or "center",
+            # No drift. A photo benefits from one; a card with type on it
+            # reads as a slide that will not sit still.
+            "ken_burns": None,
+            "quote": str(g.get("quote") or "")[:200],
+            "anchor": pieces[0]["id"] if pieces else None,
+            "anchor_offset": round(max(0.0, start), 3),
+        })
+        graphic_report.append({
+            **_graphic_meta(g), "placed": True,
+            "asset_id": aid, "bound": source == "device_bound",
+        })
+
     music_track = []
     # Auto-attach previously uploaded bg music for this job, if present.
     bg_music_files = list(UPLOAD_DIR.glob(f"{job_id}_bgmusic.*"))
@@ -18681,6 +19053,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             }
             for o in overlay_track
         ],
+        "graphics": graphic_report,
         "audio": {
             "summary": "Captions Audio Enhancement applies on ▶ Render (loudnorm / noise / duck)",
         },
@@ -18735,6 +19108,26 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "clip_id": o.get("id"),
             "label": f"B-roll “{kw}” @{mm}:{ss:02d}",
         })
+    for gr in edit_receipt["graphics"]:
+        try:
+            st = float(gr.get("start_time") or 0)
+        except (TypeError, ValueError):
+            st = 0.0
+        mm, ss = divmod(int(st), 60)
+        name = str(gr.get("kind") or "graphic").replace("_", " ")
+        if gr.get("placed"):
+            how = "your card" if gr.get("bound") else "a generated picture"
+            label = f"{name} @{mm}:{ss:02d} — {how}"
+        else:
+            # A budget that could not be spent is reported, not swallowed:
+            # the reason is the whole instruction for what to do about it.
+            label = f"{name} not placed — {gr.get('why') or 'no reason given'}"
+        edit_receipt["rows"].append({
+            "id": f"gfx{mm}{ss}{name[:4]}",
+            "kind": "graphic",
+            "track": "overlay",
+            "label": label,
+        })
     if hook_pulled and hook_quote:
         edit_receipt["rows"].append({
             "id": "hook",
@@ -18762,6 +19155,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "ken_burns_on_accept": bool(pack.get("photo_match")),
             "hook_pulled": hook_pulled,
             "hook_quote": hook_quote,
+            "devices_placed": sum(1 for g in graphic_report if g.get("placed")),
+            "devices_unplaced": sum(1 for g in graphic_report if not g.get("placed")),
         },
         "edit_receipt": edit_receipt,
         "tracks": {
@@ -19919,6 +20314,41 @@ def reference_keep(ref_id: str):
             else:
                 style[k] = v
         pack["style"] = style
+
+    # Binding a picture to a measured device is what turns the budget into
+    # something placeable. The reference can say "a document card about every
+    # 75 seconds"; it cannot reproduce the card, because a design cannot be
+    # recovered from pixels and a model asked to redraw one invents the
+    # wording. So the card is made once, on brand, and bound here.
+    #
+    # A binding for a device the analysis never measured is DROPPED: the
+    # device list is the measurement, and inventing an entry for it would be
+    # reporting a rate nothing observed.
+    binds = body.get("devices")
+    if isinstance(binds, list) and pack.get("devices"):
+        wanted = {}
+        for b in binds:
+            if not isinstance(b, dict):
+                continue
+            kind = str(b.get("kind") or "").strip().lower()
+            aid = str(b.get("asset_id") or "").strip().lower()
+            if kind:
+                wanted[kind] = aid
+        bound = []
+        for d in pack["devices"]:
+            d = dict(d) if isinstance(d, dict) else {}
+            kind = str(d.get("kind") or "")
+            if kind in wanted:
+                aid = wanted[kind]
+                # An id that resolves to no file on disk unbinds rather than
+                # binds -- a device pointing at a missing asset would place
+                # nothing and report that it had.
+                if aid and _find_asset_path(aid):
+                    d["asset_id"] = aid
+                else:
+                    d.pop("asset_id", None)
+            bound.append(d)
+        pack["devices"] = bound
     pack["label"] = label
     pack["blurb"] = str(body.get("blurb")
                         or f"Learned from {record.get('source') or 'a reel'}")[:140]
@@ -20107,8 +20537,13 @@ def ai_edit_seed():
 
     # Effect suggestions (Gemini when available; empty otherwise).
     effects = []
+    graphics = []
     hook = None
     gemini_warning = None
+    # The pack's graphic devices, as a cap for an edit of THIS length. Empty
+    # for every built-in pack, so built-ins ask for exactly what they asked
+    # for before.
+    device_budget = _pack_device_budget(pack, max(0.0, t_out - t_in))
     try:
         max_fx = int(data.get("max_effects") or _intensity_effect_budget(intensity, window_dur))
     except (TypeError, ValueError):
@@ -20126,9 +20561,12 @@ def ai_edit_seed():
                 max(1.0, work_out - work_in if create_clip else total),
                 max_fx,
                 purpose=purpose or None,
+                devices=device_budget or None,
             )
         )
         effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
+        graphics = _sanitize_graphic_suggestions(
+            result.get("graphics") or [], total, device_budget)
         # Long edits from Gemini tend to front-load all the energy into the
         # first minute — backfill quiet late stretches with light accents so
         # the back half of the video isn't dead.
@@ -20159,6 +20597,7 @@ def ai_edit_seed():
     timeline = _build_ai_edit_timeline(
         work_job_id, work_in, work_out, pack, intensity, cuts, effects,
         label=label, words=words, insert_media=insert_media, hook=hook,
+        graphics=graphics,
     )
     if purpose:
         timeline["ai_edit"] = dict(timeline.get("ai_edit") or {})
@@ -20183,6 +20622,8 @@ def ai_edit_seed():
         "recommended_cuts": rec,
         "applied_cuts": cuts,
         "effects": effects,
+        "graphics": graphics,
+        "device_budget": device_budget,
         "hook": hook,
         "timeline": timeline,
         "edit_receipt": (timeline or {}).get("edit_receipt"),
