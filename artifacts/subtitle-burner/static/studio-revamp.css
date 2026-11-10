@@ -1,0 +1,253 @@
+/* Studio UX revamp — free CSS layer (no timeline rewrite).
+   Charcoal + acid lime. Progressive disclosure helpers. */
+
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap");
+
+:root {
+  --studio-bg: #0b0d10;
+  --studio-bg-elev: #12151a;
+  --studio-bg-panel: #161a21;
+  --studio-line: rgba(255, 255, 255, 0.08);
+  --studio-line-strong: rgba(255, 255, 255, 0.14);
+  --studio-text: #eef1f4;
+  --studio-muted: #9aa3ad;
+  --studio-accent: #c8f542;
+  --studio-accent-ink: #12150a;
+  --studio-accent-soft: rgba(200, 245, 66, 0.14);
+  --studio-danger: #f07178;
+  --studio-radius: 12px;
+  --studio-font: "Sora", "Segoe UI", sans-serif;
+  --studio-display: "Fraunces", Georgia, serif;
+}
+
+body.studio-body,
+body {
+  font-family: var(--studio-font) !important;
+  background: var(--studio-bg) !important;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 10% -10%, rgba(200, 245, 66, 0.07), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(80, 140, 160, 0.08), transparent 50%) !important;
+  color: var(--studio-text) !important;
+}
+
+h1, h2, .empty-logo + h1, .logo {
+  font-family: var(--studio-display) !important;
+  letter-spacing: -0.02em;
+}
+
+/* Kill purple gradient brand text */
+h1 {
+  background: none !important;
+  -webkit-text-fill-color: var(--studio-text) !important;
+  color: var(--studio-text) !important;
+}
+
+.muted { color: var(--studio-muted) !important; }
+
+.panel {
+  background: var(--studio-bg-panel) !important;
+  border: 1px solid var(--studio-line) !important;
+  border-radius: var(--studio-radius) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+.panel:hover { border-color: var(--studio-line-strong) !important; }
+
+.drop {
+  background: var(--studio-bg-elev) !important;
+  border-color: rgba(200, 245, 66, 0.28) !important;
+  box-shadow: none !important;
+}
+.drop.hover {
+  border-color: var(--studio-accent) !important;
+  background: var(--studio-bg-panel) !important;
+  box-shadow: 0 0 0 1px rgba(200, 245, 66, 0.25) !important;
+  transform: none !important;
+}
+.drop .icon { filter: none !important; }
+.filename { color: var(--studio-accent) !important; }
+
+.btn-primary,
+.btn.btn-primary {
+  background: var(--studio-accent) !important;
+  color: var(--studio-accent-ink) !important;
+  border: none !important;
+  font-weight: 700 !important;
+  box-shadow: none !important;
+}
+.btn-primary:hover,
+.btn.btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+.btn-secondary,
+.btn.btn-secondary {
+  background: transparent !important;
+  border: 1px solid var(--studio-line-strong) !important;
+  color: var(--studio-text) !important;
+}
+
+/* ---- Header / nav: destinations, not fake numbered steps ---- */
+header.app-header {
+  background: rgba(11, 13, 16, 0.92) !important;
+  border-bottom: 1px solid var(--studio-line) !important;
+  backdrop-filter: blur(10px);
+}
+header.app-header .logo {
+  font-size: 1.05rem !important;
+  font-weight: 700 !important;
+  background: none !important;
+  -webkit-text-fill-color: var(--studio-text) !important;
+  color: var(--studio-text) !important;
+}
+
+.workflow-steps .main-tab,
+.main-tabs .main-tab {
+  border-radius: 999px !important;
+  border: 1px solid transparent !important;
+  background: transparent !important;
+  color: var(--studio-muted) !important;
+  font-weight: 600 !important;
+  font-size: 0.82rem !important;
+}
+.workflow-steps .main-tab.active,
+.main-tabs .main-tab.active {
+  background: var(--studio-accent-soft) !important;
+  color: var(--studio-accent) !important;
+  border-color: rgba(200, 245, 66, 0.35) !important;
+}
+
+/* Instant Export demoted — not the hero CTA */
+.btn-export,
+#headerExportBtn {
+  background: transparent !important;
+  color: var(--studio-muted) !important;
+  border: 1px solid var(--studio-line-strong) !important;
+  box-shadow: none !important;
+  font-weight: 600 !important;
+  font-size: 0.78rem !important;
+  padding: 6px 12px !important;
+}
+.btn-export:hover,
+#headerExportBtn:hover {
+  color: var(--studio-text) !important;
+  border-color: var(--studio-muted) !important;
+}
+
+/* Primary ready path */
+#readyActions .ready-primary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+#readyActions .ready-more {
+  margin-top: 4px;
+  border: 1px solid var(--studio-line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--studio-bg-elev);
+}
+#readyActions .ready-more > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--studio-muted);
+  list-style: none;
+}
+#readyActions .ready-more > summary::-webkit-details-marker { display: none; }
+#readyActions .ready-more[open] > summary { color: var(--studio-text); margin-bottom: 8px; }
+#readyActions .ready-more-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Advanced disclosure blocks */
+.ux-advanced {
+  margin-top: 12px;
+  border: 1px dashed var(--studio-line-strong);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: transparent;
+}
+.ux-advanced > summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--studio-muted);
+  list-style: none;
+}
+.ux-advanced > summary::-webkit-details-marker { display: none; }
+.ux-advanced[open] > summary {
+  color: var(--studio-text);
+  margin-bottom: 10px;
+}
+
+/* Empty / template home — brand first */
+.empty-state .empty-hero {
+  text-align: center;
+  padding-top: 28px;
+}
+.empty-state .empty-logo {
+  font-family: var(--studio-display) !important;
+  font-size: clamp(2.4rem, 5vw, 3.25rem) !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.03em;
+  color: var(--studio-text) !important;
+  margin-bottom: 10px;
+  filter: none !important;
+}
+.empty-state .empty-hero h1 {
+  font-family: var(--studio-font) !important;
+  font-size: clamp(1.15rem, 2.4vw, 1.45rem) !important;
+  font-weight: 600 !important;
+  color: var(--studio-text) !important;
+  margin: 0 0 6px !important;
+}
+.empty-tagline {
+  color: var(--studio-muted) !important;
+  font-size: 0.95rem !important;
+  margin: 0 0 22px !important;
+}
+.tpl-card {
+  border-color: var(--studio-line) !important;
+  background: var(--studio-bg-panel) !important;
+}
+.tpl-card:hover,
+.tpl-card:focus-visible {
+  border-color: rgba(200, 245, 66, 0.45) !important;
+  box-shadow: 0 0 0 1px rgba(200, 245, 66, 0.2) !important;
+}
+.tpl-name { color: var(--studio-text) !important; }
+.tpl-cap { color: var(--studio-muted) !important; }
+
+/* Soften purple theme chips elsewhere */
+.theme.active,
+.themes .theme.active {
+  border-color: rgba(200, 245, 66, 0.5) !important;
+  background: var(--studio-accent-soft) !important;
+  color: var(--studio-accent) !important;
+}
+
+/* Ingest aside: quieter */
+.ingest-guide {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--studio-muted);
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--studio-line);
+  background: var(--studio-bg-elev);
+}
+.ingest-guide strong { color: var(--studio-text); }
+
+/* Mobile bottom export less shouty */
+#mobileExportBtn {
+  color: var(--studio-muted) !important;
+}
+
+@media (max-width: 768px) {
+  header.app-header .logo { font-size: 0.92rem !important; }
+  .workflow-steps { gap: 4px !important; }
+}
