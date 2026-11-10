@@ -2434,6 +2434,11 @@
         ? window.describeSpeakerDetection(data.speaker_detection) : "";
       setAnalyzeProgressUI(100,
         `✓ ${data.speaker_count} speaker(s) across ${(data.sources || []).length} clip(s)${how}`);
+      // A best guess with nothing to do about it is where this stopped
+      // being useful: the ladder says "4, but it kept climbing" and the
+      // only control that could pin it was in a hidden panel. Offer the
+      // confirm right where the number is.
+      offerSpeakerCountLock(data, triggerBtn);
     } catch (e) {
       const msg = (e && e.message) || String(e);
       setAnalyzeProgressUI(100, "Whole-edit analysis failed: " + msg);
@@ -2441,6 +2446,67 @@
     } finally {
       if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = was; }
     }
+  }
+
+  // Turn an uncertain count into an answer. Sets the Speakers control to
+  // "Exactly N" -- the same control analyzeSpeakerOptions() reads, so the
+  // choice sticks for every later Analyze -- and runs it again.
+  //
+  // Only offered when the passes disagreed. A count that held steady needs
+  // no confirming, and a button on every result would train people to
+  // ignore it.
+  function offerSpeakerCountLock(data, triggerBtn) {
+    const host = $("tlAnalyzeStatus");
+    const det = data && data.speaker_detection;
+    if (!host || !det || det.confidence !== "uncertain") return;
+    const sel = document.getElementById("analyzeMaxSpeakers");
+    if (!sel) return;
+
+    const guess = Number(data.speaker_count) || 0;
+    if (guess <= 0) return;
+
+    const mk = (n, label) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tl-analyze-lock";
+      b.textContent = label;
+      b.title = `Re-run pinned to exactly ${n} speaker(s), and keep that ` +
+                `setting for later runs`;
+      b.onclick = () => {
+        // An option the dropdown does not offer would silently select
+        // nothing and the run would repeat unpinned, which looks like the
+        // button doing nothing at all.
+        const want = `exact:${n}`;
+        if (![...sel.options].some((o) => o.value === want)) {
+          const o = document.createElement("option");
+          o.value = want;
+          o.textContent = `Exactly ${n}`;
+          sel.appendChild(o);
+        }
+        sel.value = want;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        runAnalyzeWholeEdit(triggerBtn);
+      };
+      return b;
+    };
+
+    host.appendChild(mk(guess, `It's ${guess} — lock it in`));
+
+    const other = document.createElement("input");
+    other.type = "number";
+    other.min = "1";
+    other.max = "12";
+    other.className = "tl-analyze-lock";
+    other.style.width = "4.5em";
+    other.placeholder = "or…";
+    other.title = "Type the real number of speakers and press Enter";
+    other.onkeydown = (ev) => {
+      if (ev.key !== "Enter") return;
+      const n = parseInt(other.value, 10);
+      if (!(n > 0 && n <= 12)) return;
+      mk(n, "").onclick();
+    };
+    host.appendChild(other);
   }
 
   // Poll until the run reaches a terminal state. Resolves with the finished

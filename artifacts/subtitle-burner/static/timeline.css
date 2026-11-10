@@ -1439,3 +1439,31 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
    its children can never escape downward from. */
 .tl-behind-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
 .tl-behind-layer > div { pointer-events: none !important; }
+
+/* The Speakers / Sensitivity pair, beside the Analyze buttons they drive.
+   They used to sit in the Interview-reframe panel, which is `panel hidden`
+   — so "Exactly N" reached pyannote and nobody could pick it. */
+.tl-analyze-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  margin-top: 8px;
+}
+.tl-analyze-opts label { min-width: 0; }
+.tl-analyze-opts select { max-width: 100%; }
+
+/* "It's actually N" — the confirm that turns a best guess into an answer. */
+.tl-analyze-lock {
+  margin-left: 8px;
+  font: 600 .72rem/1 inherit;
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid #6366f1;
+  background: rgba(99, 102, 241, 0.18);
+  color: #c7d2fe;
+  cursor: pointer;
+  vertical-align: 1px;
+}
+.tl-analyze-lock:hover { background: rgba(99, 102, 241, 0.3); }
+.tl-analyze-lock:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }

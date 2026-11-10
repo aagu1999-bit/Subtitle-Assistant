@@ -6556,3 +6556,122 @@ def test_the_strip_sees_what_the_closeup_cannot(app_mod, tmp_path, monkeypatch):
     # And the strip really is the smaller panel, measured on the frame
     # rather than read off the filter string.
     assert 0.30 < seam / h < 0.38, seam / h
+
+
+# --- the speaker count has to be reachable ------------------------------
+# The ladder works: it runs several passes and reports "4, but the count
+# kept climbing". `num_speakers` is plumbed through the endpoint to
+# pyannote, and analyzeSpeakerOptions() sends it for "Exactly N". The whole
+# chain was complete and unusable, because the only control that produces
+# "Exactly N" sat in a section marked `class="panel hidden"` -- so the
+# dropdown was permanently stuck on whatever it was last given in markup.
+
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "param", "source", "track", "wbr"}
+
+
+def _ancestor_tags(html: str, needle: str) -> list:
+    """Every open tag enclosing *needle*, outermost first.
+
+    A tag stack rather than "the nearest <section>": the control was
+    originally hidden by its section, but a hidden <div> anywhere in
+    between would hide it just as completely, and an earlier version of
+    this test walked only to the section and missed exactly that.
+    """
+    at = html.index(needle)
+    stack = []
+    for m in re.finditer(r"<(/?)([a-zA-Z][\w-]*)([^>]*?)(/?)>", html[:at]):
+        closing, name, attrs, selfclose = m.groups()
+        name = name.lower()
+        if name in _VOID_TAGS or selfclose:
+            continue
+        if closing:
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == name:
+                    del stack[i:]
+                    break
+        else:
+            stack.append((name, m.group(0)))
+    return stack
+
+
+def test_the_speaker_controls_are_not_buried_in_a_hidden_panel(app_mod):
+    """A control nobody can see is the same as no control at all.
+
+    This is the exact shape of every gap this project keeps hitting: the
+    capability exists, the plumbing is complete, and nothing can ask for it.
+    """
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    # The scripts only. Including the whole template made every class in
+    # the markup justify itself -- a hidden <div class="mystery-box"> passed
+    # because "mystery-box" appeared in the markup being checked.
+    js_all = "".join(
+        (BURNER / "static" / f).read_text(encoding="utf-8")
+        for f in ("app.js", "timeline.js", "mobile.js")
+    ) + "".join(re.findall(r"<script[^>]*>(.*?)</script>", html, re.S))
+
+    for ctl in ('id="analyzeMaxSpeakers"', 'id="analyzeSensitivity"'):
+        assert html.count(ctl) == 1, f"{ctl} is duplicated; readers go by id"
+        for name, tag in _ancestor_tags(html, ctl):
+            # aria-hidden is never toggled here; it marks a pane that was
+            # retired and left in place for legacy handlers. That is what
+            # swallowed this control.
+            assert 'aria-hidden="true"' not in tag, (
+                f"{ctl} is inside a retired <{name}>: {tag!r}")
+            assert "display:none" not in tag.replace(" ", ""), (ctl, tag)
+            if not re.search(r"(^|[\s\"'])hidden([\s>=\"']|$)", tag):
+                continue
+            # Hidden in markup is fine for a pane code opens -- the app
+            # shell and the tab panes all start that way. It is fatal for a
+            # pane nothing can SELECT, since nothing can then open it.
+            handles = re.findall(r'id="([^"]+)"', tag)
+            handles += [c for c in re.findall(r'class="([^"]*)"', tag)
+                        for c in c.split()]
+            handles += re.findall(r'(data-[\w-]+)=', tag)
+            # "hidden" and "panel" are on half the document; finding them in
+            # a script proves nothing about THIS element.
+            handles = [h for h in handles if h not in ("hidden", "panel")]
+            assert any(h in js_all for h in handles), (
+                f"{ctl} is inside a hidden <{name}> that no script can "
+                f"select: {tag!r} — it is hidden for good, which is the "
+                "same as having no control at all")
+
+    # And it is beside the buttons it drives, not in some other tab.
+    toolbar = html[html.index('id="tlTranscriptToolbar"'):]
+    toolbar = toolbar[:toolbar.index('id="tlAnalyzeProgressWrap"')]
+    assert 'id="analyzeMaxSpeakers"' in toolbar, \
+        "the Speakers control is not beside the Analyze buttons"
+    assert 'id="analyzeSensitivity"' in toolbar
+
+    # "Exactly N" has to be on offer, or a confirmed count cannot be pinned.
+    opts = toolbar[toolbar.index('id="analyzeMaxSpeakers"'):]
+    assert 'value="exact:4"' in opts, opts[:400]
+
+
+def test_an_uncertain_count_can_be_confirmed_in_one_click(app_mod):
+    """A best guess with nothing to do about it is where this stalls.
+
+    The ladder reports "4, and the count kept climbing". Without a confirm,
+    acting on that means knowing a dropdown exists somewhere else, which is
+    exactly the knowledge the feature was supposed to remove.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function offerSpeakerCountLock"):]
+    fn = fn[:fn.index("// Poll until the run reaches")]
+
+    # Only when the passes disagreed: a steady count needs no confirming,
+    # and a button on every result trains people to ignore it.
+    assert 'det.confidence !== "uncertain"' in fn, \
+        "the confirm would appear on every result"
+    # It pins through the SAME control analyzeSpeakerOptions() reads, so the
+    # choice sticks for later runs instead of applying once and vanishing.
+    assert 'analyzeMaxSpeakers' in fn
+    assert "exact:" in fn
+    assert "runAnalyzeWholeEdit" in fn, "confirming does not re-run anything"
+    # A value the dropdown does not carry would select nothing and re-run
+    # unpinned -- which looks exactly like the button doing nothing.
+    assert "appendChild(o)" in fn or "sel.appendChild" in fn, \
+        "an unlisted count would silently fail to pin"
+
+    # And the result line is wired to call it.
+    assert "offerSpeakerCountLock(data, triggerBtn)" in js
