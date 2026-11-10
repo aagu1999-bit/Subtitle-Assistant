@@ -6173,6 +6173,11 @@
 
   function splitRatioControl(c) {
     const side = (c.layout || "auto") === "side";
+    // In wide/close mode the first panel IS a strip, and "strip size" is
+    // the phrase anyone reaches for -- including me, in the instructions I
+    // wrote for this control, which did not match what it said. "Split at"
+    // stays for a media split, where neither half is a strip.
+    const strip = c.mode === "wide_punch";
     const first = side ? "left" : "top";
     const cur = SPLIT_RATIOS.indexOf(String(c.ratio || "")) >= 0 ? String(c.ratio) : "even";
     const opts = SPLIT_RATIOS.map((k) => {
@@ -6182,7 +6187,10 @@
         : `${pct}% ${first}  \u00b7  ${100 - pct}% ${side ? "right" : "bottom"}`;
       return [k, label];
     });
-    return propSelect("ratio", `Split at (${first} panel)`, cur, opts);
+    const label = strip
+      ? `Strip size (${first})`
+      : `Split at (${first} panel)`;
+    return propSelect("ratio", label, cur, opts);
   }
 
   function panelBackgroundControls(c) {

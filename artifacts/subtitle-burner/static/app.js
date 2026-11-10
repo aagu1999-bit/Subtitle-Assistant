@@ -4503,6 +4503,32 @@ async function openAiEditPlan(ctx) {
     || null;
   if (fromCapcut) _aiEditPackId = fromCapcut;
 
+  await renderAiEditPacks();
+}
+
+
+// The review sheet needs somewhere visible to render when it is opened
+// from the picker rather than from the Look tab. One element, created
+// once, parked directly under the grid.
+function _learnHost(grid) {
+  let el = document.getElementById("aiEditLearnHost");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "aiEditLearnHost";
+    el.className = "ai-edit-learn-host";
+  }
+  if (grid && grid.parentElement && el.parentElement !== grid.parentElement) {
+    grid.parentElement.insertBefore(el, grid.nextSibling);
+  }
+  return el;
+}
+
+
+// Pulled out of openAiEditPlan so it can be re-run: learning a look adds a
+// pack, and making someone reload to see their own work is the kind of
+// small lie that makes a feature feel broken.
+async function renderAiEditPacks() {
+  const status = $("aiEditStatus");
   try {
     const res = await fetch("/ai-edit/style-packs");
     const data = await res.json();
@@ -4527,6 +4553,27 @@ async function openAiEditPlan(ctx) {
         _aiEditPackId = packs[0].id;
       }
       host.querySelectorAll(".ai-edit-pack").forEach((el) => el.classList.toggle("active", el.dataset.pack === _aiEditPackId));
+
+      // Making a look belongs where looks are chosen. It shipped only in
+      // Library → Look, three levels deep, which is exactly where someone
+      // deciding "which look do I want" is not standing.
+      const learn = document.createElement("button");
+      learn.type = "button";
+      learn.className = "ai-edit-pack ai-edit-pack-learn";
+      learn.id = "aiEditLearnPack";
+      // No data-pack on purpose: the active-state sweep above keys off it,
+      // so a card without one can never be mistaken for a chosen pack.
+      learn.innerHTML =
+        "<strong>\uFF0B Learn from a reel\u2026</strong>" +
+        "<span>Measure a reel you like and keep it as a look</span>";
+      learn.onclick = () => {
+        if (typeof window.openLearnLook !== "function") return;
+        window.openLearnLook(_learnHost(host), (saved) => {
+          if (saved && saved.id) _aiEditPackId = saved.id;
+          renderAiEditPacks();
+        });
+      };
+      host.appendChild(learn);
     }
     await previewAiEditCuts();
   } catch (e) {
@@ -4537,6 +4584,9 @@ async function openAiEditPlan(ctx) {
 function closeAiEditPlan() {
   const modal = $("aiEditModal");
   if (!modal) return;
+  if (typeof window.learnLookReturnHome === "function") {
+    window.learnLookReturnHome();
+  }
   modal.classList.add("hidden");
   modal.setAttribute("aria-hidden", "true");
   _aiEditCtx = null;
@@ -9110,6 +9160,26 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
   const title = document.getElementById("learnLookTitle");
   const closeBtn = document.getElementById("learnLookClose");
   let refId = null;
+  // Where the panel lives when nobody has borrowed it. There is ONE panel,
+  // moved rather than duplicated: two copies would mean two elements with
+  // the same ids, and every getElementById in here would start answering
+  // about whichever came first in the document.
+  const home = panel.parentElement;
+  let onSaved = null;
+
+  // The input must never sit inside a hidden subtree. It shipped as a
+  // sibling of the button inside the Caption-look root -- which the
+  // Timeline hides when that tab is not showing -- so opening the flow
+  // from the pack picker called .click() on a display:none input and
+  // nothing happened at all. It is absolutely positioned and 1px, so its
+  // place in the document is irrelevant to everything except whether it
+  // can be clicked.
+  if (file.parentElement !== document.body) document.body.appendChild(file);
+
+  function returnHome() {
+    panel.hidden = true;
+    if (home && panel.parentElement !== home) home.appendChild(panel);
+  }
 
   const PROV = {
     measured: ["measured", "m", "A number out of the file. No model."],
@@ -9122,8 +9192,21 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
     if (stage) stage.textContent = text || "";
   }
 
-  if (closeBtn) closeBtn.onclick = () => { panel.hidden = true; };
-  btn.onclick = () => file.click();
+  if (closeBtn) closeBtn.onclick = returnHome;
+  btn.onclick = () => { onSaved = null; returnHome(); file.click(); };
+
+  // Opened from somewhere else -- the AI Edit pack picker, where someone
+  // is already choosing a look and so is the obvious place to make one.
+  // Whoever borrowed the panel has to give it back when their surface
+  // goes away. Without this, closing the AI Edit modal after saving leaves
+  // the panel parked inside it, and Library -> Look comes up empty.
+  window.learnLookReturnHome = returnHome;
+
+  window.openLearnLook = function (host, savedCb) {
+    onSaved = typeof savedCb === "function" ? savedCb : null;
+    if (host && panel.parentElement !== host) host.appendChild(panel);
+    file.click();
+  };
 
   file.onchange = async () => {
     const f = file.files && file.files[0];
@@ -9274,6 +9357,9 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
         if (!r.ok || d.error) throw new Error(d.error || r.status);
         setProgress(100, 'Saved as "' + name + '" — it is now one of the AI Edit packs.');
         sheet.innerHTML = "";
+        // Whoever opened this may be showing a list the new pack belongs
+        // in. Telling them beats making them reload to see their own work.
+        if (onSaved) { try { onSaved(d); } catch (err) {} }
       } catch (e) {
         setProgress(100, "Could not save: " + ((e && e.message) || e));
         keep.disabled = false;
@@ -9283,7 +9369,7 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
     drop.type = "button";
     drop.className = "btn btn-secondary btn-sm";
     drop.textContent = "Throw it away";
-    drop.onclick = () => { panel.hidden = true; };
+    drop.onclick = returnHome;
     actions.appendChild(keep);
     actions.appendChild(drop);
     sheet.appendChild(actions);
