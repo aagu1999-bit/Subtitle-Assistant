@@ -449,10 +449,17 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
 FONT_DIR = BASE_DIR / "fonts"
 CACHE_DIR = BASE_DIR / "cache"
+# What a reference video taught us, kept DELIBERATELY outside UPLOAD_DIR and
+# OUTPUT_DIR: _cleanup_loop sweeps both on a timer, and a style sheet that
+# evaporated six hours after it was learned would be worse than useless.
+# Only a contact sheet and some numbers live here -- a few hundred KB per
+# reference rather than the hundreds of MB the video itself would cost.
+REFERENCE_DIR = BASE_DIR / "references"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 FONT_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
+REFERENCE_DIR.mkdir(exist_ok=True)
 
 # ---- FFmpeg binary selection ----
 # Prefer imageio-ffmpeg's pre-built binary, which includes libass (the
@@ -19198,6 +19205,567 @@ def _broll_callouts_for_window(words: list, t_in: float, t_out: float,
     )
 
 
+# ---- Learning a look from a reference video -------------------------------
+#
+# Three kinds of answer, kept apart on purpose, because the feature is only
+# trustworthy if a guess never arrives looking like a measurement:
+#
+#   measured  - a number out of the file. No model. Deterministic.
+#   judged    - a vision model named something. Useful, not certain.
+#   needs_confirmation - cannot be recovered from pixels at all (fonts).
+#
+# A field with no confident value is ABSENT rather than defaulted, so the
+# pack it is applied to keeps its own value there.
+
+REF_FRAME_SAMPLES = 40
+REF_SHEET_COLS = 8
+REF_SHEET_CELL = 240
+
+
+def _ref_sample_frames(video_path: Path, n: int = REF_FRAME_SAMPLES) -> list:
+    """*n* frames spread across the clip, as BGR arrays. [] if unreadable."""
+    try:
+        import cv2
+    except ImportError:
+        return []
+    frames = []
+    cap = None
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return []
+        total = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+        dur = (total / fps) if (total > 0 and fps > 0) else 0.0
+        if dur <= 0:
+            dur = float(_ffprobe_duration(video_path) or 0.0)
+        if dur <= 0:
+            return []
+        # Skip the very start and end: a reel often opens on black and ends
+        # on an outro card, neither of which is the look being learned.
+        for i in range(n):
+            t = dur * (0.04 + 0.92 * (i / max(1, n - 1)))
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                frames.append(frame)
+    except Exception as e:                        # noqa: BLE001
+        ref_log = f"[reference] frame sampling failed: {e}"
+        print(ref_log, flush=True)
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:                     # noqa: BLE001
+                pass
+    return frames
+
+
+def _ref_contact_sheet(frames: list, dest: Path) -> Path | None:
+    """Tile sampled frames into ONE JPEG.
+
+    This is what gets kept instead of the video: a few hundred KB that can
+    be re-read by a better vision prompt later without asking for the file
+    again, and small enough that nothing has to expire it.
+    """
+    if not frames:
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        cells = []
+        for f in frames:
+            h, w = f.shape[:2]
+            scale = REF_SHEET_CELL / float(max(h, w) or 1)
+            small = cv2.resize(f, (max(1, int(w * scale)), max(1, int(h * scale))),
+                               interpolation=cv2.INTER_AREA)
+            ch, cw = small.shape[:2]
+            pad = np.zeros((REF_SHEET_CELL, REF_SHEET_CELL, 3), dtype=small.dtype)
+            y0 = (REF_SHEET_CELL - ch) // 2
+            x0 = (REF_SHEET_CELL - cw) // 2
+            pad[y0:y0 + ch, x0:x0 + cw] = small
+            cells.append(pad)
+        cols = REF_SHEET_COLS
+        rows = (len(cells) + cols - 1) // cols
+        while len(cells) < rows * cols:
+            cells.append(np.zeros_like(cells[0]))
+        sheet = np.vstack([np.hstack(cells[r * cols:(r + 1) * cols])
+                           for r in range(rows)])
+        ok, buf = cv2.imencode(".jpg", sheet,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            return None
+        dest.write_bytes(buf.tobytes())
+        return dest
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] contact sheet failed: {e}", flush=True)
+        return None
+
+
+# Lower than _detect_shots_ffmpeg's own 0.35 default, deliberately. That
+# default is tuned for PROPOSING cut points to a human, where a false
+# positive costs them a click. Here the job is measuring rhythm, and the
+# expensive mistake is the other way round: a fast-cut reel whose shots look
+# alike -- same room, same person, different angle -- scores low on every
+# cut and comes back as "one long take", which would teach the pack exactly
+# the wrong pacing.
+REF_SCENE_THRESHOLD = 0.22
+
+
+def _ref_cut_rhythm(video_path: Path) -> dict | None:
+    """Median shot length and cuts per minute. Measured."""
+    try:
+        times = _detect_shots_ffmpeg(video_path, threshold=REF_SCENE_THRESHOLD)
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] shot detection failed: {e}", flush=True)
+        return None
+    dur = float(_ffprobe_duration(video_path) or 0.0)
+    if dur <= 0:
+        return None
+    bounds = [0.0] + [t for t in times if 0 < t < dur] + [dur]
+    lens = sorted(b - a for a, b in zip(bounds, bounds[1:]) if b - a > 0.15)
+    if not lens:
+        return None
+
+    def pct(q):
+        if len(lens) == 1:
+            return round(lens[0], 2)
+        i = min(len(lens) - 1, max(0, int(round(q * (len(lens) - 1)))))
+        return round(lens[i], 2)
+
+    return {
+        "median_shot_s": pct(0.5),
+        "p25_shot_s": pct(0.25),
+        "p75_shot_s": pct(0.75),
+        "cuts_per_min": round(60.0 * len(lens) / dur, 1),
+        "shots": len(lens),
+        "duration_s": round(dur, 2),
+        # Recorded so the number can be re-read later: a shot count only
+        # means something next to the threshold that produced it.
+        "threshold": REF_SCENE_THRESHOLD,
+    }
+
+
+def _ref_palette(frames: list) -> dict | None:
+    """Dominant background and the accent: the most saturated minority hue.
+
+    An accent is not simply "the second most common colour" -- on most
+    footage that is another shade of the background. It is the colour that
+    is vivid while being rare, which is what a brand highlight actually is.
+    """
+    if not frames:
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        px = np.vstack([
+            cv2.resize(f, (48, 48), interpolation=cv2.INTER_AREA).reshape(-1, 3)
+            for f in frames
+        ]).astype(np.float32)
+        if len(px) < 16:
+            return None
+        k = 6
+        crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        _compact, labels, centres = cv2.kmeans(
+            px, k, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+        counts = np.bincount(labels.flatten(), minlength=k).astype(float)
+        share = counts / counts.sum()
+
+        def hexof(bgr):
+            b, g, r = (int(max(0, min(255, round(v)))) for v in bgr)
+            return f"#{r:02X}{g:02X}{b:02X}"
+
+        dominant = int(np.argmax(counts))
+        hsv = cv2.cvtColor(centres.reshape(-1, 1, 3).astype(np.uint8),
+                           cv2.COLOR_BGR2HSV).reshape(-1, 3)
+        sat = hsv[:, 1].astype(float) / 255.0
+        val = hsv[:, 2].astype(float) / 255.0
+        # Vivid, bright, and a minority of the frame.
+        score = sat * val * (share < 0.3)
+        accent = int(np.argmax(score))
+        if score[accent] <= 0.08 or accent == dominant:
+            return {"background": hexof(centres[dominant]),
+                    "background_share": round(float(share[dominant]), 3)}
+        return {
+            "background": hexof(centres[dominant]),
+            "background_share": round(float(share[dominant]), 3),
+            "accent": hexof(centres[accent]),
+            "accent_share": round(float(share[accent]), 3),
+            "accent_saturation": round(float(sat[accent]), 3),
+        }
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] palette failed: {e}", flush=True)
+        return None
+
+
+def _ref_caption_band(frames: list) -> dict | None:
+    """Where burned captions sit, from the rows that CHANGE between frames.
+
+    Edge density alone finds any busy band -- a patterned shirt, a skyline.
+    Captions are the band that is busy AND different in the next frame,
+    because the words change. Returns None rather than a guess when the
+    signal is weak, since a confident wrong position is worse than none.
+    """
+    if not frames or len(frames) < 4:
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        H = 320
+        grays = []
+        for f in frames:
+            g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            grays.append(cv2.resize(g, (180, H), interpolation=cv2.INTER_AREA))
+        edges = np.mean([cv2.Canny(g, 90, 200).mean(axis=1) for g in grays],
+                        axis=0)
+        churn = np.mean([np.abs(a.astype(int) - b.astype(int)).mean(axis=1)
+                         for a, b in zip(grays, grays[1:])], axis=0)
+        # An ABSOLUTE floor, not just a relative peak. Confidence is a
+        # ratio, so a near-flat profile of almost no edges still has a
+        # "peak" -- on pure noise this returned position_y 100, the very
+        # bottom row of the frame, with a confidence of 28. Captions are
+        # high-contrast text and leave a real edge signal or they are not
+        # there at all.
+        if edges.max() < 1.5 or churn.max() <= 0:
+            return None
+        signal = (edges / edges.max()) * (churn / churn.max())
+        # Captions live in the lower two thirds; a top band is usually UI.
+        # The outermost rows are excluded at both ends: a band hard against
+        # the frame edge is an encoding artifact or a letterbox seam, never
+        # a caption, and it is where a spurious peak lands.
+        lo, hi = int(H * 0.30), int(H * 0.97)
+        band = signal[lo:hi]
+        if band.size == 0 or band.max() <= 0:
+            return None
+        peak = int(np.argmax(band)) + lo
+        # How much the peak stands out. A flat profile means no caption.
+        confidence = float(band.max() / (band.mean() + 1e-6))
+        if confidence < 2.2:
+            return None
+        return {"position_y": int(round(100.0 * peak / H)),
+                "confidence": round(confidence, 2)}
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] caption band failed: {e}", flush=True)
+        return None
+
+
+def _ref_loudness(video_path: Path) -> float | None:
+    """Integrated loudness in LUFS from one loudnorm analysis pass."""
+    try:
+        proc = subprocess.run(
+            [FFMPEG, "-hide_banner", "-nostats", "-i", str(video_path),
+             "-af", "loudnorm=I=-14:TP=-1:LRA=7:print_format=json",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300)
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] loudness failed: {e}", flush=True)
+        return None
+    err = proc.stderr or ""
+    start = err.rfind("{")
+    if start < 0:
+        return None
+    try:
+        data = json.loads(err[start:err.rfind("}") + 1])
+        val = float(data.get("input_i"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    # loudnorm reports -inf (or a huge negative) on silence.
+    return round(val, 1) if -70.0 < val < 0.0 else None
+
+
+# The graphic devices a reference may use, as a CLOSED list. Each maps to
+# something the app can already make, so a named device is actionable
+# rather than descriptive. Anything the model returns outside this list is
+# discarded -- an invented device would become a budget for an op that does
+# not exist.
+REF_DEVICES = {
+    "text_message": "add_text_message",
+    "document_card": "make_image",
+    "screenshot_card": "make_image",
+    "photo_collage": "add_carousel",
+    "replaced_background": "set_background",
+    "two_up": "split_screen",
+    "title_card": "add_title",
+}
+
+
+def _ref_vision(sheet: Path) -> dict | None:
+    """Ask Gemini what KIND of thing is on screen, from the contact sheet.
+
+    One call on one image, not one per frame. Returns None on any failure,
+    which must cost the judged half and nothing else: the measurements are
+    already in hand by the time this runs.
+    """
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key or not sheet or not sheet.exists():
+        return None
+    try:
+        b64 = base64.b64encode(sheet.read_bytes()).decode("ascii")
+        prompt = (
+            "This is a contact sheet of frames sampled evenly from one "
+            "short vertical video. Reply with JSON only:\n"
+            '{"devices": [{"kind": "<one of: '
+            + ", ".join(sorted(REF_DEVICES)) + '>", "frames": <int>}],\n'
+            ' "caption_look": "<max 14 words describing the on-screen '
+            'caption style, or empty if there are no captions>",\n'
+            ' "words_per_caption": <int 1-6, or 0 if unsure>,\n'
+            ' "font_category": "<one of: condensed_sans, geometric_sans, '
+            'grotesque_sans, display_serif, slab, script, unknown>"}\n'
+            "`frames` is how many of the tiles show that device. Only list "
+            "a device you can actually see. Do not invent kinds."
+        )
+        model = (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL
+                 or "gemini-2.5-flash").strip()
+        url = f"{_GEMINI_BASE_URL}/{model}:generateContent?key={api_key}"
+        body = {
+            "contents": [{"role": "user", "parts": [
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                {"text": prompt},
+            ]}],
+            "generationConfig": {"temperature": 0.2,
+                                 "responseMimeType": "application/json"},
+        }
+        import requests as _req
+        resp = _req.post(url, json=body, timeout=90)
+        if resp.status_code >= 400:
+            print(f"[reference] vision failed ({resp.status_code})", flush=True)
+            return None
+        data = resp.json() or {}
+        parts = (((data.get("candidates") or [{}])[0].get("content") or {})
+                 .get("parts") or [])
+        text = " ".join(str(x.get("text") or "") for x in parts
+                        if isinstance(x, dict)).strip()
+        return json.loads(text) if text else None
+    except Exception as e:                        # noqa: BLE001
+        print(f"[reference] vision failed: {e}", flush=True)
+        return None
+
+
+def _ref_devices_from_vision(raw, total_tiles: int, duration_s: float) -> list:
+    """Vision output → a per-minute budget, dropping anything off the list."""
+    out = []
+    if not isinstance(raw, dict) or duration_s <= 0 or total_tiles <= 0:
+        return out
+    for d in (raw.get("devices") or []):
+        if not isinstance(d, dict):
+            continue
+        kind = str(d.get("kind") or "").strip().lower()
+        if kind not in REF_DEVICES:
+            continue
+        try:
+            seen = max(0, min(total_tiles, int(d.get("frames") or 0)))
+        except (TypeError, ValueError):
+            continue
+        if not seen:
+            continue
+        # Tiles are evenly spaced, so the share of tiles showing a device is
+        # the share of RUNTIME it is on screen. Turning that into a rate
+        # needs a typical on-screen length; 3s is the app's own overlay
+        # default and is stated rather than hidden.
+        on_screen_s = duration_s * (seen / float(total_tiles))
+        per_min = (on_screen_s / 3.0) * (60.0 / duration_s)
+        out.append({
+            "kind": kind,
+            "op": REF_DEVICES[kind],
+            "per_min": round(max(0.1, per_min), 2),
+            "seen_tiles": seen,
+        })
+    out.sort(key=lambda d: d["per_min"], reverse=True)
+    return out[:6]
+
+
+_REF_FONT_CATEGORIES = {
+    "condensed_sans": ["Anton", "Bebas Neue", "Oswald", "Staatliches"],
+    "geometric_sans": ["DM Sans", "Montserrat Thin Black"],
+    "grotesque_sans": ["Archivo Black", "Montserrat Thin Black"],
+    "display_serif": ["Alfa Slab One", "Sigmar"],
+    "slab": ["Alfa Slab One", "Rubik Mono One"],
+    "script": ["Bagel Fat One", "Bowlby One"],
+}
+
+
+def _ref_font_choices(category: str) -> list:
+    """Bundled faces in that category. Checked against the files on disk,
+    because offering a font the renderer does not have is exactly how a
+    caption silently falls back to a system face."""
+    try:
+        have = {f.stem.replace("-Regular", "").replace("-Black", "")
+                .replace("[wght]", "").lower().replace(" ", "")
+                for f in FONT_DIR.glob("*")
+                if f.suffix.lower() in (".ttf", ".otf")}
+    except OSError:
+        return []
+    wanted = _REF_FONT_CATEGORIES.get(str(category or "").strip().lower(), [])
+    out = [n for n in wanted
+           if n.lower().replace(" ", "").replace("thinblack", "black") in have
+           or n.lower().replace(" ", "") in have]
+    if not out:
+        # Unknown or unmatched category: offer the condensed set, which is
+        # what short-form captions use most, rather than nothing.
+        out = [n for n in _REF_FONT_CATEGORIES["condensed_sans"]
+               if n.lower().replace(" ", "") in have]
+    return out
+
+
+def analyze_reference(video_path: Path, ref_id: str, label: str = "",
+                      on_progress=None, source_name: str = "") -> dict:
+    """Learn a look from one video. Measured, judged and asked, kept apart.
+
+    Returns a record whose `pack` is in AI_EDIT_STYLE_PACKS shape, so it can
+    be saved straight into the style_packs table and drive the AI Edit
+    pipeline exactly as a built-in does.
+
+    A field with no confident value is ABSENT, not defaulted -- absent means
+    "whatever pack you start from keeps its own value here", which is what
+    makes a half-successful analysis still useful.
+    """
+    def _say(pct, stage):
+        if on_progress:
+            try:
+                on_progress(int(pct), str(stage))
+            except Exception:                     # noqa: BLE001
+                pass
+
+    provenance = {}
+    pack: dict = {"label": (label or "From a reference")[:80], "canvas": "9x16"}
+    style: dict = {}
+    notes: list = []
+
+    _say(8, "finding the cuts")
+    rhythm = _ref_cut_rhythm(video_path)
+    if rhythm:
+        pack["pacing"] = rhythm
+        provenance["pacing"] = "measured"
+    else:
+        notes.append("could not measure the cut rhythm")
+
+    _say(32, "sampling frames")
+    frames = _ref_sample_frames(video_path)
+    sheet = _ref_contact_sheet(frames, REFERENCE_DIR / f"{ref_id}.jpg")
+
+    _say(46, "reading the colours")
+    palette = _ref_palette(frames)
+    if palette:
+        pack["palette"] = palette
+        if palette.get("accent"):
+            style["highlight"] = palette["accent"]
+            provenance["highlight"] = "measured"
+        provenance["palette"] = "measured"
+        # A dark ground wants a light caption and the reverse. Cheap, and
+        # it is a measurement rather than a preference.
+        bg = palette.get("background") or ""
+        if len(bg) == 7:
+            lum = (int(bg[1:3], 16) * 0.299 + int(bg[3:5], 16) * 0.587
+                   + int(bg[5:7], 16) * 0.114)
+            style["primary"] = "#FFFFFF" if lum < 150 else "#111111"
+            provenance["primary"] = "measured"
+
+    _say(58, "looking for the captions")
+    band = _ref_caption_band(frames)
+    if band:
+        style["position_y"] = band["position_y"]
+        provenance["position_y"] = "measured"
+    else:
+        notes.append(
+            "no caption band found — the reference may have none, or it "
+            "moves too little to measure")
+
+    _say(68, "measuring loudness")
+    lufs = _ref_loudness(video_path)
+    if lufs is not None:
+        pack["loudness_i"] = lufs
+        provenance["loudness_i"] = "measured"
+
+    _say(78, "naming what is on screen")
+    vision = _ref_vision(sheet) if sheet else None
+    unresolved = []
+    if vision:
+        devices = _ref_devices_from_vision(
+            vision, len(frames), float((rhythm or {}).get("duration_s") or 0))
+        if devices:
+            pack["devices"] = devices
+            provenance["devices"] = "judged"
+        look = str(vision.get("caption_look") or "").strip()[:120]
+        if look:
+            pack["caption_look"] = look
+            provenance["caption_look"] = "judged"
+        try:
+            grp = int(vision.get("words_per_caption") or 0)
+        except (TypeError, ValueError):
+            grp = 0
+        if 1 <= grp <= 6:
+            style["group"] = grp
+            provenance["group"] = "judged"
+        # A font cannot be detected. It is offered, never asserted.
+        choices = _ref_font_choices(vision.get("font_category"))
+        if choices:
+            unresolved.append({
+                "field": "font",
+                "category": str(vision.get("font_category") or "unknown"),
+                "choices": choices,
+            })
+            provenance["font"] = "needs_confirmation"
+    else:
+        notes.append(
+            "the vision pass did not run — the measurements above still "
+            "stand")
+        # Even with no vision, the font still cannot be guessed.
+        choices = _ref_font_choices("condensed_sans")
+        if choices:
+            unresolved.append({"field": "font", "category": "unknown",
+                               "choices": choices})
+            provenance["font"] = "needs_confirmation"
+
+    if style:
+        pack["style"] = style
+
+    _say(100, "done")
+    return {
+        "id": ref_id,
+        "created_at": time.time(),
+        # The name the user recognises, not the temp file we saved it as.
+        "source": source_name or video_path.name,
+        "sheet": sheet.name if sheet else None,
+        "frames_sampled": len(frames),
+        "pack": pack,
+        "provenance": provenance,
+        "unresolved": unresolved,
+        "notes": notes,
+    }
+
+
+def _ref_record_path(ref_id: str) -> Path:
+    return REFERENCE_DIR / f"{ref_id}.json"
+
+
+def _save_reference(record: dict) -> None:
+    try:
+        _ref_record_path(record["id"]).write_text(
+            json.dumps(record), encoding="utf-8")
+    except (OSError, KeyError) as e:
+        print(f"[reference] could not store the record: {e}", flush=True)
+
+
+def _load_reference(ref_id: str) -> dict | None:
+    path = _ref_record_path(ref_id)
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        return rec if isinstance(rec, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
                          t_in: float | None = None,
                          t_out: float | None = None) -> list:
@@ -19231,6 +19799,139 @@ def _detect_shots_ffmpeg(video_path: Path, threshold: float = 0.35,
         if not cleaned or t - cleaned[-1] >= 0.35:
             cleaned.append(t)
     return cleaned
+
+
+# Reference analysis runs in a thread for the same reason the whole-edit
+# diarization does: it decodes the whole video twice (scene detection and
+# frame sampling) plus a vision call, and a synchronous endpoint on a long
+# reference is how "Unexpected token '<'" happened before.
+_REF_RUNS: dict[str, dict] = {}
+_REF_LOCK = threading.Lock()
+
+
+def _ref_run_state(ref_id: str) -> dict | None:
+    with _REF_LOCK:
+        st = _REF_RUNS.get(ref_id)
+        return dict(st) if st else None
+
+
+def analyze_reference_job(video_path: Path, ref_id: str, label: str,
+                          source_name: str = "") -> None:
+    def _progress(pct, stage):
+        with _REF_LOCK:
+            _REF_RUNS[ref_id] = {"running": True, "progress": pct,
+                                 "stage": stage, "error": None}
+    try:
+        _progress(2, "starting")
+        record = analyze_reference(video_path, ref_id, label,
+                                   on_progress=_progress,
+                                   source_name=source_name)
+        _save_reference(record)
+        with _REF_LOCK:
+            _REF_RUNS[ref_id] = {"running": False, "progress": 100,
+                                 "stage": "done", "error": None}
+    except Exception as e:                        # noqa: BLE001
+        # A spinner with no end is worse than an error.
+        print(f"[reference] analysis failed: {e}", flush=True)
+        with _REF_LOCK:
+            _REF_RUNS[ref_id] = {"running": False, "progress": 100,
+                                 "stage": "failed", "error": str(e)}
+    finally:
+        # The video was only ever needed to measure. Keeping it would put a
+        # few hundred MB under the cleanup loop's timer for no benefit --
+        # the contact sheet is what makes this re-readable later.
+        _safe_unlink(video_path)
+
+
+@app.route("/reference/analyze", methods=["POST"])
+def reference_analyze():
+    """Start learning a look from an uploaded reference video."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "No video sent"}), 400
+    ext = Path(f.filename).suffix.lower().lstrip(".")
+    if ext not in ASSET_EXT_VIDEO:
+        return jsonify(
+            {"error": f"{ext or 'that'} is not a video this can read"}), 400
+
+    ref_id = uuid.uuid4().hex
+    tmp = UPLOAD_DIR / f"ref_{ref_id}.{ext}"
+    try:
+        f.save(str(tmp))
+    except OSError as e:
+        return jsonify({"error": f"Could not store the upload: {e}"}), 500
+
+    label = str(request.form.get("label") or Path(f.filename).stem)[:80]
+    with _REF_LOCK:
+        _REF_RUNS[ref_id] = {"running": True, "progress": 1,
+                             "stage": "queued", "error": None}
+    threading.Thread(
+        target=analyze_reference_job,
+        args=(tmp, ref_id, label, Path(f.filename).name), daemon=True).start()
+    return jsonify({"status": "started", "reference_id": ref_id}), 202
+
+
+@app.route("/reference/<ref_id>", methods=["GET"])
+def reference_status(ref_id: str):
+    """Progress while it runs, the full sheet once it is done."""
+    record = _load_reference(ref_id)
+    if record:
+        return jsonify({"ready": True, "running": False, "record": record})
+    st = _ref_run_state(ref_id)
+    if not st:
+        return jsonify({"ready": False, "running": False,
+                        "error": "No such reference"}), 404
+    return jsonify({"ready": False, **st})
+
+
+@app.route("/reference/<ref_id>/sheet.jpg", methods=["GET"])
+def reference_sheet(ref_id: str):
+    """The contact sheet, so the evidence can be looked at."""
+    safe = re.sub(r"[^a-f0-9]", "", str(ref_id))[:32]
+    path = REFERENCE_DIR / f"{safe}.jpg"
+    if not safe or not path.exists():
+        return jsonify({"error": "No contact sheet"}), 404
+    return send_from_directory(REFERENCE_DIR, f"{safe}.jpg")
+
+
+@app.route("/reference/<ref_id>/keep", methods=["POST"])
+def reference_keep(ref_id: str):
+    """Accept the sheet as a style pack, with any corrections applied.
+
+    Nothing is saved until this is called: a style sheet nobody checked is
+    worse than none, because every later video inherits it quietly.
+    """
+    record = _load_reference(ref_id)
+    if not record:
+        return jsonify({"error": "No such reference"}), 404
+    body = request.get_json(silent=True) or {}
+    pack = dict(record.get("pack") or {})
+    label = str(body.get("label") or pack.get("label") or "From a reference")
+
+    # Corrections the user made on the review sheet, including the font --
+    # which is the one field that is always theirs to answer.
+    fixes = body.get("style")
+    if isinstance(fixes, dict):
+        style = dict(pack.get("style") or {})
+        for k, v in fixes.items():
+            if v in (None, ""):
+                style.pop(k, None)
+            else:
+                style[k] = v
+        pack["style"] = style
+    pack["label"] = label
+    pack["blurb"] = str(body.get("blurb")
+                        or f"Learned from {record.get('source') or 'a reel'}")[:140]
+
+    try:
+        pack_id = _db_save_style_pack(
+            str(body.get("id") or "").strip().lower() or _slug_pack_id(label),
+            label, pack, source="reference")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.Error as e:
+        return jsonify({"error": f"Could not save the pack: {e}"}), 500
+    return jsonify({"ok": True, "id": pack_id, "pack": pack})
 
 
 @app.route("/ai-edit/style-packs", methods=["GET"])

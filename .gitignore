@@ -62,6 +62,8 @@ artifacts/subtitle-burner/jobs.db-journal
 artifacts/subtitle-burner/burner.db
 artifacts/subtitle-burner/burner.db-journal
 artifacts/subtitle-burner/assets/
+# Learned style sheets: contact sheets + measurements, not source video
+artifacts/subtitle-burner/references/
 artifacts/subtitle-burner/cache/
 artifacts/subtitle-burner/logs/
 

@@ -436,6 +436,23 @@
       <button id="saveBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Save your current style, colors, and banner as a reusable custom preset">💾 Save My Brand Preset</button>
       <button id="loadBrandPresetBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Restore your saved custom brand preset">↩ Load</button>
       <button id="applyBrandingToTimelineBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Push caption style, speaker colors, and logo into the open Timeline project">🎬 Apply look → Timeline</button>
+      <!-- Learn a look from a reel you like. The engine exists either way;
+           without this there is no way to ask for it, which is how
+           add_effect, `panels`, the wide/close split and "Exactly N" each
+           shipped unreachable. -->
+      <button id="learnLookBtn" class="btn btn-secondary btn-sm" type="button" style="font-size:.78rem" title="Measure a reel you like — its cut rhythm, colours, caption position and loudness — and keep the result as a style pack">🔍 Learn a look from a reel…</button>
+      <input type="file" id="learnLookFile" accept="video/*" class="offscreen-file" tabindex="-1" aria-hidden="true">
+    </div>
+    <div id="learnLookPanel" class="learn-look" hidden>
+      <div class="learn-look-head">
+        <strong id="learnLookTitle">Reading the reel…</strong>
+        <button type="button" id="learnLookClose" class="btn btn-secondary btn-sm" style="font-size:.72rem">✕</button>
+      </div>
+      <div class="bar"><i id="learnLookFill"></i></div>
+      <p class="muted" id="learnLookStage" style="font-size:.76rem;margin:6px 0 0"></p>
+      <div id="learnLookSheet"></div>
+    </div>
+    <div class="row">
       <p class="muted" style="width:100%;margin:4px 0 0;font-size:.74rem;line-height:1.4">
         Want CapCut-style <em>edits</em> (cuts / punch / B-roll density)? Use <strong>AI Shorts</strong> → pick an edit pack → <strong>Find highlights</strong> → <strong>AI Edit…</strong> on a card.
       </p>

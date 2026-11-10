@@ -1896,3 +1896,116 @@ header.app-header {
   .tpl-setup { padding: 0; }
   .tpl-setup-box { max-width: 100%; max-height: 100dvh; border-radius: 0; border: 0; }
 }
+
+/* ---- Learn a look from a reference reel ------------------------------ */
+/* Three kinds of answer, three shapes. The whole feature turns on a guess
+   never arriving looking like a measurement, so the stripe and the chip
+   carry that distinction rather than the wording alone. */
+.learn-look {
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  background: rgba(15, 23, 42, 0.72);
+}
+.learn-look-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.learn-look-head strong { font-size: .9rem; }
+.learn-look-head .btn { margin-left: auto; }
+.learn-look .bar {
+  height: 5px;
+  border-radius: 99px;
+  background: rgba(36, 48, 73, .9);
+  overflow: hidden;
+}
+.learn-look .bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #a855f7, #6366f1);
+  transition: width .25s ease;
+}
+
+.ll-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 4px 10px;
+  align-items: baseline;
+  margin-top: 8px;
+  padding: 9px 11px 9px 13px;
+  border-radius: 10px;
+  background: rgba(20, 29, 50, .6);
+  border-left: 4px solid var(--ll-stripe, #64748b);
+}
+.ll-m { --ll-stripe: #34d399; }
+/* Broken stripe: you can see which half of the sheet is opinion. */
+.ll-j {
+  border-left-color: transparent;
+  background-image: repeating-linear-gradient(180deg, #fbbf24 0 5px, transparent 5px 10px);
+  background-size: 4px 100%;
+  background-repeat: no-repeat;
+  background-position: left top;
+  padding-left: 13px;
+}
+.ll-a { --ll-stripe: #f472b6; }
+.ll-label { font-weight: 600; font-size: .86rem; }
+.ll-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: .9rem;
+}
+.ll-chip {
+  font: 700 .6rem/1 inherit;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+.ll-m .ll-chip { color: #065f46; background: #34d399; }
+.ll-j .ll-chip { color: #4a2d00; background: #fbbf24; }
+.ll-a .ll-chip { color: #4c1130; background: #f472b6; }
+.ll-how {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  font-size: .76rem;
+  color: #94a3b8;
+}
+.ll-fonts {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ll-fonts button {
+  font: 600 .78rem/1 inherit;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #2a2f3a;
+  background: rgba(36, 48, 73, .5);
+  color: #94a3b8;
+  cursor: pointer;
+}
+.ll-fonts button:hover { color: #f1f5f9; border-color: #6366f1; }
+.ll-fonts button[aria-pressed="true"] {
+  color: #0b0d12;
+  background: #f472b6;
+  border-color: #f472b6;
+}
+.ll-note {
+  margin: 8px 0 0;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border-left: 3px solid #6366f1;
+  background: rgba(99, 102, 241, .08);
+  font-size: .78rem;
+  color: #94a3b8;
+}
+.ll-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
