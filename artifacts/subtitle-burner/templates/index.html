@@ -1108,31 +1108,7 @@
       </p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button id="reframeAnalyzeBtn" class="btn btn-secondary">Analyze speakers + faces</button>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
-          Speakers
-          <select id="analyzeMaxSpeakers" title="&quot;Up to N&quot; is a CEILING — it permits 1 to N and the clustering still picks its own number. &quot;Exactly N&quot; forces N, which is the one to use once you know the answer." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
-            <option value="">Auto</option>
-            <option value="2">Up to 2</option>
-            <option value="3">Up to 3</option>
-            <option value="4">Up to 4</option>
-            <option value="6" selected>Up to 6</option>
-            <option value="8">Up to 8</option>
-            <option value="exact:2">Exactly 2</option>
-            <option value="exact:3">Exactly 3</option>
-            <option value="exact:4">Exactly 4</option>
-            <option value="exact:5">Exactly 5</option>
-            <option value="exact:6">Exactly 6</option>
-          </select>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
-          Sensitivity
-          <select id="analyzeSensitivity" title="Auto listens more than once — at a normal setting and a more sensitive one — and keeps the count that holds across both. It takes about twice as long and it is the only setting that can tell you how many people there are. The others do a single fast pass." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
-            <option value="auto" selected>Auto — work it out</option>
-            <option value="merge">One pass: merge similar voices</option>
-            <option value="normal">One pass: normal</option>
-            <option value="split">One pass: split similar voices</option>
-          </select>
-        </label>
+        
         <label style="display:flex;align-items:center;gap:6px;font-size:.88rem">
           <input type="checkbox" id="reframeEnabled" disabled>
           Apply 9:16 reframe on next render
@@ -1642,6 +1618,40 @@
                 <button type="button" id="tlAnalyzeEditBtn" class="btn btn-secondary btn-sm" title="Join the Main track's audio and diarize it ONCE — one label space, so six people across several interviews come back as six speakers, not two">Analyze whole edit</button>
                 <button type="button" id="tlTranscriptFillersBtn" class="btn btn-secondary btn-sm" title="Strike common filler words (um, uh, like, you know…)">Cut fillers</button>
                 <button type="button" id="tlTranscriptRestoreBtn" class="btn btn-secondary btn-sm" title="Restore every struck word in this clip">Restore all</button>
+              </div>
+              <!-- These two drive every Analyze button above, through
+                   analyzeSpeakerOptions(). They used to live in the
+                   Interview-reframe panel, which has been `class="panel
+                   hidden"` since the Timeline became the edit home -- so
+                   "Exactly N" existed, reached pyannote, and could not be
+                   picked by anyone. The control has to sit where the button
+                   is. -->
+              <div class="tl-analyze-opts">
+<label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
+          Speakers
+          <select id="analyzeMaxSpeakers" title="&quot;Up to N&quot; is a CEILING — it permits 1 to N and the clustering still picks its own number. &quot;Exactly N&quot; forces N, which is the one to use once you know the answer." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+                <option value="">Auto</option>
+                <option value="2">Up to 2</option>
+                <option value="3">Up to 3</option>
+                <option value="4">Up to 4</option>
+                <option value="6" selected>Up to 6</option>
+                <option value="8">Up to 8</option>
+                <option value="exact:2">Exactly 2</option>
+                <option value="exact:3">Exactly 3</option>
+                <option value="exact:4">Exactly 4</option>
+                <option value="exact:5">Exactly 5</option>
+                <option value="exact:6">Exactly 6</option>
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#94a3b8">
+          Sensitivity
+          <select id="analyzeSensitivity" title="Auto listens more than once — at a normal setting and a more sensitive one — and keeps the count that holds across both. It takes about twice as long and it is the only setting that can tell you how many people there are. The others do a single fast pass." style="padding:4px 8px;background:#1a1e2a;border:1px solid #2a2f3a;color:#e8eaee;border-radius:6px">
+                <option value="auto" selected>Auto — work it out</option>
+                <option value="merge">One pass: merge similar voices</option>
+                <option value="normal">One pass: normal</option>
+                <option value="split">One pass: split similar voices</option>
+          </select>
+        </label>
               </div>
               <div class="tl-analyze-progress-wrap" id="tlAnalyzeProgressWrap" hidden>
                 <div class="tl-analyze-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">

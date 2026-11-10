@@ -6556,3 +6556,458 @@ def test_the_strip_sees_what_the_closeup_cannot(app_mod, tmp_path, monkeypatch):
     # And the strip really is the smaller panel, measured on the frame
     # rather than read off the filter string.
     assert 0.30 < seam / h < 0.38, seam / h
+
+
+# --- the speaker count has to be reachable ------------------------------
+# The ladder works: it runs several passes and reports "4, but the count
+# kept climbing". `num_speakers` is plumbed through the endpoint to
+# pyannote, and analyzeSpeakerOptions() sends it for "Exactly N". The whole
+# chain was complete and unusable, because the only control that produces
+# "Exactly N" sat in a section marked `class="panel hidden"` -- so the
+# dropdown was permanently stuck on whatever it was last given in markup.
+
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "param", "source", "track", "wbr"}
+
+
+def _ancestor_tags(html: str, needle: str) -> list:
+    """Every open tag enclosing *needle*, outermost first.
+
+    A tag stack rather than "the nearest <section>": the control was
+    originally hidden by its section, but a hidden <div> anywhere in
+    between would hide it just as completely, and an earlier version of
+    this test walked only to the section and missed exactly that.
+    """
+    at = html.index(needle)
+    stack = []
+    for m in re.finditer(r"<(/?)([a-zA-Z][\w-]*)([^>]*?)(/?)>", html[:at]):
+        closing, name, attrs, selfclose = m.groups()
+        name = name.lower()
+        if name in _VOID_TAGS or selfclose:
+            continue
+        if closing:
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == name:
+                    del stack[i:]
+                    break
+        else:
+            stack.append((name, m.group(0)))
+    return stack
+
+
+def test_the_speaker_controls_are_not_buried_in_a_hidden_panel(app_mod):
+    """A control nobody can see is the same as no control at all.
+
+    This is the exact shape of every gap this project keeps hitting: the
+    capability exists, the plumbing is complete, and nothing can ask for it.
+    """
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    # The scripts only. Including the whole template made every class in
+    # the markup justify itself -- a hidden <div class="mystery-box"> passed
+    # because "mystery-box" appeared in the markup being checked.
+    js_all = "".join(
+        (BURNER / "static" / f).read_text(encoding="utf-8")
+        for f in ("app.js", "timeline.js", "mobile.js")
+    ) + "".join(re.findall(r"<script[^>]*>(.*?)</script>", html, re.S))
+
+    for ctl in ('id="analyzeMaxSpeakers"', 'id="analyzeSensitivity"'):
+        assert html.count(ctl) == 1, f"{ctl} is duplicated; readers go by id"
+        for name, tag in _ancestor_tags(html, ctl):
+            # aria-hidden is never toggled here; it marks a pane that was
+            # retired and left in place for legacy handlers. That is what
+            # swallowed this control.
+            assert 'aria-hidden="true"' not in tag, (
+                f"{ctl} is inside a retired <{name}>: {tag!r}")
+            assert "display:none" not in tag.replace(" ", ""), (ctl, tag)
+            if not re.search(r"(^|[\s\"'])hidden([\s>=\"']|$)", tag):
+                continue
+            # Hidden in markup is fine for a pane code opens -- the app
+            # shell and the tab panes all start that way. It is fatal for a
+            # pane nothing can SELECT, since nothing can then open it.
+            handles = re.findall(r'id="([^"]+)"', tag)
+            handles += [c for c in re.findall(r'class="([^"]*)"', tag)
+                        for c in c.split()]
+            handles += re.findall(r'(data-[\w-]+)=', tag)
+            # "hidden" and "panel" are on half the document; finding them in
+            # a script proves nothing about THIS element.
+            handles = [h for h in handles if h not in ("hidden", "panel")]
+            assert any(h in js_all for h in handles), (
+                f"{ctl} is inside a hidden <{name}> that no script can "
+                f"select: {tag!r} — it is hidden for good, which is the "
+                "same as having no control at all")
+
+    # And it is beside the buttons it drives, not in some other tab.
+    toolbar = html[html.index('id="tlTranscriptToolbar"'):]
+    toolbar = toolbar[:toolbar.index('id="tlAnalyzeProgressWrap"')]
+    assert 'id="analyzeMaxSpeakers"' in toolbar, \
+        "the Speakers control is not beside the Analyze buttons"
+    assert 'id="analyzeSensitivity"' in toolbar
+
+    # "Exactly N" has to be on offer, or a confirmed count cannot be pinned.
+    opts = toolbar[toolbar.index('id="analyzeMaxSpeakers"'):]
+    assert 'value="exact:4"' in opts, opts[:400]
+
+
+def test_an_uncertain_count_can_be_confirmed_in_one_click(app_mod):
+    """A best guess with nothing to do about it is where this stalls.
+
+    The ladder reports "4, and the count kept climbing". Without a confirm,
+    acting on that means knowing a dropdown exists somewhere else, which is
+    exactly the knowledge the feature was supposed to remove.
+    """
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    fn = js[js.index("function offerSpeakerCountLock"):]
+    fn = fn[:fn.index("// Poll until the run reaches")]
+
+    # Only when the passes disagreed: a steady count needs no confirming,
+    # and a button on every result trains people to ignore it.
+    assert 'det.confidence !== "uncertain"' in fn, \
+        "the confirm would appear on every result"
+    # It pins through the SAME control analyzeSpeakerOptions() reads, so the
+    # choice sticks for later runs instead of applying once and vanishing.
+    assert 'analyzeMaxSpeakers' in fn
+    assert "exact:" in fn
+    assert "runAnalyzeWholeEdit" in fn, "confirming does not re-run anything"
+    # A value the dropdown does not carry would select nothing and re-run
+    # unpinned -- which looks exactly like the button doing nothing.
+    assert "appendChild(o)" in fn or "sel.appendChild" in fn, \
+        "an unlisted count would silently fail to pin"
+
+    # And the result line is wired to call it.
+    assert "offerSpeakerCountLock(data, triggerBtn)" in js
+
+
+# --- the whole-edit answer has to reach the words -----------------------
+# Everything was right up to the last step. The global diarization ran, and
+# _tl_project_diarization_to_sources translated it back into each source's
+# own clock with the labels intact. Then nothing wrote it anywhere a reader
+# could see: /stamp-speakers only ever read the PER-SOURCE cache, so
+# "Analyze whole edit" produced a count, caption colours, and a transcript
+# with no speakers on it at all.
+
+def _two_source_project(app_mod, jid):
+    """A project whose Main track spans two different source clips."""
+    for sid, start in (("srcA", 0.0), ("srcB", 0.0)):
+        app_mod.jobs[sid] = {
+            "status": "awaiting_edit", "filename": f"{sid}.mp4",
+            "words": [{"word": w, "start": start + i * 1.0,
+                       "end": start + i * 1.0 + 0.9}
+                      for i, w in enumerate("one two three four".split())],
+        }
+    return {
+        "canvas": "9x16",
+        "tracks": {
+            "main": [
+                {"id": "m1", "source_job_id": "srcA", "in": 0.0, "out": 4.0},
+                {"id": "m2", "source_job_id": "srcB", "in": 0.0, "out": 4.0},
+            ],
+            "overlay": [], "effects": [], "text": [], "music": [],
+        },
+    }
+
+
+def test_the_whole_edit_analysis_labels_the_transcript(app_mod, tmp_path,
+                                                       monkeypatch):
+    """The failing assertion is "any word at all got a speaker".
+
+    Before this, the count was right, the colours were right, and every
+    word's `speaker` was empty -- so the transcript rails and labels that
+    renderTranscript already draws had nothing to draw.
+    """
+    import uuid
+    jid = uuid.uuid4().hex
+    tl = _two_source_project(app_mod, jid)
+    app_mod.jobs[jid] = {"status": "awaiting_edit", "timeline": tl,
+                         "filename": "project.mp4"}
+
+    # The audio join and pyannote itself are not what is under test.
+    monkeypatch.setattr(app_mod, "_tl_concat_main_audio",
+                        lambda t, dest, **k: {
+                            "pieces": [
+                                {"source_job_id": "srcA", "src_in": 0.0,
+                                 "src_out": 4.0, "out_start": 0.0, "dur": 4.0},
+                                {"source_job_id": "srcB", "src_in": 0.0,
+                                 "src_out": 4.0, "out_start": 4.0, "dur": 4.0},
+                            ],
+                            "analysis_total": 8.0, "render_total": 8.0})
+    # Four people across the two clips, in OUTPUT time -- the whole point
+    # being that srcB's people are not called SPEAKER_00 again.
+    monkeypatch.setattr(app_mod, "diarize_audio", lambda *a, **k: [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_02"},
+        {"start": 6.0, "end": 8.0, "speaker": "SPEAKER_03"},
+    ])
+    monkeypatch.setattr(app_mod, "_safe_unlink", lambda p: None)
+
+    try:
+        rec = app_mod.analyze_timeline_speakers(jid, tl)
+        assert len(rec["speakers"]) == 4, rec["speakers"]
+
+        # THE assertion. Zero before this change.
+        assert rec["words_stamped"] > 0, "the analysis labelled nothing"
+
+        stamped = {}
+        for sid in ("srcA", "srcB"):
+            got = [w.get("speaker") for w in app_mod.jobs[sid]["words"]]
+            assert any(got), f"{sid} has no speakers on its words: {got}"
+            stamped[sid] = {s for s in got if s}
+
+        # The labels stay GLOBAL. Both clips falling back to SPEAKER_00 is
+        # the per-source behaviour and the exact bug this analysis exists
+        # to remove, so overlapping label sets mean it collapsed.
+        assert not (stamped["srcA"] & stamped["srcB"]), stamped
+    finally:
+        for k in (jid, "srcA", "srcB"):
+            app_mod.jobs.pop(k, None)
+        try:
+            app_mod._tl_diar_path(jid).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def test_global_labels_win_over_the_per_source_ones(app_mod, tmp_path,
+                                                    monkeypatch):
+    """Otherwise pressing the button that fixes the collision and then the
+    one that causes it puts the collision straight back.
+    """
+    import uuid
+    jid = uuid.uuid4().hex
+    monkeypatch.setattr(app_mod, "UPLOAD_DIR", tmp_path)
+    app_mod.jobs["srcA"] = {
+        "status": "awaiting_edit",
+        "words": [{"word": "a", "start": 0.0, "end": 1.0}],
+    }
+    try:
+        # A per-source cache exists and says SPEAKER_00 ...
+        (tmp_path / "srcA_reframe.json").write_text(json.dumps({
+            "diarization": [{"start": 0.0, "end": 1.0,
+                             "speaker": "SPEAKER_00"}]}), encoding="utf-8")
+        # ... and a whole-edit record says this person is SPEAKER_02.
+        (tmp_path / f"{jid}_tldiar.json").write_text(json.dumps({
+            "by_source": {"srcA": [{"start": 0.0, "end": 1.0,
+                                    "speaker": "SPEAKER_02"}]}},
+        ), encoding="utf-8")
+
+        out = app_mod.app.test_client().post("/stamp-speakers/srcA").get_json()
+        assert out["ok"] and out["labels_from"] == "whole_edit", out
+        assert app_mod.jobs["srcA"]["words"][0]["speaker"] == "SPEAKER_02"
+
+        # With no whole-edit record it still falls back rather than failing.
+        (tmp_path / f"{jid}_tldiar.json").unlink()
+        out = app_mod.app.test_client().post("/stamp-speakers/srcA").get_json()
+        assert out["labels_from"] == "per_source", out
+    finally:
+        app_mod.jobs.pop("srcA", None)
+
+
+def test_one_source_failing_to_stamp_does_not_lose_the_analysis(app_mod,
+                                                                monkeypatch):
+    """The record is already on disk by then; losing it over one clip would
+    throw away minutes of pyannote for nothing.
+    """
+    import uuid
+    jid = uuid.uuid4().hex
+    tl = _two_source_project(app_mod, jid)
+    app_mod.jobs[jid] = {"status": "awaiting_edit", "timeline": tl}
+
+    monkeypatch.setattr(app_mod, "_tl_concat_main_audio",
+                        lambda t, dest, **k: {
+                            "pieces": [
+                                {"source_job_id": "srcA", "src_in": 0.0,
+                                 "src_out": 4.0, "out_start": 0.0, "dur": 4.0},
+                                {"source_job_id": "srcB", "src_in": 0.0,
+                                 "src_out": 4.0, "out_start": 4.0, "dur": 4.0},
+                            ],
+                            "analysis_total": 8.0, "render_total": 8.0})
+    monkeypatch.setattr(app_mod, "diarize_audio", lambda *a, **k: [
+        {"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"},
+        {"start": 4.0, "end": 8.0, "speaker": "SPEAKER_01"},
+    ])
+    monkeypatch.setattr(app_mod, "_safe_unlink", lambda p: None)
+
+    real = app_mod._stamp_job_speakers
+
+    def flaky(sid, diar=None):
+        if sid == "srcA":
+            raise RuntimeError("boom")
+        return real(sid, diar)
+
+    monkeypatch.setattr(app_mod, "_stamp_job_speakers", flaky)
+    try:
+        rec = app_mod.analyze_timeline_speakers(jid, tl)
+        assert rec["speakers"], "the analysis was lost over one clip"
+        assert rec["words_stamped"] > 0, "the surviving clip was not labelled"
+        assert "srcA" not in rec["words_stamped_by_source"]
+        assert rec["words_stamped_by_source"]["srcB"] > 0
+    finally:
+        for k in (jid, "srcA", "srcB"):
+            app_mod.jobs.pop(k, None)
+        try:
+            app_mod._tl_diar_path(jid).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# --- correcting who said what -------------------------------------------
+# Diarization is a guess and the person reading the transcript can see
+# things it cannot. Merging two labels that are obviously one person IS the
+# count going down, which is a far better lever than telling the analyser a
+# number before you have seen any evidence.
+
+@pytest.fixture
+def spk_job(app_mod, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "DB_PATH", tmp_path / "jobs.db")
+    app_mod._db_init()
+    app_mod.jobs["spk"] = {
+        "status": "awaiting_edit",
+        "words": [{"word": w, "start": i * 1.0, "end": i * 1.0 + 0.9,
+                   "speaker": f"SPEAKER_0{i % 4}"}
+                  for i, w in enumerate("a b c d e f g h".split())],
+    }
+    try:
+        yield "spk"
+    finally:
+        app_mod.jobs.pop("spk", None)
+
+
+def test_merging_two_speakers_lowers_the_count(app_mod, spk_job):
+    c = app_mod.app.test_client()
+    before = app_mod._speaker_counts(app_mod.jobs[spk_job]["words"])
+    assert len(before) == 4
+
+    r = c.post(f"/speakers/reassign/{spk_job}",
+               json={"from": "SPEAKER_03", "to": "SPEAKER_01"}).get_json()
+    assert r["ok"] and r["speaker_count"] == 3, r
+    assert "SPEAKER_03" not in r["speakers"]
+    # The words themselves moved, so every existing reader -- caption
+    # colours, the breakdown, the count -- sees it with no new code.
+    got = {w["speaker"] for w in app_mod.jobs[spk_job]["words"]}
+    assert "SPEAKER_03" not in got and "SPEAKER_01" in got
+
+
+def test_splitting_a_phrase_onto_a_new_speaker_raises_the_count(app_mod, spk_job):
+    c = app_mod.app.test_client()
+    # Collapse to two first, so "new" has a free label to claim.
+    c.post(f"/speakers/reassign/{spk_job}",
+           json={"from": "SPEAKER_02", "to": "SPEAKER_00"})
+    c.post(f"/speakers/reassign/{spk_job}",
+           json={"from": "SPEAKER_03", "to": "SPEAKER_01"})
+    assert len(app_mod._speaker_counts(app_mod.jobs[spk_job]["words"])) == 2
+
+    keys = [app_mod._word_key(w) for w in app_mod.jobs[spk_job]["words"][:2]]
+    r = c.post(f"/speakers/reassign/{spk_job}",
+               json={"words": keys, "to": "new"}).get_json()
+    assert r["speaker_count"] == 3, r
+    assert r["to"] not in ("SPEAKER_00", "SPEAKER_01"), r["to"]
+    assert r["words_changed"] == 2
+
+
+def test_a_correction_outlives_a_fresh_analysis(app_mod, spk_job):
+    """The one that decides whether any of this is trustworthy.
+
+    Re-running Analyze and silently discarding work done by hand would make
+    the feature worse than not having it.
+    """
+    c = app_mod.app.test_client()
+    keys = [app_mod._word_key(w) for w in app_mod.jobs[spk_job]["words"][:2]]
+    c.post(f"/speakers/reassign/{spk_job}",
+           json={"words": keys, "to": "SPEAKER_02"})
+    corrected = [w["speaker"] for w in app_mod.jobs[spk_job]["words"][:2]]
+    assert corrected == ["SPEAKER_02", "SPEAKER_02"]
+
+    # A fresh diarization that disagrees about exactly those words.
+    diar = [{"start": i * 1.0, "end": i * 1.0 + 0.95,
+             "speaker": f"SPEAKER_0{i % 4}"} for i in range(8)]
+    app_mod._stamp_job_speakers(spk_job, diar)
+
+    after = [w["speaker"] for w in app_mod.jobs[spk_job]["words"][:2]]
+    assert after == ["SPEAKER_02", "SPEAKER_02"], (
+        f"the re-analysis overwrote the correction: {after}")
+    # Untouched words still follow the new analysis.
+    assert app_mod.jobs[spk_job]["words"][3]["speaker"] == "SPEAKER_03"
+
+
+def test_corrections_can_be_thrown_away(app_mod, spk_job, tmp_path):
+    """An override you cannot undo is a trap, not a feature."""
+    c = app_mod.app.test_client()
+    keys = [app_mod._word_key(w) for w in app_mod.jobs[spk_job]["words"][:2]]
+    c.post(f"/speakers/reassign/{spk_job}",
+           json={"words": keys, "to": "SPEAKER_02"})
+    assert len(app_mod._load_speaker_fixes(spk_job)) == 2
+
+    (tmp_path / f"{spk_job}_reframe.json").write_text(json.dumps({
+        "diarization": [{"start": i * 1.0, "end": i * 1.0 + 0.95,
+                         "speaker": f"SPEAKER_0{i % 4}"} for i in range(8)]}),
+        encoding="utf-8")
+    r = c.delete(f"/speakers/reassign/{spk_job}").get_json()
+    assert r["ok"] and r["cleared"] == 2
+    assert app_mod._load_speaker_fixes(spk_job) == {}
+    assert app_mod.jobs[spk_job]["words"][0]["speaker"] == "SPEAKER_00"
+
+
+def test_a_reassignment_that_names_nothing_is_refused(app_mod, spk_job):
+    """Silently doing nothing is how a control that looks wired stays dead."""
+    c = app_mod.app.test_client()
+    assert c.post(f"/speakers/reassign/{spk_job}", json={}).status_code == 400
+    assert c.post(f"/speakers/reassign/{spk_job}",
+                  json={"to": "SPEAKER_01"}).status_code == 400
+    assert c.post(f"/speakers/reassign/{spk_job}",
+                  json={"from": "SPEAKER_09", "to": "SPEAKER_01"}
+                  ).status_code == 400
+    assert c.post(f"/speakers/reassign/{spk_job}",
+                  json={"words": ["999.000"], "to": "SPEAKER_01"}
+                  ).status_code == 400
+    assert c.post(f"/speakers/reassign/{spk_job}",
+                  json={"from": "SPEAKER_01", "to": "SPEAKER_01"}
+                  ).status_code == 400
+    # Nothing was written on any of those.
+    assert app_mod._load_speaker_fixes(spk_job) == {}
+
+
+def test_speaker_names_survive_the_save(app_mod):
+    """serialize() is a fixed whitelist that has eaten five fields already."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    ser = js[js.index("function serialize()"):js.index("// ---- Loaders ----")]
+    assert "speaker_names" in ser, "names vanish on the next save"
+
+    tl = app_mod._normalize_timeline({
+        "canvas": "9x16",
+        "speaker_names": {"SPEAKER_00": "Maya", "SPEAKER_01": "   ",
+                          "SPEAKER_02": "x" * 99},
+        "tracks": {"main": [], "overlay": [], "text": [], "music": [],
+                   "effects": []},
+    })
+    names = tl["speaker_names"]
+    assert names["SPEAKER_00"] == "Maya"
+    assert "SPEAKER_01" not in names, "a blank name should not be stored"
+    assert len(names["SPEAKER_02"]) == 40, "names are bounded"
+
+    # And a project with none is not given an empty dict to carry about.
+    assert app_mod._normalize_timeline({
+        "canvas": "9x16",
+        "tracks": {"main": [], "overlay": [], "text": [], "music": [],
+                   "effects": []}})["speaker_names"] is None
+
+
+def test_the_speaker_label_is_a_control_not_a_caption(app_mod):
+    """Before this it was text on the timestamp: a wrong speaker stayed
+    wrong, and the count could only be changed by re-running the analysis
+    with a number supplied up front."""
+    js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    assert "tl-phrase-spk" in js and "openSpeakerMenu" in js
+    menu = js[js.index("function openSpeakerMenu"):js.index("function _spkColors")]
+    # The three corrections, all one mechanism.
+    assert '"new"' in menu, "no way to split a phrase onto someone else"
+    assert "_mergeSpeakers" in menu, "no way to merge, so the count cannot drop"
+    assert "speaker_names" in menu, "no way to rename"
+    # Dismissable by touch: a menu that only answers to click is one that
+    # cannot be closed on iOS, which this project has already shipped once.
+    #
+    # Asserted on the LISTENER, not the word. A bare `"pointerdown" in menu`
+    # passed with the listener changed to click, because the comment above
+    # it explaining the choice contains the word -- the same self-exempting
+    # assertion that let the [hidden] CSS bug through in #40.
+    assert 'addEventListener("pointerdown"' in menu, \
+        "the menu cannot be dismissed by touch"

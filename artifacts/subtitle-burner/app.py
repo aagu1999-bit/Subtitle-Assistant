@@ -12421,6 +12421,98 @@ def _stamp_caption_words_from_source(caption_words: list,
     return stamped
 
 
+# ---- Hand corrections to who said what -----------------------------------
+#
+# Diarization is a guess, and the person reading the transcript can see
+# things it cannot. A correction is therefore ground truth and must outlive
+# every later analysis -- otherwise pressing Analyze again silently throws
+# away work that was done by hand, which would make the feature worse than
+# not having it.
+#
+# Corrections are written straight onto the words, so every existing reader
+# -- caption colouring, the speaker breakdown, the count -- sees them with
+# no new code. The sidecar exists only to replay them when a fresh
+# diarization overwrites the words, and _stamp_job_speakers is the single
+# place that does the replaying.
+
+def _spk_fix_path(job_id: str) -> Path:
+    return UPLOAD_DIR / f"{job_id}_spkfix.json"
+
+
+def _load_speaker_fixes(job_id: str) -> dict:
+    """{word key -> speaker} for one source clip. Keys are start times
+    rounded to 3dp, matching the client's wordOverrideKey()."""
+    path = _spk_fix_path(job_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v}
+
+
+def _save_speaker_fixes(job_id: str, fixes: dict) -> None:
+    path = _spk_fix_path(job_id)
+    try:
+        if fixes:
+            path.write_text(json.dumps(fixes), encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"[speakers] could not store corrections for {job_id}: {e}",
+              flush=True)
+
+
+def _word_key(w) -> str:
+    try:
+        return f"{float(w.get('start', 0) or 0):.3f}"
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
+def _apply_speaker_fixes(words: list, fixes: dict) -> int:
+    """Overwrite stamped speakers with hand corrections. Returns # applied."""
+    if not words or not fixes:
+        return 0
+    n = 0
+    for w in words:
+        if not isinstance(w, dict):
+            continue
+        want = fixes.get(_word_key(w))
+        if want and w.get("speaker") != want:
+            w["speaker"] = want
+            n += 1
+        elif want:
+            n += 1
+    return n
+
+
+def _speaker_counts(words: list) -> dict:
+    """{speaker -> word count}, in label order."""
+    counts = {}
+    for w in words or []:
+        spk = (w or {}).get("speaker") if isinstance(w, dict) else None
+        if spk:
+            counts[str(spk)] = counts.get(str(spk), 0) + 1
+    return {k: counts[k] for k in sorted(counts, key=_speaker_sort_key)}
+
+
+def _next_speaker_label(existing) -> str:
+    """The lowest SPEAKER_NN not already in use."""
+    used = set()
+    for s in existing or []:
+        m = re.match(r"SPEAKER_(\d+)$", str(s))
+        if m:
+            used.add(int(m.group(1)))
+    n = 0
+    while n in used:
+        n += 1
+    return f"SPEAKER_{n:02d}"
+
+
 def _stamp_job_speakers(job_id: str, diarization: list | None = None) -> int:
     """Persist speaker labels onto the job's words. Returns # words stamped."""
     job = jobs.get(job_id)
@@ -12440,6 +12532,10 @@ def _stamp_job_speakers(job_id: str, diarization: list | None = None) -> int:
     if not words or not diar:
         return 0
     stamped = assign_speakers_to_words(words, diar)
+    # Hand corrections win over a fresh diarization, always. This is the
+    # only place that replays them, so every stamping path -- per-source,
+    # whole-edit, and anything added later -- preserves them for free.
+    _apply_speaker_fixes(stamped, _load_speaker_fixes(job_id))
     job["words"] = stamped
     _db_save_job(job_id)
     return sum(1 for w in stamped if w.get("speaker"))
@@ -12556,20 +12652,156 @@ def _effective_diar_for_words(reframe_data: dict) -> list:
     return out
 
 
+def _global_diar_for_source(source_job_id: str, project_job_id: str | None = None):
+    """Whole-edit labels for one source clip, if any project has them.
+
+    The per-source cache numbers every clip from SPEAKER_00, so two people
+    from two interviews share a name. The whole-edit record does not, and
+    where both exist the global one has to win -- otherwise pressing the
+    button that fixes the collision and then pressing the one that causes
+    it puts the collision back.
+
+    `project_job_id` names the project to read when the caller knows it.
+    Without one, the most recent record mentioning this source is used:
+    a source usually belongs to one project, and the newest is the best
+    guess when it belongs to more.
+    """
+    candidates = []
+    if project_job_id:
+        p = _tl_diar_path(project_job_id)
+        if p.exists():
+            candidates.append(p)
+    else:
+        try:
+            candidates = sorted(
+                UPLOAD_DIR.glob("*_tldiar.json"),
+                key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            candidates = []
+    for path in candidates:
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        segs = (rec.get("by_source") or {}).get(source_job_id)
+        if segs:
+            return segs
+    return None
+
+
 @app.route("/stamp-speakers/<job_id>", methods=["POST"])
 def stamp_speakers(job_id: str):
     """Label each transcript word with its diarization speaker (idempotent)."""
     if job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
-    cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
-    if not cache_path.exists():
-        return jsonify({"error": "No diarization cache — run Analyze first"}), 400
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": str(e)}), 500
-    n = _stamp_job_speakers(job_id, _effective_diar_for_words(data))
-    return jsonify({"ok": True, "words_stamped": n})
+
+    body = request.get_json(silent=True) or {}
+    # Whole-edit labels first: they are the ones that do not collide.
+    diar = _global_diar_for_source(job_id, body.get("project_job_id"))
+    source = "whole_edit"
+    if not diar:
+        cache_path = UPLOAD_DIR / f"{job_id}_reframe.json"
+        if not cache_path.exists():
+            return jsonify(
+                {"error": "No diarization cache — run Analyze first"}), 400
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            return jsonify({"error": str(e)}), 500
+        diar = _effective_diar_for_words(data)
+        source = "per_source"
+
+    n = _stamp_job_speakers(job_id, diar)
+    return jsonify({"ok": True, "words_stamped": n, "labels_from": source})
+
+
+@app.route("/speakers/reassign/<job_id>", methods=["POST"])
+def reassign_speakers(job_id: str):
+    """Correct who said what, by hand.
+
+    Three shapes, one mechanism:
+
+      {"words": ["12.340", ...], "to": "SPEAKER_02"}  reassign those words
+      {"from": "SPEAKER_03", "to": "SPEAKER_01"}      merge -- count goes DOWN
+      {"words": [...], "to": "new"}                   split -- count goes UP
+
+    Merging and splitting are not separate features: both are a
+    reassignment, and the count is simply how many distinct labels are left
+    afterwards. That is why the count can be corrected by reading the
+    transcript rather than by telling the analyser a number up front.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job"}), 404
+    words = job.get("words") or []
+    if not words:
+        return jsonify({"error": "This clip has no transcript yet"}), 400
+
+    body = request.get_json(silent=True) or {}
+    to = str(body.get("to") or "").strip()
+    if not to:
+        return jsonify({"error": "Nothing to reassign to"}), 400
+
+    present = list(_speaker_counts(words).keys())
+    if to.lower() == "new":
+        to = _next_speaker_label(present)
+
+    src_label = str(body.get("from") or "").strip()
+    keys = body.get("words")
+
+    if src_label:
+        if src_label == to:
+            return jsonify({"error": "That is already the same speaker"}), 400
+        targets = [w for w in words
+                   if isinstance(w, dict) and w.get("speaker") == src_label]
+        if not targets:
+            return jsonify(
+                {"error": f"No words are labelled {src_label}"}), 400
+    elif isinstance(keys, list) and keys:
+        wanted = {str(k) for k in keys}
+        targets = [w for w in words
+                   if isinstance(w, dict) and _word_key(w) in wanted]
+        if not targets:
+            return jsonify(
+                {"error": "None of those words are in this clip"}), 400
+    else:
+        return jsonify(
+            {"error": "Send either `from` (merge) or `words` (reassign)"}), 400
+
+    fixes = _load_speaker_fixes(job_id)
+    for w in targets:
+        key = _word_key(w)
+        if not key:
+            continue
+        w["speaker"] = to
+        fixes[key] = to
+    _save_speaker_fixes(job_id, fixes)
+    job["words"] = words
+    _db_save_job(job_id)
+
+    counts = _speaker_counts(words)
+    return jsonify({
+        "ok": True,
+        "to": to,
+        "words_changed": len(targets),
+        "speakers": list(counts.keys()),
+        "speaker_count": len(counts),
+        "word_counts": counts,
+        "corrections": len(fixes),
+    })
+
+
+@app.route("/speakers/reassign/<job_id>", methods=["DELETE"])
+def clear_speaker_corrections(job_id: str):
+    """Throw the hand corrections away and fall back to the analysis."""
+    if job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    had = len(_load_speaker_fixes(job_id))
+    _save_speaker_fixes(job_id, {})
+    n = _stamp_job_speakers(job_id)
+    return jsonify({"ok": True, "cleared": had, "words_stamped": n,
+                    "speakers": list(_speaker_counts(
+                        jobs[job_id].get("words") or []).keys())})
 
 
 @app.route("/reframe-speaker-avatar/<job_id>/<speaker_id>")
@@ -16178,6 +16410,39 @@ def analyze_timeline_speakers(job_id: str, timeline: dict,
     }
     _tl_diar_path(job_id).write_text(
         json.dumps(record), encoding="utf-8")
+
+    # Put the answer on the words. Everything above was already right --
+    # the global labels, and _tl_project_diarization_to_sources translating
+    # them back into each source's own clock -- and then nothing wrote them
+    # anywhere a reader could see. /stamp-speakers only ever read the
+    # PER-SOURCE cache, so pressing "Analyze whole edit" produced a speaker
+    # count, caption colours, and a transcript with no speakers on it at
+    # all.
+    #
+    # Stamping here rather than from the endpoint means it happens once, in
+    # the worker, inside its try/except, and is already done by the time the
+    # poller reports ready.
+    _say(96, "labelling the transcript")
+    stamped_total = 0
+    stamped_by_source = {}
+    for sid, segs in by_source.items():
+        if not segs:
+            continue
+        try:
+            n = _stamp_job_speakers(sid, segs)
+        except Exception as e:
+            # One source failing to stamp must not lose the analysis: the
+            # record is already on disk and every other clip still gets its
+            # labels.
+            print(f"[timeline] could not label {sid}: {e}", flush=True)
+            continue
+        stamped_by_source[sid] = n
+        stamped_total += n
+    record["words_stamped"] = stamped_total
+    record["words_stamped_by_source"] = stamped_by_source
+    _tl_diar_path(job_id).write_text(
+        json.dumps(record), encoding="utf-8")
+
     _say(100, f"{len(speakers)} speaker(s) across "
               f"{len(record['sources'])} clip(s)")
     print(f"[timeline] whole-edit diarization: {len(speakers)} speakers across "
@@ -16284,6 +16549,18 @@ def _normalize_timeline(timeline: dict) -> dict:
         tl["speaker_colors"] = normalized
     else:
         tl["speaker_colors"] = {}
+    # Names you gave the speakers. Free-form but bounded: this rides a saved
+    # project and is rendered straight into the transcript. Named here
+    # because a project-level key the client sends and the server does not
+    # keep is the same silent loss as one the client never sends.
+    sn = tl.get("speaker_names")
+    if isinstance(sn, dict):
+        tl["speaker_names"] = {
+            str(k): str(v).strip()[:40] for k, v in sn.items()
+            if k and isinstance(v, str) and v.strip()
+        } or None
+    else:
+        tl["speaker_names"] = None
     hb = tl.get("headline_banner")
     if isinstance(hb, dict) or isinstance(hb, str) or hb is None:
         tl["headline_banner"] = hb
