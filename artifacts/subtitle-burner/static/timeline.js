@@ -967,6 +967,10 @@
       edit_receipt: tl.edit_receipt || null,
       last_polish: tl.last_polish || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
+      // Named here because this object is a FIXED whitelist: anything not
+      // listed is dropped on save. It has already eaten reframe, mode,
+      // speakers, panels and ratio, one per feature.
+      speaker_names: tl.speaker_names || null,
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
       tracks: {
@@ -2058,11 +2062,153 @@
   }
 
   function _spkLabel(speaker) {
+    // A name you gave wins over the generic one. "Host" and "Guest" are a
+    // reasonable guess for a two-hander and wrong the moment there are
+    // four people, which is the case this exists for.
+    const named = tl && tl.speaker_names && tl.speaker_names[speaker];
+    if (named) return String(named);
     if (speaker === "SPEAKER_00") return "Host";
     if (speaker === "SPEAKER_01") return "Guest";
     const m = /SPEAKER_(\d+)/i.exec(speaker || "");
     if (m) return "Speaker " + (parseInt(m[1], 10) + 1);
     return speaker || "";
+  }
+
+  /** Every speaker on this clip's words, most-spoken first. */
+  function _spkPresent(words) {
+    const n = {};
+    (words || []).forEach((w) => {
+      if (w && w.speaker) n[w.speaker] = (n[w.speaker] || 0) + 1;
+    });
+    return Object.keys(n).sort((a, b) => n[b] - n[a]);
+  }
+
+  function _spkNote(msg) {
+    if (window.__studioNote) window.__studioNote(msg);
+    else console.log("[speakers]", msg);
+  }
+
+  // renderTranscript() re-reads the source's words from /status on every
+  // call, so after the server rewrites them there is nothing to patch here
+  // -- re-rendering IS the refresh, and it cannot drift from the server.
+  async function _reassignSpeaker(clip, body, describe) {
+    const sid = clip && clip.source_job_id;
+    if (!sid) return;
+    try {
+      const r = await postJSON(
+        "/speakers/reassign/" + encodeURIComponent(sid), body);
+      await renderTranscript(clip);
+      _spkNote(describe(r));
+    } catch (e) {
+      _spkNote("Could not change the speaker: " + ((e && e.message) || e));
+    }
+  }
+
+  function _reassignPhrase(clip, group, to) {
+    const keys = group.map((w) => Number(w.start || 0).toFixed(3));
+    return _reassignSpeaker(clip, { words: keys, to: to }, (r) =>
+      `${r.words_changed} word(s) → ${_spkLabel(r.to)} · ` +
+      `${r.speaker_count} speaker(s) now`);
+  }
+
+  function _mergeSpeakers(clip, from, to) {
+    return _reassignSpeaker(clip, { from: from, to: to }, (r) =>
+      `Merged into ${_spkLabel(r.to)} · ${r.speaker_count} speaker(s) now`);
+  }
+
+  // One menu for every correction, because they are one mechanism: moving
+  // words from one label to another. Merge is that applied to every word of
+  // a speaker, and a new speaker is that applied to a phrase -- which is
+  // why the count can go down or up from here without the analyser being
+  // told anything.
+  function openSpeakerMenu(anchorEl, clip, group, current, allWords) {
+    document.querySelectorAll(".tl-spk-menu").forEach((m) => m.remove());
+
+    const menu = document.createElement("div");
+    menu.className = "tl-spk-menu";
+    const present = _spkPresent(allWords);
+
+    const add = (label, onPick, cls) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tl-spk-menu-item" + (cls ? " " + cls : "");
+      b.textContent = label;
+      b.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        menu.remove();
+        onPick();
+      };
+      menu.appendChild(b);
+      return b;
+    };
+
+    const head = document.createElement("p");
+    head.className = "tl-spk-menu-head";
+    head.textContent = "This phrase is…";
+    menu.appendChild(head);
+
+    present.forEach((sp) => {
+      const b = add(_spkLabel(sp) + (sp === current ? "  ✓" : ""),
+                    () => _reassignPhrase(clip, group, sp));
+      b.style.setProperty("--tl-spk", _spkColor(_spkColors(), sp) || "#FFD700");
+      b.classList.add("has-dot");
+      if (sp === current) b.classList.add("is-current");
+    });
+
+    add("Someone else (new speaker)", () => _reassignPhrase(clip, group, "new"),
+        "tl-spk-menu-new");
+
+    if (current) {
+      const sep = document.createElement("p");
+      sep.className = "tl-spk-menu-head";
+      sep.textContent = _spkLabel(current) + "…";
+      menu.appendChild(sep);
+
+      add("Rename…", () => {
+        const name = window.prompt(
+          "Call this speaker:", _spkLabel(current));
+        if (name == null) return;
+        const clean = String(name).trim().slice(0, 40);
+        tl.speaker_names = Object.assign({}, tl.speaker_names || {});
+        if (clean) tl.speaker_names[current] = clean;
+        else delete tl.speaker_names[current];
+        scheduleSave();
+        renderTranscript(clip);
+      });
+
+      // Merging is how the count comes DOWN, and it is the correction you
+      // can actually make by reading: two labels that are obviously the
+      // same person.
+      present.filter((sp) => sp !== current).forEach((sp) => {
+        add("Merge into " + _spkLabel(sp),
+            () => _mergeSpeakers(clip, current, sp), "tl-spk-menu-merge");
+      });
+    }
+
+    document.body.appendChild(menu);
+    const r = anchorEl.getBoundingClientRect();
+    menu.style.top = Math.round(r.bottom + 4) + "px";
+    menu.style.left = Math.round(
+      Math.min(r.left, window.innerWidth - menu.offsetWidth - 12)) + "px";
+    // Keep it on screen when the phrase is near the bottom.
+    if (r.bottom + menu.offsetHeight + 12 > window.innerHeight) {
+      menu.style.top = Math.max(8, Math.round(r.top - menu.offsetHeight - 4)) + "px";
+    }
+
+    const close = (ev) => {
+      if (menu.contains(ev.target)) return;
+      menu.remove();
+      document.removeEventListener("pointerdown", close, true);
+    };
+    // pointerdown, not click: a plain div on iOS Safari does not reliably
+    // get a click from a touch, which is how a dismissable overlay became
+    // undismissable once before.
+    setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+  }
+
+  function _spkColors() {
+    return (tl && tl.speaker_colors) || {};
   }
 
   function _detectTlFillerIndices(words, clip) {
@@ -2117,6 +2263,27 @@
       timeEl.textContent = _fmtTlTime(group[0].start);
       timeEl.title = "Seek to " + _fmtTlTime(group[0].start)
         + (dominantSp ? " · " + _spkLabel(dominantSp) : "");
+
+      // Who said this, as a control rather than a caption. Diarization is a
+      // guess and you can see things it cannot; before this the label was
+      // read-only, so a wrong one stayed wrong and the only way to change
+      // the COUNT was to tell the analyser a number up front and re-run.
+      const spkEl = document.createElement("button");
+      spkEl.type = "button";
+      spkEl.className = "tl-phrase-spk" + (dominantSp ? "" : " unknown");
+      spkEl.textContent = dominantSp ? _spkLabel(dominantSp) : "+ speaker";
+      if (dominantSp) {
+        spkEl.style.setProperty("--tl-spk",
+                                _spkColor(sc, dominantSp) || "#FFD700");
+      }
+      spkEl.title = dominantSp
+        ? `${_spkLabel(dominantSp)} — click to reassign, rename or merge`
+        : "No speaker on this phrase — click to set one";
+      spkEl.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openSpeakerMenu(spkEl, clip, group, dominantSp, transcriptWords);
+      });
 
       const textEl = document.createElement("div");
       textEl.className = "tl-phrase-text";
@@ -2176,6 +2343,8 @@
       });
 
       row.appendChild(timeEl);
+
+      row.appendChild(spkEl);
       row.appendChild(textEl);
       row.appendChild(delBtn);
       doc.appendChild(row);
