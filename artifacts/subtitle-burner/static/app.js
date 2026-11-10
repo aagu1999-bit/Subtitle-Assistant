@@ -9093,3 +9093,199 @@ function _tplHandOff(key, cfg) {
 
 window.openTemplateSetup = openTemplateSetup;
 window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
+
+// ---- Learn a look from a reference reel --------------------------------
+// The analysis separates three kinds of answer and the UI has to keep them
+// apart, or a guess arrives looking like a measurement and every later
+// video quietly inherits it.
+(function wireLearnLook() {
+  const btn = document.getElementById("learnLookBtn");
+  const file = document.getElementById("learnLookFile");
+  const panel = document.getElementById("learnLookPanel");
+  if (!btn || !file || !panel) return;
+
+  const fill = document.getElementById("learnLookFill");
+  const stage = document.getElementById("learnLookStage");
+  const sheet = document.getElementById("learnLookSheet");
+  const title = document.getElementById("learnLookTitle");
+  const closeBtn = document.getElementById("learnLookClose");
+  let refId = null;
+
+  const PROV = {
+    measured: ["measured", "m", "A number out of the file. No model."],
+    judged: ["a guess", "j", "Gemini named this from the frames."],
+    needs_confirmation: ["needs you", "a", "Cannot be read off pixels."],
+  };
+
+  function setProgress(pct, text) {
+    if (fill) fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    if (stage) stage.textContent = text || "";
+  }
+
+  if (closeBtn) closeBtn.onclick = () => { panel.hidden = true; };
+  btn.onclick = () => file.click();
+
+  file.onchange = async () => {
+    const f = file.files && file.files[0];
+    file.value = "";
+    if (!f) return;
+    panel.hidden = false;
+    if (sheet) sheet.innerHTML = "";
+    if (title) title.textContent = "Reading " + f.name;
+    setProgress(3, "uploading…");
+
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("label", f.name.replace(/\.[^.]+$/, ""));
+    let started;
+    try {
+      const res = await fetch("/reference/analyze", { method: "POST", body: fd });
+      started = await res.json();
+      if (!res.ok || started.error) throw new Error(started.error || res.status);
+    } catch (e) {
+      setProgress(100, "Could not start: " + ((e && e.message) || e));
+      return;
+    }
+    refId = started.reference_id;
+
+    // Poll. The analysis decodes the video twice plus a vision call, so a
+    // synchronous request would be cut off on anything long.
+    const deadline = Date.now() + 10 * 60 * 1000;
+    for (;;) {
+      if (Date.now() > deadline) {
+        setProgress(100, "still running after 10 minutes — reopen this later");
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1200));
+      let st;
+      try {
+        st = await (await fetch("/reference/" + refId)).json();
+      } catch (e) { continue; }
+      if (st.error && !st.ready) {
+        setProgress(100, "Analysis failed: " + st.error);
+        return;
+      }
+      if (st.ready) { renderSheet(st.record); return; }
+      setProgress(st.progress || 5, st.stage || "working…");
+    }
+  };
+
+  function row(label, value, prov, how) {
+    const [chip, cls] = PROV[prov] || ["", ""];
+    const d = document.createElement("div");
+    d.className = "ll-row ll-" + (cls || "m");
+    d.innerHTML =
+      '<span class="ll-label"></span>' +
+      '<span class="ll-chip">' + chip + "</span>" +
+      '<span class="ll-value"></span>' +
+      (how ? '<p class="ll-how"></p>' : "");
+    d.querySelector(".ll-label").textContent = label;
+    d.querySelector(".ll-value").textContent = value;
+    if (how) d.querySelector(".ll-how").textContent = how;
+    return d;
+  }
+
+  function renderSheet(rec) {
+    setProgress(100, "");
+    const pack = rec.pack || {};
+    const prov = rec.provenance || {};
+    const st = pack.style || {};
+    if (title) title.textContent = "What it found in " + (rec.source || "the reel");
+    sheet.innerHTML = "";
+
+    const p = pack.pacing;
+    if (p) {
+      sheet.appendChild(row("Shot length", p.median_shot_s + "s", prov.pacing,
+        p.shots + " shots over " + p.duration_s + "s · " +
+        p.cuts_per_min + " cuts a minute"));
+    }
+    if (pack.palette && pack.palette.accent) {
+      sheet.appendChild(row("Highlight", pack.palette.accent, prov.highlight,
+        "the most saturated minority colour across the sampled frames"));
+    }
+    if (st.position_y != null) {
+      sheet.appendChild(row("Caption position", st.position_y + "% down",
+        prov.position_y, "the band of the frame that changes between frames"));
+    }
+    if (st.group != null) {
+      sheet.appendChild(row("Words at a time", String(st.group), prov.group,
+        pack.caption_look || ""));
+    }
+    if (pack.loudness_i != null) {
+      sheet.appendChild(row("Loudness", pack.loudness_i + " LUFS",
+        prov.loudness_i, "your exports already target −14"));
+    }
+    (pack.devices || []).forEach((d) => {
+      sheet.appendChild(row(d.kind.replace(/_/g, " "),
+        d.per_min + " / min", "judged", "placed with " + d.op));
+    });
+
+    // The font: offered, never asserted.
+    let fontPick = null;
+    (rec.unresolved || []).forEach((u) => {
+      if (u.field !== "font") return;
+      const d = row("Font", "not set", "needs_confirmation",
+        "A font cannot be read off pixels. It looks like a " +
+        String(u.category).replace(/_/g, " ") + " — pick the closest one you have:");
+      const wrap = document.createElement("div");
+      wrap.className = "ll-fonts";
+      (u.choices || []).forEach((name) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = name;
+        b.onclick = () => {
+          fontPick = name;
+          wrap.querySelectorAll("button").forEach((x) =>
+            x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+          d.querySelector(".ll-value").textContent = name;
+        };
+        wrap.appendChild(b);
+      });
+      d.appendChild(wrap);
+      sheet.appendChild(d);
+    });
+
+    (rec.notes || []).forEach((n) => {
+      const el = document.createElement("p");
+      el.className = "ll-note";
+      el.textContent = n;
+      sheet.appendChild(el);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "ll-actions";
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.className = "btn btn-primary btn-sm";
+    keep.textContent = "Keep this as a look";
+    keep.onclick = async () => {
+      keep.disabled = true;
+      const name = (window.prompt("Name this look:",
+        pack.label || "From a reel") || "").trim();
+      if (!name) { keep.disabled = false; return; }
+      try {
+        const r = await fetch("/reference/" + refId + "/keep", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            label: name, style: fontPick ? { font: fontPick } : {},
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || r.status);
+        setProgress(100, 'Saved as "' + name + '" — it is now one of the AI Edit packs.');
+        sheet.innerHTML = "";
+      } catch (e) {
+        setProgress(100, "Could not save: " + ((e && e.message) || e));
+        keep.disabled = false;
+      }
+    };
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "btn btn-secondary btn-sm";
+    drop.textContent = "Throw it away";
+    drop.onclick = () => { panel.hidden = true; };
+    actions.appendChild(keep);
+    actions.appendChild(drop);
+    sheet.appendChild(actions);
+  }
+})();

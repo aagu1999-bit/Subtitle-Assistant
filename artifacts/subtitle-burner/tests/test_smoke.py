@@ -7011,3 +7011,332 @@ def test_the_speaker_label_is_a_control_not_a_caption(app_mod):
     # assertion that let the [hidden] CSS bug through in #40.
     assert 'addEventListener("pointerdown"' in menu, \
         "the menu cannot be dismissed by touch"
+
+
+# --- learning a look from a reference ------------------------------------
+# Three kinds of answer kept apart: measured (a number out of the file),
+# judged (a vision model named something) and needs_confirmation (fonts,
+# which cannot be recovered from pixels at all). The feature is only
+# trustworthy if a guess never arrives looking like a measurement.
+
+def _build_reference(tmp_path, shots=6, shot_s=2.0, band_y=1360):
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    """A reference with KNOWN properties.
+
+    Alternating dark/bright scenes with real structure, because a cut that
+    only changes hue scores near zero: ffmpeg's scene detection is largely
+    luma-based, and a fixture of similar-brightness colours measures the
+    fixture rather than the code.
+    """
+    segs = []
+    for i in range(shots):
+        out = tmp_path / f"seg{i}.mp4"
+        base = (f"color=c=0x101418:s=1080x1920:d={shot_s}:r=30" if i % 2 == 0
+                else f"smptebars=s=1080x1920:d={shot_s}:r=30")
+        vf = (f"drawbox=x=0:y={band_y}:w=1080:h=120:color=magenta@1:t=fill,"
+              "drawtext=text='%{n}':x=120:y=" + str(band_y + 15)
+              + ":fontsize=90:fontcolor=white")
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", base,
+                        "-vf", vf, "-pix_fmt", "yuv420p", str(out)], check=True)
+        segs.append(out)
+    lst = tmp_path / "list.txt"
+    lst.write_text("".join(f"file '{s}'\n" for s in segs), encoding="utf-8")
+    silent = tmp_path / "ref.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(lst), "-c", "copy", str(silent)], check=True)
+    out = tmp_path / "ref_av.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(silent), "-f", "lavfi",
+                    "-i", f"sine=frequency=300:duration={shots * shot_s}",
+                    "-filter:a", "volume=0.9", "-c:v", "copy", "-shortest",
+                    str(out)], check=True)
+    return out
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
+def test_a_reference_is_measured_not_guessed(app_mod, tmp_path, monkeypatch):
+    """Built to known numbers, so the analysis has something to be wrong
+    about. A measurement that returned a plausible constant would pass a
+    test that only checked the shape of the result."""
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", refs)
+    # No key here, so the judged half degrades rather than running.
+    monkeypatch.setattr(app_mod, "_ref_vision", lambda sheet: None)
+
+    video = _build_reference(tmp_path, shots=6, shot_s=2.0, band_y=1360)
+    rec = app_mod.analyze_reference(video, "r1", "My reel")
+    pack = rec["pack"]
+
+    # Cut rhythm: six 2-second shots.
+    pacing = pack["pacing"]
+    assert pacing["shots"] == 6, pacing
+    assert 1.8 <= pacing["median_shot_s"] <= 2.2, pacing
+    assert 26 <= pacing["cuts_per_min"] <= 34, pacing
+
+    # Caption band: drawn at 1360/1920 = 70.8% down.
+    assert 68 <= pack["style"]["position_y"] <= 74, pack["style"]
+
+    # The accent is the magenta band, not the dominant ground.
+    accent = pack["palette"]["accent"].upper()
+    r, g, b = (int(accent[i:i + 2], 16) for i in (1, 3, 5))
+    assert r > 150 and b > 150 and g < 110, f"accent is not the magenta: {accent}"
+    assert pack["palette"]["accent_share"] < 0.4, "the accent is not a minority"
+
+    # Loudness came back as a real number rather than silence.
+    assert -40 < pack["loudness_i"] < -5, pack.get("loudness_i")
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
+def test_what_it_could_not_measure_is_absent_not_defaulted(app_mod, tmp_path,
+                                                           monkeypatch):
+    """Absent means "the pack you start from keeps its own value here".
+
+    A confident wrong number is the expensive failure: it would silently
+    retune every video made with the pack.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", refs)
+    monkeypatch.setattr(app_mod, "_ref_vision", lambda sheet: None)
+
+    # Noise: edges everywhere and churn everywhere, spread evenly across
+    # rows. Two earlier versions of this fixture proved nothing -- flat
+    # grey has no churn and a colour wash has no edges, so each was
+    # rejected by a guard BEFORE the confidence test and passed with that
+    # test deleted. Noise is the case the confidence gate exists for: a
+    # busy profile with no peak standing out. On this exact clip the
+    # function used to answer position_y 100 -- the very bottom row --
+    # with a confidence of 28, which is how the absolute edge floor and
+    # the edge-row exclusion came to exist.
+    plain = tmp_path / "plain.mp4"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=0x303030:s=540x960:d=3:r=15",
+                    "-vf", "noise=alls=90:allf=t+u",
+                    "-pix_fmt", "yuv420p", str(plain)], check=True)
+
+    rec = app_mod.analyze_reference(plain, "r2")
+    assert "position_y" not in (rec["pack"].get("style") or {}), \
+        "a caption position was invented for a video with no captions"
+    assert "position_y" not in rec["provenance"]
+    assert any("caption" in n for n in rec["notes"]), rec["notes"]
+
+
+def test_a_band_hard_against_the_frame_edge_is_not_a_caption(app_mod):
+    """Built as arrays rather than a video, because the absolute edge floor
+    rejects the noise clip first and this guard can never fire there.
+
+    A high-contrast band changing in the very last rows is a letterbox
+    seam or an encoding artifact. It is also exactly where a spurious peak
+    lands, so without this it would be reported as a caption at 99%.
+    """
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    import numpy as np
+
+    def frames(band_rows, n=12):
+        out = []
+        for i in range(n):
+            f = np.full((960, 540, 3), 90, dtype=np.uint8)
+            # Structure everywhere, so the absolute edge floor is satisfied
+            # and this test is about WHERE the peak is allowed to be.
+            f[::6, :, :] = 170
+            lo, hi = band_rows
+            f[lo:hi, :, :] = 255 if i % 2 == 0 else 0
+            out.append(f)
+        return out
+
+    # Hard against the bottom edge: refused.
+    assert app_mod._ref_caption_band(frames((956, 960))) is None
+
+    # The same band a sensible distance up IS a caption, so the guard is
+    # an exclusion of the edge and not a rejection of everything.
+    got = app_mod._ref_caption_band(frames((660, 700)))
+    assert got is not None and 65 <= got["position_y"] <= 75, got
+
+
+def test_a_font_is_never_asserted_only_offered(app_mod):
+    """A font cannot be read off pixels. Anything claiming otherwise is
+    guessing, and a wrong guess renders in the wrong face without saying
+    so -- which this repo has already shipped once."""
+    for category in ("condensed_sans", "geometric_sans", "unknown", "", None):
+        choices = app_mod._ref_font_choices(category)
+        assert choices, f"nothing offered for {category!r}"
+        # Every offered face must exist on disk, or the pack renders in a
+        # system fallback and nobody is told.
+        files = {f.stem.lower().replace("-regular", "").replace("-black", "")
+                 .replace("[wght]", "").replace(" ", "")
+                 for f in (BURNER / "fonts").glob("*")
+                 if f.suffix.lower() in (".ttf", ".otf")}
+        for name in choices:
+            key = name.lower().replace(" ", "").replace("thinblack", "black")
+            assert key in files or name.lower().replace(" ", "") in files, \
+                f"{name} is offered but is not in fonts/"
+    # The commercial faces the repo deliberately does not bundle.
+    everywhere = {n for c in app_mod._REF_FONT_CATEGORIES for n in
+                  app_mod._ref_font_choices(c)}
+    assert "Integral CF" not in everywhere and "The Bold Font" not in everywhere
+
+
+def test_the_vision_vocabulary_is_closed(app_mod):
+    """A device the app cannot make is a budget for an op that does not
+    exist. Anything outside the list is discarded rather than carried."""
+    raw = {"devices": [
+        {"kind": "text_message", "frames": 10},
+        {"kind": "holographic_pyramid", "frames": 30},   # invented
+        {"kind": "TWO_UP", "frames": 4},                 # case
+        {"kind": "document_card", "frames": 0},          # never seen
+    ]}
+    out = app_mod._ref_devices_from_vision(raw, total_tiles=40, duration_s=60.0)
+    kinds = {d["kind"] for d in out}
+    assert "holographic_pyramid" not in kinds
+    assert "text_message" in kinds and "two_up" in kinds
+    assert "document_card" not in kinds, "a device seen in no tile got a budget"
+    # Every surviving device names an op the app actually has.
+    for d in out:
+        assert d["op"] in app_mod.REF_DEVICES.values()
+    # Garbage in does not raise.
+    assert app_mod._ref_devices_from_vision(None, 40, 60.0) == []
+    assert app_mod._ref_devices_from_vision({"devices": "x"}, 40, 60.0) == []
+    assert app_mod._ref_devices_from_vision(raw, 40, 0) == []
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
+def test_a_learned_look_outlives_the_cleanup_sweep(app_mod, tmp_path,
+                                                   monkeypatch):
+    """Renders are deleted after six hours by _cleanup_loop. A style sheet
+    that evaporated the same way would be worse than useless, so what is
+    kept lives outside every swept directory."""
+    if not _have("cv2"):
+        pytest.skip("cv2 not installed")
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    uploads = tmp_path / "up"
+    uploads.mkdir()
+    outputs = tmp_path / "out"
+    outputs.mkdir()
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", refs)
+    monkeypatch.setattr(app_mod, "UPLOAD_DIR", uploads)
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", outputs)
+    monkeypatch.setattr(app_mod, "_ref_vision", lambda sheet: None)
+
+    video = _build_reference(tmp_path, shots=2, shot_s=1.0)
+    rec = app_mod.analyze_reference(video, "r3", "Keep me")
+    app_mod._save_reference(rec)
+
+    sheet = refs / "r3.jpg"
+    assert sheet.exists() and sheet.stat().st_size > 2000
+    # Bounded in absolute terms, and -- the property that actually makes
+    # keeping it forever safe -- CONSTANT with duration: it is always
+    # REF_FRAME_SAMPLES tiles, whether the reference is ten seconds or ten
+    # minutes. Comparing it to this fixture's own file size would prove
+    # nothing, since a two-second test clip is smaller than the sheet.
+    assert sheet.stat().st_size < 500_000, sheet.stat().st_size
+
+    longer = _build_reference(tmp_path / "long", shots=8, shot_s=1.0)
+    rec2 = app_mod.analyze_reference(longer, "r3b")
+    assert rec2["frames_sampled"] == app_mod.REF_FRAME_SAMPLES
+    bigger = (refs / "r3b.jpg").stat().st_size
+    assert bigger < 500_000, bigger
+
+    # Nothing of the record is in a directory the sweep touches.
+    assert not list(uploads.glob("*")), list(uploads.glob("*"))
+    assert not list(outputs.glob("*")), list(outputs.glob("*"))
+    assert app_mod._load_reference("r3")["pack"]["label"] == "Keep me"
+
+
+def test_the_reference_store_is_not_somewhere_the_sweep_can_reach(app_mod):
+    """Asserted on the real constants, not a monkeypatched temp directory.
+
+    The test above swaps all three for temp paths, so it proves the record
+    lands in whichever directory REFERENCE_DIR points at -- and passed with
+    REFERENCE_DIR redefined as OUTPUT_DIR, which is swept every six hours.
+    """
+    ref = app_mod.REFERENCE_DIR.resolve()
+    for swept in (app_mod.OUTPUT_DIR, app_mod.UPLOAD_DIR):
+        swept = swept.resolve()
+        assert ref != swept, f"references live in {swept}, which is swept"
+        assert swept not in ref.parents, f"references sit under {swept}"
+
+    # And the sweep itself must not have learned to glob it.
+    src = (BURNER / "app.py").read_text(encoding="utf-8")
+    loop = src[src.index("def _cleanup_loop"):]
+    loop = loop[:loop.index("\ndef ", 10)]
+    assert "REFERENCE_DIR" not in loop, \
+        "the cleanup loop touches the reference store"
+
+
+def test_a_reference_becomes_a_pack_the_renderer_accepts(app_mod, temp_db,
+                                                         tmp_path, monkeypatch):
+    """The point of the whole thing: a learned look has to drive the same
+    pipeline a built-in does, through the handover that has eaten five
+    fields already."""
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", tmp_path)
+    app_mod._save_reference({
+        "id": "r4", "created_at": 0, "source": "myreel.mp4", "sheet": "r4.jpg",
+        "pack": {"label": "From a reference", "canvas": "9x16",
+                 "style": {"highlight": "#E8C39E", "position_y": 71},
+                 "pacing": {"median_shot_s": 2.4}},
+        "provenance": {"highlight": "measured"}, "unresolved": [], "notes": [],
+    })
+    c = app_mod.app.test_client()
+    r = c.post("/reference/r4/keep", json={
+        "label": "My reel look", "style": {"font": "Anton"}}).get_json()
+    assert r["ok"], r
+
+    pack = app_mod._resolve_style_pack(r["id"])
+    assert pack["style"]["font"] == "Anton", "the correction was dropped"
+    assert pack["style"]["highlight"] == "#E8C39E"
+    assert pack["pacing"]["median_shot_s"] == 2.4
+
+    # It shows up where the built-ins do, marked as learned.
+    listed = {p["id"]: p for p in c.get("/ai-edit/style-packs").get_json()["packs"]}
+    assert listed[r["id"]]["source"] == "reference"
+    assert set(app_mod.AI_EDIT_STYLE_PACKS).issubset(set(listed))
+
+    # Nothing is saved until Keep is called.
+    assert c.post("/reference/nope/keep", json={}).status_code == 404
+
+
+def test_learning_a_look_is_reachable(app_mod):
+    """An engine nothing can ask for is the bug this project keeps hitting:
+    add_effect, `panels`, the wide/close split and "Exactly N" each shipped
+    complete and unreachable, the last one because I put its control in a
+    hidden panel myself."""
+    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="learnLookBtn"' in html
+    # The button's OWN tag as well as its ancestors: _ancestor_tags walks
+    # upwards only, so a bare `hidden` on the element itself slipped past
+    # an earlier version of this.
+    own = html[html.rindex("<", 0, html.index('id="learnLookBtn"')):]
+    own = own[:own.index(">") + 1]
+    assert not re.search(r"(^|[\s\"'])hidden([\s>=\"']|$)", own), own
+
+    for ctl in ('id="learnLookBtn"', 'id="learnLookPanel"'):
+        for name, tag in _ancestor_tags(html, ctl):
+            assert 'aria-hidden="true"' not in tag, (ctl, tag)
+            if not re.search(r"(^|[\s\"'])hidden([\s>=\"']|$)", tag):
+                continue
+            handles = re.findall(r'id="([^"]+)"', tag)
+            handles += [c for c in re.findall(r'class="([^"]*)"', tag)
+                        for c in c.split()]
+            handles = [h for h in handles if h not in ("hidden", "panel")]
+            assert any(h in js for h in handles), (
+                f"{ctl} is inside a hidden <{name}> nothing can open: {tag!r}")
+
+    body = js[js.index("function wireLearnLook"):]
+    assert '"/reference/analyze"' in body, "the button reaches no endpoint"
+    assert '"/reference/" + refId' in body, "it never polls for the result"
+    assert '/keep' in body, "there is no way to accept the sheet"
+    # The three kinds of answer must stay visually apart, or a guess
+    # arrives looking like a measurement.
+    assert "needs_confirmation" in body and "judged" in body and "measured" in body
+    css = (BURNER / "static" / "style.css").read_text(encoding="utf-8")
+    for cls in (".ll-m", ".ll-j", ".ll-a"):
+        assert cls in css, f"{cls} has no styling, so the tiers look alike"
