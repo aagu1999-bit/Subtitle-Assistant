@@ -6671,9 +6671,9 @@ function setActiveTab(tab) {
   // reel, clip queue) render their own empty states.
   const needsTranscript = {
     transcript: "Edit words",
-    highlights: "AI Shorts",
+    highlights: "Shorts",
     branding: "Caption look",
-    editor: "Timeline",
+    editor: "Edit",
     result: "Result",
   };
   // A recap seeds a real Timeline project out of imported media and never
@@ -8013,7 +8013,7 @@ function _renderAssemblyBar() {
       if (progress) progress.classList.add("hidden");
     } finally {
       _exportBusy = false;
-      if (headerBtn) { headerBtn.disabled = false; headerBtn.textContent = prevHeader || "⚡ Instant Export MP4"; }
+      if (headerBtn) { headerBtn.disabled = false; headerBtn.textContent = prevHeader || "Export"; }
       if (readyBtn) readyBtn.disabled = false;
       if (mobileBtn) mobileBtn.disabled = false;
     }
