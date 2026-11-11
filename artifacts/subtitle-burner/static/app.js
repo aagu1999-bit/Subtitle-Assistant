@@ -5351,6 +5351,10 @@ function _queueClipFromPlan(c, extras) {
     theme: c.theme || extras.theme || "",
     reason: c.reason || "",
     arc_role: c.arc_role || extras.arc_role || "",
+    // The alternating 1.0 / 1.15 scale is decided server-side, where the
+    // ordering is. Without carrying it here the queue would drop it and the
+    // relay would render as a flat run of hard cuts.
+    relay_zoom: !!c.relay_zoom,
   };
 }
 
@@ -5396,19 +5400,33 @@ function renderMultiInterviewArc(plan) {
   const title = document.createElement("div");
   const total = plan.arc_total_s != null ? Number(plan.arc_total_s) : arc.reduce((s, b) => s + (b.end_time - b.start_time), 0);
   const goal = plan.goal_sec != null ? Number(plan.goal_sec) : 90;
-  title.innerHTML = `<strong>Story arc</strong>`
-    + `<span class="muted" style="font-size:.78rem;margin-left:8px">hook → answers → closer · ~${Math.round(total)}s / ${Math.round(goal)}s goal</span>`
+  // A relay is not an arc and must not describe itself as one: it is a
+  // handful of one-word answers measured in tenths of a second, so a
+  // "~2s / 90s goal" readout would look like a failure.
+  const isRelay = plan && plan.mode === "relay";
+  title.innerHTML = (isRelay
+      ? `<strong>Relay cut</strong>`
+        + `<span class="muted" style="font-size:.78rem;margin-left:8px">`
+        + `rapid consensus · ${arc.length} smash cut(s) · ${total.toFixed(1)}s total</span>`
+      : `<strong>Story arc</strong>`
+        + `<span class="muted" style="font-size:.78rem;margin-left:8px">hook → answers → closer · ~${Math.round(total)}s / ${Math.round(goal)}s goal</span>`)
     + (plan.throughline ? `<div class="muted" style="font-size:.78rem;margin-top:4px">${escHtml(plan.throughline)}</div>` : "");
   const useBtn = document.createElement("button");
   useBtn.className = "btn btn-primary";
   useBtn.type = "button";
   useBtn.style.cssText = "background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff";
-  useBtn.textContent = `＋ Use arc (${arc.length} clips)`;
+  useBtn.textContent = isRelay
+    ? `＋ Use relay (${arc.length} cuts)`
+    : `＋ Use arc (${arc.length} clips)`;
   useBtn.onclick = () => {
     arc.forEach((c) => addToCompileQueue(_queueClipFromPlan(c)));
-    useBtn.textContent = "✓ Arc queued";
+    useBtn.textContent = isRelay ? "✓ Relay queued" : "✓ Arc queued";
     useBtn.disabled = true;
-    if (multiStatusEl) multiStatusEl.textContent = `Queued ${arc.length}-beat arc (~${Math.round(total)}s).`;
+    if (multiStatusEl) {
+      multiStatusEl.textContent = isRelay
+        ? `Queued ${arc.length} smash cut(s) (${total.toFixed(1)}s). Send to timeline below.`
+        : `Queued ${arc.length}-beat arc (~${Math.round(total)}s).`;
+    }
   };
   head.appendChild(title);
   head.appendChild(useBtn);
@@ -5487,9 +5505,15 @@ function escHtml(s) {
 
 async function runMultiInterviewPlan(opts) {
   opts = opts || {};
+  const relay = opts.mode === "relay";
   const ids = Array.from(document.querySelectorAll(".multi-interview-job:checked")).map((el) => el.value);
-  if (ids.length < 2) {
-    alert("Select at least 2 transcribed interviews.");
+  // A relay needs one long interview with several speakers, or several
+  // clips. An arc needs at least two interviews to cross between.
+  const need = relay ? 1 : 2;
+  if (ids.length < need) {
+    alert(relay
+      ? "Select at least 1 transcribed interview."
+      : "Select at least 2 transcribed interviews.");
     return;
   }
   const planBtn = $("multiInterviewPlanBtn");
@@ -5498,9 +5522,10 @@ async function runMultiInterviewPlan(opts) {
   if (regenBtn) regenBtn.disabled = true;
   const goal = multiGoalEl ? Number(multiGoalEl.value) || 90 : 90;
   if (multiStatusEl) {
-    multiStatusEl.textContent = opts.regenerate
-      ? "Regenerating arc (new beats)…"
-      : "Planning story arc with Gemini…";
+    multiStatusEl.textContent = relay
+      ? "Finding the one-word answers…"
+      : (opts.regenerate ? "Regenerating arc (new beats)…"
+                         : "Planning story arc with Gemini…");
   }
   try {
     const body = {
@@ -5508,6 +5533,7 @@ async function runMultiInterviewPlan(opts) {
       format: "interview",
       goal_sec: goal,
     };
+    if (relay) body.mode = "relay";
     if (opts.regenerate && _multiAvoidFingerprints.length) {
       body.avoid_fingerprints = _multiAvoidFingerprints.slice(-6);
     }
@@ -5525,6 +5551,16 @@ async function runMultiInterviewPlan(opts) {
     }
     renderMultiInterviewArc(data);
     renderMultiInterviewThemes(data.themes || []);
+    if (relay) {
+      if (multiStatusEl) {
+        const n = (data.arc || []).length;
+        multiStatusEl.textContent = n
+          ? `Relay ready · ${n} smash cut(s) · ${(data.arc_total_s || 0).toFixed(1)}s`
+            + ` · from ${data.candidates || 0} anchor(s) · pad ${data.pad_s}s`
+          : "No anchors found.";
+      }
+      return;
+    }
     if (multiStatusEl) {
       const arcN = (data.arc || []).length;
       multiStatusEl.textContent = arcN
@@ -5551,6 +5587,10 @@ if (multiRefreshBtn) {
 const multiPlanBtn = $("multiInterviewPlanBtn");
 if (multiPlanBtn) {
   multiPlanBtn.onclick = () => runMultiInterviewPlan({ regenerate: false });
+}
+const multiRelayBtn = $("multiInterviewRelayBtn");
+if (multiRelayBtn) {
+  multiRelayBtn.onclick = () => runMultiInterviewPlan({ mode: "relay" });
 }
 const multiRegenBtn = $("multiInterviewRegenBtn");
 if (multiRegenBtn) {
@@ -9119,6 +9159,33 @@ function _tplHandOff(key, cfg) {
     const el = document.getElementById(route.panel);
     if (el && el.scrollIntoView) setTimeout(() => el.scrollIntoView({ block: "start" }), 300);
   }
+  // Every job id is already in hand here — the setup uploaded each file and
+  // waited for every transcript. Then only the first was used, and the other
+  // videos the app had just finished processing sat there unticked, waiting
+  // to be found and checked by hand. For "upload several and go" that was
+  // the whole friction.
+  _tplPreselectMultiJobs(cfg.job_ids || []);
+}
+
+/** Tick the boxes for the jobs this setup just built. */
+function _tplPreselectMultiJobs(jobIds) {
+  if (!Array.isArray(jobIds) || jobIds.length < 1) return;
+  const want = new Set(jobIds.filter(Boolean));
+  if (!want.size) return;
+  // The list is drawn by the jobs poller, so it may not exist yet. Try a
+  // few times rather than once, and stop as soon as the rows are there.
+  let tries = 0;
+  const tick = () => {
+    if (typeof renderMultiInterviewJobs === "function") {
+      try { renderMultiInterviewJobs(); } catch (e) { /* ignore */ }
+    }
+    const boxes = Array.from(document.querySelectorAll(".multi-interview-job"));
+    const hit = boxes.filter((b) => want.has(b.value));
+    hit.forEach((b) => { b.checked = true; });
+    if (hit.length >= want.size || ++tries > 12) return;
+    setTimeout(tick, 700);
+  };
+  tick();
 }
 
 // Back to the gallery, from the header.
