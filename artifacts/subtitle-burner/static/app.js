@@ -9166,6 +9166,11 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
   // about whichever came first in the document.
   const home = panel.parentElement;
   let onSaved = null;
+  // kind -> asset_id. A device with no entry stays unbound, which is a
+  // measurement worth keeping: the rate was real even if there is no card
+  // for it yet.
+  let deviceBinds = {};
+  let stillAssets = [];
 
   // The input must never sit inside a hidden subtree. It shipped as a
   // sibling of the button inside the Caption-look root -- which the
@@ -9268,6 +9273,92 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
     return d;
   }
 
+  async function loadStills() {
+    try {
+      const d = await (await fetch("/list-assets")).json();
+      stillAssets = (d.assets || []).filter((a) => a.kind === "image");
+    } catch (e) { stillAssets = []; }
+  }
+
+  // The half a reference cannot give you. It can measure HOW OFTEN a card
+  // appears and a model can name WHAT KIND it is, but neither can reproduce
+  // the card: a design is not recoverable from pixels, and a model asked to
+  // redraw one invents the wording. So the card is designed once -- in Canva
+  // or anywhere else -- and bound here, and the edit places it at the rate
+  // the reel taught it.
+  function deviceRow(d) {
+    const r = row(d.kind.replace(/_/g, " "), d.per_min + " / min", "judged",
+      "placed with " + d.op + " — bind the picture it should use:");
+    const wrap = document.createElement("div");
+    wrap.className = "ll-bind";
+
+    const sel = document.createElement("select");
+    sel.className = "ll-bind-pick";
+    sel.setAttribute("aria-label", "Picture for " + d.kind);
+    function fillOptions(selected) {
+      sel.innerHTML = "";
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "no picture — just remember the rate";
+      sel.appendChild(none);
+      stillAssets.forEach((a) => {
+        const o = document.createElement("option");
+        o.value = a.asset_id;
+        o.textContent = a.filename || a.keyword || a.asset_id.slice(0, 8);
+        sel.appendChild(o);
+      });
+      sel.value = selected || deviceBinds[d.kind] || "";
+    }
+    fillOptions();
+    sel.onchange = () => {
+      if (sel.value) deviceBinds[d.kind] = sel.value;
+      else delete deviceBinds[d.kind];
+    };
+
+    // Canva (and every other design tool) hands back a download URL for an
+    // export. Pasting it here is the whole integration: no OAuth app, no
+    // token refresh, no export polling — and it works for any image host.
+    const imp = document.createElement("button");
+    imp.type = "button";
+    imp.className = "btn btn-secondary btn-xs";
+    imp.textContent = "Paste a link…";
+    imp.title = "Paste a Canva (or any) image export URL";
+    imp.onclick = async () => {
+      const url = (window.prompt(
+        "Paste the image URL (a Canva export link works):") || "").trim();
+      if (!url) return;
+      imp.disabled = true;
+      const was = imp.textContent;
+      imp.textContent = "importing…";
+      try {
+        const res = await fetch("/import-asset-url", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: url, source: "canva" }),
+        });
+        const got = await res.json();
+        if (!res.ok || got.error) throw new Error(got.error || res.status);
+        stillAssets.unshift({
+          asset_id: got.asset_id, kind: "image",
+          filename: got.filename || "imported",
+        });
+        deviceBinds[d.kind] = got.asset_id;
+        fillOptions(got.asset_id);
+        imp.textContent = was;
+      } catch (e) {
+        // Say what came back. A link that has expired or needs a sign-in is
+        // the common case and it is not obvious from looking at the URL.
+        window.alert("Could not import that link: " + ((e && e.message) || e));
+        imp.textContent = was;
+      }
+      imp.disabled = false;
+    };
+
+    wrap.appendChild(sel);
+    wrap.appendChild(imp);
+    r.appendChild(wrap);
+    return r;
+  }
+
   function renderSheet(rec) {
     setProgress(100, "");
     const pack = rec.pack || {};
@@ -9298,10 +9389,20 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
       sheet.appendChild(row("Loudness", pack.loudness_i + " LUFS",
         prov.loudness_i, "your exports already target −14"));
     }
-    (pack.devices || []).forEach((d) => {
-      sheet.appendChild(row(d.kind.replace(/_/g, " "),
-        d.per_min + " / min", "judged", "placed with " + d.op));
-    });
+    deviceBinds = {};
+    const devices = pack.devices || [];
+    if (devices.length) {
+      const hold = document.createElement("div");
+      sheet.appendChild(hold);
+      devices.forEach((d) => hold.appendChild(deviceRow(d)));
+      // Fetch the pictures after the rows are up, then refill the pickers —
+      // a sheet that waited on a list request to show anything would look
+      // like the analysis had stalled.
+      loadStills().then(() => {
+        hold.innerHTML = "";
+        devices.forEach((d) => hold.appendChild(deviceRow(d)));
+      });
+    }
 
     // The font: offered, never asserted.
     let fontPick = null;
@@ -9351,6 +9452,9 @@ window.TEMPLATE_SETUPS = TEMPLATE_SETUPS;
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             label: name, style: fontPick ? { font: fontPick } : {},
+            devices: Object.keys(deviceBinds).map((k) => ({
+              kind: k, asset_id: deviceBinds[k],
+            })),
           }),
         });
         const d = await r.json();

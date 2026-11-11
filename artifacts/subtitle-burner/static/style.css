@@ -1999,6 +1999,26 @@ header.app-header {
   background: #f472b6;
   border-color: #f472b6;
 }
+/* Binding a picture to a measured graphic device. Same grid row as the
+   font picker, since both answer "this part needs you". */
+.ll-bind {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ll-bind-pick {
+  flex: 1 1 180px;
+  min-width: 0;
+  font: 500 .78rem/1.2 inherit;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid #2a2f3a;
+  background: rgba(36, 48, 73, .5);
+  color: #e2e8f0;
+}
 .ll-note {
   margin: 8px 0 0;
   padding: 8px 11px;

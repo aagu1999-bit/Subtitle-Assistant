@@ -7404,3 +7404,344 @@ def test_the_strip_control_is_named_for_what_it_does(app_mod):
     assert 'c.mode === "wide_punch"' in fn
     assert "Strip size" in fn, "wide/close mode still says 'Split at'"
     assert "Split at" in fn, "the media split lost its own wording"
+
+
+# --- the device budget, which until now went nowhere -----------------------
+# The reference analysis wrote `devices` onto every learned pack -- the
+# measured rate for each kind of graphic -- and NOTHING read that key. The
+# budget was measured, stored and discarded, which is the same shape as
+# add_effect, `panels`, `ratio` and "Exactly N" one more time. These tests
+# are about the key being read.
+
+def _write_png(path: Path, w: int, h: int) -> Path:
+    """A real PNG, so _verify_image_asset's decode is exercised rather than
+    stubbed -- the whole point of that check is that it opens the bytes."""
+    from PIL import Image
+    Image.new("RGB", (w, h), (120, 40, 200)).save(path)
+    return path
+
+
+def test_a_url_becomes_an_asset_like_an_upload(app_mod, tmp_path, monkeypatch):
+    """Canva hands back a download URL for an export. Downloading it by hand
+    and uploading it again is two steps that accomplish nothing."""
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    png = tmp_path / "src.png"
+    _write_png(png, 64, 48)
+
+    def fake_dl(url, dest_stem, timeout=25):
+        dest = dest_stem.with_suffix(".png")
+        dest.write_bytes(png.read_bytes())
+        return dest
+
+    monkeypatch.setattr(app_mod, "_download_url_to_asset", fake_dl)
+    c = app_mod.app.test_client()
+    got = c.post("/import-asset-url", json={
+        "url": "https://export.example/card.png", "source": "canva"}).get_json()
+    assert got.get("asset_id"), got
+    assert got["kind"] == "image"
+    # The same contract an upload satisfies: on disk, with a sidecar, and
+    # findable by the pickers.
+    assert app_mod._find_asset_path(got["asset_id"]) is not None
+    meta = app_mod._read_asset_meta(got["asset_id"])
+    assert meta["source"] == "canva", "where it came from was not recorded"
+    assert meta["origin_url"].endswith("card.png")
+    assert got["filename"] == "card.png", "the name from the URL was lost"
+    listed = {a["asset_id"] for a in c.get("/list-assets").get_json()["assets"]}
+    assert got["asset_id"] in listed, "the import never reaches the picker"
+
+
+def test_a_url_that_is_not_a_picture_is_refused(app_mod, tmp_path, monkeypatch):
+    """_download_url_to_asset names the file from the Content-Type header, so
+    an expired export link that redirects to a sign-in page would be written
+    out as a .jpg and then sit in the picker rendering as nothing. A broken
+    asset is worse than a refusal, because the refusal says what happened."""
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+
+    def fake_dl(url, dest_stem, timeout=25):
+        dest = dest_stem.with_suffix(".jpg")       # the header's claim
+        dest.write_bytes(b"<!doctype html><title>Sign in</title>" * 60)
+        return dest
+
+    monkeypatch.setattr(app_mod, "_download_url_to_asset", fake_dl)
+    c = app_mod.app.test_client()
+    r = c.post("/import-asset-url", json={"url": "https://x.example/a.jpg"})
+    assert r.status_code == 400
+    why = (r.get_json() or {}).get("error") or ""
+    assert "picture" in why.lower(), why
+    # And nothing was kept: an asset that renders as nothing is the defect.
+    assert not list(tmp_path.glob("*.jpg")), "the broken file was stored anyway"
+    assert c.get("/list-assets").get_json()["assets"] == []
+    # A non-URL is refused before any transfer is attempted.
+    assert c.post("/import-asset-url",
+                  json={"url": "file:///etc/passwd"}).status_code == 400
+
+
+def test_a_bound_picture_survives_the_pack_round_trip(app_mod, temp_db,
+                                                      tmp_path, monkeypatch):
+    """Review sheet -> /keep -> _db_save_style_pack -> _resolve_style_pack.
+    That handover has eaten six fields now, so it is asserted."""
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    aid = "b" * 32
+    _write_png(tmp_path / f"{aid}.png", 40, 40)
+    app_mod._save_reference({
+        "id": "rb", "created_at": 0, "source": "reel.mp4", "sheet": "rb.jpg",
+        "pack": {"label": "L", "canvas": "9x16", "style": {},
+                 "devices": [
+                     {"kind": "document_card", "op": "make_image", "per_min": 0.8},
+                     {"kind": "text_message", "op": "add_text_message", "per_min": 1.4},
+                 ]},
+        "provenance": {}, "unresolved": [], "notes": [],
+    })
+    c = app_mod.app.test_client()
+    r = c.post("/reference/rb/keep", json={
+        "label": "Bound look",
+        "devices": [
+            {"kind": "document_card", "asset_id": aid},
+            {"kind": "text_message", "asset_id": "f" * 32},   # no such file
+            {"kind": "invented_card", "asset_id": aid},       # never measured
+        ],
+    }).get_json()
+    assert r["ok"], r
+
+    pack = app_mod._resolve_style_pack(r["id"])
+    by_kind = {d["kind"]: d for d in pack["devices"]}
+    assert by_kind["document_card"]["asset_id"] == aid, \
+        "the binding did not survive the pack handover"
+    # An id with no file unbinds rather than binds: a device pointing at a
+    # missing asset would place nothing and report that it had.
+    assert "asset_id" not in by_kind["text_message"]
+    # A binding for a device the analysis never measured is dropped -- the
+    # device list IS the measurement.
+    assert "invented_card" not in by_kind
+    assert by_kind["text_message"]["per_min"] == 1.4, "the rate was lost"
+
+
+def test_the_device_budget_is_a_cap_not_a_schedule(app_mod):
+    """0.8 a minute over 90 seconds is one, never two."""
+    pack = {"devices": [{"kind": "document_card", "op": "make_image",
+                         "per_min": 0.8}]}
+    assert app_mod._pack_device_budget(pack, 90.0)[0]["max"] == 1
+    assert app_mod._pack_device_budget(pack, 240.0)[0]["max"] == 3
+    # Seen at all means at least one chance, or anything measured under one a
+    # minute could never appear on a short edit -- a measurement discarded
+    # rather than respected.
+    assert app_mod._pack_device_budget(pack, 20.0)[0]["max"] == 1
+    # A kind outside the closed list is not a budget for anything.
+    assert app_mod._pack_device_budget(
+        {"devices": [{"kind": "hologram", "per_min": 3}]}, 120.0) == []
+    assert app_mod._pack_device_budget({}, 120.0) == []
+    # The op comes from REF_DEVICES, not from whatever was stored.
+    got = app_mod._pack_device_budget(
+        {"devices": [{"kind": "photo_collage", "op": "nonsense",
+                      "per_min": 1}]}, 60.0)
+    assert got[0]["op"] == "add_carousel"
+
+
+def test_the_budget_reaches_the_prompt(app_mod):
+    """The assertion that failed before any of this existed, because nothing
+    read `devices` at all."""
+    base = app_mod._build_effect_suggestion_prompt("[00:01] hello", 90.0, 4)
+    assert "document_card" not in base
+    # With no devices the text must be byte-identical to what it was before
+    # the budget existed -- every edit on a built-in pack provably untouched.
+    assert app_mod._build_effect_suggestion_prompt(
+        "[00:01] hello", 90.0, 4, devices=None) == base
+    assert app_mod._build_effect_suggestion_prompt(
+        "[00:01] hello", 90.0, 4, devices=[]) == base
+
+    budget = app_mod._pack_device_budget(
+        {"devices": [{"kind": "document_card", "per_min": 0.8,
+                      "asset_id": "a" * 32}]}, 90.0)
+    with_dev = app_mod._build_effect_suggestion_prompt(
+        "[00:01] hello", 90.0, 4, devices=budget)
+    assert "document_card" in with_dev
+    assert "at most 1" in with_dev, "the cap never reaches the model"
+    assert "already exists" in with_dev, "it is not told the card exists"
+    assert '"graphics"' in with_dev, "no shape for it to answer in"
+    # The camera-move half is untouched by the addition.
+    assert "punch_zoom" in with_dev and "zoom_1_5" in with_dev
+
+
+def test_a_graphic_outside_the_budget_is_discarded(app_mod):
+    budget = app_mod._pack_device_budget(
+        {"devices": [{"kind": "document_card", "per_min": 0.8}]}, 90.0)
+    raw = [
+        {"kind": "document_card", "start_time": 10, "end_time": 13,
+         "quote": "the fact"},
+        {"kind": "document_card", "start_time": 40, "end_time": 43},  # over cap
+        {"kind": "hologram", "start_time": 60, "end_time": 63},       # invented
+        {"kind": "document_card", "start_time": 11, "end_time": 12},  # overlaps
+    ]
+    got = app_mod._sanitize_graphic_suggestions(raw, 90.0, budget)
+    assert len(got) == 1, got
+    assert got[0]["kind"] == "document_card"
+    assert got[0]["op"] == "make_image"
+    assert got[0]["quote"] == "the fact"
+    # An absurd duration is clamped rather than trusted.
+    long = app_mod._sanitize_graphic_suggestions(
+        [{"kind": "document_card", "start_time": 5, "end_time": 85}],
+        90.0, budget)
+    assert long[0]["end_time"] - long[0]["start_time"] <= 6.0
+    # No budget means no graphics, whatever the model said.
+    assert app_mod._sanitize_graphic_suggestions(raw, 90.0, []) == []
+
+
+def test_a_bound_device_is_placed_and_an_unbound_one_says_why(
+        app_mod, temp_db, tmp_path, monkeypatch):
+    """The half that makes it real. A bound device carries the picture that
+    was designed for it; an unbound one must not silently not happen, which
+    is how `devices` spent its whole life measured and ignored."""
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    aid = "c" * 32
+    _write_png(tmp_path / f"{aid}.png", 40, 40)
+    # No generation configured, so the unbound fallback cannot quietly
+    # succeed and hide the reporting path.
+    monkeypatch.setattr(app_mod, "_gemini_image_ready", lambda: False)
+    pack = {"label": "P", "canvas": "9x16", "style": {},
+            "devices": [
+                {"kind": "document_card", "op": "make_image",
+                 "per_min": 2.0, "asset_id": aid},
+                {"kind": "text_message", "op": "add_text_message",
+                 "per_min": 2.0},
+            ]}
+    graphics = app_mod._sanitize_graphic_suggestions(
+        [{"kind": "document_card", "start_time": 10, "end_time": 13,
+          "quote": "a fact"},
+         {"kind": "text_message", "start_time": 30, "end_time": 33,
+          "quote": "a message"}],
+        90.0, app_mod._pack_device_budget(pack, 90.0))
+    assert len(graphics) == 2, graphics
+
+    tl = app_mod._build_ai_edit_timeline(
+        "job1", 0.0, 90.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False, graphics=graphics)
+
+    overlays = tl["tracks"]["overlay"]
+    assert len(overlays) == 1, "the bound card was not placed, or both were"
+    o = overlays[0]
+    assert o["asset_id"] == aid, "the overlay does not carry THAT picture"
+    assert o["source"] == "device_bound"
+    assert o["device_kind"] == "document_card"
+    assert abs(o["start"] - 10.0) < 0.05
+    # contain, never cover: a designed card cropped to fill a box is a card
+    # with its edges cut off.
+    assert o["fit"] == "contain"
+    assert not o["ken_burns"], "a card with type on it must not drift"
+
+    report = {g["kind"]: g for g in tl["edit_receipt"]["graphics"]}
+    assert report["document_card"]["placed"] is True
+    assert report["document_card"]["bound"] is True
+    assert report["text_message"]["placed"] is False
+    assert "bind" in report["text_message"]["why"].lower(), \
+        report["text_message"]["why"]
+    # And it is said on screen, not only in the payload.
+    labels = " | ".join(r.get("label", "") for r in tl["edit_receipt"]["rows"])
+    assert "text message not placed" in labels, labels
+    assert tl["ai_edit"]["devices_placed"] == 1
+    assert tl["ai_edit"]["devices_unplaced"] == 1
+
+
+def test_no_devices_changes_nothing_about_a_builtin_edit(app_mod, temp_db):
+    """Every built-in pack has no devices, so this path must be provably the
+    same as before the budget existed."""
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    assert not pack.get("devices")
+    before = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 30.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False)
+    after = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 30.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False, graphics=[])
+    assert before["tracks"]["overlay"] == after["tracks"]["overlay"] == []
+    assert after["edit_receipt"]["graphics"] == []
+    assert after["ai_edit"]["devices_placed"] == 0
+    # No graphic rows when there are no graphics.
+    assert not [r for r in after["edit_receipt"]["rows"]
+                if r.get("kind") == "graphic"]
+
+
+def test_the_picture_for_a_device_can_be_bound_from_the_sheet(app_mod):
+    """A budget nobody can attach a picture to is the measured-and-ignored
+    bug with one extra step. The row has to carry the control."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("function wireLearnLook"):]
+    assert "function deviceRow" in body, "devices have no binding control"
+    assert '"/list-assets"' in body, "the picker is built from nothing"
+    assert '"/import-asset-url"' in body, "a link cannot be pasted in"
+    assert '"canva"' in body, "the import does not record where it came from"
+    # The binding must reach the server on Keep, or it is a control that
+    # does nothing -- which this project has shipped twice.
+    keep = body[body.index('/keep"'):]
+    keep = keep[:keep.index("catch")]
+    assert "devices:" in keep, "the bindings are never sent"
+    assert "deviceBinds" in keep
+    css = (BURNER / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".ll-bind" in css, "the control has no styling"
+
+
+def test_a_learned_look_places_its_card_through_the_seeder(
+        app_mod, temp_db, tmp_path, monkeypatch):
+    """End to end on the path that matters: a kept pack carrying a bound
+    picture, through /ai-edit-seed, to an overlay clip holding THAT asset.
+
+    Every step in between is a hand-written handover, and this one is new.
+    """
+    monkeypatch.setattr(app_mod, "REFERENCE_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    aid = "9" * 31 + "a"
+    _write_png(tmp_path / f"{aid}.png", 40, 40)
+
+    prompts = []
+
+    def fake(prompt):
+        prompts.append(prompt)
+        return {"effects": [], "graphics": [
+            {"kind": "document_card", "start_time": 6.0, "end_time": 9.0,
+             "quote": "the number that matters", "reason": "a stated fact"},
+            # Over the cap for a 24-second edit, and discarded on the way out.
+            {"kind": "document_card", "start_time": 14.0, "end_time": 17.0},
+        ]}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    c = app_mod.app.test_client()
+    app_mod._save_reference({
+        "id": "re2e", "created_at": 0, "source": "reel.mp4", "sheet": "x.jpg",
+        "pack": {"label": "L", "canvas": "9x16", "style": {},
+                 "devices": [{"kind": "document_card", "op": "make_image",
+                              "per_min": 0.8}]},
+        "provenance": {}, "unresolved": [], "notes": [],
+    })
+    kept = c.post("/reference/re2e/keep", json={
+        "label": "Carded", "devices": [{"kind": "document_card",
+                                        "asset_id": aid}]}).get_json()
+    assert kept["ok"], kept
+
+    app_mod.jobs["gsrc"] = {
+        "status": "awaiting_edit", "filename": "x.mp4",
+        "words": [{"word": w, "start": i * 0.5, "end": i * 0.5 + 0.45}
+                  for i, w in enumerate("one two three four".split() * 12)],
+    }
+    try:
+        got = c.post("/ai-edit-seed", json={
+            "source_job_id": "gsrc", "style_pack": kept["id"],
+            "full_video": True, "insert_media": False}).get_json()
+    finally:
+        app_mod.jobs.pop("gsrc", None)
+
+    # The budget reached the model, naming the cap and that a card exists.
+    assert "document_card" in prompts[0], "the budget never left the pack"
+    assert "already exists" in prompts[0]
+    assert got["device_budget"][0]["asset_id"] == aid
+    # The cap held on the way back.
+    assert len(got["graphics"]) == 1, got["graphics"]
+
+    overlays = got["timeline"]["tracks"]["overlay"]
+    assert len(overlays) == 1, overlays
+    assert overlays[0]["asset_id"] == aid, \
+        "the overlay does not carry the bound picture"
+    assert overlays[0]["source"] == "device_bound"
+    assert overlays[0]["fit"] == "contain"
+    rows = " | ".join(r.get("label", "")
+                      for r in got["timeline"]["edit_receipt"]["rows"])
+    assert "your card" in rows, rows
