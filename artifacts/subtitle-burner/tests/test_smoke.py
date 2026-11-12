@@ -7745,3 +7745,456 @@ def test_a_learned_look_places_its_card_through_the_seeder(
     rows = " | ".join(r.get("label", "")
                       for r in got["timeline"]["edit_receipt"]["rows"])
     assert "your card" in rows, rows
+
+
+# --- interview cut grammar: the relay cut and the pause push ---------------
+# Two gaps, both narrow. The multi-interview normalizer floors every clip at
+# 3.0s, so a one-word smash cut has never been expressible. And the taste
+# pass already decides which silences carry comedy or shock, and already
+# keeps them out of the cut ranges -- but nothing on the render side ever
+# read that decision, so a protected pause survived and then sat there
+# perfectly static.
+
+def _relay_words(opener, job_speakers=("S0", "S1"), t0=0.0):
+    """An interviewer turn, then an answer opening with `opener`."""
+    out, t = [], t0
+    for w in "so would you say that".split():
+        out.append({"word": w, "start": t, "end": t + 0.2,
+                    "speaker": job_speakers[0]})
+        t += 0.25
+    t += 0.7
+    for w in opener.split():
+        out.append({"word": w, "start": t, "end": t + 0.3,
+                    "speaker": job_speakers[1]})
+        t += 0.32
+    t += 0.5
+    for w in "because it really matters to me".split():
+        out.append({"word": w, "start": t, "end": t + 0.2,
+                    "speaker": job_speakers[1]})
+        t += 0.25
+    return out
+
+
+def test_the_relay_finds_the_anchor_and_takes_its_time_from_the_words(app_mod):
+    """The model's job is which words; the code's job is where the cut is.
+
+    Asking a model for a timestamp at one-word precision is asking it for the
+    one thing it cannot do, so it is never asked.
+    """
+    words = _relay_words("absolutely")
+    got = app_mod._relay_answer_openings(words, "job1")
+    assert len(got) == 1, got
+    hit = got[0]
+    assert hit["polarity"] == "affirm"
+    assert hit["text"].lower().startswith("absolutely")
+    # The times are the word's own, to the millisecond.
+    anchor = next(w for w in words if w["word"] == "absolutely")
+    assert abs(hit["start_time"] - anchor["start"]) < 1e-6
+    assert hit["source_job_id"] == "job1"
+
+    # A negative anchor is found too, and told apart.
+    neg = app_mod._relay_answer_openings(_relay_words("no way"), "j2")
+    assert neg and neg[0]["polarity"] == "negate"
+
+    # An answer that is not an anchor is not a candidate -- the relay is a
+    # consensus cut, not "the first words of every turn".
+    assert app_mod._relay_answer_openings(_relay_words("well it depends"),
+                                          "j3") == []
+
+
+def test_a_leading_um_does_not_become_the_cut(app_mod):
+    """"Um, absolutely" has to start on *absolutely*, or the smash cut opens
+    on a stall."""
+    words = _relay_words("um absolutely")
+    got = app_mod._relay_answer_openings(words, "j")
+    assert len(got) == 1, got
+    anchor = next(w for w in words if w["word"] == "absolutely")
+    assert abs(got[0]["start_time"] - anchor["start"]) < 1e-6
+    assert not got[0]["text"].lower().startswith("um")
+
+    # But a filler that IS the answer survives. "Right." and "Okay" are both
+    # in the filler list and both real answers.
+    assert app_mod._relay_answer_openings(_relay_words("right"), "j")
+
+
+def test_the_relay_works_without_diarization(app_mod):
+    """One long interview that was never analysed still has turns in it --
+    falling back to a speech gap is what makes the feature usable on a raw
+    transcript instead of silently finding nothing."""
+    words = _relay_words("absolutely")
+    for w in words:
+        w.pop("speaker", None)
+    assert app_mod._relay_answer_openings(words, "j"), \
+        "no anchors found once the speaker labels are gone"
+
+
+def test_the_three_second_floor_is_lifted_for_relay_only(app_mod, temp_db):
+    """The one line that made a smash cut impossible -- and the arc path it
+    must not leak into."""
+    app_mod.jobs["mj"] = {"status": "done", "filename": "a.mp4", "words": [
+        {"word": "absolutely", "start": 4.0, "end": 4.6}]}
+    try:
+        micro = {"source_job_id": "mj", "start_time": 4.0, "end_time": 4.6,
+                 "text": "absolutely"}
+        got = app_mod._normalize_micro_clip(dict(micro), {"mj"}, pad=0.0)
+        assert got is not None, "a 0.6s clip is still rejected"
+        assert abs(got["end_time"] - got["start_time"] - 0.6) < 1e-6
+        assert got["arc_role"] == "relay"
+        # The arc normalizer is untouched. It is nested inside the route, so
+        # this is proved through the route rather than by calling it: the
+        # same sub-3s range is still thrown away there.
+        app_mod.jobs["mj2"] = dict(app_mod.jobs["mj"])
+        import unittest.mock as _mock
+        with _mock.patch.object(
+                app_mod, "_gemini_generate_clip_suggestions",
+                lambda prompt: {"arc": [
+                    {"role": "hook", "source_job_id": "mj",
+                     "start_time": 4.0, "end_time": 4.6},
+                ], "themes": []}):
+            r = app_mod.app.test_client().post(
+                "/multi-interview/plan", json={"job_ids": ["mj", "mj2"]})
+        assert r.status_code == 500, "a 0.6s arc beat was accepted"
+        app_mod.jobs.pop("mj2", None)
+        # Below the relay's own floor is still refused.
+        assert app_mod._normalize_micro_clip(
+            {"source_job_id": "mj", "start_time": 4.0, "end_time": 4.1},
+            {"mj"}, pad=0.0) is None
+        # An unknown source is refused.
+        assert app_mod._normalize_micro_clip(dict(micro), {"other"}) is None
+    finally:
+        app_mod.jobs.pop("mj", None)
+
+
+def test_the_pad_is_one_tunable_constant(app_mod, temp_db):
+    """Zero padding was asked for; the repo's own silence code keeps 0.05s so
+    a late Whisper timestamp cannot lop off a trailing consonant. Both get
+    rendered before the constant is settled, so both have to work."""
+    app_mod.jobs["pj"] = {"status": "done", "filename": "a.mp4", "words": [
+        {"word": "absolutely", "start": 4.0, "end": 4.6},
+        {"word": "yes", "start": 7.0, "end": 7.4}]}
+    try:
+        base = {"source_job_id": "pj", "start_time": 4.0, "end_time": 4.6}
+        zero = app_mod._normalize_micro_clip(dict(base), {"pj"}, pad=0.0)
+        padded = app_mod._normalize_micro_clip(dict(base), {"pj"}, pad=0.05)
+        assert abs(zero["start_time"] - 4.0) < 1e-6
+        assert abs(padded["start_time"] - 3.95) < 1e-6
+        assert padded["end_time"] > zero["end_time"]
+        # The default is the constant, not a literal buried in the function.
+        dflt = app_mod._normalize_micro_clip(dict(base), {"pj"})
+        assert abs(dflt["start_time"] - (4.0 - app_mod.RELAY_PAD_S)) < 1e-6
+        # It never runs past the end of the transcript.
+        assert padded["end_time"] <= 4.6 + 0.05 + 1e-6
+        # And it never runs past the transcript's own end.
+        tail = app_mod._normalize_micro_clip(
+            {"source_job_id": "pj", "start_time": 7.0, "end_time": 7.4},
+            {"pj"}, pad=5.0)
+        assert tail["end_time"] <= 7.4 + 1e-6
+    finally:
+        app_mod.jobs.pop("pj", None)
+
+
+def test_relay_mode_runs_on_one_long_interview(app_mod, temp_db, monkeypatch):
+    """"or just one long interview" -- an arc needs two sources to cross
+    between, a relay does not."""
+    monkeypatch.setattr(app_mod, "_relay_rank_with_gemini", lambda c: None)
+    words = (_relay_words("absolutely", ("S0", "S1"), 0.0)
+             + _relay_words("no way", ("S0", "S2"), 20.0))
+    app_mod.jobs["solo"] = {"status": "done", "filename": "long.mp4",
+                            "words": words}
+    c = app_mod.app.test_client()
+    try:
+        r = c.post("/multi-interview/plan",
+                   json={"job_ids": ["solo"], "mode": "relay"})
+        got = r.get_json()
+        assert r.status_code == 200, got
+        assert got["mode"] == "relay"
+        assert len(got["arc"]) == 2, got["arc"]
+        assert {b["polarity"] for b in got["arc"]} == {"affirm", "negate"}
+        # Every cut is a micro-clip, which the arc path could never produce.
+        for b in got["arc"]:
+            assert b["end_time"] - b["start_time"] < 3.0
+            assert b["arc_role"] == "relay"
+        # The dissent lands last: a chorus broken at the end reads as a
+        # debate, which is the point of the shape.
+        assert got["arc"][-1]["polarity"] == "negate"
+        # An arc on one source is still refused.
+        assert c.post("/multi-interview/plan",
+                      json={"job_ids": ["solo"]}).status_code == 400
+    finally:
+        app_mod.jobs.pop("solo", None)
+
+
+def test_the_relay_alternates_the_scale(app_mod, temp_db, monkeypatch):
+    """A flat run of hard cuts reads as a glitch. 1.0 / 1.15 / 1.0 is what
+    makes it kinetic -- and `hold_1_15` has to exist for it to render."""
+    assert app_mod._PUNCH_PEAK["hold_1_15"] == 1.15
+    assert "hold_1_15" in app_mod._PUNCH_HOLD_INTENSITIES, \
+        "it would decay back to 1.0 instead of holding"
+    monkeypatch.setattr(app_mod, "_relay_rank_with_gemini", lambda c: None)
+    words = (_relay_words("absolutely", ("S0", "S1"), 0.0)
+             + _relay_words("yes", ("S0", "S2"), 20.0)
+             + _relay_words("definitely", ("S0", "S3"), 40.0))
+    app_mod.jobs["alt"] = {"status": "done", "filename": "x.mp4", "words": words}
+    c = app_mod.app.test_client()
+    try:
+        arc = c.post("/multi-interview/plan",
+                     json={"job_ids": ["alt"], "mode": "relay"}).get_json()["arc"]
+        assert [b["relay_zoom"] for b in arc] == [False, True, False], arc
+    finally:
+        app_mod.jobs.pop("alt", None)
+
+
+def test_a_bad_ranking_cannot_move_a_cut_off_a_word(app_mod, temp_db,
+                                                    monkeypatch):
+    """The model returns indices, never times. The worst a wrong answer can
+    do is order the clips oddly."""
+    words = _relay_words("absolutely")
+    app_mod.jobs["rk"] = {"status": "done", "filename": "x.mp4", "words": words}
+    anchor = next(w for w in words if w["word"] == "absolutely")
+
+    tmax = float(words[-1]["end"])
+
+    def evil(cands):
+        # A ranking that also tries to dictate the timing: one entry far past
+        # the end of the transcript, one still on its real word.
+        return [dict(cands[0], start_time=99.0, end_time=120.0),
+                dict(cands[0])]
+
+    monkeypatch.setattr(app_mod, "_relay_rank_with_gemini", evil)
+    c = app_mod.app.test_client()
+    try:
+        got = c.post("/multi-interview/plan",
+                     json={"job_ids": ["rk"], "mode": "relay"}).get_json()
+        arc = got.get("arc") or []
+        # The invented range is dropped; the real one survives on its word.
+        assert len(arc) == 1, got
+        assert arc[0]["end_time"] <= tmax + app_mod.RELAY_PAD_S + 1e-6
+        assert abs(arc[0]["start_time"]
+                   - (anchor["start"] - app_mod.RELAY_PAD_S)) < 1e-6
+
+        # And when EVERY entry is nonsense, the answer is a refusal rather
+        # than a garbage cut.
+        monkeypatch.setattr(app_mod, "_relay_rank_with_gemini",
+                            lambda cands: [dict(cands[0], start_time=99.0,
+                                                end_time=120.0)])
+        r2 = c.post("/multi-interview/plan",
+                    json={"job_ids": ["rk"], "mode": "relay"})
+        assert r2.status_code == 400
+        assert not (r2.get_json() or {}).get("arc")
+    finally:
+        app_mod.jobs.pop("rk", None)
+
+
+def test_relay_with_no_anchors_says_so(app_mod, temp_db, monkeypatch):
+    """A refusal that names what it was looking for beats an empty list."""
+    monkeypatch.setattr(app_mod, "_relay_rank_with_gemini", lambda c: None)
+    app_mod.jobs["dull"] = {"status": "done", "filename": "x.mp4",
+                            "words": _relay_words("well it depends")}
+    c = app_mod.app.test_client()
+    try:
+        r = c.post("/multi-interview/plan",
+                   json={"job_ids": ["dull"], "mode": "relay"})
+        assert r.status_code == 400
+        why = r.get_json()["error"]
+        assert "absolutely" in why.lower(), why
+    finally:
+        app_mod.jobs.pop("dull", None)
+
+
+def test_mode_absent_leaves_the_arc_prompt_untouched(app_mod, temp_db,
+                                                     monkeypatch):
+    """Everything that already works must be provably unchanged."""
+    seen = {}
+
+    def fake(prompt):
+        seen["prompt"] = prompt
+        return {"arc": [], "themes": []}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    for jid in ("a1", "a2"):
+        app_mod.jobs[jid] = {"status": "done", "filename": f"{jid}.mp4",
+                             "words": _relay_words("absolutely")}
+    c = app_mod.app.test_client()
+    try:
+        c.post("/multi-interview/plan", json={"job_ids": ["a1", "a2"]})
+        assert "MULTI-INTERVIEW reel" in seen["prompt"]
+        assert "hook" in seen["prompt"] and "closer" in seen["prompt"]
+        assert "relay" not in seen["prompt"].lower(), \
+            "relay wording leaked into the arc prompt"
+        # And relay never reaches the arc planner at all.
+        seen.clear()
+        c.post("/multi-interview/plan",
+               json={"job_ids": ["a1", "a2"], "mode": "relay"})
+        assert "prompt" not in seen, "relay went through the arc prompt"
+    finally:
+        for jid in ("a1", "a2"):
+            app_mod.jobs.pop(jid, None)
+
+
+def test_a_protected_pause_gets_a_push_and_an_ordinary_gap_does_not(
+        app_mod, temp_db):
+    """_taste_protect_silence_gaps already decides which silences carry
+    comedy or shock, and _recommended_cuts_for_words already keeps them out
+    of the cut ranges. Nothing ever READ that decision, so the pause survived
+    and then sat there static -- which reads as a stall, not as tension."""
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    gaps = [
+        {"start": 10.0, "end": 12.0, "duration": 2.0, "taste_protected": True,
+         "taste_sentiment": "humor", "taste_reason": "punchline needs the hang"},
+        {"start": 30.0, "end": 31.4, "duration": 1.4, "taste_protected": True,
+         "taste_sentiment": "shock", "taste_reason": "reaction beat"},
+    ]
+    tl = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 60.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False, protected_gaps=gaps)
+
+    ken = [e for e in tl["tracks"]["effects"] if e["type"] == "ken_burns"]
+    assert len(ken) == 2, ken
+    assert all(e["direction"] == "in" for e in ken)
+    # Longer pause, stronger ramp.
+    by_start = {e["start"]: e for e in ken}
+    assert by_start[10.0]["intensity"] == "med"      # 2.0s
+    assert by_start[30.0]["intensity"] == "low"      # 1.4s
+    assert abs(by_start[10.0]["out"] - 2.0) < 1e-6
+
+    # Said on screen, with what it was holding.
+    labels = " | ".join(r.get("label", "") for r in tl["edit_receipt"]["rows"])
+    assert "Held the humor pause" in labels, labels
+    assert tl["ai_edit"]["pauses_held"] == 2
+
+    # A gap the taste pass did NOT protect gets nothing -- the push is for
+    # the beat, not for every silence.
+    plain = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 60.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False, protected_gaps=[])
+    assert not [e for e in plain["tracks"]["effects"]
+                if e["type"] == "ken_burns"]
+    assert plain["ai_edit"]["pauses_held"] == 0
+    assert plain["edit_receipt"]["pauses"] == []
+    # And a pause too short to amplify is skipped rather than twitched.
+    tiny = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 60.0, pack, "med", [], [], label="t", words=[],
+        insert_media=False,
+        protected_gaps=[{"start": 5.0, "end": 5.6, "duration": 0.6,
+                         "taste_protected": True}])
+    assert tiny["ai_edit"]["pauses_held"] == 0
+
+
+def test_the_push_lands_on_the_right_silence_after_cuts_compress(
+        app_mod, temp_db):
+    """The overlay seeder punts on cut compression -- fine for a b-roll photo
+    that only has to be near the right moment, not for an effect whose whole
+    job is to sit on ONE silence.
+
+    The naive `t - t_in` passes a test with no earlier cut, so the fixture
+    has one.
+    """
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    cuts = [[2.0, 5.0], [6.0, 7.0]]          # 4.0s removed before the gap
+    gap = [{"start": 20.0, "end": 22.0, "duration": 2.0,
+            "taste_protected": True, "taste_sentiment": "dramatic"}]
+    tl = app_mod._build_ai_edit_timeline(
+        "j", 0.0, 60.0, pack, "med", cuts, [], label="t", words=[],
+        insert_media=False, protected_gaps=gap)
+    ken = [e for e in tl["tracks"]["effects"] if e["type"] == "ken_burns"]
+    assert len(ken) == 1
+    # 20.0 source - 4.0 cut = 16.0 output. A naive offset would say 20.0.
+    assert abs(ken[0]["start"] - 16.0) < 1e-6, ken[0]["start"]
+
+    # The helper itself, since it is the thing that can be subtly wrong.
+    assert app_mod._tl_kept_span(0.0, 10.0, cuts) == 6.0
+    assert app_mod._tl_kept_span(0.0, 10.0, []) == 10.0
+    assert app_mod._tl_source_to_output_time(20.0, 0.0, 60.0, cuts) == 16.0
+    # Outside every range is None, not 0 -- a silent 0 would stack every
+    # unmappable push at the head of the edit.
+    assert app_mod._tl_source_to_output_time(
+        99.0, 0.0, 60.0, cuts, [(0.0, 60.0)]) is None
+
+
+def test_the_seeder_hands_the_protected_pauses_over(app_mod, temp_db,
+                                                    monkeypatch):
+    """The handover that did not exist: they were computed here and returned
+    to the client, and the render side never saw them."""
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions",
+                        lambda p: {"effects": []})
+    seen = {}
+    real = app_mod._build_ai_edit_timeline
+
+    def spy(*a, **kw):
+        seen["protected_gaps"] = kw.get("protected_gaps")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(app_mod, "_build_ai_edit_timeline", spy)
+    monkeypatch.setattr(
+        app_mod, "_recommended_cuts_for_words",
+        lambda *a, **kw: {
+            "cuts": [], "cut_details": [], "filler_count": 0,
+            "silence_gaps": [
+                {"start": 3.0, "end": 5.0, "duration": 2.0,
+                 "taste_protected": True, "taste_sentiment": "humor"},
+                {"start": 9.0, "end": 10.5, "duration": 1.5,
+                 "taste_protected": False},
+            ],
+            "taste": {}, "stats": {},
+        })
+    app_mod.jobs["ps"] = {
+        "status": "awaiting_edit", "filename": "x.mp4",
+        "words": [{"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+                  for i, w in enumerate("one two three four".split() * 10)],
+    }
+    try:
+        got = app_mod.app.test_client().post("/ai-edit-seed", json={
+            "source_job_id": "ps", "style_pack": "clarity",
+            "full_video": True, "insert_media": False}).get_json()
+    finally:
+        app_mod.jobs.pop("ps", None)
+    handed = seen["protected_gaps"]
+    assert handed is not None, "the gaps never reached the builder"
+    # Only the protected ones: an ordinary silence is cut, not amplified.
+    assert [g["start"] for g in handed] == [3.0]
+    assert got["pauses_held"] == 1
+
+
+def test_the_relay_zoom_reaches_the_timeline(app_mod):
+    """The alternating scale is decided server-side, where the ordering is.
+    Two hops can drop it: the compile queue and the clips loop."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    q = js[js.index("function _queueClipFromPlan"):]
+    q = q[:q.index("\n}")]
+    assert "relay_zoom" in q, "the compile queue drops the alternating scale"
+
+    tjs = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
+    loop = tjs[tjs.index("const clips = Array.isArray(opts.clips)"):]
+    loop = loop[:loop.index("// Single-job seed")]
+    assert "item.relay_zoom" in loop, "nothing reads it when building Main"
+    assert "hold_1_15" in loop, "the zoom is placed at the wrong strength"
+    # Output time has to accumulate by the clip's real length, or every
+    # zoom stacks at 0. Asserting the bare name, or even "+=", passes on
+    # `_relayOutStart += 0` -- which is the self-exempting check this repo
+    # has shipped twice, so this pins the arithmetic itself.
+    assert ("_relayOutStart += Math.max(0, Number(_lastClip.out) "
+            "- Number(_lastClip.in))") in loop, \
+        "the running output time does not advance by the clip length"
+
+
+def test_uploading_several_interviews_ticks_their_boxes(app_mod):
+    """runTemplateBuild already has every job id -- it uploaded each file and
+    waited for every transcript. Then it used the first and left the rest
+    unticked, so you hunt for videos the app just finished processing."""
+    js = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    hand = js[js.index("function _tplHandOff"):]
+    hand = hand[:hand.index("\n/** Tick the boxes")]
+    assert "_tplPreselectMultiJobs(cfg.job_ids" in hand, \
+        "the other uploaded jobs are still thrown away"
+    fn = js[js.index("function _tplPreselectMultiJobs"):]
+    fn = fn[:fn.index("\n}\n")]
+    # It must tick by VALUE against the ids, not blanket-check the list.
+    # `want.has(b.value)` survives on the filter line even when the forEach
+    # is changed to check every box, so the forEach target is what is
+    # asserted -- the behaviour, not a word that happens to be nearby.
+    assert "const hit = boxes.filter((b) => want.has(b.value));" in fn
+    assert "hit.forEach((b) => { b.checked = true; });" in fn, \
+        "it checks every box rather than the ones it uploaded"
+    assert "boxes.forEach((b) => { b.checked = true; });" not in fn
+    # The list is drawn by the jobs poller, so a single attempt races it.
+    assert "setTimeout(tick" in fn, "one attempt races the jobs poller"

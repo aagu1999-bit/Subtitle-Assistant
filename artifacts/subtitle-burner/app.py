@@ -11462,6 +11462,170 @@ def load_compilation(job_id: str):
     })
 
 
+def _normalize_micro_clip(c, allowed: set, *, pad: float | None = None):
+    """A relay micro-clip, snapped to real word boundaries.
+
+    Deliberately NOT _normalize_clip: that one floors at 3.0s and clamps the
+    start to ``tmax - 3.0``, which is exactly why a one-word smash cut has
+    never been expressible here. It is left untouched so the arc path stays
+    provably as it was.
+    """
+    if not isinstance(c, dict):
+        return None
+    sid = str(c.get("source_job_id") or "").strip()
+    if sid not in allowed:
+        return None
+    try:
+        st = float(c.get("start_time"))
+        en = float(c.get("end_time"))
+    except (TypeError, ValueError):
+        return None
+    pad = RELAY_PAD_S if pad is None else float(pad)
+    words = jobs[sid].get("words") or []
+    tmax = float(words[-1].get("end") or en) if words else en
+    st = max(0.0, st - pad)
+    en = min(tmax, en + pad)
+    if en - st < RELAY_MIN_S:
+        return None
+    if en - st > RELAY_MAX_S:
+        en = st + RELAY_MAX_S
+    fname = jobs[sid].get("filename") or ""
+    return {
+        "source_job_id": sid,
+        "source_filename": fname,
+        "source_label": str(fname).rsplit(".", 1)[0][:60] if fname else sid[:8],
+        "start_time": round(st, 3),
+        "end_time": round(en, 3),
+        "title": str(c.get("text") or c.get("title") or "")[:120],
+        "hook_quote": str(c.get("text") or "")[:300],
+        "reason": str(c.get("reason") or "")[:300],
+        "theme": str(c.get("theme") or "")[:120],
+        "arc_role": "relay",
+        "polarity": str(c.get("polarity") or ""),
+        "relay_zoom": bool(c.get("relay_zoom")),
+    }
+
+
+def _relay_rank_with_gemini(cands: list) -> list | None:
+    """Ask only what a model is good at: which of these belong together.
+
+    It never sees or returns a timestamp. The ordering comes back as indices
+    into the list it was shown, so the worst a bad answer can do is order the
+    clips oddly -- it cannot move a cut off a word boundary.
+    """
+    if not (os.environ.get("GEMINI_API_KEY") or "").strip():
+        return None
+    lines = [
+        f'{i}. [{c["polarity"]}] "{c["text"]}" (source {c["source_job_id"][:8]})'
+        for i, c in enumerate(cands[:40])
+    ]
+    prompt = f"""These are the opening words of answers from DIFFERENT people in
+street interviews. They are candidates for a rapid-fire consensus opener: several
+strangers answering the same question back to back.
+
+Pick the 3-6 that read as the SAME question being answered, and order them for
+maximum energy. Prefer a run of agreement broken by one disagreement at the end
+if one is available -- that reads as a debate rather than a chorus.
+
+Use DIFFERENT sources for consecutive picks wherever possible.
+
+Candidates:
+{chr(10).join(lines)}
+
+Return STRICT JSON, indices only:
+{{"order": [3, 7, 1, 9], "question": "the shared question these answer"}}
+"""
+    try:
+        result = _gemini_generate_clip_suggestions(prompt)
+    except Exception as exc:                          # noqa: BLE001
+        ai_logger.warning(f"[relay] ranking failed: {exc}")
+        return None
+    raw = (result or {}).get("order") if isinstance(result, dict) else None
+    if not isinstance(raw, list):
+        return None
+    picked, seen = [], set()
+    for idx in raw[:8]:
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < len(cands) and i not in seen:
+            seen.add(i)
+            picked.append(dict(cands[i], theme=str(
+                (result or {}).get("question") or "")[:120]))
+    return picked or None
+
+
+def _relay_rank_heuristic(cands: list) -> list:
+    """Ordering without a model: a run of agreement, then the dissent.
+
+    Consecutive picks come from different sources where possible, because
+    two clips of the same face back to back is not a relay.
+    """
+    affirm = [c for c in cands if c["polarity"] == "affirm"]
+    negate = [c for c in cands if c["polarity"] == "negate"]
+    out, last = [], None
+    for pool in (affirm, negate):
+        for c in pool:
+            if len(out) >= 6:
+                break
+            # Keyed on the PERSON, not the file. In one long interview every
+            # answer comes from the same job, so a source-only rule would
+            # throw all but the first away -- which is exactly what it did.
+            who = (c["source_job_id"], c.get("speaker") or "")
+            if who == last:
+                continue
+            out.append(c)
+            last = who
+    return out
+
+
+def _multi_interview_relay(job_ids: list, meta: list, goal_sec: float):
+    """The rapid-consensus opener: several people, one or two words each."""
+    cands = []
+    for jid in job_ids:
+        cands.extend(_relay_answer_openings(jobs[jid].get("words") or [], jid))
+    if not cands:
+        return jsonify({
+            "error": "No one opens an answer with a yes/no anchor in these "
+                     "clips, so there is nothing to smash together. The relay "
+                     "cut needs short answers like \"absolutely\" or \"no way\".",
+            "mode": "relay", "candidates": 0,
+        }), 400
+
+    picked = _relay_rank_with_gemini(cands) or _relay_rank_heuristic(cands)
+    allowed = set(job_ids)
+    clips = []
+    for i, c in enumerate(picked):
+        # Alternate the scale. 1.0 / 1.15 / 1.0 is what keeps a smash cut
+        # kinetic instead of reading as a glitch.
+        norm = _normalize_micro_clip(dict(c, relay_zoom=(i % 2 == 1)), allowed)
+        if norm:
+            clips.append(norm)
+    if not clips:
+        return jsonify({"error": "Found anchors but none survived trimming.",
+                        "mode": "relay", "candidates": len(cands)}), 400
+
+    total = sum(c["end_time"] - c["start_time"] for c in clips)
+    return jsonify({
+        "ok": True,
+        "mode": "relay",
+        "sources": meta,
+        "throughline": clips[0].get("theme") or "Rapid consensus",
+        "arc": clips,
+        "arc_total_s": round(total, 2),
+        "goal_sec": goal_sec,
+        "formula": "relay(anchor*)",
+        "fingerprint": "|".join(
+            f"relay:{c['source_job_id'][:8]}:{c['start_time']:.2f}" for c in clips),
+        "themes": [],
+        "theme_count": 0,
+        "clip_count": len(clips),
+        "candidates": len(cands),
+        "pad_s": RELAY_PAD_S,
+    })
+
+
 @app.route("/multi-interview/plan", methods=["POST"])
 def multi_interview_plan():
     """Plan a cross-interview reel from multiple uploaded / transcribed jobs.
@@ -11477,16 +11641,29 @@ def multi_interview_plan():
     Returns themes (browse) + arc (ordered story beats) for the compile queue.
     """
     data = request.get_json(force=True) or {}
+    # "arc" is everything this endpoint has ever done. "relay" is the rapid
+    # consensus open: one-to-three-word answers smashed together. They share
+    # the job list, the compile queue and Send to timeline, so relay rides
+    # the whole existing surface rather than growing a second one.
+    mode = str(data.get("mode") or "arc").strip().lower()
+    if mode not in ("arc", "relay"):
+        mode = "arc"
+    # An arc needs at least two interviews to cross between. A relay does
+    # not: one long interview with several speakers already has the turns
+    # it needs, and that is half of what was asked for.
+    need = 1 if mode == "relay" else 2
     raw_ids = data.get("job_ids") or data.get("jobs") or []
-    if not isinstance(raw_ids, list) or len(raw_ids) < 2:
-        return jsonify({"error": "Pick at least 2 transcribed videos (job_ids)."}), 400
+    if not isinstance(raw_ids, list) or len(raw_ids) < need:
+        return jsonify({"error": f"Pick at least {need} transcribed "
+                                 f"video{'s' if need > 1 else ''} (job_ids)."}), 400
     job_ids = []
     for jid in raw_ids[:12]:
         jid = str(jid or "").strip()
         if jid and jid in jobs and jid not in job_ids:
             job_ids.append(jid)
-    if len(job_ids) < 2:
-        return jsonify({"error": "Need at least 2 valid transcribed jobs."}), 400
+    if len(job_ids) < need:
+        return jsonify({"error": f"Need at least {need} valid transcribed "
+                                 f"job{'s' if need > 1 else ''}."}), 400
 
     try:
         max_themes = max(2, min(10, int(data.get("max_themes") or 6)))
@@ -11528,8 +11705,12 @@ def multi_interview_plan():
             "word_count": len(words),
             "duration": float(words[-1].get("end") or 0) if words else 0,
         })
-    if len(blocks) < 2:
-        return jsonify({"error": "At least 2 jobs need transcripts (words)."}), 400
+    if len(blocks) < need:
+        return jsonify({"error": f"At least {need} job{'s' if need > 1 else ''} "
+                                 f"need transcripts (words)."}), 400
+
+    if mode == "relay":
+        return _multi_interview_relay(job_ids, meta, goal_sec)
 
     avoid_note = ""
     if avoid:
@@ -14092,11 +14273,15 @@ _PUNCH_PEAK = {
     # clip/effect duration instead of decaying back to 1.0 (see
     # _PUNCH_HOLD_INTENSITIES below).
     "1.5x": 1.5, "2x": 2.0, "hold_1_5": 1.5, "hold_2": 2.0,
+    # A gentle hold for the relay cut, where alternating 1.0 / 1.15 / 1.0
+    # between one-word clips is what makes a smash cut read as kinetic
+    # rather than as a glitch. 1.5x is far too strong at that length.
+    "hold_1_15": 1.15,
 }
 PUNCH_DECAY_SECONDS = 0.45
 # Intensities that hold at their target scale for the whole duration rather
 # than easing back down to 1.0 — used by the 1.5x / 2x "Zoom hold" effects.
-_PUNCH_HOLD_INTENSITIES = {"1.5x", "2x", "hold_1_5", "hold_2"}
+_PUNCH_HOLD_INTENSITIES = {"1.5x", "2x", "hold_1_5", "hold_2", "hold_1_15"}
 
 # Frames, at the project fps: snap in, sit at the peak, release more slowly
 # than it arrived. The asymmetry is what makes it feel like a camera operator
@@ -18048,6 +18233,132 @@ def timeline_delete():
 # Captions-aligned pipeline: AI Edit seed, recommended cuts, shots, co-editor
 # =====================================================================
 
+# The relay cut's vocabulary, as a CLOSED list. The spec called for vector
+# embeddings and semantic clustering; this does the same job deterministically,
+# for free, with no model call and no surprises -- and it mirrors the pattern
+# the taste pass already uses, where a heuristic runs first and Gemini only
+# refines. An embedding would be slower, costlier and less predictable at the
+# one thing it would be doing.
+_RELAY_AFFIRM = frozenset({
+    "absolutely", "yes", "yeah", "yea", "yep", "yup", "definitely",
+    "certainly", "totally", "exactly", "obviously", "always", "sure",
+    "right", "correct", "agreed", "facts", "period", "hundred", "100",
+})
+_RELAY_NEGATE = frozenset({
+    "no", "nope", "never", "nah", "negative", "nowhere", "nothing",
+})
+# Minimum length of a relay micro-clip. The multi-interview arc normalizer
+# floors at 3.0s, which is why a one-word smash cut has never been possible.
+RELAY_MIN_S = 0.25
+RELAY_MAX_S = 2.5
+# Padding at each word boundary. compute_silence_compression uses 0.05 for
+# this reason, in its own words: "so a slightly-late Whisper timestamp can't
+# lop off a trailing consonant". On a one-word clip that is the difference
+# between "Absolutely" and "bsolutel". Set to 0.0 for a true zero-pad cut.
+RELAY_PAD_S = 0.05
+
+
+def _relay_turn_starts(words: list) -> list[int]:
+    """Indices where a new turn begins.
+
+    Prefers the diarization label, which is exact. Falls back to a speech gap
+    when a job was never analysed, so the relay still works on raw
+    transcripts rather than silently finding nothing.
+    """
+    starts = []
+    prev_spk = None
+    have_speakers = any(w.get("speaker") for w in words or [])
+    for i, w in enumerate(words or []):
+        if i == 0:
+            starts.append(0)
+            prev_spk = w.get("speaker")
+            continue
+        if have_speakers:
+            spk = w.get("speaker")
+            if spk and spk != prev_spk:
+                starts.append(i)
+            if spk:
+                prev_spk = spk
+        else:
+            try:
+                gap = float(w.get("start", 0)) - float(words[i - 1].get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            # Intra-phrase gaps sit under ~0.3s; a handoff between two
+            # people is reliably longer. 0.6 missed real answers.
+            if gap >= 0.45:
+                starts.append(i)
+    return starts
+
+
+def _relay_answer_openings(words: list, job_id: str = "",
+                           max_words: int = 3) -> list[dict]:
+    """Every moment a new voice opens with an anchor word, with its times.
+
+    The times come from ``word.start`` / ``word.end`` and nowhere else.
+    Asking a model for a timestamp at one-word precision is asking it for the
+    one thing it cannot do, so it is never asked: the model's job is grouping
+    and ranking, and this function's job is where the cut lands.
+
+    Note it does NOT try to work out who the interviewer is. An interviewer
+    almost never opens a turn with "Absolutely", so filtering on the anchor
+    word gets there without a fragile who-is-who guess.
+    """
+    out: list[dict] = []
+    words = words or []
+    for s in _relay_turn_starts(words):
+        i = s
+        # Skip a leading "um" -- but never skip a token that is itself the
+        # answer. "Right." and "Okay" are both fillers and both real answers.
+        while i < len(words) and i - s < 4:
+            tok = _strip_filler_token(str(words[i].get("word", "")))
+            if tok in _RELAY_AFFIRM or tok in _RELAY_NEGATE:
+                break
+            if tok in _FILLER_SINGLE_WORDS:
+                i += 1
+                continue
+            break
+        if i >= len(words):
+            continue
+        tok = _strip_filler_token(str(words[i].get("word", "")))
+        if tok in _RELAY_AFFIRM:
+            polarity = "affirm"
+        elif tok in _RELAY_NEGATE:
+            polarity = "negate"
+        else:
+            continue
+        # Take up to max_words, stopping at a real pause so "Yes" does not
+        # drag in the start of the explanation that follows it.
+        j = i
+        while j + 1 < len(words) and (j - i + 1) < max_words:
+            try:
+                gap = float(words[j + 1].get("start", 0)) - float(words[j].get("end", 0))
+            except (TypeError, ValueError):
+                break
+            if gap > 0.35:
+                break
+            j += 1
+        try:
+            st = float(words[i].get("start"))
+            en = float(words[j].get("end"))
+        except (TypeError, ValueError):
+            continue
+        if en <= st:
+            continue
+        text = " ".join(str(words[k].get("word", "")).strip()
+                        for k in range(i, j + 1)).strip()
+        out.append({
+            "source_job_id": job_id,
+            "word_index": i,
+            "start_time": round(st, 3),
+            "end_time": round(en, 3),
+            "text": text[:80],
+            "polarity": polarity,
+            "speaker": words[i].get("speaker") or "",
+        })
+    return out
+
+
 def _strip_filler_token(s: str) -> str:
     return re.sub(r"[^a-z']", "", (s or "").lower())
 
@@ -18509,6 +18820,46 @@ def _clip_color_from_pack(pack: dict) -> dict:
     return {"preset": preset}
 
 
+def _tl_kept_span(a: float, b: float, cuts: list | None) -> float:
+    """Seconds of [a, b] that survive *cuts* (source seconds)."""
+    span = max(0.0, float(b) - float(a))
+    for c in cuts or []:
+        try:
+            cs, ce = float(c[0]), float(c[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        lo = max(float(a), cs)
+        hi = min(float(b), ce)
+        if hi > lo:
+            span -= (hi - lo)
+    return max(0.0, span)
+
+
+def _tl_source_to_output_time(t: float, t_in: float, t_out: float,
+                              cuts: list | None = None,
+                              ranges: list | None = None) -> float | None:
+    """Source seconds -> output seconds, through cuts and any hook reorder.
+
+    The overlay seeder punts on this -- "roughly as offset from t_in (before
+    cut compression)" -- which is tolerable for a b-roll photo that only has
+    to be near the right moment. It is not tolerable for an effect whose
+    whole job is to sit on ONE specific silence: a push that lands two
+    seconds late amplifies the wrong beat, which is worse than no push.
+
+    Returns None when *t* falls in no surviving range.
+    """
+    rngs = ranges or [(float(t_in), float(t_out))]
+    cursor = 0.0
+    for rs, re_ in rngs:
+        rs, re_ = float(rs), float(re_)
+        if re_ - rs < 0.1:
+            continue
+        if rs - 0.05 <= t <= re_ + 0.05:
+            return cursor + _tl_kept_span(rs, min(float(t), re_), cuts)
+        cursor += _tl_kept_span(rs, re_, cuts)
+    return None
+
+
 def _tl_map_through_ranges(t: float, rngs: list) -> float | None:
     """Source time -> output time through a reordered list of source ranges.
 
@@ -18578,7 +18929,8 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                             words: list | None = None,
                             insert_media: bool = True,
                             hook: dict | None = None,
-                            graphics: list | None = None) -> dict:
+                            graphics: list | None = None,
+                            protected_gaps: list | None = None) -> dict:
     """Assemble a Captions-style seeded timeline project from a style pack."""
     main_id = _uid_short()
     grade = _clip_color_from_pack(pack)
@@ -18772,6 +19124,51 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
                     entry["start"] = round(new_start, 3)
                     remapped.append(entry)
                 effects_track = remapped
+
+    # The pause push. _taste_protect_silence_gaps already decides which
+    # silences carry comedy, shock or a rhetorical hang, and
+    # _recommended_cuts_for_words already keeps those out of the cut ranges.
+    # Both have shipped for a while. What never happened is anything USING
+    # that decision: the sentiment was computed, returned to the client, and
+    # read by nothing on the render side -- so a protected pause survived the
+    # cut and then sat there perfectly static, which reads as a stall rather
+    # than as tension.
+    #
+    # A slow push over the gap is what sells it, and it needs no new render
+    # code: ken_burns is already a two-keyframe linear ramp (0.12 / 0.22 /
+    # 0.35), so `low` across the pause is 1.0 -> 1.12. The room tone is kept
+    # for free, because a protected gap was never cut in the first place.
+    pause_pushes: list[dict] = []
+    for g in protected_gaps or []:
+        if not isinstance(g, dict):
+            continue
+        try:
+            gs = float(g.get("start"))
+            ge = float(g.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if gs < t_in - 0.05 or ge > t_out + 0.05:
+            continue
+        dur = ge - gs
+        # Under a second there is nothing to amplify and the ramp would read
+        # as a twitch.
+        if dur < 1.0:
+            continue
+        start = _tl_source_to_output_time(gs, t_in, t_out, cuts, hook_ranges)
+        if start is None:
+            continue
+        entry = {
+            "id": _uid_short(),
+            "type": "ken_burns",
+            "start": round(max(0.0, start), 3),
+            "out": round(min(6.0, dur), 3),
+            "intensity": "low" if dur < 2.0 else "med",
+            "direction": "in",
+            "reason": str(g.get("taste_reason") or "")[:300],
+            "pause_sentiment": str(g.get("taste_sentiment") or "")[:40],
+        }
+        effects_track.append(entry)
+        pause_pushes.append(entry)
 
     # AI Edit never seeds text overlays — captions already carry the words,
     # and auto-placed titles/keyword callouts read as clutter more often than
@@ -19054,6 +19451,16 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             for o in overlay_track
         ],
         "graphics": graphic_report,
+        "pauses": [
+            {
+                "id": e.get("id"),
+                "start": e.get("start"),
+                "duration": e.get("out"),
+                "sentiment": e.get("pause_sentiment") or "",
+                "reason": e.get("reason") or "",
+            }
+            for e in pause_pushes
+        ],
         "audio": {
             "summary": "Captions Audio Enhancement applies on ▶ Render (loudnorm / noise / duck)",
         },
@@ -19108,6 +19515,18 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "clip_id": o.get("id"),
             "label": f"B-roll “{kw}” @{mm}:{ss:02d}",
         })
+    for pz in edit_receipt["pauses"]:
+        st = float(pz.get("start") or 0)
+        mm, ss = divmod(int(st), 60)
+        what = pz.get("sentiment") or "beat"
+        edit_receipt["rows"].append({
+            "id": pz.get("id"),
+            "kind": "pause",
+            "track": "effects",
+            "clip_id": pz.get("id"),
+            "label": f"Held the {what} pause @{mm}:{ss:02d} "
+                     f"({float(pz.get('duration') or 0):.1f}s, slow push)",
+        })
     for gr in edit_receipt["graphics"]:
         try:
             st = float(gr.get("start_time") or 0)
@@ -19155,6 +19574,7 @@ def _build_ai_edit_timeline(job_id: str, t_in: float, t_out: float,
             "ken_burns_on_accept": bool(pack.get("photo_match")),
             "hook_pulled": hook_pulled,
             "hook_quote": hook_quote,
+            "pauses_held": len(pause_pushes),
             "devices_placed": sum(1 for g in graphic_report if g.get("placed")),
             "devices_unplaced": sum(1 for g in graphic_report if not g.get("placed")),
         },
@@ -20598,6 +21018,11 @@ def ai_edit_seed():
         work_job_id, work_in, work_out, pack, intensity, cuts, effects,
         label=label, words=words, insert_media=insert_media, hook=hook,
         graphics=graphics,
+        # The pauses the taste pass decided to keep. They were already being
+        # computed here and handed straight back to the client; this is the
+        # first time anything on the render side reads them.
+        protected_gaps=[g for g in (rec.get("silence_gaps") or [])
+                        if g.get("taste_protected")] if apply_cuts else [],
     )
     if purpose:
         timeline["ai_edit"] = dict(timeline.get("ai_edit") or {})
@@ -20624,6 +21049,7 @@ def ai_edit_seed():
         "effects": effects,
         "graphics": graphics,
         "device_budget": device_budget,
+        "pauses_held": (timeline.get("ai_edit") or {}).get("pauses_held", 0),
         "hook": hook,
         "timeline": timeline,
         "edit_receipt": (timeline or {}).get("edit_receipt"),

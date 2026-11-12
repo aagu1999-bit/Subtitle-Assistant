@@ -9158,6 +9158,9 @@
           selected = null;
         }
         await loadSources();
+        // Output time as clips accumulate. Relay clips carry no transition,
+        // so output time is just the running sum of their lengths.
+        let _relayOutStart = 0;
         for (const item of clips) {
           const jid = item && (item.source_job_id || item.job_id);
           if (!jid) continue;
@@ -9178,6 +9181,26 @@
               if (item.title) last.title = item.title;
               if (item.hook_quote) last.hook_quote = item.hook_quote;
             }
+          }
+          // Relay cut: alternate the scale so a run of one-word smash cuts
+          // reads as kinetic rather than as a glitch. hold_1_15 snaps to
+          // 1.15 and stays there for the clip, via the "hold" easing that
+          // already exists — no new render code.
+          const _lastClip = tl.tracks.main[tl.tracks.main.length - 1];
+          if (item.relay_zoom && _lastClip) {
+            const _d = Math.max(0.05, Number(_lastClip.out) - Number(_lastClip.in));
+            tl.tracks.effects = tl.tracks.effects || [];
+            tl.tracks.effects.push({
+              id: "fx" + Math.random().toString(36).slice(2, 9),
+              type: "punch_zoom",
+              start: Math.round(_relayOutStart * 1000) / 1000,
+              out: Math.round(_d * 1000) / 1000,
+              intensity: "hold_1_15",
+              direction: "in",
+            });
+          }
+          if (_lastClip) {
+            _relayOutStart += Math.max(0, Number(_lastClip.out) - Number(_lastClip.in));
           }
         }
         seedStyleFromCaptionLook(clips[0] && (clips[0].source_job_id || clips[0].job_id));

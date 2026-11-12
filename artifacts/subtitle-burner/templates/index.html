@@ -1448,6 +1448,10 @@
       (<strong>hook → answers → closer</strong>, ~90s goal) plus shared themes you can browse.
       Use the arc (or a theme) to fill the compilation queue, then Compile / Send to timeline.
       Re-plan regenerates a different beat set with the same formula.
+      <strong>⚡ Relay cut</strong> is the other shape: it finds where people open an answer with
+      <em>&ldquo;absolutely&rdquo;</em> or <em>&ldquo;no way&rdquo;</em> and smash-cuts those one-to-three-word
+      anchors together, alternating the scale. Needs only <strong>one</strong> interview if several
+      people speak in it.
     </p>
     <div id="multiInterviewJobList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;max-height:180px;overflow:auto"></div>
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
@@ -1463,6 +1467,8 @@
       <button id="multiInterviewPlanBtn" class="btn btn-primary" type="button"
         style="background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff">✨ Plan cross-interview reel</button>
       <button id="multiInterviewRegenBtn" class="btn btn-secondary" type="button" disabled title="Same arc formula, different beats">♻ Regenerate arc</button>
+      <button id="multiInterviewRelayBtn" class="btn btn-secondary" type="button"
+        title="Rapid consensus open: the one-word answers from several people, smash cut together. Works on one long interview too.">⚡ Relay cut</button>
       <span id="multiInterviewStatus" class="muted" style="font-size:.84rem"></span>
     </div>
     <div id="multiInterviewArc" style="margin-bottom:12px"></div>
