@@ -22650,6 +22650,15 @@ def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
 CO_EDITOR_TRANSCRIPT_CHARS = 12000
 
 
+def _plain_co_editor_message(text: str) -> str:
+    """The chat bubble shows plain text, so markdown arrives as stray symbols."""
+    import re as _re
+    text = text.replace("**", "").replace("`", "")
+    text = _re.sub(r"(?m)^\s*#+\s*", "", text)
+    text = _re.sub(r"(?m)^(\s*)[*\-]\s+", lambda m: ("  " if m.group(1) else "") + "• ", text)
+    return _re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _co_editor_transcript(timeline: dict) -> str:
     """What is said on the timeline, as [mm:ss] lines in OUTPUT time.
 
@@ -22904,6 +22913,13 @@ Return ONLY JSON:
   "message": "Short confirmation (or explanation if ops empty). Mention Render when burn/style changed."
 }}
 
+The message is shown as plain text to someone who is not technical:
+- Everyday words only. Never op names, field names or snake_case (say "chat bubbles",
+  not chat_bubbles or add_device; "behind you", not behind: true).
+- No markdown: no asterisks, no backticks, no headings.
+- For a list, put each item on its own line starting with "• ", one short line each,
+  with a blank line between groups and the group name on its own line.
+
 Rules:
 - Use only the ops listed above (examples show shapes; emit only what the user asked for).
 - Indexes are 0-based. Main shots also carry seq like "S1", "S2" (timeline order, matching the S# badge on clips). For "put S2 first / swap S1 and S3", prefer reorder_shot or swap_shot with "S2"-style labels (or 0-based from/to).
@@ -22996,7 +23012,7 @@ Rules:
     raw_ops = raw_ops or []
     message = ""
     if isinstance(result, dict):
-        message = str(result.get("message") or "")[:1500]
+        message = _plain_co_editor_message(str(result.get("message") or ""))[:1500]
 
     allowed = _co_editor_op_names()
     ops = []

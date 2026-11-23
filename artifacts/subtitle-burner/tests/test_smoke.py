@@ -675,6 +675,15 @@ def test_the_coeditor_reads_the_whole_transcript_in_output_time(app_mod, temp_db
     assert "Never ask the user to describe" in p
 
 
+def test_coeditor_replies_reach_the_chat_as_plain_text(app_mod):
+    raw = ("## Graphics\n* **App mockups:**\n    * `chat_bubbles`: a text thread\n"
+           "- **Kinetic text**\n\n\n\nDone.")
+    out = app_mod._plain_co_editor_message(raw)
+    assert "*" not in out and "`" not in out and "#" not in out
+    assert "• App mockups:" in out and "  • chat_bubbles: a text thread" in out
+    assert "\n\n\n" not in out
+
+
 def test_the_new_ops_survive_the_whitelist(app_mod, temp_db, monkeypatch):
     """An op the server does not allow is dropped before it reaches the UI."""
     ops = [

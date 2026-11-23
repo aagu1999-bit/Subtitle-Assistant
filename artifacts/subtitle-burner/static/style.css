@@ -854,6 +854,7 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   font-size: .82rem;
   line-height: 1.4;
   max-width: 92%;
+  white-space: pre-line;
 }
 .co-editor-msg.user {
   align-self: flex-end;
