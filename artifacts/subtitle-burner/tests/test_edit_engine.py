@@ -186,3 +186,8 @@ def test_a_texting_story_shows_the_texts_not_a_stock_photo():
     row = plan["structure"]["spans"][0]
     assert row["role"] == "story"
     assert row["treatment"] == "device:chat_bubbles"
+
+
+def test_labels_keep_apostrophes_lowercase():
+    alts = {a["kind"]: a["labels"] for a in ee.suggest_device("here's the thing: consistency beats talent")["alternatives"]}
+    assert alts["venn"][0] == "Here's"

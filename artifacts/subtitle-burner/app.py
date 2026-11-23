@@ -7601,7 +7601,9 @@ def _tl_segment_cache_path(src: Path, t_in: float, t_out: float,
     rendered?" is answered by exactly the key the render will use.
     """
     mtime = src.stat().st_mtime if src.exists() else 0
-    cache_raw = f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_{json.dumps(ken, sort_keys=True) if ken else ''}_{json.dumps(color, sort_keys=True) if color else ''}_{json.dumps(punch, sort_keys=True) if punch else ''}"
+    # v2: frame-exact segment lengths; older entries had audio a few ms past
+    # the last frame and stitched into variable-rate output.
+    cache_raw = f"v2_{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_{json.dumps(ken, sort_keys=True) if ken else ''}_{json.dumps(color, sort_keys=True) if color else ''}_{json.dumps(punch, sort_keys=True) if punch else ''}"
     if abs(speed - 1.0) > 1e-3:
         # Only sped segments extend the key, so existing caches stay valid.
         cache_raw += f"_speed{speed:.3f}_{int(bool(smooth))}"
@@ -7640,7 +7642,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     """
     speed = max(0.25, min(4.0, float(speed or 1.0)))
     src_dur = max(0.05, t_out - t_in)
-    dur = max(0.05, src_dur / speed)
+    dur = _tl_frame_dur(src_dur / speed, fps)
     cached_segment = _tl_segment_cache_path(src, t_in, t_out, W, H, fps, fit, bg,
                                             ken, color, punch, speed, smooth)
 
@@ -7683,15 +7685,15 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     has_audio = _has_audio_stream(src)
     cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
     if not has_audio:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+        cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
-    cmd += ["-t", f"{dur:.3f}", "-vf", vf,
+    cmd += ["-t", f"{dur:.6f}", "-vf", vf,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
     if has_audio:
         af = _tl_declick_af(dur)
         if retimed:
             af = _tl_atempo_chain(speed) + "," + af
-        cmd += ["-af", af]
+        cmd += ["-af", af + ",apad"]
     if not has_audio:
         cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
     cmd += [str(out_path)]
@@ -7703,6 +7705,18 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     except Exception:
         pass
     return dur
+
+
+def _tl_frame_dur(dur: float, fps: int) -> float:
+    """Round a segment length to whole frames.
+
+    The concat demuxer offsets each file by its longest stream. If audio runs
+    a few ms past the last frame, every join leaves a gap in the video
+    timestamps and the stitched file comes out variable-rate (29.67 fps
+    instead of 30) with dropped frames.
+    """
+    fps = max(1, int(fps or 30))
+    return max(1.0 / fps, round(float(dur) * fps) / fps)
 
 
 def _tl_declick_af(dur: float, d: float = 0.02) -> str:
@@ -7721,6 +7735,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     taken from source A. Each half is center-cropped to fill its panel. An
     optional *color* grade is applied to the combined frame.
     """
+    dur = _tl_frame_dur(dur, fps)
     if layout == "auto":
         layout = "stack" if H >= W else "side"
     if layout == "side":
@@ -7745,15 +7760,15 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
            "-ss", f"{inA:.3f}", "-i", str(srcA),
            "-ss", f"{inB:.3f}", "-i", str(srcB)]
     if not hasA:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+        cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     audio_idx = "2:a:0" if not hasA else "0:a:0"
-    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+    cmd += ["-t", f"{dur:.6f}", "-filter_complex", fc,
             "-map", "[v]", "-map", audio_idx,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if hasA:
-        cmd += ["-af", _tl_declick_af(dur)]
+        cmd += ["-af", _tl_declick_af(dur) + ",apad"]
     cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Split-screen")
     return dur

@@ -433,6 +433,12 @@ def _device_for(span: dict) -> str | None:
     return _ROLE_DEVICE.get(span.get("role"))
 
 
+def _cap(word: str) -> str:
+    """Capitalise the first letter only; str.title() turns "here's" into "Here'S"."""
+    word = str(word)
+    return word[:1].upper() + word[1:]
+
+
 def _labels_for(kind: str, span: dict) -> list[str]:
     """Best-effort labels for a device, pulled from the span itself."""
     text = span.get("text", "")
@@ -445,12 +451,12 @@ def _labels_for(kind: str, span: dict) -> list[str]:
             return [f"{m.group(1) or ''}{m.group(2)}{unit}", " ".join(toks[:4]).capitalize()]
         return ["2x", " ".join(toks[:4]).capitalize()]
     if kind == "step_tracker":
-        return [w.title() for w in toks[:3]] or ["One", "Two", "Three"]
+        return [_cap(w) for w in toks[:3]] or ["One", "Two", "Three"]
     if kind == "venn":
         m = re.search(r"(\w+)\s+(?:vs\.?|versus|compared (?:to|with)|instead of|rather than|than)\s+(\w+)", text, re.I)
         if m:
-            return [m.group(1).title(), m.group(2).title(), "Overlap"]
-        return [(toks[0] if toks else "This").title(), (toks[1] if len(toks) > 1 else "That").title(), "Both"]
+            return [_cap(m.group(1)), _cap(m.group(2)), "Overlap"]
+        return [_cap(toks[0] if toks else "This"), _cap(toks[1] if len(toks) > 1 else "That"), "Both"]
     if kind == "chat_bubbles":
         return [text[:60], "wait what?"]
     if kind == "notification":
@@ -458,12 +464,12 @@ def _labels_for(kind: str, span: dict) -> list[str]:
     if kind == "search_bar":
         return [" ".join(toks[:5]) or text[:40]]
     if kind == "toggle_meter":
-        return [(toks[0] if toks else "Focus").title(), "on"]
+        return [_cap(toks[0] if toks else "Focus"), "on"]
     if kind == "node_map":
-        return [w.title() for w in toks[:4]] or ["Cause", "Effect"]
+        return [_cap(w) for w in toks[:4]] or ["Cause", "Effect"]
     if kind == "timeline_scrubber":
         years = re.findall(r"(?:19|20)\d\d", text)
-        return years[:4] or [w.title() for w in toks[:3]] or ["Start", "Now"]
+        return years[:4] or [_cap(w) for w in toks[:3]] or ["Start", "Now"]
     if kind == "kinetic_text":
         return [text[:48]]
     return [text[:60]]

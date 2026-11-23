@@ -305,6 +305,10 @@
 .tl-keys-hint {
   font-size: .72rem;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
   opacity: 0.75;
   padding: 0 4px;
 }
@@ -466,6 +470,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 .tl-timeline {
   position: relative;

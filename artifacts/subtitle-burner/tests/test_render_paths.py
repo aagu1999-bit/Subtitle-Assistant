@@ -132,3 +132,25 @@ def test_behind_subject_restores_the_speaker_over_the_graphic(app_mod, source_jo
     out, _job = _render(app_mod, _timeline(source_job, overlays=[ov]))
     assert calls == [(0.2, 1.7)]
     assert _dur(out) == pytest.approx(2.0, abs=0.12)
+
+
+@needs_ffmpeg
+def test_stitched_short_segments_stay_constant_frame_rate(app_mod, clip, tmp_path):
+    """Many tiny segments (speed ramps, behind-me splits) must not drift off 30 fps."""
+    import subprocess
+    spans = [(0.0, 0.53), (0.53, 0.87), (0.87, 1.6), (1.6, 1.93)]
+    segs = []
+    for i, (a, b) in enumerate(spans):
+        out = tmp_path / f"s{i}.mp4"
+        d = app_mod._tl_normalize_segment(clip, a, b, 360, 640, 30, "cover", "#000000", out,
+                                          speed=1.5 if i == 2 else 1.0)
+        assert abs(d * 30 - round(d * 30)) < 1e-6
+        segs.append((out, d))
+    final = tmp_path / "main.mp4"
+    total, _ = app_mod._tl_build_main_track(segs, [0] * len(segs), final, "cfrtest")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-count_frames",
+                            "-show_entries", "stream=r_frame_rate,nb_read_frames", "-of", "csv=p=0",
+                            str(final)], capture_output=True, text=True).stdout.strip()
+    rate, frames = probe.split(",")
+    assert rate == "30/1"
+    assert int(frames) == round(total * 30)

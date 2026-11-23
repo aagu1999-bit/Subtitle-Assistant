@@ -37,6 +37,7 @@
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
   let transcriptWords = null;    // cached words for the open transcript clip
+  let transcriptClipId = null;   // which Main clip those words belong to
   let undoStack = [];
   let redoStack = [];
   let historySuspended = false;
@@ -576,7 +577,14 @@
 
   function wireLeftTabs() {
     document.querySelectorAll(".tl-lefttab").forEach((b) => {
-      b.onclick = () => setLeftTab(b.dataset.ltab, { pin: true });
+      b.onclick = () => {
+        setLeftTab(b.dataset.ltab, { pin: true });
+        if (b.dataset.ltab === "transcript" && tl) {
+          const c = (selected && selected.track === "main" && findClip("main", selected.id))
+            || tl.tracks.main[0];
+          if (c) renderTranscript(c);
+        }
+      };
     });
   }
 
@@ -680,6 +688,7 @@
     const hint = $("tlTranscriptHint");
     if (!doc) return;
     transcriptWords = null;
+    transcriptClipId = clip ? clip.id : null;
     updateTranscriptToolbar(null);
     if (!clip || !clip.source_job_id) {
       doc.innerHTML = "";
@@ -1317,7 +1326,8 @@
     // can still position boxes against real framing.
     let src = null, seekTo = null;
     if (c && c.source_job_id) { src = "/raw-upload/" + c.source_job_id; seekTo = c.in || 0; }
-    else if (c && c.asset_id && track !== "music") src = "/asset/" + c.asset_id;
+    // Graphics are transparent overlays: keep the speaker shot as the backdrop.
+    else if (c && c.asset_id && track !== "music" && !c.device) src = "/asset/" + c.asset_id;
     if (!src) {
       const fm = tl.tracks.main.find((m) => m.source_job_id);
       if (fm) src = "/raw-upload/" + fm.source_job_id;
@@ -3856,6 +3866,7 @@
     get tl() { return tl; },
     get selected() { return selected; },
     get transcriptWords() { return transcriptWords; },
+    get transcriptClip() { return transcriptClipId && tl ? findClip("main", transcriptClipId) : null; },
     serialize: () => (tl ? serialize() : null),
     pushHistory, scheduleSave, saveNow, renderTimeline, renderTracks, renderProps,
     selectClip, findClip, clipDuration, totalDuration, mainStart, reanchor, fmtTime,
