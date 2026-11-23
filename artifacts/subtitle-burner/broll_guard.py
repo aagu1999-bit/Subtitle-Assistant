@@ -19,7 +19,7 @@ import edit_engine
 
 _STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "my", "your",
          "our", "img", "image", "photo", "video", "clip", "final", "copy", "jpg", "png", "mp4",
-         "mov", "webm", "stock", "broll", "b", "roll"}
+         "mov", "webm", "stock", "broll", "b", "roll", "atmospheric"}
 
 
 def _stem(tok: str) -> str:
