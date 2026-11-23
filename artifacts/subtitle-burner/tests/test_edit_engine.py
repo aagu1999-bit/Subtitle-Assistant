@@ -178,3 +178,11 @@ def test_llm_role_refinement_ignores_garbage():
     assert [s["role"] for s in spans] == before
     ee.refine_roles_with_llm(spans, lambda p: {"roles": [{"index": 1, "role": "story"}]})
     assert spans[1]["role"] == "story"
+
+
+def test_a_texting_story_shows_the_texts_not_a_stock_photo():
+    words = words_from([(8.0, "Last night she texted me asking where the money went.")])
+    plan = ee.plan_edit(words, 0, 20, intensity="high")
+    row = plan["structure"]["spans"][0]
+    assert row["role"] == "story"
+    assert row["treatment"] == "device:chat_bubbles"

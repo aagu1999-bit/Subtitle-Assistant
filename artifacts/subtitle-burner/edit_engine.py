@@ -65,6 +65,9 @@ _DEVICE_CUES = [
                                      r"phase|roadmap)\b", re.I)),
 ]
 
+# Cues specific enough that the device beats a B-roll cutaway.
+_STRONG_CUES = {"chat_bubbles", "notification", "search_bar"}
+
 _ROLE_DEVICE = {
     "data": "counter",
     "list": "step_tracker",
@@ -439,8 +442,8 @@ def _labels_for(kind: str, span: dict) -> list[str]:
         if m:
             unit = (m.group(3) or "").lower()
             unit = {"percent": "%", "million": "M", "billion": "B"}.get(unit, unit)
-            return [f"{m.group(1) or ''}{m.group(2)}{unit}", " ".join(toks[:3]).title()]
-        return ["2x", " ".join(toks[:3]).title()]
+            return [f"{m.group(1) or ''}{m.group(2)}{unit}", " ".join(toks[:4]).capitalize()]
+        return ["2x", " ".join(toks[:4]).capitalize()]
     if kind == "step_tracker":
         return [w.title() for w in toks[:3]] or ["One", "Two", "Three"]
     if kind == "venn":
@@ -522,7 +525,12 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
         elif role in ("data", "list", "comparison"):
             c = [f"device:{dev or _ROLE_DEVICE[role]}", "punch"]
         elif role == "story":
-            c = ["broll"] + ([f"device:{dev}"] if dev else []) + ["punch"]
+            # "She texted me" is better shown as the text than as a stock
+            # photo of a phone; looser cues still lose to B-roll.
+            if dev in _STRONG_CUES:
+                c = [f"device:{dev}", "broll", "punch"]
+            else:
+                c = ["broll"] + ([f"device:{dev}"] if dev else []) + ["punch"]
         elif role == "thesis":
             c = ["clean_zoom"]
         else:

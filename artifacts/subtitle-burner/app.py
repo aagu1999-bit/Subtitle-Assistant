@@ -6167,7 +6167,7 @@ _QA_STATE: dict = {}
 def _qa_graphics_boxes(overlays: list, W: int, H: int) -> list[dict]:
     out = []
     for o in overlays or []:
-        if o.get("behind_subject"):
+        if o.get("behind"):
             continue
         try:
             s = float(o.get("start", 0) or 0)
@@ -18363,6 +18363,96 @@ def timeline_get(job_id: str):
     })
 
 
+def _tl_download_name(job: dict, ext: str) -> str:
+    label = re.sub(r"[^\w\- ]", "", (job.get("filename") or "timeline").rsplit(".", 1)[0]).strip()
+    return f"{label or 'timeline'}.{ext}"
+
+
+@app.route("/timeline/<job_id>/export.json", methods=["GET"])
+def timeline_export_json(job_id: str):
+    """The edit as two documents: structure (what happens when) and style (how it looks)."""
+    job = jobs.get(job_id)
+    if job is None or not job.get("is_timeline"):
+        return jsonify({"error": "Unknown timeline"}), 404
+    tl = _normalize_timeline(job.get("timeline") or {})
+    structure, style = edit_engine.split_timeline(tl)
+    doc = {"format": "subtitle-burner.edit", "version": 1, "name": job.get("filename"),
+           "structure": structure, "style": style}
+    resp = make_response(json.dumps(doc, indent=2, ensure_ascii=False))
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{_tl_download_name(job, "edit.json")}"'
+    return resp
+
+
+@app.route("/timeline/<job_id>/export.otio", methods=["GET"])
+def timeline_export_otio(job_id: str):
+    """OpenTimelineIO JSON for Resolve / Premiere / Kdenlive round trips."""
+    job = jobs.get(job_id)
+    if job is None or not job.get("is_timeline"):
+        return jsonify({"error": "Unknown timeline"}), 404
+    tl = _normalize_timeline(job.get("timeline") or {})
+    sources, assets = {}, {}
+    for c in tl["tracks"]["main"]:
+        sid = c.get("source_job_id")
+        if sid and sid not in sources:
+            p = find_video_path(sid)
+            if p:
+                sources[sid] = str(p.resolve())
+    for c in tl["tracks"]["overlay"] + tl["tracks"]["music"]:
+        aid = c.get("asset_id")
+        if aid and aid not in assets:
+            p = _find_asset_path(aid)
+            if p:
+                assets[aid] = str(p.resolve())
+    doc = edit_engine.timeline_to_otio(tl, (job.get("filename") or "edit").rsplit(".", 1)[0],
+                                       sources, assets)
+    resp = make_response(json.dumps(doc, indent=2, ensure_ascii=False))
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{_tl_download_name(job, "otio")}"'
+    return resp
+
+
+@app.route("/timeline/import", methods=["POST"])
+def timeline_import():
+    """New timeline from an exported edit (.edit.json), OTIO, or a raw timeline doc.
+
+    Media that no longer exists here is listed rather than silently dropped,
+    so the user knows what to relink.
+    """
+    doc = None
+    if "file" in request.files:
+        try:
+            doc = json.loads(request.files["file"].read().decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return jsonify({"error": "That file is not JSON."}), 400
+    else:
+        doc = (request.get_json(silent=True) or {}).get("doc")
+    if not isinstance(doc, dict):
+        return jsonify({"error": "Send an exported edit, an .otio file or a timeline."}), 400
+    if doc.get("OTIO_SCHEMA", "").startswith("Timeline"):
+        raw, kind = edit_engine.otio_to_timeline(doc), "otio"
+    elif "structure" in doc and "style" in doc:
+        raw, kind = edit_engine.merge_timeline(doc["structure"], doc["style"]), "edit"
+    else:
+        raw, kind = doc.get("timeline") if isinstance(doc.get("timeline"), dict) else doc, "timeline"
+    tl = _normalize_timeline(raw)
+    missing = []
+    for track in ("main", "overlay", "music"):
+        for c in tl["tracks"][track]:
+            if not _timeline_clip_source(c):
+                missing.append({"track": track, "id": c.get("id"),
+                                "relink": c.get("relink") or c.get("source_job_id") or c.get("asset_id")})
+    job_id = uuid.uuid4().hex
+    name = str(doc.get("name") or "Imported edit").rsplit(".", 1)[0][:80]
+    jobs[job_id] = {
+        "status": "timeline_edit", "progress": 0, "output": None, "error": None,
+        "words": None, "style": tl.get("style") or None, "audio": None, "emoji_rules": None,
+        "created_at": time.time(), "filename": f"{name}.mp4", "timeline": tl, "is_timeline": True,
+    }
+    _db_save_job(job_id)
+    return jsonify({"job_id": job_id, "timeline": tl, "format": kind, "missing": missing})
+
+
 @app.route("/timeline/save", methods=["POST"])
 def timeline_save():
     """Persist a timeline document (autosave from the editor)."""
@@ -18784,20 +18874,10 @@ def _broll_color_params(tl: dict, asset_id: str, start: float) -> dict | None:
     return broll_guard.color_match_params(look["stats"], b_stats)
 
 
-@app.route("/broll/smart", methods=["POST"])
-def broll_smart():
-    """B-roll for a phrase via the ladder; returns a colour-matched overlay clip."""
-    data = request.get_json(force=True) or {}
-    text = str(data.get("text") or "").strip()[:400]
-    if not text:
-        return jsonify({"error": "No text"}), 400
-    tl = data.get("timeline") or (jobs.get(data.get("job_id") or "") or {}).get("timeline") or {}
-    tl = _normalize_timeline(tl)
-    try:
-        start = max(0.0, float(data.get("start") or 0))
-        dur = max(0.8, min(12.0, float(data.get("duration") or 2.5)))
-    except (TypeError, ValueError):
-        start, dur = 0.0, 2.5
+def _smart_broll_for(tl: dict, text: str, start: float, dur: float, *,
+                     allow_stock: bool = True, allow_generate: bool = True,
+                     color_match: bool = True, placement: str = "") -> tuple[dict, dict | None]:
+    """(ladder result, overlay clip or None) for one phrase on a timeline."""
     W, H = TIMELINE_CANVASES[tl["canvas"]]
     look = _aroll_look(tl, start) or {}
     pal = look.get("palette") or ["#334155", "#64748B", "#0F172A"]
@@ -18821,27 +18901,50 @@ def broll_smart():
         return {"asset_id": asset_id, "kind": "video", "filename": f"Abstract {g['look']}",
                 "look": g["look"], "prompt": g["prompt"], "policy": g["policy"]}
 
-    res = broll_guard.smart_broll(
-        text, assets=_asset_rows(), stock=stock, generate=generate,
-        allow_stock=bool(data.get("allow_stock", True)),
-        allow_generate=bool(data.get("allow_generate", True)))
+    res = broll_guard.smart_broll(text, assets=_asset_rows(), stock=stock, generate=generate,
+                                  allow_stock=allow_stock, allow_generate=allow_generate)
+    res["palette"] = pal
     if not res["asset"]:
-        return jsonify({**res, "clip": None,
-                        "error": "Nothing suitable: no library match, no stock hit, "
-                                 "and generation is off."}), 200
+        return res, None
     asset = res["asset"]
-    full = res["source"] == "generated" or str(data.get("placement") or "") == "full"
+    full = res["source"] == "generated" or placement == "full"
     box = _CAROUSEL_BOX["full" if full else "pip"]
     clip = {"id": uuid.uuid4().hex[:8], "asset_id": asset["asset_id"], "start": round(start, 3),
             "in": 0.0, "out": round(dur, 3), **box, "fade_in": 0.2, "fade_out": 0.2,
             "keyword": res["query"][:60],
             "broll": {"source": res["source"], "query": res["query"],
                       "concepts": res["concepts"], "ladder": res["ladder"]}}
-    if data.get("color_match", True):
+    if color_match:
         params = _broll_color_params(tl, asset["asset_id"], start)
         if params:
             clip["color_match"] = params
-    return jsonify({**res, "clip": clip, "palette": pal})
+    return res, clip
+
+
+@app.route("/broll/smart", methods=["POST"])
+def broll_smart():
+    """B-roll for a phrase via the ladder; returns a colour-matched overlay clip."""
+    data = request.get_json(force=True) or {}
+    text = str(data.get("text") or "").strip()[:400]
+    if not text:
+        return jsonify({"error": "No text"}), 400
+    tl = data.get("timeline") or (jobs.get(data.get("job_id") or "") or {}).get("timeline") or {}
+    tl = _normalize_timeline(tl)
+    try:
+        start = max(0.0, float(data.get("start") or 0))
+        dur = max(0.8, min(12.0, float(data.get("duration") or 2.5)))
+    except (TypeError, ValueError):
+        start, dur = 0.0, 2.5
+    res, clip = _smart_broll_for(
+        tl, text, start, dur, allow_stock=bool(data.get("allow_stock", True)),
+        allow_generate=bool(data.get("allow_generate", True)),
+        color_match=bool(data.get("color_match", True)),
+        placement=str(data.get("placement") or ""))
+    if clip is None:
+        return jsonify({**res, "clip": None,
+                        "error": "Nothing suitable: no library match, no stock hit, "
+                                 "and generation is off."}), 200
+    return jsonify({**res, "clip": clip})
 
 
 @app.route("/broll/color-match", methods=["POST"])
@@ -21639,6 +21742,168 @@ def recommended_cuts():
     return jsonify(result)
 
 
+# ---- Edit decision engine: plan, then place ----
+
+def _prosody_for(job_id: str, words: list, t_in: float, t_out: float) -> dict | None:
+    """Loudness emphasis + pauses from the real audio (None if unreadable)."""
+    path = find_video_path(job_id)
+    if not path or not _has_audio_stream(path):
+        return None
+    try:
+        import numpy as np
+        raw = subprocess.run(
+            [FFMPEG, "-v", "error", "-ss", f"{t_in:.3f}", "-t", f"{max(0.5, t_out - t_in):.3f}",
+             "-i", str(path), "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
+            capture_output=True, timeout=180).stdout
+        samples = np.frombuffer(raw, dtype=np.float32)
+    except Exception:
+        return None
+    local = []
+    for w in words:
+        try:
+            ws, we = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t_in <= ws < t_out:
+            local.append(dict(w, start=ws - t_in, end=we - t_in))
+    pr = edit_engine.prosody_from_samples(samples, 8000, local)
+    for key in ("emphasis", "pauses", "words"):
+        for row in pr.get(key) or []:
+            for f in ("start", "end"):
+                if f in row and row[f] is not None:
+                    row[f] = round(row[f] + t_in, 3)
+    return pr
+
+
+def _edit_plan_for(job_id: str, t_in: float, t_out: float, pack: dict, intensity: str,
+                   use_llm: bool = True) -> dict:
+    words = (jobs.get(job_id) or {}).get("words") or []
+    spans = edit_engine.classify_spans(words, t_in, t_out)
+    if use_llm and os.environ.get("GEMINI_API_KEY"):
+        edit_engine.refine_roles_with_llm(spans, _gemini_generate_clip_suggestions)
+    prosody = _prosody_for(job_id, words, t_in, t_out)
+    try:
+        hints = TASTE.plan_hints()
+    except Exception:
+        hints = {}
+    return edit_engine.plan_edit(words, t_in, t_out, intensity, pack, prosody, hints, spans)
+
+
+def _src_to_timeline(t: float, t_in: float, cuts: list) -> float:
+    """Source time -> timeline time for a single main clip with text cuts."""
+    removed = 0.0
+    for a, b in sorted((float(c[0]), float(c[1])) for c in cuts or []):
+        if b <= t:
+            removed += b - a
+        elif a < t:
+            removed += t - a
+    return max(0.0, t - t_in - removed)
+
+
+def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list,
+                intensity: str, allow_generate: bool = True) -> dict:
+    """Turn plan decisions into effects-lane clips, devices and B-roll."""
+    tl = _normalize_timeline(timeline)
+    tracks = tl["tracks"]
+    pal = plan["style"]["devices"]["palette"]
+    font = plan["style"]["devices"]["font"]
+    placed = {"devices": 0, "broll": 0, "effects": 0, "notes": []}
+    device_jobs = []
+    for row in plan["structure"]["spans"]:
+        tr = row["treatment"]
+        if tr == "none":
+            continue
+        start = _src_to_timeline(row["start"], t_in, cuts)
+        end = _src_to_timeline(row["end"], t_in, cuts)
+        dur = max(0.8, end - start)
+        if tr == "punch":
+            at = row.get("hit") or row["start"]
+            fx = {"id": _uid_short(), "type": "punch_zoom",
+                  "start": round(_src_to_timeline(at, t_in, cuts), 3), "out": 0.9,
+                  "intensity": "high" if intensity == "high" else "med", "fx_origin": "plan",
+                  "plan_ref": row["index"]}
+            aim = _face_anchor_at(job_id, at)
+            if aim:
+                fx["aim"] = aim
+            tracks["effects"].append(fx)
+            placed["effects"] += 1
+        elif tr == "clean_zoom":
+            tracks["effects"].append({"id": _uid_short(), "type": "ken_burns",
+                                      "start": round(start, 3), "out": round(min(dur, 6.0), 3),
+                                      "intensity": "low", "direction": "in", "fx_origin": "plan",
+                                      "plan_ref": row["index"]})
+            placed["effects"] += 1
+        elif tr.startswith("device:") or tr == "kinetic_text":
+            dev = row.get("device") or {"kind": "kinetic_text", "labels": [row["text"][:48]]}
+            kind = dev["kind"]
+            base = devices.CATALOG[kind]["dur"]
+            device_jobs.append((row, kind, dev.get("labels") or [], start,
+                                max(1.4, min(base + 1.0, dur))))
+        elif tr == "broll":
+            try:
+                res, clip = _smart_broll_for(tl, row["text"], start, min(max(1.6, dur), 4.0),
+                                             allow_generate=allow_generate)
+            except Exception as e:
+                res, clip = {}, None
+                placed["notes"].append(f"B-roll at {start:.1f}s failed: {str(e)[:80]}")
+            if clip:
+                clip["plan_ref"] = row["index"]
+                tracks["overlay"].append(clip)
+                placed["broll"] += 1
+                row["broll_source"] = res.get("source")
+
+    def render_one(job):
+        row, kind, labels, start, dur = job
+        info = _render_device_asset(kind, labels, dur, tl["canvas"], pal, font, tl["fps"])
+        clip = _device_overlay_clip(info, start)
+        clip["plan_ref"] = row["index"]
+        if kind == "kinetic_text" and row["role"] == "hook":
+            # The signature "text behind me" hook: big type, speaker in front.
+            clip["behind"] = True
+        return clip
+
+    if device_jobs:
+        with ThreadPoolExecutor(max_workers=min(4, len(device_jobs))) as pool:
+            futs = {pool.submit(render_one, j): j for j in device_jobs}
+            for fut in as_completed(futs):
+                try:
+                    tracks["overlay"].append(fut.result())
+                    placed["devices"] += 1
+                except Exception as e:
+                    placed["notes"].append(f"Device {futs[fut][1]} failed: {str(e)[:80]}")
+    tracks["overlay"].sort(key=lambda c: float(c.get("start") or 0))
+    tracks["effects"].sort(key=lambda c: float(c.get("start") or 0))
+    tl["structure"] = plan["structure"]
+    tl["style_doc"] = plan["style"]
+    tl["ai_edit"] = dict(tl.get("ai_edit") or {}, smart=True, placed=placed)
+    return tl
+
+
+@app.route("/edit-plan", methods=["POST"])
+def edit_plan():
+    """Structure + style for a window, without touching any media (storyboard)."""
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id") or data.get("source_job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    words = jobs[job_id].get("words") or []
+    if not words:
+        return jsonify({"error": "Transcript not available"}), 400
+    pack_id = (data.get("style_pack") or "pulse").lower()
+    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    intensity = (data.get("intensity") or "med").lower()
+    if intensity not in edit_engine.DENSITY:
+        intensity = "med"
+    try:
+        t_in = max(0.0, float(data.get("start_time", 0) or 0))
+        t_out = float(data.get("end_time") or words[-1].get("end") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid start/end"}), 400
+    plan = _edit_plan_for(job_id, t_in, t_out, pack, intensity,
+                          use_llm=bool(data.get("use_llm", False)))
+    return jsonify({**plan, "style_pack": pack_id, "intensity": intensity})
+
+
 @app.route("/ai-edit-seed", methods=["POST"])
 def ai_edit_seed():
     """Captions-style AI Edit: style pack + intensity → seeded timeline JSON.
@@ -21694,6 +21959,9 @@ def ai_edit_seed():
     create_clip = bool(data.get("create_clip", False))
     insert_media = bool(data.get("insert_media", True))
     window_dur = t_out - t_in
+    # smart: the edit decision engine picks every beat (devices, B-roll,
+    # moves) instead of keyword badges and Gemini camera moves.
+    smart = bool(data.get("smart", False))
 
     # Optional: materialize a chopped child job (Captions "individual clip").
     work_job_id = source_job_id
@@ -21714,6 +21982,27 @@ def ai_edit_seed():
         cuts = _merge_cut_ranges(raw_cuts) if apply_cuts else []
     else:
         cuts = rec["cuts"] if apply_cuts else []
+
+    if smart:
+        plan = _edit_plan_for(work_job_id, work_in, work_out, pack, intensity,
+                              use_llm=bool(data.get("use_llm", True)))
+        timeline = _build_ai_edit_timeline(
+            work_job_id, work_in, work_out, pack, intensity, cuts, [],
+            label=label, words=words, insert_media=False,
+        )
+        timeline = _place_plan(timeline, plan, work_job_id, work_in, cuts, intensity,
+                               allow_generate=bool(data.get("allow_generate", True)))
+        if pack.get("style"):
+            jobs[work_job_id]["style"] = _normalize_caption_style(pack["style"])
+            _db_save_job(work_job_id)
+        return jsonify({
+            "ok": True, "smart": True, "source_job_id": source_job_id,
+            "clip_job_id": work_job_id if create_clip else None, "job_id": work_job_id,
+            "style_pack": pack_id, "intensity": intensity, "label": label,
+            "in": work_in, "out": work_out, "recommended_cuts": rec, "applied_cuts": cuts,
+            "effects": [], "timeline": timeline, "plan": plan,
+            "placed": timeline["ai_edit"]["placed"], "warning": None,
+        })
 
     # Effect suggestions (Gemini when available; empty otherwise).
     effects = []
@@ -21915,6 +22204,9 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "set_background", "photo": "bali beach", "fit": "cover"}',
     '{"op": "set_background", "clear": true}',
     '{"op": "make_image", "description": "a pier in Jersey City at dusk", "style": "photo", "start": 3.0, "duration": 4, "behind": true}',
+    '{"op": "add_device", "kind": "venn", "labels": ["Skill", "Demand", "Money"], "start": 8.0, "duration": 3.4}',
+    '{"op": "add_speed", "start": 12.0, "duration": 2.0, "speed": 2.0}',
+    '{"op": "set_behind", "index": 0, "on": true}',
     '{"op": "add_text_message", "title": "Mom", "start": 2.0, "duration": 4, "messages": [{"from": "them", "text": "are you going tonight"}, {"from": "me", "text": "obviously"}]}',
 ]
 
@@ -22197,6 +22489,29 @@ def _resolve_add_carousel(op: dict) -> tuple[dict | None, str]:
 
 
 
+def _resolve_add_device(op: dict, timeline: dict) -> tuple[dict | None, str]:
+    """Render the graphic the model asked for and hand back a placed clip."""
+    kind = str(op.get("kind") or "")
+    if kind not in devices.CATALOG:
+        return None, f"there is no '{kind}' graphic"
+    labels = [str(x)[:120] for x in (op.get("labels") or []) if x is not None][:6]
+    try:
+        start = max(0.0, float(op.get("start", 0)))
+        dur = max(0.8, min(12.0, float(op.get("duration") or devices.CATALOG[kind]["dur"])))
+    except (TypeError, ValueError):
+        return None, "the graphic had no usable time"
+    pal, font = _device_look(timeline)
+    try:
+        info = _render_device_asset(kind, labels, dur, timeline.get("canvas") or "9x16",
+                                    pal, font, int(timeline.get("fps") or 30))
+    except (RuntimeError, OSError, ValueError) as e:
+        return None, f"the {kind.replace('_', ' ')} graphic failed to render ({str(e)[:80]})"
+    clip = _device_overlay_clip(info, start)
+    if op.get("behind"):
+        clip["behind"] = True
+    return {"op": "add_device", "clip": clip}, ""
+
+
 def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
     """Turn at:"speaker" into a real point, and sanity-check explicit ones.
 
@@ -22310,6 +22625,8 @@ def co_editor():
                 "keyword": c.get("keyword"),
                 "source": c.get("source"),
                 "layout": c.get("layout"),
+                "device": (c.get("device") or {}).get("kind") if isinstance(c.get("device"), dict) else None,
+                "behind": bool(c.get("behind")),
                 "has_ken_burns": bool((c.get("ken_burns") or {}).get("enabled")),
                 "start": c.get("start"),
                 "duration": (float(c.get("out") or 0) - float(c.get("in") or 0)) if c.get("out") is not None else None,
@@ -22492,6 +22809,14 @@ Rules:
   specific text, use add_text_message, which DRAWS an iMessage-style thread
   with the words exactly as given. If they want a conversation on screen,
   that is the op, not make_image.
+- add_device places an animated graphic. kind is one of {", ".join(devices.CATALOG)}.
+  labels are the words it shows: chat_bubbles = messages, notification =
+  [title, body], search_bar = [query, result...], toggle_meter = [label,
+  0-100 or on/off], step_tracker/node_map/timeline_scrubber = the steps,
+  venn = [left, right, overlap], counter = [number with unit, caption],
+  kinetic_text = [the phrase]. Pull labels from what is said.
+- add_speed speeds up (speed > 1) or slows down (< 1) a stretch; 0.25 to 4.
+- set_behind puts an existing overlay behind the speaker ("put it behind me").
 {_taste_block(prompt)}"""
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
@@ -22561,6 +22886,20 @@ Rules:
             if note:
                 blocked.append(note)
             if op is None:
+                continue
+        elif name == "add_device":
+            op, note = _resolve_add_device(op, timeline)
+            if note:
+                blocked.append(note)
+            if op is None:
+                continue
+        elif name == "add_speed":
+            try:
+                op = {"op": "add_speed", "start": max(0.0, float(op.get("start", 0))),
+                      "duration": max(0.2, min(30.0, float(op.get("duration", 2)))),
+                      "speed": max(0.25, min(4.0, float(op.get("speed", 1.5)))),
+                      "smooth": bool(op.get("smooth"))}
+            except (TypeError, ValueError):
                 continue
         ops.append(op)
         if len(ops) >= 12:
