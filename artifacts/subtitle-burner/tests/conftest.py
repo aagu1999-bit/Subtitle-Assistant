@@ -49,3 +49,11 @@ def clip(tmp_path_factory):
     )
     assert out.stat().st_size > 0
     return out
+
+
+@pytest.fixture
+def temp_db(app_mod, tmp_path, monkeypatch):
+    """Point the schema and every write at a throwaway database."""
+    monkeypatch.setattr(app_mod, "DB_PATH", tmp_path / "jobs.db")
+    app_mod._db_init()
+    return app_mod.DB_PATH

@@ -5489,7 +5489,7 @@ _EFFECT_LIMITS = {
 # hand the client a clip that vanishes on the next save -- the silent-sink
 # failure this codebase has hit twice. One definition, both readers.
 TL_EFFECT_TYPES = (
-    "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen",
+    "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen", "speed",
 )
 
 
@@ -14372,46 +14372,96 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     )
 
 
-def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
-                          W: int, H: int, fps: int, fit: str, bg: str,
-                          out_path: Path, ken: dict | None = None,
-                          color: dict | None = None,
-                          punch: dict | None = None) -> float:
-    """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
+def _tl_segment_cache_path(src: Path, t_in: float, t_out: float,
+                           W: int, H: int, fps: int, fit: str, bg: str,
+                           ken: dict | None = None, color: dict | None = None,
+                           punch: dict | None = None, speed: float = 1.0,
+                           smooth: bool = False) -> Path:
+    """Where a conformed segment lives in the cache.
 
-    Still-image assets (Main cutaways) are looped for the requested duration.
-    Uses an MD5 hash cache to skip FFmpeg re-encoding for unchanged segments,
-    speeding up timeline updates by up to 30x.
+    Shared by the renderer and /timeline/dirty, so "is this segment already
+    rendered?" is answered by exactly the key the render will use.
     """
-    dur = max(0.05, t_out - t_in)
-    ext = src.suffix.lower().lstrip(".")
-    is_gif = ext in ASSET_EXT_GIF
-    is_image = ext in ASSET_EXT_STILL
-
-    # Calculate unique segment cache key
     mtime = src.stat().st_mtime if src.exists() else 0
+    ext = src.suffix.lower().lstrip(".")
     cache_raw = (
         f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_"
-        f"img={int(is_image)}_gif={int(is_gif)}_"
+        f"img={int(ext in ASSET_EXT_STILL)}_gif={int(ext in ASSET_EXT_GIF)}_"
         f"{json.dumps(ken, sort_keys=True) if ken else ''}_"
         f"{json.dumps(color, sort_keys=True) if color else ''}_"
         f"{json.dumps(punch, sort_keys=True) if punch else ''}"
     )
-    cache_hash = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
-    cached_segment = CACHE_DIR / f"norm_{cache_hash}.mp4"
+    if abs(speed - 1.0) > 1e-3:
+        # Only sped segments extend the key, so existing caches stay valid.
+        cache_raw += f"_speed{speed:.3f}_{int(bool(smooth))}"
+    return CACHE_DIR / f"norm_{hashlib.md5(cache_raw.encode('utf-8')).hexdigest()}.mp4"
+
+
+def _tl_atempo_chain(speed: float) -> str:
+    """atempo filters for *speed*; each stage is limited to 0.5..2."""
+    parts = []
+    s = speed
+    while s > 2.0:
+        parts.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5:
+        parts.append("atempo=0.5")
+        s /= 0.5
+    if abs(s - 1.0) > 1e-3:
+        parts.append(f"atempo={s:.4f}")
+    return ",".join(parts)
+
+
+def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
+                          W: int, H: int, fps: int, fit: str, bg: str,
+                          out_path: Path, ken: dict | None = None,
+                          color: dict | None = None,
+                          punch: dict | None = None,
+                          speed: float = 1.0, smooth: bool = False,
+                          stats: dict | None = None) -> float:
+    """Trim [t_in, t_out] of *src* and conform it to the WxH/fps canvas.
+
+    Still-image assets (Main cutaways) are looped for the requested duration.
+    Uses an MD5 hash cache to skip FFmpeg re-encoding for unchanged segments,
+    speeding up timeline updates by up to 30x. *speed* retimes the piece
+    (output lasts (t_out - t_in) / speed); *smooth* blends frames on slow
+    motion, which costs real encode time and so is only ever asked for here,
+    at render, never in the preview. Returns the output duration.
+    """
+    speed = max(0.25, min(4.0, float(speed or 1.0)))
+    src_dur = max(0.05, t_out - t_in)
+    dur = max(0.05, src_dur / speed)
+    ext = src.suffix.lower().lstrip(".")
+    is_gif = ext in ASSET_EXT_GIF
+    is_image = ext in ASSET_EXT_STILL
+    cached_segment = _tl_segment_cache_path(src, t_in, t_out, W, H, fps, fit, bg,
+                                            ken, color, punch, speed, smooth)
 
     if cached_segment.exists() and cached_segment.stat().st_size > 0:
         # Cache hit: copy cached segment directly without FFmpeg render!
         shutil.copy(cached_segment, out_path)
+        if stats is not None:
+            stats["hits"] = stats.get("hits", 0) + 1
+            stats["seconds_reused"] = round(stats.get("seconds_reused", 0.0) + dur, 3)
         return dur
+    if stats is not None:
+        stats["misses"] = stats.get("misses", 0) + 1
+        stats["seconds_rendered"] = round(stats.get("seconds_rendered", 0.0) + dur, 3)
 
+    retimed = abs(speed - 1.0) > 1e-3
+    vf = f"setpts=PTS/{speed:.4f}," if retimed else ""
     if fit == "contain":
-        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={_ff_color(bg)},setsar=1")
+        vf += (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={_ff_color(bg)},setsar=1")
     else:  # cover
-        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},setsar=1")
-    vf += f",fps={fps}"
+        vf += (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+               f"crop={W}:{H},setsar=1")
+    if retimed and smooth and speed < 1.0:
+        # Frame blending, not motion-compensated interpolation: mci is
+        # seconds per frame on a CPU, blend is close to free.
+        vf += f",minterpolate=fps={fps}:mi_mode=blend"
+    else:
+        vf += f",fps={fps}"
     # Skip Ken Burns on GIFs — motion lives in the animation itself.
     kb = None if is_gif else _tl_kenburns_filter(ken, W, H, fps, dur)
     if kb:
@@ -14459,7 +14509,10 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         cmd += ["-t", f"{dur:.3f}", "-vf", vf,
                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
         if has_audio:
-            cmd += ["-af", _tl_declick_af(dur)]
+            af = _tl_declick_af(dur)
+            if retimed:
+                af = _tl_atempo_chain(speed) + "," + af
+            cmd += ["-af", af]
         if not has_audio:
             cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
         cmd += [str(out_path)]
@@ -16961,6 +17014,10 @@ def _normalize_timeline(timeline: dict) -> dict:
     for key in ("main", "overlay", "effects", "text", "music"):
         clips = tracks.get(key)
         tracks[key] = clips if isinstance(clips, list) else []
+    for ov in tracks["overlay"]:
+        # Projects saved by the phrase toolbar's "Behind me" used this name.
+        if isinstance(ov, dict) and ov.pop("behind_subject", None):
+            ov["behind"] = True
     # Effect-lane clips: type + start + out(duration). Coerce common shapes.
     _fx_types = set(TL_EFFECT_TYPES)
     cleaned_fx = []
@@ -16984,6 +17041,12 @@ def _normalize_timeline(timeline: dict) -> dict:
         row["type"] = ftype
         row["start"] = start
         row["out"] = dur
+        if ftype == "speed":
+            try:
+                row["speed"] = max(0.25, min(4.0, float(fx.get("speed", 1.5))))
+            except (TypeError, ValueError):
+                row["speed"] = 1.5
+            row["smooth"] = bool(fx.get("smooth"))
         if "id" not in row or not row["id"]:
             row["id"] = uuid.uuid4().hex[:8]
         cleaned_fx.append(row)
@@ -17112,6 +17175,218 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
     return ken, punch, color, split
 
 
+def _tl_speed_from_lane_effects(lane_fxs: list) -> tuple[float, bool]:
+    """(speed, smooth) from overlapping speed clips; the last one wins."""
+    speed, smooth = 1.0, False
+    for fx in lane_fxs or []:
+        if fx.get("type") == "speed":
+            try:
+                speed = max(0.25, min(4.0, float(fx.get("speed") or 1.0)))
+            except (TypeError, ValueError):
+                speed = 1.0
+            smooth = bool(fx.get("smooth"))
+    return speed, smooth
+
+
+class _TimeMap:
+    """Timeline time -> output time once speed ramps shorten or stretch pieces.
+
+    The effects lane, overlays and titles are all placed in timeline time
+    (what the editor shows). A 2x stretch plays its span in half the time, so
+    everything after it must slide earlier by the same amount.
+    """
+
+    def __init__(self):
+        self.pieces = []   # [(t0, t1, speed)] in timeline time, contiguous
+
+    def add(self, t0: float, t1: float, speed: float) -> None:
+        self.pieces.append((t0, t1, speed))
+
+    def __call__(self, t: float) -> float:
+        out = 0.0
+        for t0, t1, sp in self.pieces:
+            if t <= t0:
+                break
+            out += (min(t, t1) - t0) / sp
+        if self.pieces and t > self.pieces[-1][1]:
+            out += t - self.pieces[-1][1]
+        return out
+
+    @property
+    def identity(self) -> bool:
+        return all(abs(sp - 1.0) < 1e-3 for _, _, sp in self.pieces)
+
+    def remap_span(self, start: float, dur: float) -> tuple[float, float]:
+        s = self(start)
+        return s, max(0.05, self(start + dur) - s)
+
+
+def _tl_remap_clip(clip: dict, tm: "_TimeMap", out_is_end: bool = False) -> dict:
+    """Move a clip placed in timeline time onto the sped-up output timeline."""
+    c = dict(clip)
+    try:
+        start = float(c.get("start", 0) or 0)
+    except (TypeError, ValueError):
+        return c
+    c["start"] = round(tm(start), 3)
+    if out_is_end:
+        try:
+            out = float(c.get("out", 0) or 0)
+        except (TypeError, ValueError):
+            return c
+        if out > start:
+            c["out"] = round(tm(out), 3)
+    return c
+
+
+def _tl_plan_segments(tl: dict, style: dict, build_reframe: bool = True) -> list[dict]:
+    """Every main-track segment the render will produce, without rendering.
+
+    Each main clip may expand into several segments: text-based editing cuts
+    split it into keep-ranges, and split-screen / Ken Burns change how each
+    piece is rendered. Effects-lane clips further subdivide by time.
+    Transitions live on clip *boundaries* only; cut-internal boundaries are
+    hard cuts. Normal segments carry the cache path the render will use, so
+    the same plan answers "what is still to render?".
+    """
+    W, H = TIMELINE_CANVASES[tl["canvas"]]
+    fps, fit, bg = tl["fps"], tl["fit"], tl["bg"]
+    tracks = tl["tracks"]
+    lane_effects = tracks.get("effects") or []
+    plan = []
+    out_cursor = 0.0     # timeline time so far (before xfade), matches Effects lane
+    for i, c in enumerate(tracks["main"]):
+        src = _timeline_clip_source(c)
+        if not src:
+            raise RuntimeError(f"Main clip {i + 1}: source video is no longer available.")
+
+        # Apply reframe if enabled in style
+        if style.get("reframe", {}).get("enabled"):
+            source_job_id = c.get("source_job_id")
+            if source_job_id:
+                cache_path = UPLOAD_DIR / f"{source_job_id}_reframe.json"
+                if cache_path.exists():
+                    reframe_video_path = UPLOAD_DIR / f"{source_job_id}_reframe.mp4"
+                    if not reframe_video_path.exists() and build_reframe:
+                        reframe_data = json.loads(cache_path.read_text(encoding="utf-8"))
+                        src_w, src_h = get_video_dimensions(src)
+                        src_duration = _media_duration(src)
+                        plan_rf = compute_reframe_plan(reframe_data, src_w, src_h, src_duration)
+                        apply_reframe(src, plan_rf, reframe_video_path)
+                    src = reframe_video_path
+
+        t_in = max(0.0, float(c.get("in", 0)))
+        t_out = float(c.get("out", t_in + 2))
+        if t_out <= t_in:
+            raise RuntimeError(f"Main clip {i + 1}: end must be after start.")
+
+        keeps = _tl_keep_ranges(t_in, t_out, c.get("cuts") or [])
+        if not keeps:
+            continue  # entire clip was cut away via text editing
+
+        # Clip-level FX (legacy / inspector) — Effects lane overrides when set.
+        clip_ken = c.get("ken_burns")
+        clip_punch = c.get("punch_zoom")
+        clip_color = c.get("color") or c.get("color_grade")
+        clip_split = c.get("split") or {}
+
+        clip_tr = c.get("transition") or {}
+        clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
+
+        # Captions default ON; the source job supplies the words + style.
+        burn_caps = c.get("burn_captions", True) and bool(c.get("source_job_id"))
+
+        for k, (ks, ke) in enumerate(keeps):
+            kdur = ke - ks
+            keep_ot0 = out_cursor
+            keep_ot1 = out_cursor + kdur
+            cuts = _tl_effect_cut_points(lane_effects, keep_ot0, keep_ot1)
+            for bi in range(len(cuts) - 1):
+                ot0, ot1 = cuts[bi], cuts[bi + 1]
+                sub_dur = ot1 - ot0
+                if sub_dur < 0.04:
+                    continue
+                src_off = ot0 - keep_ot0
+                sub_ks = ks + src_off
+                sub_ke = sub_ks + sub_dur
+
+                lane_fxs = _tl_effects_overlapping(lane_effects, ot0, ot1)
+                fx_ken, fx_punch, fx_color, fx_split = _tl_props_from_lane_effects(lane_fxs)
+                speed, smooth = _tl_speed_from_lane_effects(lane_fxs)
+
+                ken = fx_ken if fx_ken else clip_ken
+                punch = fx_punch if fx_punch else clip_punch
+                color = fx_color if fx_color else clip_color
+                split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
+                split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
+                # Both-speakers split: one source, two crop boxes. Only
+                # when no second media was picked, so an explicit choice
+                # always wins over the automatic one.
+                spk_boxes = None
+                spk_crops = None
+                spk_layout = (split or {}).get("layout", "auto")
+                split_mode = (split or {}).get("mode") or ""
+                if split and split.get("enabled") and not split_src:
+                    if split_mode == "speakers":
+                        spk_boxes = _tl_speaker_split_boxes(
+                            c.get("source_job_id"), split.get("speakers"))
+                    elif split_mode == "wide_punch":
+                        # A pulled-back strip over a close-up, both from
+                        # this clip. Never None: it needs no diarization
+                        # and no faces, which is the whole reason it
+                        # exists -- the footage this is for (a set, a
+                        # performance) often has no speech at all.
+                        spk_boxes, spk_crops = _tl_framing_boxes(
+                            c.get("source_job_id"))
+                        # Only reads stacked. Side by side the strip is a
+                        # narrow vertical slice, which shows LESS of the
+                        # room than the close-up rather than more, so
+                        # "auto" does not consult the canvas here.
+                        if spk_layout == "auto":
+                            spk_layout = "stack"
+
+                spec = {
+                    "clip_index": i, "src": src, "sub_ks": sub_ks, "sub_ke": sub_ke,
+                    "t0": ot0, "t1": ot1, "ken": ken, "punch": punch, "color": color,
+                    "speed": 1.0, "smooth": False,
+                    "transition": clip_tr if (k == 0 and bi == 0) else 0,
+                    "meta": {
+                        "source_job_id": c.get("source_job_id"),
+                        "src_in": sub_ks, "src_out": sub_ke, "burn_captions": burn_caps,
+                        "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
+                        "speed": 1.0,
+                    },
+                }
+                if spk_boxes:
+                    spec.update(kind="speakers", boxes=spk_boxes, crops=spk_crops,
+                                layout=spk_layout, panels=(split or {}).get("panels"),
+                                ratio=(split or {}).get("ratio"), cache=None)
+                elif split_src:
+                    # Second-source in-point advances with source time on A
+                    # for video; stills/GIFs stay pinned at 0 (looped).
+                    base_in = max(0.0, float((split or {}).get("in", 0)))
+                    ext_b = split_src.suffix.lower().lstrip(".")
+                    if ext_b in ASSET_EXT_STILL or ext_b in ASSET_EXT_GIF:
+                        s_in = 0.0
+                    else:
+                        s_in = base_in + (sub_ks - t_in)
+                    spec.update(kind="split", split_src=split_src, split_in=s_in,
+                                layout=(split or {}).get("layout", "auto"),
+                                placement=(split or {}).get("placement"),
+                                panels=(split or {}).get("panels"),
+                                ratio=(split or {}).get("ratio"), cache=None)
+                else:
+                    spec.update(kind="norm", speed=speed, smooth=smooth,
+                                cache=_tl_segment_cache_path(src, sub_ks, sub_ke, W, H, fps,
+                                                             fit, bg, ken, color, punch,
+                                                             speed, smooth))
+                    spec["meta"]["speed"] = speed
+                plan.append(spec)
+
+            out_cursor += kdur
+    return plan
+
+
 def render_timeline_job(job_id: str, timeline: dict) -> None:
     """Background worker: composite a timeline into OUTPUT_DIR/{job_id}.mp4."""
     work: list[Path] = []
@@ -17143,153 +17418,47 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         if not main_clips:
             raise RuntimeError("Add at least one clip to the main track before rendering.")
 
-        lane_effects = tracks.get("effects") or []
-
         # ---- Pass 1: normalize + stitch the main video track ----
-        # Each main clip may expand into several segments: text-based editing
-        # cuts split it into keep-ranges, and split-screen / Ken Burns change how
-        # each piece is rendered. Effects-lane clips further subdivide by time.
-        # Transitions live on clip *boundaries* only; cut-internal boundaries
-        # are hard cuts.
         _stage("building main track", 10)
+        plan = _tl_plan_segments(tl, style)
         segments = []        # [(path, dur)]
         transitions = []     # len == len(segments) - 1
         seg_meta = []        # per-segment caption source info, aligned to segments
-        seg_counter = 0
-        out_cursor = 0.0     # output time so far (before xfade), matches Effects lane
-        for i, c in enumerate(main_clips):
-            src = _timeline_clip_source(c)
-            if not src:
-                raise RuntimeError(f"Main clip {i + 1}: source video is no longer available.")
-            
-            # Apply reframe if enabled in style
-            if style.get("reframe", {}).get("enabled"):
-                source_job_id = c.get("source_job_id")
-                if source_job_id:
-                    cache_path = UPLOAD_DIR / f"{source_job_id}_reframe.json"
-                    if cache_path.exists():
-                        reframe_video_path = UPLOAD_DIR / f"{source_job_id}_reframe.mp4"
-                        if not reframe_video_path.exists():
-                            reframe_data = json.loads(cache_path.read_text(encoding="utf-8"))
-                            src_w, src_h = get_video_dimensions(src)
-                            src_duration = _media_duration(src)
-                            plan = compute_reframe_plan(reframe_data, src_w, src_h, src_duration)
-                            apply_reframe(src, plan, reframe_video_path)
-                        src = reframe_video_path
-
-            t_in = max(0.0, float(c.get("in", 0)))
-            t_out = float(c.get("out", t_in + 2))
-            if t_out <= t_in:
-                raise RuntimeError(f"Main clip {i + 1}: end must be after start.")
-
-            keeps = _tl_keep_ranges(t_in, t_out, c.get("cuts") or [])
-            if not keeps:
-                continue  # entire clip was cut away via text editing
-
-            # Clip-level FX (legacy / inspector) — Effects lane overrides when set.
-            clip_ken = c.get("ken_burns")
-            clip_punch = c.get("punch_zoom")
-            clip_color = c.get("color") or c.get("color_grade")
-            clip_split = c.get("split") or {}
-
-            clip_tr = c.get("transition") or {}
-            clip_tr = clip_tr.get("type") if isinstance(clip_tr, dict) and clip_tr.get("type") else 0
-
-            # Captions default ON; the source job supplies the words + style.
-            burn_caps = c.get("burn_captions", True) and bool(c.get("source_job_id"))
-
-            for k, (ks, ke) in enumerate(keeps):
-                kdur = ke - ks
-                keep_ot0 = out_cursor
-                keep_ot1 = out_cursor + kdur
-                cuts = _tl_effect_cut_points(lane_effects, keep_ot0, keep_ot1)
-                for bi in range(len(cuts) - 1):
-                    ot0, ot1 = cuts[bi], cuts[bi + 1]
-                    sub_dur = ot1 - ot0
-                    if sub_dur < 0.04:
-                        continue
-                    src_off = ot0 - keep_ot0
-                    sub_ks = ks + src_off
-                    sub_ke = sub_ks + sub_dur
-
-                    lane_fxs = _tl_effects_overlapping(lane_effects, ot0, ot1)
-                    fx_ken, fx_punch, fx_color, fx_split = _tl_props_from_lane_effects(lane_fxs)
-
-                    ken = fx_ken if fx_ken else clip_ken
-                    punch = fx_punch if fx_punch else clip_punch
-                    color = fx_color if fx_color else clip_color
-                    split = fx_split if fx_split else (clip_split if clip_split.get("enabled") else None)
-                    split_src = _timeline_clip_source(split) if (split and split.get("enabled")) else None
-                    # Both-speakers split: one source, two crop boxes. Only
-                    # when no second media was picked, so an explicit choice
-                    # always wins over the automatic one.
-                    spk_boxes = None
-                    spk_crops = None
-                    spk_layout = (split or {}).get("layout", "auto")
-                    split_mode = (split or {}).get("mode") or ""
-                    if split and split.get("enabled") and not split_src:
-                        if split_mode == "speakers":
-                            spk_boxes = _tl_speaker_split_boxes(
-                                c.get("source_job_id"), split.get("speakers"))
-                        elif split_mode == "wide_punch":
-                            # A pulled-back strip over a close-up, both from
-                            # this clip. Never None: it needs no diarization
-                            # and no faces, which is the whole reason it
-                            # exists -- the footage this is for (a set, a
-                            # performance) often has no speech at all.
-                            spk_boxes, spk_crops = _tl_framing_boxes(
-                                c.get("source_job_id"))
-                            # Only reads stacked. Side by side the strip is a
-                            # narrow vertical slice, which shows LESS of the
-                            # room than the close-up rather than more, so
-                            # "auto" does not consult the canvas here.
-                            if spk_layout == "auto":
-                                spk_layout = "stack"
-
-                    seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
-                    if spk_boxes:
-                        dur = _tl_split_speakers_segment(
-                            src, sub_ks, sub_dur, spk_boxes,
-                            spk_layout,
-                            W, H, fps, seg_path, color=color,
-                            panel_bgs=(split or {}).get("panels"),
-                            ratio=(split or {}).get("ratio"),
-                            crop_opts=spk_crops)
-                    elif split_src:
-                        # Second-source in-point advances with source time on A
-                        # for video; stills/GIFs stay pinned at 0 (looped).
-                        base_in = max(0.0, float((split or {}).get("in", 0)))
-                        ext_b = split_src.suffix.lower().lstrip(".")
-                        if ext_b in ASSET_EXT_STILL or ext_b in ASSET_EXT_GIF:
-                            s_in = 0.0
-                        else:
-                            s_in = base_in + (sub_ks - t_in)
-                        dur = _tl_split_segment(src, sub_ks, split_src, s_in, sub_dur,
-                                                (split or {}).get("layout", "auto"),
-                                                W, H, fps, seg_path, color=color,
-                                                placement=(split or {}).get("placement"),
-                                                panel_bgs=(split or {}).get("panels"),
-                                                ratio=(split or {}).get("ratio"))
-                    else:
-                        dur = _tl_normalize_segment(src, sub_ks, sub_ke, W, H, fps, fit, bg,
-                                                    seg_path, ken=ken, color=color, punch=punch)
-                    segments.append((seg_path, dur))
-                    seg_meta.append({
-                        "source_job_id": c.get("source_job_id"),
-                        "src_in": sub_ks, "src_out": sub_ke, "burn_captions": burn_caps,
-                        "word_overrides": c.get("word_overrides") if isinstance(c.get("word_overrides"), dict) else {},
-                    })
-                    work.append(seg_path)
-                    # Boundary transition only at the START of a new clip's first
-                    # kept piece (not the very first segment overall).
-                    if segments and len(segments) > 1:
-                        transitions.append(clip_tr if (k == 0 and bi == 0) else 0)
-                    seg_counter += 1
-
-                out_cursor += kdur
-
-            jobs[job_id]["progress"] = 10 + int(25 * (i + 1) / len(main_clips))
-            _db_save_job(job_id)
+        time_map = _TimeMap()
+        cache_stats = {"hits": 0, "misses": 0, "split": 0}
+        for seg_counter, spec in enumerate(plan):
+            seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
+            sub_dur = spec["sub_ke"] - spec["sub_ks"]
+            if spec["kind"] == "speakers":
+                dur = _tl_split_speakers_segment(
+                    spec["src"], spec["sub_ks"], sub_dur, spec["boxes"], spec["layout"],
+                    W, H, fps, seg_path, color=spec["color"],
+                    panel_bgs=spec["panels"], ratio=spec["ratio"], crop_opts=spec["crops"])
+                cache_stats["split"] += 1
+            elif spec["kind"] == "split":
+                dur = _tl_split_segment(spec["src"], spec["sub_ks"], spec["split_src"],
+                                        spec["split_in"], sub_dur, spec["layout"],
+                                        W, H, fps, seg_path, color=spec["color"],
+                                        placement=spec["placement"],
+                                        panel_bgs=spec["panels"], ratio=spec["ratio"])
+                cache_stats["split"] += 1
+            else:
+                dur = _tl_normalize_segment(spec["src"], spec["sub_ks"], spec["sub_ke"],
+                                            W, H, fps, fit, bg, seg_path,
+                                            ken=spec["ken"], color=spec["color"],
+                                            punch=spec["punch"], speed=spec["speed"],
+                                            smooth=spec["smooth"], stats=cache_stats)
+            time_map.add(spec["t0"], spec["t1"], spec["speed"])
+            segments.append((seg_path, dur))
+            seg_meta.append(spec["meta"])
+            work.append(seg_path)
+            # Boundary transition only at the START of a new clip's first
+            # kept piece (not the very first segment overall).
+            if len(segments) > 1:
+                transitions.append(spec["transition"])
+            jobs[job_id]["progress"] = 10 + int(25 * (spec["clip_index"] + 1) / len(main_clips))
+        jobs[job_id]["render_stats"] = cache_stats
+        _db_save_job(job_id)
 
         if not segments:
             raise RuntimeError("Every main clip was cut away — nothing left to render.")
@@ -17326,8 +17495,9 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     continue
                 if we <= meta["src_in"] or ws >= meta["src_out"]:
                     continue
-                local_s = max(0.0, ws - meta["src_in"])
-                local_e = max(local_s, min(meta["src_out"], we) - meta["src_in"])
+                sp = float(meta.get("speed") or 1.0)
+                local_s = max(0.0, ws - meta["src_in"]) / sp
+                local_e = max(local_s, (min(meta["src_out"], we) - meta["src_in"]) / sp)
                 text = w.get("word", "")
                 # Clip-local caption renames (Phase 4) keyed by source start time.
                 key = f"{ws:.3f}"
@@ -17433,6 +17603,10 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                 # hiccup — keep the pre-music picture and continue.
                 print(f"[timeline] Audio mix skipped: {music_err}", flush=True)
                 _safe_unlink(mixed)
+
+        if not time_map.identity:
+            tracks["overlay"] = [_tl_remap_clip(o, time_map) for o in tracks["overlay"]]
+            tracks["text"] = [_tl_remap_clip(t, time_map, out_is_end=True) for t in tracks["text"]]
 
         # ---- Pass 3: overlays / B-roll / PiP ----
         if tracks["overlay"]:
@@ -18222,6 +18396,41 @@ def timeline_speakers_status(job_id: str):
             "speaker_detection": rec.get("speaker_detection") or {},
         })
     return jsonify(out)
+
+
+@app.route("/timeline/dirty", methods=["POST"])
+def timeline_dirty():
+    """Which main-track spans the next render must encode, and which it reuses.
+
+    Uses the render's own plan and cache keys, so an amber band in the editor
+    is exactly a segment the renderer will re-encode.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id")
+    raw = data.get("timeline") or (jobs.get(job_id or "") or {}).get("timeline") or {}
+    tl = _normalize_timeline(raw)
+    if not tl["tracks"]["main"]:
+        return jsonify({"segments": [], "dirty_seconds": 0, "cached_seconds": 0})
+    style = tl.get("style") or {}
+    try:
+        plan = _tl_plan_segments(tl, style, build_reframe=False)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    out = []
+    dirty = cached = 0.0
+    for spec in plan:
+        is_cached = bool(spec.get("cache") and spec["cache"].exists()
+                         and spec["cache"].stat().st_size > 0)
+        span = spec["t1"] - spec["t0"]
+        if is_cached:
+            cached += span
+        else:
+            dirty += span
+        out.append({"start": round(spec["t0"], 3), "end": round(spec["t1"], 3),
+                    "cached": is_cached, "kind": spec["kind"],
+                    "speed": spec.get("speed", 1.0), "clip_index": spec["clip_index"]})
+    return jsonify({"segments": out, "dirty_seconds": round(dirty, 3),
+                    "cached_seconds": round(cached, 3)})
 
 
 @app.route("/timeline/list", methods=["GET"])
