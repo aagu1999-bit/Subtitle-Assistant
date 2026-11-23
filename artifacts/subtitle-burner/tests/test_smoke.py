@@ -625,6 +625,31 @@ def test_the_coeditor_can_see_the_effects_lane(app_mod, temp_db, monkeypatch):
     assert "from_ai" in seen["prompt"], "no way to tell which moves the AI placed"
 
 
+def test_the_coeditor_is_told_everything_it_can_do(app_mod, temp_db, monkeypatch):
+    """Asked "what can you do", the model answers from the top of its prompt.
+
+    That section once listed only captions, shots, overlays, music, titles and
+    styles, so it told people it could not make graphics or put text behind
+    them -- both of which are ops.
+    """
+    seen = {}
+
+    def fake(prompt):
+        seen["prompt"] = prompt
+        return {"ops": [], "message": "noted"}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "what can you do?", "timeline": _coeditor_timeline()})
+    p = seen["prompt"]
+    head = p[:p.index("Current timeline")]
+    for capability in ("Animated graphics", "mental", "Behind the speaker",
+                       "kinetic_text", "speed ramps", "venn"):
+        assert capability in head, f"capability list is missing {capability!r}"
+    assert "NOT a video generator" not in p
+    assert "Never say you cannot make graphics" in p
+
+
 def test_the_new_ops_survive_the_whitelist(app_mod, temp_db, monkeypatch):
     """An op the server does not allow is dropped before it reaches the UI."""
     ops = [

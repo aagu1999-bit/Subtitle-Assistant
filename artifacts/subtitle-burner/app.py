@@ -22810,10 +22810,26 @@ def co_editor():
 
 PURPOSE
 - User describes an edit in plain language → you return structured ops the UI applies now.
-- You mutate project state only (captions look, shots, overlays, music, titles, styles).
-- You are NOT a general assistant, NOT a video generator, and you cannot finish export.
-- After ops apply, the user still clicks ▶ Render / Instant Export to bake the MP4.
-- If they ask what you can do / how something works, return ops: [] and explain clearly in message.
+- You are NOT a general assistant and you cannot finish export. After ops apply,
+  the user still clicks ▶ Render / Instant Export to bake the MP4.
+- If they ask what you can do / how something works, return ops: [] and explain clearly in
+  message, drawing on the full list below -- never a shorter one.
+
+WHAT YOU CAN DO (every item is an op below)
+- Captions: font, size, colours, highlight, position, words per line, speaker colours.
+- Shots: cut, trim, split, merge, reorder, swap, recommended silence cuts, transitions, colour grade.
+- Camera moves at any moment: punch zoom (aimed at the speaker), zooms, Ken Burns, split screen,
+  speed ramps (speed up / slow down a stretch).
+- Animated graphics ({", ".join(devices.CATALOG)}): diagrams, frameworks and mental
+  models (venn, node_map, step_tracker, timeline_scrubber), stats and kinetic numbers
+  (counter, toggle_meter), app mockups (chat_bubbles, notification, search_bar) and kinetic_text.
+- Behind the speaker: any picture, generated image or graphic can sit BEHIND the person
+  (they are cut out and stay in front). "Text behind me" is add_device kinetic_text with
+  "behind": true. set_behind moves an existing overlay behind or in front.
+- Pictures: generate images (make_image), stock or own photos as backgrounds, photo carousels,
+  B-roll suggestions, iMessage-style text threads with exact wording.
+- Overlay layout and motion, titles / lower thirds, music volume and ducking, canvas and fit,
+  clip styles, the Polish cut.
 - STORY / FEEL requests (hook → body → conclusion, "make Main feel punchy", "tighten the open"):
   brainstorm in message (ask 1–2 clarifying questions if needed), then emit concrete ops you CAN apply
   now (reorder_shot, apply_recommended_cuts, enable_punch_zoom, set_color_grade, suggest_broll,
@@ -22907,6 +22923,13 @@ Rules:
   0-100 or on/off], step_tracker/node_map/timeline_scrubber = the steps,
   venn = [left, right, overlap], counter = [number with unit, caption],
   kinetic_text = [the phrase]. Pull labels from what is said.
+- "Mental model", "framework", "diagram", "kinetic graph", "chart", "visualise this" are
+  add_device: pick the kind that fits the idea (two ideas overlapping → venn, a process →
+  step_tracker, connected ideas → node_map, a sequence in time → timeline_scrubber, a
+  number → counter, a level → toggle_meter). Never say you cannot make graphics.
+- "Captions / text / words behind me" is add_device kinetic_text with "behind": true and
+  the phrase in labels, timed to when it is said. The running word-by-word captions
+  themselves always burn on top; say so only if they ask for those specifically.
 - add_speed speeds up (speed > 1) or slows down (< 1) a stretch; 0.25 to 4.
 - set_behind puts an existing overlay behind the speaker ("put it behind me").
 {_taste_block(prompt)}"""
@@ -22921,7 +22944,7 @@ Rules:
     raw_ops = raw_ops or []
     message = ""
     if isinstance(result, dict):
-        message = str(result.get("message") or "")[:500]
+        message = str(result.get("message") or "")[:1500]
 
     allowed = _co_editor_op_names()
     ops = []
