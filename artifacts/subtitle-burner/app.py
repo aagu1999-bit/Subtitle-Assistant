@@ -14530,8 +14530,10 @@ def _tl_segment_cache_path(src: Path, t_in: float, t_out: float,
     """
     mtime = src.stat().st_mtime if src.exists() else 0
     ext = src.suffix.lower().lstrip(".")
+    # v2: frame-exact segment lengths; older entries had audio a few ms past
+    # the last frame and stitched into variable-rate output.
     cache_raw = (
-        f"{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_"
+        f"v2_{src.resolve()}_{mtime}_{t_in:.3f}_{t_out:.3f}_{W}_{H}_{fps}_{fit}_{bg}_"
         f"img={int(ext in ASSET_EXT_STILL)}_gif={int(ext in ASSET_EXT_GIF)}_"
         f"{json.dumps(ken, sort_keys=True) if ken else ''}_"
         f"{json.dumps(color, sort_keys=True) if color else ''}_"
@@ -14576,7 +14578,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     """
     speed = max(0.25, min(4.0, float(speed or 1.0)))
     src_dur = max(0.05, t_out - t_in)
-    dur = max(0.05, src_dur / speed)
+    dur = _tl_frame_dur(src_dur / speed, fps)
     ext = src.suffix.lower().lstrip(".")
     is_gif = ext in ASSET_EXT_GIF
     is_image = ext in ASSET_EXT_STILL
@@ -14625,9 +14627,9 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
             FFMPEG, "-y",
             "-ignore_loop", "0", "-stream_loop", "-1",
             "-i", str(src),
-            "-f", "lavfi", "-t", f"{dur:.3f}",
+            "-f", "lavfi", "-t", f"{dur:.6f}",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-t", f"{dur:.3f}", "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-t", f"{dur:.6f}", "-vf", vf, *_VIDEO_ENC_ARGS,
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-map", "0:v:0", "-map", "1:a:0", "-shortest",
             str(out_path),
@@ -14637,28 +14639,28 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         # Main cutaway from a still: loop the frame, silent audio bed.
         cmd = [
             FFMPEG, "-y",
-            "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", str(src),
-            "-f", "lavfi", "-t", f"{dur:.3f}",
+            "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.6f}", "-i", str(src),
+            "-f", "lavfi", "-t", f"{dur:.6f}",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
             "-vf", vf, *_VIDEO_ENC_ARGS,
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-map", "0:v:0", "-map", "1:a:0", "-shortest",
-            "-t", f"{dur:.3f}", str(out_path),
+            "-t", f"{dur:.6f}", str(out_path),
         ]
         _tl_run(cmd, "Still cutaway")
     else:
         has_audio = _has_audio_stream(src)
         cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
         if not has_audio:
-            cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+            cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                     "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
-        cmd += ["-t", f"{dur:.3f}", "-vf", vf,
+        cmd += ["-t", f"{dur:.6f}", "-vf", vf,
                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
         if has_audio:
             af = _tl_declick_af(dur)
             if retimed:
                 af = _tl_atempo_chain(speed) + "," + af
-            cmd += ["-af", af]
+            cmd += ["-af", af + ",apad"]
         if not has_audio:
             cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
         cmd += [str(out_path)]
@@ -14670,6 +14672,18 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
     except Exception:
         pass
     return dur
+
+
+def _tl_frame_dur(dur: float, fps: int) -> float:
+    """Round a segment length to whole frames.
+
+    The concat demuxer offsets each file by its longest stream. If audio runs
+    a few ms past the last frame, every join leaves a gap in the video
+    timestamps and the stitched file comes out variable-rate (29.67 fps
+    instead of 30) with dropped frames.
+    """
+    fps = max(1, int(fps or 30))
+    return max(1.0 / fps, round(float(dur) * fps) / fps)
 
 
 def _tl_declick_af(dur: float, d: float = 0.02) -> str:
@@ -14967,6 +14981,7 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
     is nothing to sync -- which is the quiet advantage over a two-source
     split, where the second panel's audio has to be thrown away.
     """
+    dur = _tl_frame_dur(dur, fps)
     if layout == "auto":
         layout = "stack" if H >= W else "side"
     stack = "hstack" if layout == "side" else "vstack"
@@ -15051,21 +15066,21 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
 
     cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
     if not has_audio:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+        cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     for f in extra_files:
         # A still picture has to be looped to cover the window; the matte is
         # already a clip of exactly the right length.
         if Path(f).suffix.lower().lstrip(".") in ASSET_EXT_STILL:
-            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", f]
+            cmd += ["-loop", "1", "-t", f"{dur:.6f}", "-i", f]
         else:
             cmd += ["-i", f]
-    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+    cmd += ["-t", f"{dur:.6f}", "-filter_complex", fc,
             "-map", "[v]", "-map", "0:a:0" if has_audio else "1:a:0",
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if has_audio:
-        cmd += ["-af", _tl_declick_af(dur)]
+        cmd += ["-af", _tl_declick_af(dur) + ",apad"]
     cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Speaker split-screen")
     return dur
@@ -15091,6 +15106,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     stream-looped. Audio is taken from source A. Each half is center-cropped
     to fill its panel. An optional *color* grade is applied to the combined frame.
     """
+    dur = _tl_frame_dur(dur, fps)
     if layout == "auto":
         layout = "stack" if H >= W else "side"
     place = (placement or "").strip().lower()
@@ -15186,26 +15202,26 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
            "-ss", f"{inA:.3f}", "-i", str(srcA)]
     if is_still:
         # Loop the still for the full segment — seeking into a photo is a no-op.
-        cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", str(srcB)]
+        cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.6f}", "-i", str(srcB)]
     elif is_gif:
         cmd += ["-ignore_loop", "0", "-stream_loop", "-1", "-i", str(srcB)]
     else:
         cmd += ["-ss", f"{inB:.3f}", "-i", str(srcB)]
     if not hasA:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+        cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     audio_idx = "2:a:0" if not hasA else "0:a:0"
     for f in extra_files:
         if Path(f).suffix.lower().lstrip(".") in ASSET_EXT_STILL:
-            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", f]
+            cmd += ["-loop", "1", "-t", f"{dur:.6f}", "-i", f]
         else:
             cmd += ["-i", f]
-    cmd += ["-t", f"{dur:.3f}", "-filter_complex", fc,
+    cmd += ["-t", f"{dur:.6f}", "-filter_complex", fc,
             "-map", "[v]", "-map", audio_idx,
             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if hasA:
-        cmd += ["-af", _tl_declick_af(dur)]
+        cmd += ["-af", _tl_declick_af(dur) + ",apad"]
     cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Split-screen")
     return dur

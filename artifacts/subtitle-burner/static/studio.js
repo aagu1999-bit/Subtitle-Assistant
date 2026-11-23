@@ -125,10 +125,10 @@
   function budgetLine(p) {
     const own = p.graphics_budget || {};
     const d = own.per_minute != null ? own : (catalog.budgets[p.id] || {});
-    if (d.per_minute == null) return "Graphics at the default rate";
+    if (d.per_minute == null) return "No graphics cap";
     const per = d.per_minute;
     const allow = d.allow || [];
-    const fam = allow.includes("all") ? "any graphic" : allow.map((a) =>
+    const fam = (!allow.length || allow.includes("all")) ? "any graphic" : allow.map((a) =>
       FAMILY_LABEL[a] || (catalog.byKind[a] ? catalog.byKind[a].label : a.replace(/_/g, " "))).join(", ");
     return `≤${per} graphics/min · ${fam}`;
   }
@@ -272,7 +272,12 @@
         await window.openTimelineEditor(data.job_id, {
           newProject: true, replace: true, seedTimeline: data.timeline, label: data.label || "AI Edit",
         });
-        if (T()) await T().reloadAssets();
+        const api_ = T();
+        if (api_) {
+          await api_.reloadAssets();
+          const first = api_.tl && api_.tl.tracks.main[0];
+          if (first) api_.selectClip("main", first.id);
+        }
         toast("Edit built. Drag across transcript words to add more.");
       }
     } catch (e) {
@@ -319,10 +324,8 @@
     });
     const api_ = T();
     const words = api_ && api_.transcriptWords;
-    const sel_ = api_ && api_.selected;
-    if (!idxs.length || !words || !sel_ || sel_.track !== "main") return null;
-    const clip = api_.findClip("main", sel_.id);
-    if (!clip) return null;
+    const clip = api_ && api_.transcriptClip;
+    if (!idxs.length || !words || !clip) return null;
     const a = Math.min(...idxs), b = Math.max(...idxs);
     const ws = words.slice(a, b + 1);
     const text = ws.map((w) => String(w.word || "").trim()).join(" ").replace(/\s+/g, " ").trim();
