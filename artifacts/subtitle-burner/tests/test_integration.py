@@ -142,3 +142,36 @@ def test_coeditor_can_add_a_device_speed_and_put_it_behind(app_mod, temp_db, mon
     assert r["ops"][0]["clip"]["device"]["kind"] == "venn"
     assert r["ops"][1]["speed"] == 4.0
     assert "hologram" in r["message"]
+
+
+def test_style_toggles_reach_the_plan(app_mod, talk_job):
+    c = app_mod.app.test_client()
+    base = {"job_id": talk_job, "style_pack": "velocity", "intensity": "high"}
+    full = c.post("/edit-plan", json=base).get_json()
+    trs = {s["treatment"] for s in full["structure"]["spans"]}
+    assert any(t.startswith("device:") or t == "kinetic_text" for t in trs)
+
+    bare = c.post("/edit-plan", json=dict(base, graphics=False, broll=False)).get_json()
+    trs = [s["treatment"] for s in bare["structure"]["spans"]]
+    assert not any(t.startswith("device:") or t in ("kinetic_text", "broll") for t in trs)
+    assert all("device" not in s for s in bare["structure"]["spans"])
+    assert set(trs) <= {"punch", "clean_zoom", "none"}
+
+    still = c.post("/edit-plan", json=dict(base, graphics=False, broll=False, moves=False)).get_json()
+    assert {s["treatment"] for s in still["structure"]["spans"]} == {"none"}
+
+
+def test_style_packs_describe_the_look(app_mod):
+    packs = app_mod.app.test_client().get("/ai-edit/style-packs").get_json()["packs"]
+    by = {p["id"]: p for p in packs}
+    assert by["film"]["devices"]["per_minute"] == 1
+    assert by["pulse"]["style"]["highlight"].startswith("#")
+
+
+def test_page_ships_the_style_first_flow(app_mod):
+    html = app_mod.app.test_client().get("/").get_data(as_text=True)
+    for needle in ('data-tab="style"', 'data-tab="export"', 'data-tab-group="style"',
+                   'data-tab-group="export"', "studio.js", 'id="devicePicker"',
+                   'id="tasteModal"', 'data-ltab="structure"', "Caption preset"):
+        assert needle in html, needle
+    assert "CapCut Template" not in html

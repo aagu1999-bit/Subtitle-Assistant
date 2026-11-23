@@ -335,7 +335,7 @@ AI_EDIT_STYLE_PACKS = {
         },
         "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
         # Graphics devices per minute and which kinds suit the look.
-        "devices": {"per_minute": 6, "allow": ["ui", "stat", "text", "step_tracker"]},
+        "graphics_budget": {"per_minute": 6, "allow": ["ui", "stat", "text", "step_tracker"]},
     },
     "clarity": {
         "label": "Clarity",
@@ -350,7 +350,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
-        "devices": {"per_minute": 3, "allow": ["mental", "stat"]},
+        "graphics_budget": {"per_minute": 3, "allow": ["mental", "stat"]},
     },
     "magazine": {
         "label": "Magazine",
@@ -366,7 +366,7 @@ AI_EDIT_STYLE_PACKS = {
         # AI Edit no longer seeds text overlays (see _build_ai_edit_timeline) —
         # kept False rather than removed in case older saved projects read it.
         "add_title": False,
-        "devices": {"per_minute": 2, "allow": ["mental", "text"]},
+        "graphics_budget": {"per_minute": 2, "allow": ["mental", "text"]},
     },
     "velocity": {
         "label": "Velocity",
@@ -379,7 +379,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
         },
         "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
-        "devices": {"per_minute": 8, "allow": []},
+        "graphics_budget": {"per_minute": 8, "allow": []},
     },
     "film": {
         "label": "Film",
@@ -392,7 +392,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
         },
         "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
-        "devices": {"per_minute": 1, "allow": ["timeline_scrubber", "venn", "text"]},
+        "graphics_budget": {"per_minute": 1, "allow": ["timeline_scrubber", "venn", "text"]},
     },
     "always": {
         "label": "Always",
@@ -816,6 +816,18 @@ def _resolve_style_pack(pack_id: str) -> dict:
     return pack
 
 
+def _style_pack_preview(pack: dict) -> dict:
+    """What a pack card shows: type, colours, grade, cut and graphics budget."""
+    style = pack.get("style") or {}
+    grade = pack.get("color_grade")
+    return {
+        "style": {k: style.get(k) for k in ("font", "primary", "highlight", "accent")},
+        "color_grade": grade.get("preset") if isinstance(grade, dict) else grade,
+        "transition": pack.get("transition"),
+        "graphics_budget": pack.get("graphics_budget") or {},
+    }
+
+
 def _list_style_packs() -> list:
     """Built-ins then saved, for the picker. Saved packs are marked."""
     packs = []
@@ -826,6 +838,7 @@ def _list_style_packs() -> list:
             "blurb": pack.get("blurb", ""),
             "canvas": pack.get("canvas", "9x16"),
             "source": "builtin",
+            **_style_pack_preview(pack),
         })
     for key, pack in _db_load_style_packs().items():
         packs.append({
@@ -834,6 +847,7 @@ def _list_style_packs() -> list:
             "blurb": pack.get("blurb", ""),
             "canvas": pack.get("canvas", "9x16"),
             "source": pack.get("_source", "manual"),
+            **_style_pack_preview(pack),
         })
     return packs
 
@@ -19021,7 +19035,7 @@ def _device_overlay_clip(info: dict, start: float) -> dict:
 
 @app.route("/devices/catalog", methods=["GET"])
 def devices_catalog():
-    packs = {k: (v.get("devices") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
+    packs = {k: (v.get("graphics_budget") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
     return jsonify({"devices": devices.catalog_public(), "pack_budgets": packs})
 
 
@@ -21899,6 +21913,34 @@ def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list
     return tl
 
 
+def _plan_toggles(data: dict) -> dict:
+    return {k: bool(data.get(k, True)) for k in ("graphics", "broll", "moves")}
+
+
+def _apply_plan_toggles(plan: dict, toggles: dict) -> dict:
+    """Drop treatment families the user switched off in the Style tab.
+
+    A dropped graphic or B-roll falls back to a camera move when moves are
+    on, so a beat the planner flagged still gets *something* rather than
+    going flat; otherwise it becomes plain talking head.
+    """
+    graphics, broll, moves = toggles["graphics"], toggles["broll"], toggles["moves"]
+    for row in plan["structure"]["spans"]:
+        tr, new = row["treatment"], None
+        if (tr.startswith("device:") or tr == "kinetic_text") and not graphics:
+            new = "punch" if moves and row.get("role") in ("hook", "data") else (
+                "clean_zoom" if moves else "none")
+        elif tr == "broll" and not broll:
+            new = "clean_zoom" if moves else "none"
+        elif tr in ("punch", "clean_zoom") and not moves:
+            new = "none"
+        if new is not None:
+            row["treatment"] = new
+            row.pop("device", None)
+            row["reason"] = (row.get("reason") or "") + " (style toggle)"
+    return plan
+
+
 @app.route("/edit-plan", methods=["POST"])
 def edit_plan():
     """Structure + style for a window, without touching any media (storyboard)."""
@@ -21921,6 +21963,7 @@ def edit_plan():
         return jsonify({"error": "Invalid start/end"}), 400
     plan = _edit_plan_for(job_id, t_in, t_out, pack, intensity,
                           use_llm=bool(data.get("use_llm", False)))
+    plan = _apply_plan_toggles(plan, _plan_toggles(data))
     return jsonify({**plan, "style_pack": pack_id, "intensity": intensity})
 
 
@@ -22006,6 +22049,7 @@ def ai_edit_seed():
     if smart:
         plan = _edit_plan_for(work_job_id, work_in, work_out, pack, intensity,
                               use_llm=bool(data.get("use_llm", True)))
+        plan = _apply_plan_toggles(plan, _plan_toggles(data))
         timeline = _build_ai_edit_timeline(
             work_job_id, work_in, work_out, pack, intensity, cuts, [],
             label=label, words=words, insert_media=False,

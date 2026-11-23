@@ -6762,6 +6762,7 @@ function setActiveTab(tab) {
   const needsTranscript = {
     transcript: "Edit words",
     highlights: "Shorts",
+    style: "Style",
     branding: "Caption look",
     editor: "Edit",
     result: "Result",
@@ -6793,16 +6794,17 @@ function setActiveTab(tab) {
     }
   }
 
-  // Primary story steps: 1 Ingest → 2 Shorts → 3 Timeline.
-  // transcript/branding are secondary panels (Edit words / Caption look).
+  // Primary story steps: 1 Ingest → 2 Style → 3 Edit → 4 Export.
+  // transcript/branding are secondary panels (Edit words / Caption look);
+  // AI Shorts and Compilation are side trips with no step number.
   const stepMap = {
     ingest: "1",
-    highlights: "2",
-    compilation: "2",
-    editor: "3",
-    result: "3",
     transcript: "1",
-    branding: "1",
+    style: "2",
+    branding: "2",
+    editor: "3",
+    export: "4",
+    result: "4",
   };
   const step = stepMap[tab];
 
@@ -6851,6 +6853,7 @@ function setActiveTab(tab) {
   }
 
   if (typeof updateReadyActions === "function") updateReadyActions();
+  document.dispatchEvent(new CustomEvent("studio:tab", { detail: { tab } }));
 }
 
 // Used by timeline.js openTimelineEditor / other modules.
@@ -6900,6 +6903,11 @@ function openCaptionLook() {
   }, 50);
 }
 
+function openStyle() {
+  if (!requireReadyTranscript("Style")) return;
+  setActiveTab("style");
+}
+
 function openFindShorts() {
   if (!requireReadyTranscript("AI Shorts")) return;
   setActiveTab("highlights");
@@ -6932,8 +6940,11 @@ function openLongFormFromReady() {
 window.openEditWords = openEditWords;
 window.openCaptionLook = openCaptionLook;
 window.openLongFormFromReady = openLongFormFromReady;
+window.openStyle = openStyle;
 
 [
+  ["readyStyleBtn", openStyle],
+  ["captionLookToStyle", (e) => { if (e) e.preventDefault(); openStyle(); }],
   ["readyCaptionLookBtn", openCaptionLook],
   ["readyFindShortsBtn", openFindShorts],
   ["readyOpenTimelineBtn", openTimelineFromReady],
@@ -6985,8 +6996,9 @@ if (workflowSteps) {
     if (!badge || !badge.dataset.step) return;
     const stepToTab = {
       "1": "ingest",
-      "2": "highlights",
+      "2": "style",
       "3": "editor",
+      "4": "export",
     };
     const tab = stepToTab[badge.dataset.step];
     if (tab) setActiveTab(tab);

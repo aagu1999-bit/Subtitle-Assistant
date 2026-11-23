@@ -124,11 +124,11 @@ def test_style_pack_budget_limits_and_filters_devices():
             words.append({"word": tok, "start": t, "end": t + 0.25})
             t += 0.3
         t += 2.0
-    film = {"devices": {"per_minute": 1, "allow": ["venn", "timeline_scrubber"]}}
+    film = {"graphics_budget": {"per_minute": 1, "allow": ["venn", "timeline_scrubber"]}}
     plan = ee.plan_edit(words, 0, t, intensity="med", style_pack=film)
     kinds = [r["device"]["kind"] for r in plan["structure"]["spans"] if "device" in r]
     assert all(k in ("venn", "timeline_scrubber") for k in kinds)
-    pulse = {"devices": {"per_minute": 6, "allow": ["ui", "stat"]}}
+    pulse = {"graphics_budget": {"per_minute": 6, "allow": ["ui", "stat"]}}
     plan = ee.plan_edit(words, 0, t, intensity="high", style_pack=pulse)
     kinds = [r["device"]["kind"] for r in plan["structure"]["spans"] if "device" in r]
     assert kinds and all(k in ("counter", "chat_bubbles", "notification", "search_bar",

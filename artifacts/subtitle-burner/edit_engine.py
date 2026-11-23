@@ -411,7 +411,7 @@ DEVICE_FAMILY = {
 
 def device_budget(pack: dict | None, seconds: float, intensity: str = "med") -> tuple[int, set]:
     """(max devices for this window, allowed kinds/families) from a style pack."""
-    cfg = (pack or {}).get("devices") or {}
+    cfg = (pack or {}).get("graphics_budget") or {}
     allow = set(cfg.get("allow") or [])
     per_min = cfg.get("per_minute")
     if per_min is None:
@@ -621,8 +621,8 @@ def style_from_pack(pack: dict, intensity: str = "med") -> dict:
             "palette": [accent, second, "#FFFFFF", "#0F1220"],
             "font": st.get("font") or st.get("font_name") or "DM Sans",
             "corner": 28,
-            "per_minute": ((pack.get("devices") or {}).get("per_minute")),
-            "allow": list((pack.get("devices") or {}).get("allow") or []),
+            "per_minute": ((pack.get("graphics_budget") or {}).get("per_minute")),
+            "allow": list((pack.get("graphics_budget") or {}).get("allow") or []),
         },
     }
 

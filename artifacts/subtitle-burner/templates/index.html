@@ -277,8 +277,9 @@
   <div class="logo">Studio</div>
   <div class="workflow-steps" id="workflowSteps">
     <button class="main-tab active" data-tab="ingest">Media</button>
-    <button class="main-tab" data-tab="highlights">Shorts</button>
+    <button class="main-tab" data-tab="style">Style</button>
     <button class="main-tab" data-tab="editor">Edit</button>
+    <button class="main-tab" data-tab="export">Export</button>
   </div>
   <div class="header-actions">
     <button class="btn-export" id="headerExportBtn" type="button" title="Quick caption burn — prefer Edit → Render for full Timeline">Export</button>
@@ -288,11 +289,14 @@
 <!-- Main app shell: full-width main area (hidden until a job exists) -->
 <div id="appShell" class="app-shell hidden">
   <main class="main-area" style="width:100%;">
-    <!-- Destinations: Media · Shorts · Edit · Projects. Secondary panels via ready CTAs. -->
+    <!-- Destinations: Media · Style · Edit · Export, then Shorts · Projects as side trips. Secondary panels via ready CTAs. -->
     <nav class="main-tabs" id="mainTabs">
       <button class="main-tab active" data-tab="ingest">Media</button>
-      <button class="main-tab" data-tab="highlights">Shorts</button>
+      <button class="main-tab" data-tab="style">Style</button>
       <button class="main-tab" data-tab="editor">Edit</button>
+      <button class="main-tab" data-tab="export">Export</button>
+      <span class="main-tabs-sep" aria-hidden="true"></span>
+      <button class="main-tab" data-tab="highlights">Shorts</button>
       <button class="main-tab" data-tab="compilation" title="Recap, interviews, compilation queue">Projects <span id="compileBadge" class="tab-badge hidden">0</span></button>
       <!-- Secondary panels — opened from ready CTAs, not primary nav -->
       <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav" aria-hidden="true" tabindex="-1">Edit words</button>
@@ -372,7 +376,8 @@
               Open <strong>Edit</strong> to cut, caption, and Render. Everything else is optional.
             </p>
             <div class="ready-primary-row">
-              <button type="button" id="readyOpenTimelineBtn" class="btn btn-primary btn-sm">Open Edit →</button>
+              <button type="button" id="readyStyleBtn" class="btn btn-primary btn-sm">Pick a style →</button>
+              <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">Open Edit →</button>
               <button type="button" id="readyOpenLongFormBtn" class="btn btn-secondary btn-sm hidden" title="Open a 16:9 Timeline for the full upload">Long-form 16:9</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
             </div>
@@ -412,6 +417,49 @@
       </div>
     </div>
     <!-- /Tab: Ingest -->
+
+
+    <!-- Tab: Style — pick the look of the whole edit, preview its storyboard, build it -->
+    <div class="tab-content hidden" data-tab-group="style">
+      <section class="panel style-panel">
+        <div class="style-head">
+          <div>
+            <h2 style="margin:0">🎨 Style</h2>
+            <p class="muted" style="margin:4px 0 0;font-size:.8rem">A style decides pacing, camera moves, which graphics are allowed and how often, and the caption look. The edit is planned from what is said: hooks, numbers, lists, stories.</p>
+          </div>
+          <div class="style-window">
+            <label class="muted">Window
+              <input type="number" id="styleStart" min="0" step="0.5" value="0" title="Start (s)"> –
+              <input type="number" id="styleEnd" min="0" step="0.5" placeholder="end" title="End (s)">
+            </label>
+          </div>
+        </div>
+        <div id="stylePacks" class="style-packs" role="radiogroup" aria-label="Style pack"></div>
+        <div class="style-controls">
+          <div class="style-intensity" role="radiogroup" aria-label="Intensity">
+            <span class="muted">Intensity</span>
+            <button type="button" class="tl-chip-btn" data-intensity="low">Low</button>
+            <button type="button" class="tl-chip-btn active" data-intensity="med">Med</button>
+            <button type="button" class="tl-chip-btn" data-intensity="high">High</button>
+          </div>
+          <label class="style-toggle"><input type="checkbox" id="styleCuts" checked> ✂️ Trim fillers &amp; silences</label>
+          <label class="style-toggle"><input type="checkbox" id="styleMoves" checked> ⚡ Camera moves</label>
+          <label class="style-toggle"><input type="checkbox" id="styleGraphics" checked> 🧩 Graphics</label>
+          <label class="style-toggle"><input type="checkbox" id="styleBroll" checked> 🖼 B-roll</label>
+          <label class="style-toggle" title="When no library or stock clip fits, render an abstract moving texture (never people, hands or text)"><input type="checkbox" id="styleGenerate" checked> 🌀 Generated fills</label>
+          <label class="style-toggle" title="Ask Gemini to label the beats (hook / data / story…). Off = fast local rules."><input type="checkbox" id="styleLlm"> 🤖 Gemini roles</label>
+        </div>
+        <div class="style-actions">
+          <button type="button" id="stylePreviewBtn" class="btn btn-secondary">👁 Preview edit</button>
+          <button type="button" id="styleBuildBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">✨ Build edit</button>
+          <button type="button" id="styleTasteBtn" class="btn btn-secondary" title="Rules and learned preferences the AI follows">🧠 Taste memory</button>
+          <span id="styleStatus" class="muted" style="font-size:.8rem"></span>
+        </div>
+        <div id="styleSummary" class="style-summary hidden"></div>
+        <div id="styleStoryboard" class="style-storyboard"></div>
+      </section>
+    </div>
+    <!-- /Tab: Style -->
 
     <!-- Panel: Caption look (was step 4 — opened via ready CTA / Timeline) -->
     <div class="tab-content hidden" data-tab-group="branding">
@@ -457,6 +505,8 @@
         Want CapCut-style <em>edits</em> (cuts / punch / B-roll density)? Use <strong>AI Shorts</strong> → pick an edit pack → <strong>Find highlights</strong> → <strong>AI Edit…</strong> on a card.
       </p>
     </div>
+
+    <p class="muted" style="font-size:.74rem;margin:0 0 16px">For a whole video, cuts, zooms, graphics and B-roll come from the <a href="#" id="captionLookToStyle">Style</a> you pick.</p>
 
     <div class="row" style="margin-bottom:20px;">
       <label style="width:100%;margin-bottom:8px;font-weight:600;">✨ Subtitle Animation Presets</label>
@@ -1629,10 +1679,17 @@
             <button class="tl-lefttab active" data-ltab="transcript">📝 Transcript</button>
             <button class="tl-lefttab" data-ltab="media">📁 Media</button>
             <button class="tl-lefttab" data-ltab="look">🎨 Look</button>
+            <button class="tl-lefttab" data-ltab="structure" title="The planned beats: role, treatment and why">🧭 Structure</button>
+          </div>
+
+          <div class="tl-leftpanel hidden" data-lpanel="structure">
+            <p class="muted tl-hint">Beats from the edit plan. Click one to jump there.</p>
+            <div id="tlStructure" class="tl-structure"></div>
           </div>
 
           <div class="tl-leftpanel" data-lpanel="transcript">
             <p class="muted tl-hint" id="tlTranscriptHint">Select a Main clip to edit phrases. Click a row to seek · edit text inline · × cuts the phrase · Shift+click a word to cut one word.</p>
+            <p class="muted tl-hint" style="margin-top:-4px">Drag across words for <strong>B-roll · Graphic · Behind me · Speed · Punch</strong>.</p>
             <div id="tlTranscriptToolbar" class="tl-transcript-toolbar hidden">
               <span id="tlTranscriptMeta" class="muted tl-transcript-meta"></span>
               <div class="tl-transcript-actions">
@@ -1818,6 +1875,8 @@
             <button id="tlCoEditorBtn" class="tl-chip-btn" title="Chat-based co-editor — describe edits in plain language">💬 Co-editor</button>
             <button id="tlPolishChip" class="tl-chip-btn tl-chip-polish" type="button"
               title="Polish cut — silence, jump-cut, B-roll, audio master (opens options)">✨ Polish</button>
+            <button id="tlTasteBtn" class="tl-chip-btn" title="Rules and learned preferences the AI follows">🧠 Taste</button>
+            <button id="tlDirtyBtn" class="tl-chip-btn" title="Show which spans the next render re-encodes (amber) and which it reuses">🟧 Changed</button>
             <span style="flex:1"></span>
             <span id="tlPlayheadTime" class="muted" style="font-size:.74rem">0:00.0</span>
             <button id="tlZoomOut" class="tl-chip-btn" title="Zoom out (−)">−</button>
@@ -1848,6 +1907,7 @@
           </div>
           <div class="tl-actions">
             <span id="tlRenderStatus" class="muted"></span>
+            <span id="tlCacheStats" class="muted tl-cache-stats"></span>
           </div>
 
           <!-- CapCut-style contextual tools (phone). Desktop keeps #tlProps. -->
@@ -2090,6 +2150,99 @@
     <input type="text" id="mobileChatInput" placeholder="Chat to edit" maxlength="400" autocomplete="off" />
     <button type="button" class="mobile-chat-max" id="mobileChatOpen" title="Open co-editor">MAX</button>
     <button type="button" class="mobile-chat-send" id="mobileChatSend" title="Send">↑</button>
+
+  <!-- Tab: Export — render, QA report, cache stats, interchange -->
+  <div class="tab-content hidden" data-tab-group="export">
+    <section class="panel export-panel">
+      <div class="style-head">
+        <div>
+          <h2 style="margin:0">📤 Export</h2>
+          <p class="muted" style="margin:4px 0 0;font-size:.8rem" id="exportProjectName">No timeline project open.</p>
+        </div>
+        <div class="export-actions">
+          <button type="button" id="exportRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
+          <a id="exportDownload" class="btn btn-secondary hidden" href="#" download>⬇ Download MP4</a>
+        </div>
+      </div>
+      <div id="exportDirty" class="export-dirty muted"></div>
+      <div id="exportStatus" class="muted" style="font-size:.82rem;margin:6px 0"></div>
+      <div id="exportCache" class="export-cache hidden"></div>
+      <div class="export-grid">
+        <div>
+          <div class="section-title" style="display:flex;align-items:center;gap:8px">
+            <span>✅ Quality report</span>
+            <span id="qaBadge" class="qa-badge">—</span>
+            <span style="flex:1"></span>
+            <button type="button" id="qaRerunBtn" class="tl-chip-btn" title="Re-run the format / loudness / black-frame / caption checks">↻ Re-check</button>
+            <button type="button" id="qaVisionBtn" class="tl-chip-btn" title="Look at five keyframes for captions over faces, cut-off text and stray artifacts">👁 Vision spot-check</button>
+          </div>
+          <ul id="qaChecks" class="qa-checks"><li class="muted">Render to see the report.</li></ul>
+          <div id="qaKeyframes" class="qa-keyframes"></div>
+        </div>
+        <div>
+          <div class="section-title">🎞 Preview</div>
+          <video id="exportPlayer" controls playsinline class="export-player hidden"></video>
+          <div class="section-title" style="margin-top:14px">🔁 Interchange</div>
+          <p class="muted" style="font-size:.74rem;margin:0 0 8px">The edit as data: structure (what happens when) and style (how it looks), or OpenTimelineIO for Resolve / Premiere / Kdenlive.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a id="exportJsonBtn" class="btn btn-secondary btn-sm" href="#" download>⬇ Edit JSON</a>
+            <a id="exportOtioBtn" class="btn btn-secondary btn-sm" href="#" download>⬇ OTIO</a>
+            <label class="btn btn-secondary btn-sm" style="cursor:pointer;position:relative;overflow:hidden">⬆ Import…
+              <input type="file" id="exportImportFile" accept=".json,.otio,application/json" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </label>
+          </div>
+          <div id="exportImportStatus" class="muted" style="font-size:.76rem;margin-top:6px"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <!-- /Tab: Export -->
+
+  <!-- Taste memory -->
+  <div id="tasteModal" class="ai-edit-modal hidden" aria-hidden="true">
+    <div class="ai-edit-modal-card">
+      <div class="ai-edit-modal-head">
+        <strong>🧠 Taste memory</strong>
+        <span class="muted" style="font-size:.78rem">Your rules always apply. Learned preferences fade unless you keep confirming them.</span>
+        <button type="button" id="tasteClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+      </div>
+      <div class="ai-edit-modal-body">
+        <div class="taste-add">
+          <select id="tasteKind"><option value="rule">Rule</option><option value="bad_example">Never do</option></select>
+          <input type="text" id="tasteText" maxlength="240" placeholder="e.g. Never zoom on my co-host · Keep graphics in brand yellow">
+          <button type="button" id="tasteAddBtn" class="btn btn-primary btn-sm">Add</button>
+        </div>
+        <div id="tasteList" class="taste-list"></div>
+      </div>
+      <div class="ai-edit-modal-foot">
+        <button type="button" id="tastePruneBtn" class="btn btn-secondary btn-sm" title="Drop expired and near-zero learned items">Prune</button>
+        <button type="button" id="tasteResetBtn" class="btn btn-secondary btn-sm" title="Forget everything learned (keeps your rules)">Forget learned</button>
+        <span style="flex:1"></span>
+        <button type="button" id="tasteDone" class="btn btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Graphic picker (phrase toolbar → Graphic) -->
+  <div id="devicePicker" class="ai-edit-modal hidden" aria-hidden="true">
+    <div class="ai-edit-modal-card device-picker-card">
+      <div class="ai-edit-modal-head">
+        <strong>🧩 Add a graphic</strong>
+        <span id="devicePickerPhrase" class="muted" style="font-size:.78rem"></span>
+        <button type="button" id="devicePickerClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
+      </div>
+      <div class="ai-edit-modal-body">
+        <div id="devicePickerGrid" class="device-grid"></div>
+        <div id="devicePickerFields" class="device-fields"></div>
+        <label class="style-toggle" style="margin-top:8px"><input type="checkbox" id="devicePickerBehind"> 👤 Behind me (tuck under the speaker)</label>
+      </div>
+      <div class="ai-edit-modal-foot">
+        <span id="devicePickerStatus" class="muted" style="font-size:.8rem"></span>
+        <span style="flex:1"></span>
+        <button type="button" id="devicePickerCancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="devicePickerAdd" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">Add to timeline</button>
+      </div>
+    </div>
   </div>
 
   <!-- Tab: Result -->
@@ -2144,6 +2297,7 @@
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='timeline.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='mobile.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='studio.js') }}?v={{ asset_version }}"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
   // Step badge navigation handler
