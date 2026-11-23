@@ -268,6 +268,13 @@
       const pl = data.placed || {};
       status.textContent = `Built: ${pl.devices || 0} graphics · ${pl.broll || 0} B-roll · ${pl.effects || 0} moves`
         + ((pl.notes || []).length ? ` · ${(pl.notes || []).length} note(s)` : "");
+      // Render pulls captions from Caption look, so the picked style has to
+      // land there too or its captions are replaced at export.
+      if (data.timeline && data.timeline.style && typeof window.applyStyle === "function") {
+        try { window.applyStyle(data.timeline.style); } catch (_) { /* Look form not mounted */ }
+        if (typeof window.updateFontPreview === "function") window.updateFontPreview();
+        if (typeof window.scheduleDraftSave === "function") window.scheduleDraftSave();
+      }
       if (typeof window.openTimelineEditor === "function") {
         await window.openTimelineEditor(data.job_id, {
           newProject: true, replace: true, seedTimeline: data.timeline, label: data.label || "AI Edit",
@@ -364,7 +371,7 @@
       if (b.dataset.speed) { phraseSpeed(Number(b.dataset.speed)); return; }
       const act = b.dataset.ph;
       if (act === "broll") phraseBroll(b);
-      else if (act === "graphic") openPicker(phrase);
+      else if (act === "graphic") { hideToolbar(); openPicker(phrase); }
       else if (act === "behind") phraseBehind(b);
       else if (act === "speed") bar.querySelector(".phrase-speed").classList.toggle("hidden");
       else if (act === "punch") phrasePunch();
@@ -462,7 +469,7 @@
 
   function wirePhraseToolbar() {
     document.addEventListener("mouseup", (e) => {
-      if (e.target.closest && e.target.closest("#phraseToolbar")) return;
+      if (e.target.closest && e.target.closest("#phraseToolbar, #devicePicker, #tasteModal")) return;
       setTimeout(() => {
         const p = phraseFromSelection();
         if (p && p.text) showToolbar(p);
