@@ -188,6 +188,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "crossfade",
         "caption_preset": "mrbeast",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             # Integral CF is commercial and not bundled; Anton is the
             # nearest heavy condensed face that actually ships here.
             "font": "Anton", "size": 68, "primary": "#FFFFFF",
@@ -204,6 +206,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "dissolve",
         "caption_preset": "hormozi",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             # The family name inside Montserrat-Black.ttf, which is what
             # libass matches on. "Montserrat Black" matches the filename,
             # so it previewed correctly and rendered as a system font.
@@ -220,6 +224,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "fade_black",
         "caption_preset": "karaoke",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
             "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
         },
@@ -234,6 +240,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": "slide",
         "caption_preset": "neon",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
             "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
         },

@@ -142,3 +142,9 @@ def test_a_timeline_render_comes_back_with_a_qa_report(app_mod, clip, monkeypatc
         app_mod.jobs.pop(sid, None)
         app_mod.jobs.pop(jid, None)
         dest.unlink(missing_ok=True)
+
+
+def test_vertical_packs_keep_captions_out_of_the_feed_ui(app_mod):
+    for pid, pack in app_mod.AI_EDIT_STYLE_PACKS.items():
+        if pack.get("canvas", "9x16") == "9x16":
+            assert pack["style"]["position_y"] <= 75, pid
