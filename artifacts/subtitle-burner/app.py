@@ -10330,6 +10330,26 @@ def _src_to_timeline(t: float, t_in: float, cuts: list) -> float:
     return max(0.0, t - t_in - removed)
 
 
+def _plan_fx_origin(fx: dict, job_id: str) -> dict:
+    """Mark a planned move the way the editor marks AI moves.
+
+    The proposal is recorded as a suggestion, so when the user trims,
+    re-aims or deletes it the existing correction tracking (and with it the
+    taste memory) learns from the planner exactly as from Gemini's moves.
+    The proposed shape mirrors currentFxState() in timeline.js.
+    """
+    proposed = {"type": fx["type"], "start": fx["start"], "dur": fx["out"],
+                "intensity": fx.get("intensity") or "med"}
+    if fx["type"] == "ken_burns":
+        proposed["direction"] = fx.get("direction") or "in"
+    if isinstance(fx.get("aim"), dict):
+        proposed["anchor"] = {"x": fx["aim"].get("x"), "y": fx["aim"].get("y")}
+    sid = _record_suggestion(job_id, "effect", proposed, "proposed")
+    fx["fx_origin"] = {"suggestion_id": sid, "job_id": job_id, "proposed": proposed,
+                       "source": "plan"}
+    return fx
+
+
 def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list,
                 intensity: str, allow_generate: bool = True) -> dict:
     """Turn plan decisions into effects-lane clips, devices and B-roll."""
@@ -10350,18 +10370,18 @@ def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list
             at = row.get("hit") or row["start"]
             fx = {"id": _uid_short(), "type": "punch_zoom",
                   "start": round(_src_to_timeline(at, t_in, cuts), 3), "out": 0.9,
-                  "intensity": "high" if intensity == "high" else "med", "fx_origin": "plan",
+                  "intensity": "high" if intensity == "high" else "med",
                   "plan_ref": row["index"]}
             aim = _face_anchor_at(job_id, at)
             if aim:
                 fx["aim"] = aim
-            tracks["effects"].append(fx)
+            tracks["effects"].append(_plan_fx_origin(fx, job_id))
             placed["effects"] += 1
         elif tr == "clean_zoom":
-            tracks["effects"].append({"id": _uid_short(), "type": "ken_burns",
-                                      "start": round(start, 3), "out": round(min(dur, 6.0), 3),
-                                      "intensity": "low", "direction": "in", "fx_origin": "plan",
-                                      "plan_ref": row["index"]})
+            fx = {"id": _uid_short(), "type": "ken_burns", "start": round(start, 3),
+                  "out": round(min(dur, 6.0), 3), "intensity": "low", "direction": "in",
+                  "plan_ref": row["index"]}
+            tracks["effects"].append(_plan_fx_origin(fx, job_id))
             placed["effects"] += 1
         elif tr.startswith("device:") or tr == "kinetic_text":
             dev = row.get("device") or {"kind": "kinetic_text", "labels": [row["text"][:48]]}

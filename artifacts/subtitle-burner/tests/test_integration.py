@@ -75,8 +75,13 @@ def test_smart_seed_places_every_decision(app_mod, talk_job):
     for o in overlays:
         assert app_mod._find_asset_path(o["asset_id"]) is not None
         assert "plan_ref" in o
-    assert any(fx.get("fx_origin") == "plan" for fx in tl["tracks"]["effects"]) or not (
-        treatments & {"punch", "clean_zoom"})
+    planned_fx = [fx for fx in tl["tracks"]["effects"]
+                  if (fx.get("fx_origin") or {}).get("source") == "plan"]
+    assert planned_fx or not (treatments & {"punch", "clean_zoom"})
+    for fx in planned_fx:
+        o = fx["fx_origin"]
+        assert o["suggestion_id"] and o["proposed"]["type"] == fx["type"]
+        assert o["proposed"]["dur"] == fx["out"]
     assert r["placed"]["devices"] == len([o for o in overlays if o.get("device")])
 
 

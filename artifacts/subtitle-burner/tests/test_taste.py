@@ -107,3 +107,9 @@ def test_the_repo_memory_index_has_no_dead_links():
     import prune_context
     rep = prune_context.lint_memory(prune_context.REPO / ".agents" / "memory")
     assert not rep["dead_links"], rep
+
+
+def test_learning_reads_the_editor_state_shape(store):
+    proposed = {"type": "ken_burns", "start": 2.0, "dur": 6.0, "intensity": "low", "direction": "in"}
+    got = store.learn_from_suggestion("effect", proposed, "edited", dict(proposed, dur=2.0))
+    assert [g["text"] for g in got] == ["Prefers shorter ken burns"]
