@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
+import qa  # noqa: E402
 
 # ---- Local env auto-load ----
 # Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
@@ -6112,6 +6113,92 @@ def _gemini_generate_clip_suggestions(prompt: str) -> dict:
         raise RuntimeError(f"Gemini returned non-JSON output: {e}; first 500 chars: {text[:500]}")
 
 
+def _gemini_vision_json(prompt: str, images: list) -> dict:
+    """Gemini over (time, jpeg bytes) frames; parsed JSON. Raises on failure."""
+    import requests
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("Gemini is not configured (GEMINI_API_KEY not set).")
+    parts = [{"text": prompt}]
+    for t, data in images:
+        parts.append({"text": f"Frame at {t:.2f}s:"})
+        parts.append(qa.image_part(data))
+    url = f"{_GEMINI_BASE_URL}/{GEMINI_MODEL}:generateContent?key={api_key}"
+    body = {"contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
+    resp = requests.post(url, json=body, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini API failed ({resp.status_code}): {resp.text[:300]}")
+    try:
+        return json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+    except (KeyError, IndexError, ValueError) as e:
+        raise RuntimeError(f"Gemini returned an unexpected response: {e}")
+
+
+# ---- Post-render QA ----
+
+AUTO_QA = os.environ.get("AUTO_QA", "1") != "0"
+# Frames and caption boxes from the last QA per job, kept for an on-demand
+# vision pass without re-extracting anything.
+_QA_STATE: dict = {}
+
+
+def _qa_graphics_boxes(overlays: list, W: int, H: int) -> list[dict]:
+    out = []
+    for o in overlays or []:
+        if o.get("behind_subject"):
+            continue
+        try:
+            s = float(o.get("start", 0) or 0)
+            ln = float(o.get("out", 0) or 0) - float(o.get("in", 0) or 0)
+            x, y = float(o.get("x", 0)), float(o.get("y", 0))
+            w = float(o.get("w", 0.4))
+            h = float(o.get("h") if o.get("h") is not None else w * 9 / 16)
+        except (TypeError, ValueError):
+            continue
+        label = (o.get("device") or {}).get("kind") or ("B-roll" if o.get("broll") else "Overlay")
+        out.append({"start": s, "end": s + max(0.2, ln), "label": label.replace("_", " ").title(),
+                    "x0": x * W, "y0": y * H, "x1": (x + w) * W, "y1": (y + h) * H})
+    return out
+
+
+def _run_job_qa(job_id: str, output_path: Path, *, W: int | None = None, H: int | None = None,
+                fps: float | None = None, duration: float | None = None,
+                ass_text: str | None = None, overlays: list | None = None) -> dict | None:
+    """Run the programmatic checks on a finished export; never raises."""
+    job = jobs.get(job_id)
+    if job is None:
+        return None
+    job["qa"] = {"status": "running"}
+    try:
+        report = qa.run_qa(output_path, W=W, H=H, fps=fps, duration=duration, ass_text=ass_text,
+                           font_loader=devices._font, keyframe_dir=OUTPUT_DIR,
+                           stem=output_path.stem, ffmpeg=FFMPEG)
+        info = report["probe"]
+        _QA_STATE[job_id] = {"frames": report["_frames"], "boxes": report["_boxes"],
+                             "W": info.get("width") or W, "H": info.get("height") or H,
+                             "graphics": _qa_graphics_boxes(overlays or [], info.get("width") or W or 1080,
+                                                            info.get("height") or H or 1920)}
+        pub = qa.public(report)
+        pub["render_stats"] = job.get("render_stats")
+        job["qa"] = pub
+    except Exception as e:
+        ai_logger.warning(f"[{job_id}] QA failed: {e}")
+        job["qa"] = {"status": "error", "error": str(e)[:300]}
+    _db_save_job(job_id)
+    return job["qa"]
+
+
+def _run_job_vision(job_id: str) -> dict:
+    st = _QA_STATE.get(job_id)
+    if not st:
+        raise RuntimeError("Run QA on this export first.")
+    llm = _gemini_vision_json if os.environ.get("GEMINI_API_KEY") else None
+    return qa.run_vision(st["frames"], llm, boxes=st["boxes"], W=st["W"], H=st["H"],
+                         graphics=st["graphics"])
+
+
 # ---- Background workers ----
 
 def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
@@ -6634,6 +6721,12 @@ def render_job(job_id: str, video_path: Path, words: list, style: dict, audio: d
         jobs[job_id]["output"] = output_path.name
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
+        if AUTO_QA:
+            try:
+                qa_ass = ass_path.read_text(encoding="utf-8") if ass_path and ass_path.exists() else None
+            except OSError:
+                qa_ass = None
+            _run_job_qa(job_id, output_path, ass_text=qa_ass)
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -17636,6 +17729,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
         output_path = OUTPUT_DIR / f"{job_id}.mp4"
         caption_ass = None
+        qa_ass = None
         if caption_words:
             # Prefer timeline branding; fall back to caption style colors.
             speaker_colors = tl.get("speaker_colors") or (caption_style or {}).get("speaker_colors") or {}
@@ -17710,6 +17804,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         if caption_ass or titles_ass:
             _stage("adding captions & titles", 85)
             ass_text = _tl_compose_ass(W, H, caption_ass or "", titles_ass or "")
+            qa_ass = ass_text
             ass_path = UPLOAD_DIR / f"{job_id}_tltext.ass"
             ass_path.write_text(ass_text, encoding="utf-8")
             work.append(ass_path)
@@ -17764,6 +17859,9 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         jobs[job_id]["output"] = output_path.name
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
+        if AUTO_QA:
+            _run_job_qa(job_id, output_path, W=W, H=H, fps=fps, duration=_total_dur,
+                        ass_text=qa_ass, overlays=tracks["overlay"])
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -18396,6 +18494,50 @@ def timeline_speakers_status(job_id: str):
             "speaker_detection": rec.get("speaker_detection") or {},
         })
     return jsonify(out)
+
+
+@app.route("/qa/<job_id>", methods=["GET"])
+def qa_report(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "Unknown job"}), 404
+    rep = dict(job.get("qa") or {"status": "none"})
+    if rep.get("keyframes"):
+        rep["keyframes"] = [dict(k, url=f"/preview/{k['file']}") for k in rep["keyframes"]]
+    return jsonify(rep)
+
+
+@app.route("/qa/<job_id>/run", methods=["POST"])
+def qa_run(job_id: str):
+    """Re-run the checks, and optionally the vision spot-check, on an export."""
+    job = jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "Unknown job"}), 404
+    data = request.get_json(silent=True) or {}
+    out = OUTPUT_DIR / str(job.get("output") or "")
+    if not job.get("output") or not out.exists():
+        return jsonify({"error": "This job has no finished export yet."}), 400
+    if data.get("checks", True) or job_id not in _QA_STATE:
+        tl = job.get("timeline") if job.get("is_timeline") else None
+        kw = {}
+        if tl:
+            ntl = _normalize_timeline(tl)
+            W, H = TIMELINE_CANVASES[ntl["canvas"]]
+            kw = {"W": W, "H": H, "fps": ntl["fps"], "overlays": ntl["tracks"]["overlay"]}
+        _run_job_qa(job_id, out, **kw)
+    if data.get("vision"):
+        try:
+            vis = _run_job_vision(job_id)
+        except Exception as e:
+            return jsonify({"error": str(e)[:300]}), 400
+        rep = job.get("qa") or {}
+        rep["vision"] = vis
+        if any(i["severity"] == "fail" for i in vis["issues"]):
+            rep["status"] = "fail"
+        elif vis["issues"] and rep.get("status") == "pass":
+            rep["status"] = "warn"
+        job["qa"] = rep
+    return qa_report(job_id)
 
 
 @app.route("/timeline/dirty", methods=["POST"])
