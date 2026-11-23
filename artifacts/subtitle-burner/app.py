@@ -10243,6 +10243,11 @@ def ai_edit_style_packs():
             "label": pack.get("label", key),
             "blurb": pack.get("blurb", ""),
             "canvas": pack.get("canvas", "9x16"),
+            "style": {k: (pack.get("style") or {}).get(k)
+                      for k in ("font", "primary", "highlight", "accent")},
+            "color_grade": (pack.get("color_grade") or {}).get("preset"),
+            "transition": pack.get("transition"),
+            "devices": pack.get("devices") or {},
         })
     return jsonify({"packs": packs})
 
@@ -10429,6 +10434,34 @@ def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list
     return tl
 
 
+def _plan_toggles(data: dict) -> dict:
+    return {k: bool(data.get(k, True)) for k in ("graphics", "broll", "moves")}
+
+
+def _apply_plan_toggles(plan: dict, toggles: dict) -> dict:
+    """Drop treatment families the user switched off in the Style tab.
+
+    A dropped graphic or B-roll falls back to a camera move when moves are
+    on, so a beat the planner flagged still gets *something* rather than
+    going flat; otherwise it becomes plain talking head.
+    """
+    graphics, broll, moves = toggles["graphics"], toggles["broll"], toggles["moves"]
+    for row in plan["structure"]["spans"]:
+        tr, new = row["treatment"], None
+        if (tr.startswith("device:") or tr == "kinetic_text") and not graphics:
+            new = "punch" if moves and row.get("role") in ("hook", "data") else (
+                "clean_zoom" if moves else "none")
+        elif tr == "broll" and not broll:
+            new = "clean_zoom" if moves else "none"
+        elif tr in ("punch", "clean_zoom") and not moves:
+            new = "none"
+        if new is not None:
+            row["treatment"] = new
+            row.pop("device", None)
+            row["reason"] = (row.get("reason") or "") + " (style toggle)"
+    return plan
+
+
 @app.route("/edit-plan", methods=["POST"])
 def edit_plan():
     """Structure + style for a window, without touching any media (storyboard)."""
@@ -10451,6 +10484,7 @@ def edit_plan():
         return jsonify({"error": "Invalid start/end"}), 400
     plan = _edit_plan_for(job_id, t_in, t_out, pack, intensity,
                           use_llm=bool(data.get("use_llm", False)))
+    plan = _apply_plan_toggles(plan, _plan_toggles(data))
     return jsonify({**plan, "style_pack": pack_id, "intensity": intensity})
 
 
@@ -10519,6 +10553,7 @@ def ai_edit_seed():
     if smart:
         plan = _edit_plan_for(work_job_id, work_in, work_out, pack, intensity,
                               use_llm=bool(data.get("use_llm", True)))
+        plan = _apply_plan_toggles(plan, _plan_toggles(data))
         timeline = _build_ai_edit_timeline(
             work_job_id, work_in, work_out, pack, intensity, cuts, [],
             label=label, words=words, insert_media=False,

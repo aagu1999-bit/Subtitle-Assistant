@@ -4569,6 +4569,7 @@ function setActiveTab(tab) {
   const needsTranscript = {
     transcript: "Edit words",
     highlights: "AI Shorts",
+    style: "Style",
     branding: "Caption look",
     compilation: "Compilation",
     editor: "Timeline",
@@ -4588,16 +4589,17 @@ function setActiveTab(tab) {
     }
   }
 
-  // Primary story steps: 1 Ingest → 2 Shorts → 3 Timeline.
-  // transcript/branding are secondary panels (Edit words / Caption look).
+  // Primary story steps: 1 Ingest → 2 Style → 3 Edit → 4 Export.
+  // transcript/branding are secondary panels (Edit words / Caption look);
+  // AI Shorts and Compilation are side trips with no step number.
   const stepMap = {
     ingest: "1",
-    highlights: "2",
-    compilation: "2",
-    editor: "3",
-    result: "3",
     transcript: "1",
-    branding: "1",
+    style: "2",
+    branding: "2",
+    editor: "3",
+    export: "4",
+    result: "4",
   };
   const step = stepMap[tab];
 
@@ -4641,6 +4643,7 @@ function setActiveTab(tab) {
   }
 
   if (typeof updateReadyActions === "function") updateReadyActions();
+  document.dispatchEvent(new CustomEvent("studio:tab", { detail: { tab } }));
 }
 
 // Used by timeline.js openTimelineEditor / other modules.
@@ -4669,6 +4672,11 @@ function openCaptionLook() {
   setActiveTab("branding");
 }
 
+function openStyle() {
+  if (!requireReadyTranscript("Style")) return;
+  setActiveTab("style");
+}
+
 function openFindShorts() {
   if (!requireReadyTranscript("AI Shorts")) return;
   setActiveTab("highlights");
@@ -4685,8 +4693,11 @@ function openTimelineFromReady() {
 
 window.openEditWords = openEditWords;
 window.openCaptionLook = openCaptionLook;
+window.openStyle = openStyle;
 
 [
+  ["readyStyleBtn", openStyle],
+  ["captionLookToStyle", (e) => { if (e) e.preventDefault(); openStyle(); }],
   ["readyEditWordsBtn", openEditWords],
   ["readyCaptionLookBtn", openCaptionLook],
   ["readyFindShortsBtn", openFindShorts],
@@ -4725,8 +4736,9 @@ if (workflowSteps) {
     if (!badge || !badge.dataset.step) return;
     const stepToTab = {
       "1": "ingest",
-      "2": "highlights",
+      "2": "style",
       "3": "editor",
+      "4": "export",
     };
     const tab = stepToTab[badge.dataset.step];
     if (tab) setActiveTab(tab);
@@ -5692,7 +5704,7 @@ function _renderAssemblyBar() {
 // ---- CapCut Viral Templates ----
 const CAPCUT_TEMPLATES = {
   podcast_interview: { font: "Montserrat Thin Black", size: 64, primary: "#FFFFFF", highlight: "#FFD60A", accent: "#00FF88", group: 2, headline: "Mind-Blowing Secret", speakerColors: true },
-  capcut_reels: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1, headline: "", speakerColors: false, punch_zoom: { enabled: true, intensity: "med" } },
+  capcut_reels: { font: "Integral CF", size: 68, primary: "#FFFFFF", highlight: "#00F2EA", accent: "#FF0055", group: 1, headline: "", speakerColors: false },
   product_spotlight: { font: "Bebas Neue", size: 72, primary: "#00FF88", highlight: "#FF00FF", accent: "#00CFFF", group: 3, headline: "Must Have Product!", speakerColors: false },
   cinematic_vlog: { font: "DM Sans", size: 56, primary: "#F8FAFC", highlight: "#6366F1", accent: "#EC4899", group: 4, headline: "", speakerColors: false },
 };
@@ -5708,14 +5720,8 @@ if (capcutTemplateEl) {
     if (document.getElementById("group")) { document.getElementById("group").value = t.group; if (document.getElementById("groupVal")) document.getElementById("groupVal").textContent = t.group; }
     if (document.getElementById("headlineBanner")) document.getElementById("headlineBanner").value = t.headline;
     if (document.getElementById("speakerColorsEnabled")) document.getElementById("speakerColorsEnabled").checked = t.speakerColors;
-    
-    if (t.punch_zoom) {
-      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = t.punch_zoom.enabled;
-      if (document.getElementById("punchZoomIntensity")) document.getElementById("punchZoomIntensity").value = t.punch_zoom.intensity;
-    } else {
-      if (document.getElementById("punchZoomEnabled")) document.getElementById("punchZoomEnabled").checked = false;
-    }
-    
+    // Captions only: camera moves belong to the Style tab.
+
     const presetMap = {
       podcast_interview: "hormozi",
       capcut_reels: "mrbeast",

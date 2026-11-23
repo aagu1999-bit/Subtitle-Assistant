@@ -22,6 +22,7 @@
     { id: "punch_zoom", label: "Punch zoom", icon: "⚡" },
     { id: "ken_burns", label: "Ken Burns", icon: "🔍" },
     { id: "color", label: "Color grade", icon: "🎨" },
+    { id: "speed", label: "Speed ramp", icon: "⏩" },
   ];
 
   // ---- State ----
@@ -117,6 +118,8 @@
       logo: tl.logo || null,
       style: tl.style || null,
       ai_edit: tl.ai_edit || null,
+      structure: tl.structure || null,
+      style_doc: tl.style_doc || null,
       speaker_colors: tl.speaker_colors || null,
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -151,6 +154,8 @@
     tl.logo = d.logo || null;
     if (d.style !== undefined) tl.style = d.style;
     if (d.ai_edit !== undefined) tl.ai_edit = d.ai_edit;
+    if (d.structure !== undefined) tl.structure = d.structure;
+    if (d.style_doc !== undefined) tl.style_doc = d.style_doc;
     if (d.speaker_colors !== undefined) tl.speaker_colors = d.speaker_colors;
     if (d.headline_banner !== undefined) tl.headline_banner = d.headline_banner;
     if (d.track_states !== undefined) tl.track_states = d.track_states;
@@ -322,6 +327,8 @@
       logo: tl.logo || null,
       style: tl.style || null,
       ai_edit: tl.ai_edit || null,
+      structure: tl.structure || null,
+      style_doc: tl.style_doc || null,
       speaker_colors: tl.speaker_colors || { SPEAKER_00: "#FFD700", SPEAKER_01: "#00E5FF" },
       headline_banner: tl.headline_banner || null,
       track_states: tl.track_states || null,
@@ -970,6 +977,9 @@
           ? { enabled: true, direction: "in", intensity: "med" }
           : null),
     };
+    ["device", "behind_subject", "color_match", "broll", "plan_ref", "motion"].forEach((k) => {
+      if (ref[k] != null) oc[k] = typeof ref[k] === "object" ? JSON.parse(JSON.stringify(ref[k])) : ref[k];
+    });
     // Legacy auto-fetch used percent coords / scale — normalize if needed.
     if (oc.x > 1.5) oc.x = Math.min(1, oc.x / 100);
     if (oc.y > 1.5) oc.y = Math.min(1, oc.y / 100);
@@ -1043,7 +1053,8 @@
     const v = $("tlPreviewVideo");
     const start = opts.start != null ? Number(opts.start) : (v ? (v.currentTime || 0) : 0);
     const dur = opts.out != null ? Number(opts.out) : (
-      ftype === "punch_zoom" ? 1.2 : ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4 : 3
+      ftype === "punch_zoom" ? 1.2 : ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4
+        : ftype === "speed" ? 2 : 3
     );
     const ec = {
       id: uid(),
@@ -1066,6 +1077,10 @@
       // reflow, which silently un-aimed every AI-placed push.
       aim: opts.aim || opts.anchor || null,
     };
+    if (ftype === "speed") {
+      ec.speed = Math.max(0.25, Math.min(4, Number(opts.speed) || 1.5));
+      ec.smooth = !!opts.smooth;
+    }
     if (opts.quote) ec.quote = opts.quote;
     if (opts.reason) ec.reason = opts.reason;
     reanchor(ec);
@@ -1263,6 +1278,7 @@
       const meta = EFFECT_TYPES.find((t) => t.id === c.type);
       const icon = meta ? meta.icon : "✨";
       const name = meta ? meta.label : (c.type || "Effect");
+      if (c.type === "speed") return `${icon} ${Number(c.speed || 1).toFixed(2).replace(/\.?0+$/, "")}x ${fmtTime(clipDuration(c))}`;
       return `${icon} ${name} ${fmtTime(clipDuration(c))}`;
     }
     if (track === "text") return (c.text || "Title").split("\n")[0];
@@ -1274,6 +1290,11 @@
     const isVid = !!(c.source_job_id || (c.asset_id && (assets.find((x) => x.asset_id === c.asset_id) || {}).kind === "video"));
     const icon = isVid ? "🎬" : "🖼";
     let ovBadge = (c.ken_burns && c.ken_burns.enabled) ? " 🔍" : "";
+    if (c.behind_subject) ovBadge += " 👤";
+    if (c.device) {
+      const lbl = (c.device.labels && (c.device.labels.value || c.device.labels.title || c.device.labels.query)) || "";
+      return `🧩 ${c.device.kind.replace(/_/g, " ")}${lbl ? " · " + lbl : ""}${ovBadge}`;
+    }
     if (c.keyword) return `${icon} ${c.keyword}${ovBadge}`;
     if (c.asset_id) {
       const a = assets.find((x) => x.asset_id === c.asset_id);
@@ -1925,12 +1946,28 @@
     const active = activeMainAt(ot);
     if (!(seqPreview && seqPreview.running)) applyLiveGrade(active, ot);
     applyPunchZoom(v, ot);   // must run every frame, not only on rebuild
+    applySpeedPreview(v, ot);
     syncOverlayVideos(ot, !v.paused && !v.ended);
     syncOverlayKenBurns(ot);
     updatePlayhead();
     if (leftTab === "transcript" && transcriptWords) highlightTranscriptAt(v.currentTime);
 
     rafId = (!v.paused && !v.ended) ? requestAnimationFrame(previewFrame) : null;
+  }
+
+  // Speed ramps preview as playbackRate. Timeline positions stay in
+  // pre-speed time, the same convention the renderer's _TimeMap uses.
+  function applySpeedPreview(v, ot) {
+    if (previewingOutput || (seqPreview && seqPreview.running)) {
+      if (v.playbackRate !== 1 && previewingOutput) v.playbackRate = 1;
+      return;
+    }
+    const fx = activeEffectOfType(ot, "speed");
+    const rate = fx ? Math.max(0.25, Math.min(4, Number(fx.speed) || 1)) : 1;
+    if (Math.abs(v.playbackRate - rate) > 0.001) {
+      v.playbackRate = rate;
+      v.preservesPitch = true;
+    }
   }
 
   function startPreviewLoop() {
@@ -2050,7 +2087,12 @@
         wrap.style.overflow = "hidden";
         wrap.style.pointerEvents = "auto";
         wrap.style.cursor = "move";
-        if (item.border_px) {
+        if (item.behind_subject) {
+          wrap.classList.add("tl-ov-behind");
+          wrap.title = "Renders behind the speaker (matte is applied at export)";
+        }
+        if (item.device) media.style.objectFit = "contain";
+        if (item.border_px && !item.device) {
           wrap.style.boxShadow = `0 0 0 ${item.border_px}px #fff`;
         }
         media.style.position = "absolute";
@@ -2385,6 +2427,10 @@
           sources.map((s) => [s.job_id, (s.filename || s.job_id.slice(0, 8)).replace(/\.[^.]+$/, "")]));
         html += propSelect("source_job_id", "Second video", c.source_job_id || "", splitOpts);
         html += `<div class="tl-prop-grid">${propSelect("layout", "Layout", c.layout || "auto", [["auto", "Auto"], ["side", "Side by side"], ["stack", "Top / bottom"]])}${propNum("in", "2nd start (s)", c.in || 0, 0, 99999, 0.1)}</div>`;
+      } else if (c.type === "speed") {
+        html += propRange("speed", "Speed (x)", c.speed != null ? c.speed : 1.5, 0.25, 4, 0.05);
+        html += propCheck("smooth", "Smooth slow-mo (frame blending, render only)", !!c.smooth);
+        html += `<p class="muted" style="font-size:.72rem">Audio keeps its pitch. The lane shows pre-speed time; the export gets ${(clipDuration(c) / Math.max(0.25, Number(c.speed) || 1)).toFixed(1)}s for this span.</p>`;
       } else if (c.type === "color") {
         html += `<div class="tl-swatches" id="tlFxSwatches">` +
           COLOR_PRESETS.map(([v, t2]) =>
@@ -2422,6 +2468,17 @@
       html += propSelect("fit", "Fit mode", c.fit || "cover", fitOpts);
       html += `<div class="tl-prop-grid">${propRange("fade_in", "Fade in (s)", c.fade_in != null ? c.fade_in : 0.15, 0, 1.5, 0.05)}${propRange("fade_out", "Fade out (s)", c.fade_out != null ? c.fade_out : 0.2, 0, 1.5, 0.05)}</div>`;
       html += propRange("border_px", "White border (px)", c.border_px != null ? c.border_px : 0, 0, 16, 1);
+      html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">👤 Depth & look</label>`;
+      html += propCheck("behind_subject", "Behind me — tuck under the speaker", !!c.behind_subject);
+      if (!c.device) {
+        const cm = c.color_match;
+        html += `<label class="tl-prop tl-prop-check"><input type="checkbox" data-act="colormatch" ${cm ? "checked" : ""}> Match A-roll color &amp; grain</label>`;
+        if (cm) html += `<p class="muted" style="font-size:.72rem">Graded toward the speaker shot: sat ×${(cm.saturation || 1).toFixed(2)}, grain ${cm.grain || 0}.</p>`;
+      }
+      if (c.broll && c.broll.source) {
+        html += `<p class="muted" style="font-size:.72rem">B-roll via <strong>${c.broll.source}</strong>${c.broll.query ? ` · "${c.broll.query}"` : ""}${c.broll.look ? ` · ${c.broll.look}` : ""}</p>`;
+      }
+      if (c.device) html += `<div id="tlDeviceProps" data-kind="${c.device.kind}"></div>`;
       // Ken Burns on B-roll / photo overlays (moment inserts — not whole Main).
       const ovKb = c.ken_burns || {};
       html += `<hr class="tl-sep"><label class="tl-prop-sectlabel">🔍 Ken Burns (B-roll motion)</label>`;
@@ -2521,6 +2578,7 @@
     html += `<button class="tl-del-btn" data-act="del">🗑 Delete clip</button>`;
     wrap.innerHTML = html;
     wireProps(wrap, t, c);
+    if (typeof window.studioWireProps === "function") window.studioWireProps(wrap, t, c);
     // Applying a suggestion selects the new effect clip, which rebuilds this
     // panel. Redraw the list the user was working from instead of losing it.
     if (t === "main" && fxSuggest && fxSuggest.jobId === c.source_job_id) {
@@ -3349,6 +3407,8 @@
       logo: d.logo || null,
       style: d.style ? normalizeTlStyle(d.style) : null,
       ai_edit: d.ai_edit || null,
+      structure: d.structure || null,
+      style_doc: d.style_doc || null,
       speaker_colors: (() => {
         const sc = d.speaker_colors || {};
         return {
@@ -3437,6 +3497,7 @@
           clearInterval(pollTimer);
           setRenderStatus("Done ✓");
           $("tlRenderBtn").disabled = false;
+          if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(tl.job_id, s);
           const v = $("tlPreviewVideo");
           v.src = "/preview/" + s.output + "?t=" + Date.now();
           previewingOutput = true;   // preview is now the full output (1:1 playhead)
@@ -3447,6 +3508,7 @@
           clearInterval(pollTimer);
           setRenderStatus("Error: " + (s.error || "render failed"));
           $("tlRenderBtn").disabled = false;
+          if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(tl.job_id, s);
         } else {
           setRenderStatus(`${s.status || "working"}… ${s.progress || 0}%`);
         }
@@ -3789,6 +3851,34 @@
 
   // Expose for setActiveTab("editor") — both header + main nav entry points.
   window.ensureTimelineInit = ensureInit;
+  // Narrow surface for studio.js (phrase toolbar, export/QA, structure).
+  window.tlAPI = {
+    get tl() { return tl; },
+    get selected() { return selected; },
+    get transcriptWords() { return transcriptWords; },
+    serialize: () => (tl ? serialize() : null),
+    pushHistory, scheduleSave, saveNow, renderTimeline, renderTracks, renderProps,
+    selectClip, findClip, clipDuration, totalDuration, mainStart, reanchor, fmtTime,
+    reloadAssets: loadAssets,
+    addOverlayClip, addEffectClip,
+    sourceToTimeline(clip, srcT) {
+      const idx = tl ? tl.tracks.main.findIndex((c) => c.id === clip.id) : -1;
+      if (idx < 0) return Number(srcT) || 0;
+      return mainStart(idx) + sourceTimeToLocalOutput(clip, srcT);
+    },
+    playheadTime: () => playheadOutputTime(),
+    seek(t) {
+      if (!tl) return;
+      const clip = activeMainAt(Math.max(0, t)) || tl.tracks.main[tl.tracks.main.length - 1];
+      if (!clip) return;
+      if (!selected || selected.id !== clip.id) selectClip("main", clip.id);
+      const src = sourceTimeFromKeepRanges(t, clip);
+      seekTranscriptWord(clip, { start: src != null ? src : clip.in || 0 });
+    },
+    get pps() { return PPS; },
+    openProject: (id) => openProject(id),
+    render: () => renderTimelineVideo(),
+  };
   window.addOverlayClip = addOverlayClip;
   window.addEffectClip = addEffectClip;
 
@@ -3976,6 +4066,8 @@
     tl.bg = seed.bg || tl.bg || "#000000";
     if (seed.style) tl.style = normalizeTlStyle(seed.style);
     if (seed.ai_edit) tl.ai_edit = seed.ai_edit;
+    tl.structure = seed.structure || null;
+    tl.style_doc = seed.style_doc || null;
     if (label) {
       tl.label = label;
       if ($("tlLabel")) $("tlLabel").value = label;
@@ -4597,6 +4689,34 @@
             });
             notes.push(name === "add_broll"
               ? "b-roll photo" : `carousel of ${clips.length}`);
+            applied++;
+          }
+        } else if (name === "add_device" && op.clip) {
+          const ov = Object.assign({ id: uid(), opacity: 1 }, op.clip);
+          reanchor(ov);
+          tl.tracks.overlay.push(ov);
+          notes.push(`${(ov.device && ov.device.kind || "graphic").replace(/_/g, " ")} graphic`);
+          loadAssets().then(() => updateStageCompositor());
+          applied++;
+        } else if (name === "add_speed") {
+          const ec = {
+            id: uid(), type: "speed",
+            start: Math.max(0, Number(op.start) || 0),
+            out: Math.max(0.2, Number(op.duration) || 2),
+            speed: Math.max(0.25, Math.min(4, Number(op.speed) || 1.5)),
+            smooth: !!op.smooth,
+          };
+          reanchor(ec);
+          if (!tl.tracks.effects) tl.tracks.effects = [];
+          tl.tracks.effects.push(ec);
+          notes.push(`${ec.speed}x speed`);
+          applied++;
+        } else if (name === "set_behind") {
+          const i = Number(op.index);
+          const arr = tl.tracks.overlay || [];
+          if (i >= 0 && i < arr.length) {
+            arr[i].behind_subject = op.on !== false;
+            notes.push(`overlay ${i} ${arr[i].behind_subject ? "behind" : "in front of"} speaker`);
             applied++;
           }
         } else if (name === "set_overlay_motion") {
