@@ -255,14 +255,17 @@ class TasteStore:
                     isinstance(proposed.get("anchor") or proposed.get("aim"), dict)):
                 out.append(self.add("prefer", f"Aims {pretty} at the speaker's face",
                                     tags=tags + ["aim"], source="learned"))
+            def length(d):
+                if d.get("dur") is not None:
+                    return float(d["dur"])
+                return float(d.get("end", 0)) - float(d.get("start", 0))
             try:
-                pd = float(proposed.get("end", 0)) - float(proposed.get("start", 0))
-                fd = float(final.get("end", 0)) - float(final.get("start", 0))
+                pd, fd = length(proposed), length(final)
             except (TypeError, ValueError):
                 pd = fd = 0
             if pd > 0 and fd > 0 and abs(fd - pd) / pd > 0.3:
                 out.append(self.add("prefer", f"Prefers {'shorter' if fd < pd else 'longer'} "
-                                    f"{pretty}s", tags=tags + ["duration"], source="learned"))
+                                    f"{pretty if pretty.endswith('s') else pretty + 's'}", tags=tags + ["duration"], source="learned"))
             if not out:
                 out.append(self.add("prefer", f"Keeps suggested {pretty} with tweaks", tags=tags,
                                     key=key, source="learned", weight=0.3))
