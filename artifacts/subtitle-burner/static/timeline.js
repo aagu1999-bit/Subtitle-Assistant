@@ -3499,6 +3499,9 @@
     let ovBadge = (c.ken_burns && c.ken_burns.enabled) ? " 🔍" : "";
     if (track === "main" && c.cutaway) ovBadge = " ✂" + ovBadge;
     if (c.behind) ovBadge += " 👤";
+    if (c.device && c.device.kind === "animation") {
+      return `✨ ${String(c.device.description || "animation").slice(0, 40)}${ovBadge}`;
+    }
     if (c.device) {
       const lbl = (c.device.labels && (c.device.labels.value || c.device.labels.title || c.device.labels.query)) || "";
       return `🧩 ${c.device.kind.replace(/_/g, " ")}${lbl ? " · " + lbl : ""}${ovBadge}`;
@@ -10173,11 +10176,12 @@
             notes.push(`carousel of ${clips.length}`);
             applied++;
           }
-        } else if (name === "add_device" && op.clip) {
+        } else if ((name === "add_device" || name === "add_animation") && op.clip) {
           const ov = Object.assign({ id: uid(), opacity: 1 }, op.clip);
           reanchor(ov);
           tl.tracks.overlay.push(ov);
-          notes.push(`${(ov.device && ov.device.kind || "graphic").replace(/_/g, " ")} graphic`);
+          notes.push(name === "add_animation" ? "animation"
+            : `${(ov.device && ov.device.kind || "graphic").replace(/_/g, " ")} graphic`);
           loadAssets().then(() => updateStageCompositor());
           applied++;
         } else if (name === "add_speed") {

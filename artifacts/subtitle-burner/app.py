@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
+import motion  # noqa: E402
 import qa  # noqa: E402
 import taste  # noqa: E402
 
@@ -19061,6 +19062,134 @@ def _device_overlay_clip(info: dict, start: float) -> dict:
     }
 
 
+def _design_animation(description: str, timeline: dict | None,
+                      duration: float | None) -> dict:
+    """Ask the model for a scene and validate it; one retry with the error."""
+    pal, font = _device_look(timeline)
+    canvas = (timeline or {}).get("canvas") or "9x16"
+    prompt = motion.brief(description, pal, font, duration, canvas)
+    err = ""
+    for _ in range(2):
+        raw = _gemini_generate_clip_suggestions(
+            prompt + (f"\n\nYour last answer was rejected: {err}. Fix it." if err else ""))
+        if isinstance(raw, dict) and "scene" in raw and isinstance(raw["scene"], dict):
+            raw = raw["scene"]
+        try:
+            spec = motion.normalize(raw)
+        except ValueError as e:
+            err = str(e)
+            continue
+        if duration:
+            spec["duration"] = max(0.8, min(12.0, float(duration)))
+        return _review_animation(motion.fit_to_content(spec), description, prompt)
+    raise ValueError(f"the designed animation was unusable: {err}")
+
+
+MOTION_REVIEW = os.environ.get("MOTION_REVIEW", "1") != "0"
+
+
+def _animation_frames(spec: dict, n: int = 6) -> list:
+    """(t, jpeg) stills over a mid-grey backdrop, so dark and light both read."""
+    import io
+    from PIL import Image
+    sw, sh = spec["size"]
+    w = 640
+    h = max(48, int(w * sh / sw))
+    out = []
+    for i in range(n):
+        t = spec["duration"] * (0.08 + 0.84 * i / max(1, n - 1))
+        img = Image.new("RGBA", (w, h), (92, 110, 130, 255))
+        img.alpha_composite(motion.frame_at(spec, t, (w, h)))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, "JPEG", quality=80)
+        out.append((t, buf.getvalue()))
+    return out
+
+
+def _review_animation(spec: dict, description: str, brief: str) -> dict:
+    """Let the designer see its own frames once and fix what is visibly wrong.
+
+    Laying out a scene blind, the model misjudges text widths and where
+    children land. Looking at the result catches that the way a person would.
+    """
+    if not MOTION_REVIEW:
+        return spec
+    try:
+        frames = _animation_frames(spec)
+        prompt = (
+            brief + "\n\nYOU ALREADY DESIGNED THIS SCENE:\n" + json.dumps(spec)
+            + "\n\nThe frames below are what it renders (the grey is only a backdrop). Check "
+            "them against the request: text spilling out of its shape or off the frame, parts "
+            "that should sit together but don't, overlaps, things too small to read, a cursor "
+            "that misses what it should click, motion that does not happen, anything missing "
+            "from the request. Return {\"ok\": true} if it is right, otherwise "
+            "{\"ok\": false, \"problems\": [...], \"scene\": <the full corrected scene>}."
+        )
+        verdict = _gemini_vision_json(prompt, frames)
+    except Exception as e:
+        ai_logger.info(f"[motion] review skipped: {e}")
+        return spec
+    if not isinstance(verdict, dict) or verdict.get("ok") or not isinstance(verdict.get("scene"), dict):
+        return spec
+    try:
+        fixed = motion.normalize(verdict["scene"])
+    except ValueError:
+        return spec
+    fixed["duration"] = spec["duration"]
+    ai_logger.info(f"[motion] review fixed: {verdict.get('problems')}")
+    return motion.fit_to_content(fixed)
+
+
+def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 30) -> dict:
+    W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
+    box = motion.box_for(spec, W, H)
+    path, cached = motion.render_cached(spec, (box["px_w"], box["px_h"]), fps, CACHE_DIR,
+                                        ffmpeg=FFMPEG)
+    asset_id = hashlib.md5(path.name.encode("utf-8")).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.webm"
+    if not dest.exists():
+        try:
+            os.link(path, dest)
+        except OSError:
+            shutil.copyfile(path, dest)
+    _write_asset_meta(asset_id, filename=f"Animation: {description[:48]}",
+                      source="device", device_kind="animation", alpha=True)
+    return {"asset_id": asset_id, "kind": "video", "cached": cached,
+            "duration": round(float(spec["duration"]), 3), "box": box,
+            "device": {"kind": "animation", "description": description, "spec": spec}}
+
+
+def _make_animation(description: str, timeline: dict | None,
+                    duration: float | None = None) -> dict:
+    spec = _design_animation(description, timeline, duration)
+    tl = timeline or {}
+    return _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
+                                int(tl.get("fps") or 30))
+
+
+@app.route("/motion/render", methods=["POST"])
+def motion_render():
+    """Any animation from a description, as a transparent overlay clip."""
+    data = request.get_json(force=True) or {}
+    desc = str(data.get("description") or "").strip()[:600]
+    if not desc:
+        return jsonify({"error": "Describe the animation"}), 400
+    tl = dict((jobs.get(data.get("job_id") or "") or {}).get("timeline") or {})
+    if data.get("canvas"):
+        tl["canvas"] = data["canvas"]
+    try:
+        dur = data.get("duration")
+        dur = max(0.8, min(12.0, float(dur))) if dur else None
+        start = float(data.get("start") or 0)
+    except (TypeError, ValueError):
+        dur, start = None, 0.0
+    try:
+        info = _make_animation(desc, tl, dur)
+    except (RuntimeError, OSError, ValueError) as e:
+        return jsonify({"error": str(e)[:300]}), 500
+    return jsonify({**info, "clip": _device_overlay_clip(info, start)})
+
+
 @app.route("/devices/catalog", methods=["GET"])
 def devices_catalog():
     packs = {k: (v.get("graphics_budget") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
@@ -22297,6 +22426,7 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "set_background", "clear": true}',
     '{"op": "make_image", "description": "a pier in Jersey City at dusk", "style": "photo", "start": 3.0, "duration": 4, "behind": true}',
     '{"op": "add_device", "kind": "venn", "labels": ["Skill", "Demand", "Money"], "start": 8.0, "duration": 3.4}',
+    '{"op": "add_animation", "description": "a YouTube subscribe button; a mouse pointer glides in, hovers, clicks it and it turns grey with a ringing bell", "start": 20.0, "duration": 3.5}',
     '{"op": "add_speed", "start": 12.0, "duration": 2.0, "speed": 2.0}',
     '{"op": "set_behind", "index": 0, "on": true}',
     '{"op": "add_text_message", "title": "Mom", "start": 2.0, "duration": 4, "messages": [{"from": "them", "text": "are you going tonight"}, {"from": "me", "text": "obviously"}]}',
@@ -22604,6 +22734,27 @@ def _resolve_add_device(op: dict, timeline: dict) -> tuple[dict | None, str]:
     return {"op": "add_device", "clip": clip}, ""
 
 
+def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
+    """Design, render and place an animation described in words."""
+    desc = str(op.get("description") or "").strip()[:600]
+    if not desc:
+        return None, "the animation had no description"
+    try:
+        start = max(0.0, float(op.get("start", 0)))
+        dur = op.get("duration")
+        dur = max(0.8, min(12.0, float(dur))) if dur is not None else None
+    except (TypeError, ValueError):
+        return None, "the animation had no usable time"
+    try:
+        info = _make_animation(desc, timeline, dur)
+    except (RuntimeError, OSError, ValueError) as e:
+        return None, f"the animation could not be made ({str(e)[:120]})"
+    clip = _device_overlay_clip(info, start)
+    if op.get("behind"):
+        clip["behind"] = True
+    return {"op": "add_animation", "clip": clip}, ""
+
+
 def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
     """Turn at:"speaker" into a real point, and sanity-check explicit ones.
 
@@ -22882,6 +23033,10 @@ WHAT YOU CAN DO (every item is an op below)
   models (venn, node_map, step_tracker, timeline_scrubber), stats and kinetic numbers
   (counter, toggle_meter), app mockups (chat_bubbles, notification, search_bar,
   subscribe_button: a YouTube subscribe button a mouse hovers over and clicks) and kinetic_text.
+- ANY OTHER ANIMATION, described in words (add_animation): buttons, icons, like/heart
+  bursts, progress bars, loading rings, charts, price tags, app screens, cursors clicking
+  things, logo-style reveals, arrows pointing at something, checklists ticking off -- if
+  it can be drawn with shapes, text, icons, lines and a mouse pointer, you can make it.
 - Behind the speaker: any picture, generated image or graphic can sit BEHIND the person
   (they are cut out and stay in front). "Text behind me" is add_device kinetic_text with
   "behind": true. set_behind moves an existing overlay behind or in front.
@@ -23001,6 +23156,14 @@ Rules:
 - "Captions / text / words behind me" is add_device kinetic_text with "behind": true and
   the phrase in labels, timed to when it is said. The running word-by-word captions
   themselves always burn on top; say so only if they ask for those specifically.
+- add_animation makes ANY animated graphic from a description: a designer turns
+  "description" into a scene of shapes, text, icons, lines and a mouse pointer with
+  timed motion. Use it whenever no add_device kind is an exact fit -- never refuse an
+  animation request and never offer a still image instead. Write the description like a
+  brief: what is on screen, the real brand colours if it imitates something real, the
+  exact words shown (from the transcript where relevant), and the sequence of motion
+  ("slides up, the bar fills to 80%, a cursor clicks the button, it turns green").
+  Optional duration (0.8-12 s), "behind": true to put it behind the speaker.
 - add_speed speeds up (speed > 1) or slows down (< 1) a stretch; 0.25 to 4.
 - set_behind puts an existing overlay behind the speaker ("put it behind me").
 {_taste_block(prompt)}"""
@@ -23075,6 +23238,12 @@ Rules:
                 continue
         elif name == "add_device":
             op, note = _resolve_add_device(op, timeline)
+            if note:
+                blocked.append(note)
+            if op is None:
+                continue
+        elif name == "add_animation":
+            op, note = _resolve_add_animation(op, timeline)
             if note:
                 blocked.append(note)
             if op is None:

@@ -623,6 +623,37 @@
     }
     const host = wrap.querySelector("#tlDeviceProps");
     if (!host || !c.device) return;
+    if (c.device.kind === "animation") {
+      host.innerHTML = `<hr class="tl-sep"><label class="tl-prop-sectlabel">✨ Animation</label>
+        <label class="tl-prop">Describe it<textarea rows="4" maxlength="600" data-anim-desc>${esc(c.device.description || "")}</textarea></label>
+        <button type="button" class="btn btn-secondary btn-block" data-act="animredo">↻ Redo animation</button>`;
+      host.querySelector('[data-act="animredo"]').onclick = async (ev) => {
+        const btn = ev.currentTarget;
+        const description = host.querySelector("[data-anim-desc]").value.trim();
+        if (!description) return;
+        btn.disabled = true;
+        btn.textContent = "Designing…";
+        try {
+          const d = await post("/motion/render", {
+            description, start: c.start || 0, job_id: api_.tl.job_id, canvas: api_.tl.canvas,
+            duration: Math.max(0.8, (c.out || 0) - (c.in || 0)),
+          });
+          api_.pushHistory();
+          Object.assign(c, { asset_id: d.asset_id, device: d.device, in: 0, out: d.duration,
+            x: d.clip.x, y: d.clip.y, w: d.clip.w, h: d.clip.h });
+          await api_.reloadAssets();
+          api_.renderTimeline();
+          api_.renderProps();
+          api_.scheduleSave();
+          toast("Animation redone.");
+        } catch (e) {
+          toast("Animation failed: " + e.message);
+          btn.disabled = false;
+          btn.textContent = "↻ Redo animation";
+        }
+      };
+      return;
+    }
     loadCatalog().then(() => {
       const meta = catalog.byKind[c.device.kind];
       if (!meta) return;

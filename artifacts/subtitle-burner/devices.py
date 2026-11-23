@@ -875,6 +875,12 @@ def render_device(kind: str, labels: list, duration: float, size: tuple, fps: in
     dur = max(0.6, min(20.0, float(duration or CATALOG[kind]["dur"])))
     pal = (list(palette or []) + DEFAULT_PALETTE)[:4]
     draw = PAINTERS[kind](w, h, labels, pal, font_name, dur)
+    return encode_alpha_webm(draw, w, h, fps, dur, out_path, ffmpeg)
+
+
+def encode_alpha_webm(draw, w: int, h: int, fps: int, dur: float, out_path: Path,
+                      ffmpeg: str = "ffmpeg") -> Path:
+    """Pipe draw(frame, t) frames into a transparent VP9 WebM."""
     n = int(round(dur * fps))
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
