@@ -775,7 +775,11 @@
     $("exportStatus").textContent = "Queued…";
     $("exportRenderBtn").disabled = true;
     setQa(null);
-    await api_.render();
+    const result = await api_.render();
+    if (!result && $("exportRenderBtn").disabled) {
+      $("exportRenderBtn").disabled = false;
+      $("exportStatus").textContent = "Render did not start — see the message above.";
+    }
   }
 
   window.studioOnRenderDone = function (jobId, s) {
