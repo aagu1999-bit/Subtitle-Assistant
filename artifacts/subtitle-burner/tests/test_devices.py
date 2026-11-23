@@ -46,6 +46,21 @@ def test_labels_reach_the_pixels():
     assert a.tobytes() != b.tobytes()
 
 
+def test_subscribe_button_is_clicked_and_turns_grey():
+    size = (600, 190)
+
+    def red_pixels(t):
+        img = devices.frame_at("subscribe_button", ["Alex", "1.2M"], t, size).convert("RGB")
+        return sum(1 for r, g, b in img.getdata() if r > 180 and g < 40 and b < 40)
+
+    assert red_pixels(0.6) > 2000, "no red Subscribe button before the click"
+    assert red_pixels(2.4) == 0, "button still red after it was clicked"
+
+    import edit_engine
+    assert edit_engine.suggest_device("don't forget to subscribe and hit the bell")["kind"] \
+        == "subscribe_button"
+
+
 def test_cache_key_covers_every_input():
     base = ("counter", ["40%"], 2.8, (400, 200), 30, ["#FFFFFF"], "Anton")
     k = devices.cache_key(*base)

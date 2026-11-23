@@ -44,6 +44,12 @@ CATALOG = {
         "fields": ["Query", "Result 1", "Result 2"],
         "blurb": "A query typed into a search bar, then a highlighted result",
     },
+    "subscribe_button": {
+        "label": "Subscribe button", "family": "ui", "dur": 3.6,
+        "box": (0.04, 0.60, 0.92, 0.16),
+        "fields": ["Channel name", "Subscribers (1.2M)"],
+        "blurb": "A mouse glides to a red Subscribe button, clicks, and the bell rings",
+    },
     "toggle_meter": {
         "label": "Toggle + meter", "family": "ui", "dur": 2.8,
         "box": (0.10, 0.18, 0.80, 0.22),
@@ -671,8 +677,134 @@ def _kinetic(w, h, labels, pal, font_name, dur):
     return draw
 
 
+def _pointer(size: int, ss: int = 4) -> tuple[Image.Image, tuple[float, float]]:
+    """Arrow mouse pointer and its hotspot (the tip) as a fraction of the sprite."""
+    s = size * ss
+    pts = [(0.08, 0.04), (0.08, 0.80), (0.27, 0.63), (0.41, 0.95), (0.55, 0.89),
+           (0.41, 0.58), (0.66, 0.58)]
+    big = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    poly = [(x * s, y * s) for x, y in pts]
+    shadow = [(x + s * 0.03, y + s * 0.03) for x, y in poly]
+    d.polygon(shadow, fill=(0, 0, 0, 90))
+    d.polygon(poly, fill=(255, 255, 255, 255))
+    d.line(poly + [poly[0]], fill=(0, 0, 0, 255), width=max(2, int(s * 0.045)), joint="curve")
+    return big.resize((size, size), Image.LANCZOS), (0.08, 0.04)
+
+
+def _bell(size: int, color, ss: int = 4) -> Image.Image:
+    s = size * ss
+    big = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    d.ellipse([s * 0.44, s * 0.04, s * 0.56, s * 0.16], fill=color)
+    d.pieslice([s * 0.2, s * 0.1, s * 0.8, s * 0.7], 180, 360, fill=color)
+    d.polygon([(s * 0.2, s * 0.4), (s * 0.8, s * 0.4), (s * 0.92, s * 0.76), (s * 0.08, s * 0.76)],
+              fill=color)
+    d.ellipse([s * 0.38, s * 0.74, s * 0.62, s * 0.96], fill=color)
+    return big.resize((size, size), Image.LANCZOS)
+
+
+def _subscribe(w, h, labels, pal, font_name, dur):
+    ls = (_labels(labels, 2, ["Your Channel", "1.2M"]) + [""])[:2]
+    name = ls[0][:32]
+    subs = ls[1].strip()
+    if subs and "subscriber" not in subs.lower():
+        subs += " subscribers"
+    red, red_hover = _rgb("#FF0000"), _rgb("#CC0000")
+    done_bg, done_fg = _rgb("#3A3A3A"), (241, 241, 241, 255)
+
+    ch = int(h * 0.62)
+    cw = int(w * 0.98)
+    cx, cy = w / 2, h * 0.40
+    card = _rounded((cw, ch), int(ch * 0.22), fill=(15, 15, 15, 236),
+                    outline=(255, 255, 255, 30), width=2)
+    d = ImageDraw.Draw(card)
+    av = int(ch * 0.64)
+    pad = int(ch * 0.18)
+    card.alpha_composite(_circle(av, _rgb(pal[0] if pal else "#FFD60A")), (pad, (ch - av) // 2))
+    ini = _text_sprite((name[:1] or "Y").upper(), _bold(int(av * 0.5)), (15, 15, 15, 255))
+    card.alpha_composite(ini, (pad + (av - ini.width) // 2, (ch - ini.height) // 2))
+
+    bh = int(ch * 0.50)
+    bf = _bold(int(bh * 0.40))
+    sub_txt = _text_sprite("SUBSCRIBE", bf, (255, 255, 255, 255))
+    done_txt = _text_sprite("SUBSCRIBED", bf, done_fg)
+    bell_sz = int(bh * 0.52)
+    bw = max(sub_txt.width, done_txt.width + bell_sz + int(bh * 0.25)) + int(bh * 0.9)
+    bx = cx + cw / 2 - pad - bw / 2
+    btn_up = _rounded((bw, bh), bh // 2, fill=red)
+    btn_hover = _rounded((bw, bh), bh // 2, fill=red_hover)
+    btn_done = _rounded((bw, bh), bh // 2, fill=done_bg)
+    bell = _bell(bell_sz, done_fg)
+
+    tx = pad + av + int(pad * 0.8)
+    room = int(cw - tx - bw - pad * 2)
+    nfs = int(ch * 0.26)
+    nf = _bold(nfs)
+    while nfs > 12 and _text_w(nf, name) > room:
+        nfs = int(nfs * 0.9)
+        nf = _bold(nfs)
+    sf = _font(UI_FONT, max(11, int(ch * 0.17)))
+    name_h = nf.getbbox(name or " ")[3]
+    top = (ch - name_h - (int(ch * 0.24) if subs else 0)) // 2
+    d.text((tx, top), name, font=nf, fill=(255, 255, 255, 255))
+    if subs:
+        d.text((tx, top + name_h + int(ch * 0.06)), subs[:28], font=sf, fill=(170, 170, 170, 255))
+
+    ptr_sz = int(h * 0.30)
+    ptr, (hx, hy) = _pointer(ptr_sz)
+    ring = _circle(bh * 2, (255, 255, 255, 0), outline=(255, 255, 255, 220), width=max(2, bh // 14))
+
+    target = (bx + bw * 0.12, cy + bh * 0.12)
+    start = (w * 0.98, h * 1.02)
+    t_move, t_arrive, t_click, t_done = 0.35, 1.25, 1.6, 1.72
+
+    def draw(frame, t):
+        sc, al = _pop(t, 0.0, 0.35)
+        _paste(frame, card, cx, cy, sc, al)
+        if t < 0.2:
+            return
+        hovering = t_arrive - 0.1 <= t < t_done
+        if t >= t_done:
+            s2 = 0.92 + 0.08 * ease_out_back((t - t_done) / 0.3)
+            _paste(frame, btn_done, bx, cy, s2)
+            gap = int(bh * 0.18)
+            total = bell_sz + gap + done_txt.width
+            left = bx - total / 2
+            ang = 0.0
+            if t >= t_done + 0.15:
+                k = t - t_done - 0.15
+                ang = 24 * math.sin(k * 26) * math.exp(-k * 3.2)
+            _paste(frame, bell.rotate(ang, resample=Image.BICUBIC), left + bell_sz / 2, cy, s2)
+            _paste(frame, done_txt, left + bell_sz + gap + done_txt.width / 2, cy, s2)
+        else:
+            press = 0.94 if t_click <= t < t_done else (1.04 if hovering else 1.0)
+            _paste(frame, btn_hover if hovering else btn_up, bx, cy, press)
+            _paste(frame, sub_txt, bx, cy, press)
+        if t_click <= t < t_click + 0.45:
+            u = (t - t_click) / 0.45
+            _paste(frame, ring, target[0], target[1], 0.2 + 0.8 * ease_out_cubic(u), 1 - u)
+
+        if t < t_move:
+            return
+        if t < t_arrive:
+            u = ease_in_out((t - t_move) / (t_arrive - t_move))
+            px = start[0] + (target[0] - start[0]) * u
+            py = start[1] + (target[1] - start[1]) * u - math.sin(u * math.pi) * h * 0.12
+        elif t < t_done + 0.5:
+            px, py = target
+        else:
+            u = ease_in_out((t - t_done - 0.5) / 0.6)
+            px, py = target[0] + w * 0.05 * u, target[1] + h * 0.22 * u
+        pscale = 0.85 if t_click <= t < t_click + 0.12 else 1.0
+        sw = ptr.width * pscale
+        _paste(frame, ptr, px - hx * sw + sw / 2, py - hy * sw + sw / 2, pscale)
+    return draw
+
+
 PAINTERS = {
     "chat_bubbles": _chat,
+    "subscribe_button": _subscribe,
     "notification": _notification,
     "search_bar": _search,
     "toggle_meter": _toggle,

@@ -22880,7 +22880,8 @@ WHAT YOU CAN DO (every item is an op below)
   speed ramps (speed up / slow down a stretch).
 - Animated graphics ({", ".join(devices.CATALOG)}): diagrams, frameworks and mental
   models (venn, node_map, step_tracker, timeline_scrubber), stats and kinetic numbers
-  (counter, toggle_meter), app mockups (chat_bubbles, notification, search_bar) and kinetic_text.
+  (counter, toggle_meter), app mockups (chat_bubbles, notification, search_bar,
+  subscribe_button: a YouTube subscribe button a mouse hovers over and clicks) and kinetic_text.
 - Behind the speaker: any picture, generated image or graphic can sit BEHIND the person
   (they are cut out and stay in front). "Text behind me" is add_device kinetic_text with
   "behind": true. set_behind moves an existing overlay behind or in front.
@@ -22985,7 +22986,9 @@ Rules:
   that is the op, not make_image.
 - add_device places an animated graphic. kind is one of {", ".join(devices.CATALOG)}.
   labels are the words it shows: chat_bubbles = messages, notification =
-  [title, body], search_bar = [query, result...], toggle_meter = [label,
+  [title, body], search_bar = [query, result...], subscribe_button = [channel name,
+  subscriber count like "1.2M"] (use it for "subscribe", "hit the bell" and end-screen
+  calls to action), toggle_meter = [label,
   0-100 or on/off], step_tracker/node_map/timeline_scrubber = the steps,
   venn = [left, right, overlap], counter = [number with unit, caption],
   kinetic_text = [the phrase]. Pull labels and start times from the transcript above;

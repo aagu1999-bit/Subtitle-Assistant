@@ -50,6 +50,8 @@ _THESIS_RE = re.compile(
 
 # Words that pull a span toward a specific graphics device rather than b-roll.
 _DEVICE_CUES = [
+    ("subscribe_button", re.compile(r"\b(subscrib(e|ed|ing)|hit (that|the) (sub|bell)|"
+                                    r"(ring|smash|tap) (that|the) bell|join the channel)\b", re.I)),
     ("chat_bubbles", re.compile(r"\b(text(ed)?|messag(e|ed|es)|dm(ed)?|imessage|whatsapp|"
                                 r"said to me|told me|replied|reply|chat)\b", re.I)),
     ("notification", re.compile(r"\b(notification|alert|ping(ed)?|email(ed)?|inbox|"
@@ -66,7 +68,7 @@ _DEVICE_CUES = [
 ]
 
 # Cues specific enough that the device beats a B-roll cutaway.
-_STRONG_CUES = {"chat_bubbles", "notification", "search_bar"}
+_STRONG_CUES = {"subscribe_button", "chat_bubbles", "notification", "search_bar"}
 
 _ROLE_DEVICE = {
     "data": "counter",
@@ -404,6 +406,7 @@ DENSITY = {"low": 0.5, "med": 1.0, "high": 1.6}
 
 DEVICE_FAMILY = {
     "chat_bubbles": "ui", "notification": "ui", "search_bar": "ui", "toggle_meter": "ui",
+    "subscribe_button": "ui",
     "step_tracker": "mental", "venn": "mental", "node_map": "mental",
     "timeline_scrubber": "mental", "counter": "stat", "kinetic_text": "text",
 }
@@ -457,6 +460,8 @@ def _labels_for(kind: str, span: dict) -> list[str]:
         if m:
             return [_cap(m.group(1)), _cap(m.group(2)), "Overlap"]
         return [_cap(toks[0] if toks else "This"), _cap(toks[1] if len(toks) > 1 else "That"), "Both"]
+    if kind == "subscribe_button":
+        return ["Your Channel", "1.2M"]
     if kind == "chat_bubbles":
         return [text[:60], "wait what?"]
     if kind == "notification":

@@ -519,6 +519,7 @@
 
   function pickerLabels(kind) {
     if (picker.labelsByKind[kind]) return picker.labelsByKind[kind];
+    if (kind === "subscribe_button") return ["Your Channel", "1.2M"];
     const words = (picker.phrase.text || "").split(/\s+/).filter((w) => w.length > 3).slice(0, 4);
     return kind === "kinetic_text" ? [picker.phrase.text.slice(0, 48)] : words.map((w) => w[0].toUpperCase() + w.slice(1));
   }
