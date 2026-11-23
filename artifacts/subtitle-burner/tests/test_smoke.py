@@ -350,14 +350,6 @@ def test_font_faces_are_installed_before_the_explicit_load():
 # row is the one that matters: proposed vs shipped is a labelled example of
 # how the suggestion was wrong.
 
-@pytest.fixture
-def temp_db(app_mod, tmp_path, monkeypatch):
-    """Point the schema and every write at a throwaway database."""
-    monkeypatch.setattr(app_mod, "DB_PATH", tmp_path / "jobs.db")
-    app_mod._db_init()
-    return app_mod.DB_PATH
-
-
 def test_an_edited_suggestion_stores_both_halves(app_mod, temp_db):
     client = app_mod.app.test_client()
     proposed = {"type": "punch_zoom", "start": 10.0, "end": 12.0, "intensity": "med"}
