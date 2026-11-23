@@ -329,6 +329,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "mrbeast",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             # Commercial, not bundled -- see above.
             "font": "Anton", "size": 68, "primary": "#FFFFFF",
             "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
@@ -344,6 +346,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "hormozi",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             # The family name inside Montserrat-Black.ttf, which is what
             # libass matches on.
             "font": "Montserrat Thin Black", "size": 64, "primary": "#FFFFFF",
@@ -359,6 +363,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "karaoke",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
             "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
         },
@@ -375,6 +381,8 @@ AI_EDIT_STYLE_PACKS = {
         "transition": None,
         "caption_preset": "neon",
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
             "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
         },
