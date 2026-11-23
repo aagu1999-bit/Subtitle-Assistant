@@ -351,7 +351,10 @@ def concept_queries(text: str, limit: int = 3) -> dict:
 def abstract_prompt(text: str, palette: list[str] | None = None) -> str:
     """A generative prompt restricted to textures, environments and macro detail."""
     cq = concept_queries(text)
-    seed = (cq["concepts"] or cq["literal"][:2] or ["ambient light"])
+    # Only abstracted concepts reach a generator. The speaker's literal nouns
+    # ("my mom", "a sign saying SOLD") are exactly the people and text this
+    # policy keeps out of generated frames.
+    seed = cq["concepts"] or ["ambient light"]
     words = " ".join(seed)
     words = GEN_BANNED.sub("", words)
     words = re.sub(r"\s+", " ", words).strip() or "ambient light"

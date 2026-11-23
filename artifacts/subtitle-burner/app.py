@@ -37,6 +37,7 @@ from logging.handlers import RotatingFileHandler
 # is the browser's reader of the same spec; the suite compares them.
 import keyframes
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
 
@@ -16231,6 +16232,9 @@ def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
                  f"pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1")
     else:
         scale = _tl_overlay_scale_filter(ow, oh, fit)
+        cm = broll_guard.color_match_filter(ov.get("color_match"))
+        if cm:
+            scale += "," + cm
     if kind == "gif":
         # Animated GIF: decode frames (ignore_loop 0 = honor file loop;
         # stream_loop -1 keeps it playing for the overlay window).
@@ -18274,6 +18278,143 @@ def timeline_delete():
     except Exception as e:
         return jsonify({"error": f"Deleted from memory but DB failed: {e}"}), 500
     return jsonify({"ok": True, "job_id": job_id})
+
+
+# ---- B-roll guardrails: library -> stock -> abstract, colour-matched ----
+
+_AROLL_LOOK_CACHE: dict = {}
+
+
+def _main_source_at(tl: dict, t: float) -> tuple[Path | None, float]:
+    """(source file, source time) of the Main clip playing at output time *t*."""
+    cursor = 0.0
+    main = ((tl or {}).get("tracks") or {}).get("main") or []
+    for c in main:
+        try:
+            c_in, c_out = float(c.get("in", 0)), float(c.get("out", 0))
+        except (TypeError, ValueError):
+            continue
+        dur = max(0.0, c_out - c_in)
+        if t < cursor + dur or c is main[-1]:
+            return _timeline_clip_source(c), c_in + max(0.0, min(dur, t - cursor))
+        cursor += dur
+    return None, 0.0
+
+
+def _aroll_look(tl: dict, t: float) -> dict | None:
+    """Stats + palette of the A-roll around output time *t* (cached)."""
+    src, st = _main_source_at(tl, t)
+    if not src:
+        return None
+    key = (str(src), round(st))
+    if key not in _AROLL_LOOK_CACHE:
+        img = broll_guard.frame_image(src, st, FFMPEG)
+        if img is None:
+            return None
+        _AROLL_LOOK_CACHE[key] = {"stats": broll_guard.image_stats(img),
+                                  "palette": broll_guard.palette(img)}
+    return _AROLL_LOOK_CACHE[key]
+
+
+def _asset_rows() -> list[dict]:
+    """Library rows for matching (no ffprobe per file, unlike /list-assets)."""
+    rows = []
+    for p in ASSET_DIR.glob("*"):
+        if not p.is_file() or p.name.endswith(".meta.json") or p.suffix.lower() == ".json":
+            continue
+        kind = _asset_kind(p.suffix)
+        if not kind:
+            continue
+        meta = _read_asset_meta(p.stem)
+        rows.append({"asset_id": p.stem, "kind": kind, "filename": meta.get("filename") or "",
+                     "keyword": meta.get("keyword") or "", "source": meta.get("source") or "",
+                     "tags": " ".join(meta.get("tags") or [])})
+    return rows
+
+
+def _broll_color_params(tl: dict, asset_id: str, start: float) -> dict | None:
+    look = _aroll_look(tl, start)
+    path = _find_asset_path(asset_id)
+    if not look or not path:
+        return None
+    b_img = broll_guard.frame_image(path, 0.5, FFMPEG)
+    b_stats = broll_guard.image_stats(b_img) if b_img is not None else None
+    return broll_guard.color_match_params(look["stats"], b_stats)
+
+
+@app.route("/broll/smart", methods=["POST"])
+def broll_smart():
+    """B-roll for a phrase via the ladder; returns a colour-matched overlay clip."""
+    data = request.get_json(force=True) or {}
+    text = str(data.get("text") or "").strip()[:400]
+    if not text:
+        return jsonify({"error": "No text"}), 400
+    tl = data.get("timeline") or (jobs.get(data.get("job_id") or "") or {}).get("timeline") or {}
+    tl = _normalize_timeline(tl)
+    try:
+        start = max(0.0, float(data.get("start") or 0))
+        dur = max(0.8, min(12.0, float(data.get("duration") or 2.5)))
+    except (TypeError, ValueError):
+        start, dur = 0.0, 2.5
+    W, H = TIMELINE_CANVASES[tl["canvas"]]
+    look = _aroll_look(tl, start) or {}
+    pal = look.get("palette") or ["#334155", "#64748B", "#0F172A"]
+
+    def stock(q):
+        if not _broll_any_photo_provider():
+            return None
+        asset_id, _why = _resolve_photo_source(q)
+        return {"asset_id": asset_id, "kind": "image", "filename": q} if asset_id else None
+
+    def generate(phrase):
+        g = broll_guard.generate_abstract(phrase, pal, dur, W, H, CACHE_DIR, tl["fps"], FFMPEG)
+        if not g["ok"]:
+            return None
+        asset_id = hashlib.md5(g["path"].name.encode()).hexdigest()
+        dest = ASSET_DIR / f"{asset_id}.mp4"
+        if not dest.exists():
+            shutil.copyfile(g["path"], dest)
+        _write_asset_meta(asset_id, filename=f"Abstract {g['look']}", source="generated",
+                          prompt=g["prompt"], look=g["look"])
+        return {"asset_id": asset_id, "kind": "video", "filename": f"Abstract {g['look']}",
+                "look": g["look"], "prompt": g["prompt"], "policy": g["policy"]}
+
+    res = broll_guard.smart_broll(
+        text, assets=_asset_rows(), stock=stock, generate=generate,
+        allow_stock=bool(data.get("allow_stock", True)),
+        allow_generate=bool(data.get("allow_generate", True)))
+    if not res["asset"]:
+        return jsonify({**res, "clip": None,
+                        "error": "Nothing suitable: no library match, no stock hit, "
+                                 "and generation is off."}), 200
+    asset = res["asset"]
+    full = res["source"] == "generated" or str(data.get("placement") or "") == "full"
+    box = _CAROUSEL_BOX["full" if full else "pip"]
+    clip = {"id": uuid.uuid4().hex[:8], "asset_id": asset["asset_id"], "start": round(start, 3),
+            "in": 0.0, "out": round(dur, 3), **box, "fade_in": 0.2, "fade_out": 0.2,
+            "keyword": res["query"][:60],
+            "broll": {"source": res["source"], "query": res["query"],
+                      "concepts": res["concepts"], "ladder": res["ladder"]}}
+    if data.get("color_match", True):
+        params = _broll_color_params(tl, asset["asset_id"], start)
+        if params:
+            clip["color_match"] = params
+    return jsonify({**res, "clip": clip, "palette": pal})
+
+
+@app.route("/broll/color-match", methods=["POST"])
+def broll_color_match():
+    """Colour-match parameters for an existing overlay against the A-roll."""
+    data = request.get_json(force=True) or {}
+    tl = data.get("timeline") or (jobs.get(data.get("job_id") or "") or {}).get("timeline") or {}
+    try:
+        start = float(data.get("start") or 0)
+    except (TypeError, ValueError):
+        start = 0.0
+    params = _broll_color_params(_normalize_timeline(tl), str(data.get("asset_id") or ""), start)
+    if not params:
+        return jsonify({"error": "Could not read the A-roll or the asset"}), 400
+    return jsonify({"color_match": params, "filter": broll_guard.color_match_filter(params)})
 
 
 # ---- Graphics devices (UI mockups + mental-model diagrams) ----
