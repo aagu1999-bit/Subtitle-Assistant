@@ -15645,55 +15645,89 @@ def _tl_build_main_track(segments: list, transitions: list,
             _safe_unlink(p)
 
 
-def _ensure_ui_sfx_assets() -> dict[str, Path]:
-    """Generate the short click/whoosh WAVs used by the overlay SFX pass.
+# Sounds an overlay can make when it lands. Synthesized, so no binary assets;
+# every one is short, peaks well under full scale and decays to silence, so
+# nothing pumps or clips when it lands on speech.
+SFX_LIBRARY = {
+    "pop": ("Pop", "0.55*sin(2*PI*t*(1100-5200*t))*exp(-38*t)", 0.14, ""),
+    "soft_pop": ("Soft pop", "0.45*sin(2*PI*t*(620-2000*t))*exp(-26*t)", 0.18, "lowpass=f=2600"),
+    "click": ("Click", "0.5*sin(2*PI*2300*t)*exp(-110*t)", 0.05, ""),
+    "tick": ("Tick", "0.4*sin(2*PI*3400*t)*exp(-220*t)", 0.03, ""),
+    "ding": ("Ding", "0.32*(sin(2*PI*1318.5*t)+0.35*sin(2*PI*2637*t))*exp(-5.5*t)", 0.9, ""),
+    "sparkle": ("Sparkle",
+                "0.22*(sin(2*PI*2093*t)*exp(-16*t)"
+                "+gt(t,0.06)*sin(2*PI*2637*(t-0.06))*exp(-16*(t-0.06))"
+                "+gt(t,0.12)*sin(2*PI*3136*(t-0.12))*exp(-16*(t-0.12)))", 0.55, ""),
+    "thud": ("Thud", "0.7*sin(2*PI*t*(130-160*t))*exp(-13*t)", 0.32, "lowpass=f=900"),
+    "whoosh": ("Whoosh", None, 0.42, ""),
+}
+SFX_DEFAULT_GRAPHICS = "pop"
 
-    These stay synthesized (no binary assets needed). The camera SHUTTER is
-    not here — it is a real recording, cut from sfx/camera_shutter_burst.mp3
-    by _ensure_camera_shutter_wav(). One shutter source only, so there is
-    never a question of which one a recap is using.
-    """
+
+def _ensure_sfx_library() -> dict[str, Path]:
+    """Render every SFX_LIBRARY sound once into the cache; name -> wav."""
     sfx_dir = CACHE_DIR / "sfx"
     sfx_dir.mkdir(parents=True, exist_ok=True)
     out: dict[str, Path] = {}
-    # (name, ffmpeg_input_args, af_or_filter_complex, use_filter_complex)
-    specs = [
-        # Soft high click — pairs with punch / badge-like pops
-        (
-            "click",
-            ["-f", "lavfi", "-i", "sine=frequency=1650:duration=0.06"],
-            "afade=t=out:st=0.015:d=0.045,volume=0.85",
-            False,
-        ),
-        # Pink-noise whoosh — pairs with B-roll / split / Ken Burns arrivals
-        (
-            "whoosh",
-            ["-f", "lavfi", "-i", "anoisesrc=d=0.38:color=pink:sample_rate=44100"],
-            "afade=t=in:st=0:d=0.035,afade=t=out:st=0.22:d=0.14,"
-            "highpass=f=220,lowpass=f=7200,volume=0.72",
-            False,
-        ),
-    ]
-    for name, src, af, use_fc in specs:
-        # Bump generation stamp so louder / new assets replace quiet cached WAVs.
-        path = sfx_dir / f"{name}_v3.wav"
+    for name, (_label, expr, dur, extra) in SFX_LIBRARY.items():
+        path = sfx_dir / f"lib_{name}_v2.wav"
         if path.exists() and path.stat().st_size > 200:
             out[name] = path
             continue
-        if use_fc:
-            cmd = [
-                FFMPEG, "-y", *src,
-                "-filter_complex", af, "-map", "[aout]",
-                "-ar", "44100", "-ac", "2", str(path),
-            ]
+        if expr is None:
+            # A swell, not a burst: slow attack and band-limited noise. The
+            # old one started at full level and was boosted ~1.7x on top of
+            # the voice, which is what made it sound crushed.
+            src = ["-f", "lavfi", "-i", f"anoisesrc=d={dur}:color=pink:sample_rate=44100"]
+            af = (f"highpass=f=350,lowpass=f=3800,afade=t=in:st=0:d=0.16,"
+                  f"afade=t=out:st=0.18:d=0.24,volume=1.1")
         else:
-            cmd = [FFMPEG, "-y", *src, "-af", af, "-ar", "44100", "-ac", "2", str(path)]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+            src = ["-f", "lavfi", "-i", f"aevalsrc='{expr}':s=44100:d={dur}"]
+            af = ",".join(x for x in (extra, f"afade=t=out:st={dur * 0.8:.3f}:d={dur * 0.2:.3f}") if x)
+        proc = subprocess.run([FFMPEG, "-y", "-v", "error", *src, "-af", af,
+                               "-ar", "44100", "-ac", "2", str(path)],
+                              capture_output=True, text=True)
         if proc.returncode == 0 and path.exists():
             out[name] = path
         else:
             print(f"[sfx] failed to build {name}: {(proc.stderr or '')[-200:]}", flush=True)
     return out
+
+
+def _overlay_sound_hits(ov: dict, default_graphics: str) -> list[tuple[float, str]]:
+    """(time, sound) for one overlay clip.
+
+    "auto" means graphics and animations get the project's graphics sound
+    and photos / B-roll stay silent -- a sound on every cutaway is what made
+    the old pass tiring. An animation that times its own sounds (a click
+    when its pointer clicks) uses those instead of an entrance sound.
+    """
+    choice = str(ov.get("sfx") or "auto")
+    if choice == "none":
+        return []
+    try:
+        st = max(0.0, float(ov.get("start", 0)))
+        t_in = float(ov.get("in", 0) or 0)
+        t_out = float(ov.get("out", 0) or 0)
+    except (TypeError, ValueError):
+        return []
+    if choice in SFX_LIBRARY:
+        return [(st, choice)]
+    dev = ov.get("device") if isinstance(ov.get("device"), dict) else None
+    if not dev or default_graphics not in SFX_LIBRARY:
+        return []
+    spec = dev.get("spec") if isinstance(dev.get("spec"), dict) else None
+    inner = []
+    if spec:
+        for s in spec.get("sounds") or []:
+            try:
+                t = float(s.get("t", 0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            name = str(s.get("name") or "")
+            if name in SFX_LIBRARY and t_in <= t < (t_out or 1e9):
+                inner.append((st + t - t_in, name))
+    return inner or [(st, default_graphics)]
 
 
 def _tl_input_has_audio(path: Path) -> bool:
@@ -15767,44 +15801,28 @@ def _tl_mux_filtered_audio(
     _assert_mp4_has_video(out_path, what)
 
 
-def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
-                        out_path: Path) -> None:
-    """Mix auto click/whoosh one-shots at overlay / effect onsets.
-
-    Captions-style sensory sync: every visual pop gets a tiny audio accent.
-    Voice stays primary; SFX are short but clearly audible on Render.
-    """
-    assets = _ensure_ui_sfx_assets()
-    if not assets:
-        _tl_run([FFMPEG, "-y", "-i", str(base), "-c", "copy", str(out_path)],
-                "SFX passthrough")
-        return
-
+def _tl_sound_hits(overlay_clips: list, effect_clips: list,
+                   default_graphics: str = SFX_DEFAULT_GRAPHICS) -> list[tuple[float, str]]:
     hits: list[tuple[float, str]] = []
     for ov in overlay_clips or []:
-        if not isinstance(ov, dict):
-            continue
-        try:
-            st = float(ov.get("start", 0))
-        except (TypeError, ValueError):
-            continue
-        kind = "whoosh"
-        src = str(ov.get("source") or "").lower()
-        if src in ("badge",):
-            kind = "click"
-        hits.append((max(0.0, st), kind))
+        if isinstance(ov, dict):
+            hits.extend(_overlay_sound_hits(ov, default_graphics))
     for fx in effect_clips or []:
-        if not isinstance(fx, dict):
+        # Camera moves are silent unless a sound was picked for that move.
+        if not isinstance(fx, dict) or str(fx.get("sfx") or "") not in SFX_LIBRARY:
             continue
-        ftype = str(fx.get("type") or "")
         try:
-            st = float(fx.get("start", 0))
+            hits.append((max(0.0, float(fx.get("start", 0))), str(fx["sfx"])))
         except (TypeError, ValueError):
             continue
-        if ftype in ("punch_zoom", "zoom_1_5", "zoom_2x", "split_screen"):
-            hits.append((max(0.0, st), "click" if ftype.startswith("zoom") or ftype == "punch_zoom" else "whoosh"))
-        elif ftype == "ken_burns":
-            hits.append((max(0.0, st), "whoosh"))
+    return hits
+
+
+def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
+                        out_path: Path, default_graphics: str = SFX_DEFAULT_GRAPHICS) -> None:
+    """Mix the chosen sounds at overlay / effect onsets, under the voice."""
+    assets = _ensure_sfx_library()
+    hits = _tl_sound_hits(overlay_clips, effect_clips, default_graphics) if assets else []
 
     # Dedupe near-simultaneous hits (keep first)
     hits.sort(key=lambda h: h[0])
@@ -15836,7 +15854,7 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
 
     labels = []
     for t, kind in cleaned:
-        path = assets.get(kind) or assets.get("whoosh") or assets.get("click")
+        path = assets.get(kind)
         if not path:
             continue
         inputs += ["-i", str(path)]
@@ -15845,7 +15863,7 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
         # badly with -shortest / stream-copy muxes.
         filt.append(
             f"[{next_i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume=1.35,adelay={delay}|{delay},apad=whole_dur={duration:.3f}[s{next_i}]"
+            f"adelay={delay}|{delay},apad=whole_dur={duration:.3f}[s{next_i}]"
         )
         labels.append(f"[s{next_i}]")
         next_i += 1
@@ -15859,10 +15877,11 @@ def _tl_mix_overlay_sfx(base: Path, overlay_clips: list, effect_clips: list,
         filt.append(
             f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0[sfxall]"
         )
-    # Prefer hearing the accent; voice still dominates after amix.
-    filt.append("[sfxall]volume=1.25[sfxboost]")
+    # The limiter catches a pop landing on a loud syllable; without it the
+    # sum clips, which is the crushed sound the old boosted mix made.
     filt.append(
-        "[voice][sfxboost]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+        "[voice][sfxall]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "alimiter=limit=0.89:attack=2:release=40:level=disabled[aout]"
     )
     print(f"[sfx] mixing {len(labels)} hits onto {base.name}", flush=True)
     _tl_mux_filtered_audio(
@@ -17181,6 +17200,8 @@ def _normalize_timeline(timeline: dict) -> dict:
     tl["audio"] = audio if isinstance(audio, dict) else None
     # Auto whoosh/click on overlay & camera-effect onsets (Captions-style).
     tl["sfx_overlays"] = tl.get("sfx_overlays", True) is not False
+    g = str(tl.get("sfx_graphics") or SFX_DEFAULT_GRAPHICS)
+    tl["sfx_graphics"] = g if g in SFX_LIBRARY or g == "none" else SFX_DEFAULT_GRAPHICS
     ts = tl.get("track_states")
     tl["track_states"] = ts if isinstance(ts, dict) else None
     tracks = tl.get("tracks")
@@ -17803,6 +17824,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                     tracks.get("overlay") or [],
                     tracks.get("effects") or [],
                     sfxed,
+                    tl.get("sfx_graphics") or SFX_DEFAULT_GRAPHICS,
                 )
                 base = sfxed
             except Exception as sfx_err:
@@ -19062,12 +19084,51 @@ def _device_overlay_clip(info: dict, start: float) -> dict:
     }
 
 
+def _resolve_motion_images(spec: dict) -> dict:
+    """Give every image layer a real file; drop the ones nothing can supply.
+
+    The model names a picture (an asset id, a stock subject, a description);
+    only the server turns that into a path, so a scene can never point the
+    renderer at an arbitrary file.
+    """
+    layers = []
+    made: dict[str, str] = {}
+    for lay in spec["layers"]:
+        if lay["type"] != "image":
+            layers.append(lay)
+            continue
+        key = lay.get("photo") or ("gen:" + lay.get("generate", ""))
+        path = made.get(key)
+        if path is None:
+            path = ""
+            try:
+                if lay.get("photo"):
+                    aid, _why = _resolve_photo_source(lay["photo"])
+                    p = _find_asset_path(aid) if aid else None
+                    path = str(p) if p else ""
+                if not path and lay.get("generate") and _gemini_image_ready():
+                    tmp = CACHE_DIR / f"motionimg_{hashlib.md5(lay['generate'].encode()).hexdigest()[:12]}"
+                    tmp.parent.mkdir(parents=True, exist_ok=True)
+                    got = gemini_image(lay["generate"], tmp)
+                    path = str(got) if got else ""
+            except Exception as e:
+                ai_logger.info(f"[motion] image {key[:60]!r} failed: {e}")
+                path = ""
+            made[key] = path
+        if path:
+            layers.append({**lay, "file": path})
+    return {**spec, "layers": layers}
+
+
 def _design_animation(description: str, timeline: dict | None,
                       duration: float | None) -> dict:
     """Ask the model for a scene and validate it; one retry with the error."""
     pal, font = _device_look(timeline)
     canvas = (timeline or {}).get("canvas") or "9x16"
-    prompt = motion.brief(description, pal, font, duration, canvas)
+    prompt = motion.brief(description, pal, font, duration, canvas,
+                          photos=_co_editor_asset_choices(),
+                          stock=_broll_any_photo_provider(),
+                          generate=_gemini_image_ready())
     err = ""
     for _ in range(2):
         raw = _gemini_generate_clip_suggestions(
@@ -19081,7 +19142,8 @@ def _design_animation(description: str, timeline: dict | None,
             continue
         if duration:
             spec["duration"] = max(0.8, min(12.0, float(duration)))
-        return _review_animation(motion.fit_to_content(spec), description, prompt)
+        spec = motion.fit_to_content(_resolve_motion_images(spec))
+        return _review_animation(spec, description, prompt)
     raise ValueError(f"the designed animation was unusable: {err}")
 
 
@@ -19117,7 +19179,9 @@ def _review_animation(spec: dict, description: str, brief: str) -> dict:
     try:
         frames = _animation_frames(spec)
         prompt = (
-            brief + "\n\nYOU ALREADY DESIGNED THIS SCENE:\n" + json.dumps(spec)
+            brief + "\n\nYOU ALREADY DESIGNED THIS SCENE:\n"
+            + json.dumps({**spec, "layers": [{k: v for k, v in l.items() if k != "file"}
+                                             for l in spec["layers"]]})
             + "\n\nThe frames below are what it renders (the grey is only a backdrop). Check "
             "them against the request: text spilling out of its shape or off the frame, parts "
             "that should sit together but don't, overlaps, things too small to read, a cursor "
@@ -19137,7 +19201,7 @@ def _review_animation(spec: dict, description: str, brief: str) -> dict:
         return spec
     fixed["duration"] = spec["duration"]
     ai_logger.info(f"[motion] review fixed: {verdict.get('problems')}")
-    return motion.fit_to_content(fixed)
+    return motion.fit_to_content(_resolve_motion_images(fixed))
 
 
 def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 30) -> dict:
@@ -19165,6 +19229,22 @@ def _make_animation(description: str, timeline: dict | None,
     tl = timeline or {}
     return _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
                                 int(tl.get("fps") or 30))
+
+
+@app.route("/sfx/library", methods=["GET"])
+def sfx_library():
+    return jsonify({"sounds": [{"name": k, "label": v[0]} for k, v in SFX_LIBRARY.items()],
+                    "default_graphics": SFX_DEFAULT_GRAPHICS})
+
+
+@app.route("/sfx/<name>.wav", methods=["GET"])
+def sfx_sound(name):
+    if name not in SFX_LIBRARY:
+        return jsonify({"error": "Unknown sound"}), 404
+    path = _ensure_sfx_library().get(name)
+    if not path:
+        return jsonify({"error": "Sound unavailable"}), 500
+    return send_from_directory(str(path.parent), path.name, mimetype="audio/wav", max_age=86400)
 
 
 @app.route("/motion/render", methods=["POST"])
@@ -22427,6 +22507,8 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "make_image", "description": "a pier in Jersey City at dusk", "style": "photo", "start": 3.0, "duration": 4, "behind": true}',
     '{"op": "add_device", "kind": "venn", "labels": ["Skill", "Demand", "Money"], "start": 8.0, "duration": 3.4}',
     '{"op": "add_animation", "description": "a YouTube subscribe button; a mouse pointer glides in, hovers, clicks it and it turns grey with a ringing bell", "start": 20.0, "duration": 3.5}',
+    '{"op": "set_sound", "track": "overlay", "index": 0, "sound": "pop"}',
+    '{"op": "set_sound", "default": "soft_pop"}',
     '{"op": "add_speed", "start": 12.0, "duration": 2.0, "speed": 2.0}',
     '{"op": "set_behind", "index": 0, "on": true}',
     '{"op": "add_text_message", "title": "Mom", "start": 2.0, "duration": 4, "messages": [{"from": "them", "text": "are you going tonight"}, {"from": "me", "text": "obviously"}]}',
@@ -22731,6 +22813,8 @@ def _resolve_add_device(op: dict, timeline: dict) -> tuple[dict | None, str]:
     clip = _device_overlay_clip(info, start)
     if op.get("behind"):
         clip["behind"] = True
+    if op.get("sound") in SFX_LIBRARY or op.get("sound") == "none":
+        clip["sfx"] = op["sound"]
     return {"op": "add_device", "clip": clip}, ""
 
 
@@ -22752,6 +22836,8 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
     clip = _device_overlay_clip(info, start)
     if op.get("behind"):
         clip["behind"] = True
+    if op.get("sound") in SFX_LIBRARY or op.get("sound") == "none":
+        clip["sfx"] = op["sound"]
     return {"op": "add_animation", "clip": clip}, ""
 
 
@@ -23036,7 +23122,12 @@ WHAT YOU CAN DO (every item is an op below)
 - ANY OTHER ANIMATION, described in words (add_animation): buttons, icons, like/heart
   bursts, progress bars, loading rings, charts, price tags, app screens, cursors clicking
   things, logo-style reveals, arrows pointing at something, checklists ticking off -- if
-  it can be drawn with shapes, text, icons, lines and a mouse pointer, you can make it.
+  it can be drawn with shapes, text, icons, lines, a mouse pointer and PICTURES, you can
+  make it. Animations can include real pictures: the user's own photos, stock photos or
+  generated images (a profile photo in a follow card, a thumbnail in a video card).
+- Sounds: pop, soft pop, click, tick, ding, sparkle, thud, whoosh. Graphics and
+  animations make the project's graphics sound when they appear (pop unless changed);
+  photos and B-roll are silent unless given one; animations can time their own sounds.
 - Behind the speaker: any picture, generated image or graphic can sit BEHIND the person
   (they are cut out and stay in front). "Text behind me" is add_device kinetic_text with
   "behind": true. set_behind moves an existing overlay behind or in front.
@@ -23164,6 +23255,12 @@ Rules:
   exact words shown (from the transcript where relevant), and the sequence of motion
   ("slides up, the bar fills to 80%, a cursor clicks the button, it turns green").
   Optional duration (0.8-12 s), "behind": true to put it behind the speaker.
+- set_sound picks the sound for one overlay (track "overlay") or camera move (track
+  "effects") by index -- sound is one of the names above, "none" or "auto" -- or with
+  "default" sets the sound every graphic makes ("none" silences them). add_device and
+  add_animation also take "sound". Sounds are accents: never put one on every clip.
+- In add_animation descriptions, say which pictures appear (one of their photos by its
+  name, or what to show) and which sounds land when ("a click as the pointer clicks").
 - add_speed speeds up (speed > 1) or slows down (< 1) a stretch; 0.25 to 4.
 - set_behind puts an existing overlay behind the speaker ("put it behind me").
 {_taste_block(prompt)}"""
@@ -23242,6 +23339,21 @@ Rules:
                 blocked.append(note)
             if op is None:
                 continue
+        elif name == "set_sound":
+            snd = str(op.get("sound") or op.get("default") or "")
+            if snd not in SFX_LIBRARY and snd not in ("none", "auto"):
+                blocked.append(f"there is no '{snd}' sound ({', '.join(SFX_LIBRARY)})")
+                continue
+            if op.get("default") is not None and op.get("index") is None:
+                op = {"op": "set_sound", "default": snd if snd != "auto" else SFX_DEFAULT_GRAPHICS}
+            else:
+                trk = "effects" if op.get("track") == "effects" else "overlay"
+                try:
+                    op = {"op": "set_sound", "track": trk, "index": int(op.get("index")), "sound": snd}
+                except (TypeError, ValueError):
+                    if op.get("target") != "selected":
+                        continue
+                    op = {"op": "set_sound", "track": trk, "target": "selected", "sound": snd}
         elif name == "add_animation":
             op, note = _resolve_add_animation(op, timeline)
             if note:

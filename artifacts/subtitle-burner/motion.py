@@ -20,7 +20,7 @@ import math
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 import devices
 from devices import (_bold, _circle, _clamp, _font, _pointer, _rounded, _text_w,
@@ -29,10 +29,12 @@ from devices import (_bold, _circle, _clamp, _font, _pointer, _rounded, _text_w,
 MOTION_VERSION = 1
 MAX_LAYERS = 48
 MAX_KEYS = 24
-LAYER_TYPES = ("rect", "circle", "text", "icon", "line", "ring", "cursor")
+LAYER_TYPES = ("rect", "circle", "text", "icon", "line", "ring", "cursor", "image")
+MAX_IMAGES = 6
 ICONS = ("bell", "heart", "star", "check", "play", "pause", "plus", "close", "arrow_right",
          "arrow_up", "arrow_down", "search", "user", "lock", "mail", "chat", "thumbs_up",
          "bolt", "fire", "share", "bookmark", "eye")
+SOUNDS = ("pop", "soft_pop", "click", "tick", "ding", "sparkle", "thud", "whoosh")
 EASES = ("linear", "in", "out", "in_out", "back", "bounce", "elastic", "step")
 KEYED = ("x", "y", "w", "h", "r", "scale", "opacity", "rotation", "progress", "fill", "color")
 PLACEMENTS = {"top": 0.16, "upper": 0.32, "center": 0.5, "lower": 0.66, "bottom": 0.8}
@@ -142,6 +144,15 @@ def normalize(spec: dict) -> dict:
                 continue
             lay["points"] = pts
             lay["arrow"] = bool(raw.get("arrow"))
+        if typ == "image":
+            if sum(1 for l in out["layers"] if l["type"] == "image") >= MAX_IMAGES:
+                continue
+            lay["photo"] = str(raw.get("photo") or "").strip()[:120]
+            lay["generate"] = str(raw.get("generate") or "").strip()[:300]
+            if not (lay["photo"] or lay["generate"]):
+                continue
+            lay["fit"] = "contain" if raw.get("fit") == "contain" else "cover"
+            lay["shape"] = "circle" if raw.get("shape") == "circle" else "rect"
         if typ == "cursor":
             lay["size"] = _num(raw.get("size"), 10, sh * 2, sh * 0.3)
             lay["clicks"] = sorted(_num(c, 0, dur, 0) for c in (raw.get("clicks") or [])[:8])
@@ -191,6 +202,15 @@ def normalize(spec: dict) -> dict:
         out["layers"].append(lay)
     if not out["layers"]:
         raise ValueError("animation has no drawable layers")
+    sounds = []
+    for s in (spec.get("sounds") or [])[:16]:
+        if isinstance(s, dict) and s.get("name") in SOUNDS:
+            sounds.append({"t": _num(s.get("t"), 0, dur, 0), "name": s["name"]})
+    if not sounds:
+        for lay in out["layers"]:
+            if lay["type"] == "cursor":
+                sounds += [{"t": c, "name": "click"} for c in lay["clicks"]]
+    out["sounds"] = sorted(sounds, key=lambda s: s["t"])
     return out
 
 
@@ -373,6 +393,36 @@ def _icon(name: str, size: int, color: tuple, ss: int = 4) -> Image.Image:
 
 # ---- drawing --------------------------------------------------------------------
 
+def _image_sprite(path: str, w: int, h: int, fit: str, shape: str, radius: int):
+    try:
+        with Image.open(path) as im:
+            src = im.convert("RGBA")
+    except (OSError, ValueError):
+        return None
+    if fit == "contain":
+        s = min(w / src.width, h / src.height)
+        img = src.resize((max(1, int(src.width * s)), max(1, int(src.height * s))), Image.LANCZOS)
+        canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        canvas.alpha_composite(img, ((w - img.width) // 2, (h - img.height) // 2))
+        img = canvas
+    else:
+        s = max(w / src.width, h / src.height)
+        img = src.resize((max(w, int(src.width * s + 0.5)), max(h, int(src.height * s + 0.5))),
+                         Image.LANCZOS)
+        x0, y0 = (img.width - w) // 2, (img.height - h) // 2
+        img = img.crop((x0, y0, x0 + w, y0 + h))
+    if shape == "circle" or radius > 0:
+        ss = 3
+        mask = Image.new("L", (w * ss, h * ss), 0)
+        d = ImageDraw.Draw(mask)
+        if shape == "circle":
+            d.ellipse([0, 0, w * ss - 1, h * ss - 1], fill=255)
+        else:
+            d.rounded_rectangle([0, 0, w * ss - 1, h * ss - 1], radius=radius * ss, fill=255)
+        mask = mask.resize((w, h), Image.LANCZOS)
+        img.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
+    return img
+
 def _font_for(name: str, px: int):
     n = (name or "").lower()
     if n in ("bold", "heavy", "black"):
@@ -513,6 +563,16 @@ def painter(spec: dict, px_w: int, px_h: int):
                 spr = sprites.get(("text", txt, px, st["color"], lay["font"], lay["stroke"]), mk)
                 anchor = {"left": (0, 0.5), "right": (1, 0.5)}.get(lay["align"], (0.5, 0.5))
                 _place(frame, spr, cx, cy, st["scale"], st["rotation"], op, anchor)
+            elif typ == "image":
+                path = lay.get("file")
+                if not path:
+                    continue
+                w, h = max(2, int(st["w"] * k)), max(2, int(st["h"] * k))
+                rad = int(min(lay["radius"] * k, min(w, h) / 2))
+                spr = sprites.get(("img", path, w, h, rad, lay["fit"], lay["shape"]),
+                                  lambda: _image_sprite(path, w, h, lay["fit"], lay["shape"], rad))
+                if spr is not None:
+                    _place(frame, spr, cx, cy, st["scale"], st["rotation"], op)
             elif typ == "icon":
                 sz = max(4, int(lay["size"] * k))
                 spr = sprites.get(("icon", lay["name"], sz, st["color"]),
@@ -704,7 +764,18 @@ EXAMPLE_BAR = {
 
 
 def brief(description: str, palette: list, font: str | None, duration: float | None,
-          canvas: str) -> str:
+          canvas: str, photos: list | None = None, stock: bool = False,
+          generate: bool = False) -> str:
+    sources = []
+    if photos:
+        sources.append("the user's own photos, by asset id: " + "; ".join(
+            f'{p.get("asset_id")} = "{p.get("name")}"' for p in photos[:12]))
+    if stock:
+        sources.append('"photo": a subject to search stock photos for ("golden retriever")')
+    if generate:
+        sources.append('"generate": a description to create a picture from')
+    pictures = ("\n        ".join(sources) if sources
+                else "NONE are available on this server, so do not use image layers")
     return f"""You are a motion designer. Design a short transparent animation that is
 composited over a {canvas} talking-head video. Return ONLY a JSON scene.
 
@@ -738,6 +809,15 @@ SCENE FORMAT
   line: points [[x,y],...], color, line_width, arrow (bool); key progress 0->1 to draw it on
   ring: r, line_width, color (the arc), stroke (the track), key progress 0->1
   cursor: a mouse pointer whose TIP is at (x, y); size; clicks [seconds] (press + ripple)
+  image: a real picture -- w, h, fit (cover|contain), shape (rect|circle), radius, and ONE of
+        "photo": an asset id of the user's photo or a stock subject, or "generate": a
+        description. Up to {MAX_IMAGES}. Sources available:
+        {pictures}
+        Use pictures wherever a real app would show one: avatars, thumbnails, product shots,
+        a post's photo, a profile picture, a before/after.
+- sounds: optional [{{"t": seconds, "name": one of {", ".join(SOUNDS)}}}] timed to the
+  action (a click when the pointer clicks, a ding when a counter lands, a pop when
+  something appears). Keep it to the moments that matter -- usually 1 to 3.
 - Colours "#RRGGBB" or "#RRGGBBAA".
 
 DESIGN RULES

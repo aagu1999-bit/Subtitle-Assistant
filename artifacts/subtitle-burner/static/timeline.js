@@ -969,6 +969,7 @@
       style: tl.style || null,
       audio: tl.audio || null,
       sfx_overlays: tl.sfx_overlays !== false,
+      sfx_graphics: tl.sfx_graphics || "pop",
       ai_edit: tl.ai_edit || null,
       edit_receipt: tl.edit_receipt || null,
       last_polish: tl.last_polish || null,
@@ -5619,6 +5620,12 @@
       if (c.broll && c.broll.source) {
         ovBody += `<p class="muted" style="font-size:.72rem">B-roll via <strong>${c.broll.source}</strong>${c.broll.query ? ` · "${c.broll.query}"` : ""}${c.broll.look ? ` · ${c.broll.look}` : ""}</p>`;
       }
+      const autoLbl = c.device
+        ? `Auto (${tl.sfx_overlays === false ? "sounds off" : (SFX_LABEL[tl.sfx_graphics || "pop"] || "no sound")})`
+        : "Auto (silent)";
+      ovBody += `<div class="tl-sfx-row">${propSelect("sfx", "Sound when it appears", c.sfx || "auto",
+        [["auto", autoLbl], ["none", "No sound"]].concat(SFX_CHOICES))}`
+        + `<button type="button" class="tl-chip-btn" data-sfx-play="${esc(c.sfx && c.sfx !== "auto" && c.sfx !== "none" ? c.sfx : (c.device ? (tl.sfx_graphics || "pop") : ""))}" title="Hear it">▶</button></div>`;
       if (c.device) ovBody += `<div id="tlDeviceProps" data-kind="${c.device.kind}"></div>`;
       html += propSection("🖼 Overlay layout", ovBody, true);
       const ovKb = c.ken_burns || {};
@@ -5851,9 +5858,14 @@
     }
     html += propSection("🖼 Background (behind you)", bgBody, !!bgl.asset_id);
 
-    let sfxBody = propCheck("__sfx_overlays", "Auto whoosh / click when overlays & zooms land", tl.sfx_overlays !== false);
-    sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Baked on <strong>▶ Render</strong> (not Timeline preview scrub). Louder accents under speech — uncheck to silence.</p>`;
-    html += propSection("🔊 Overlay SFX", sfxBody, true);
+    let sfxBody = propCheck("__sfx_overlays", "Play sounds when things appear", tl.sfx_overlays !== false);
+    if (tl.sfx_overlays !== false) {
+      sfxBody += `<div class="tl-sfx-row">${propSelect("__sfx_graphics", "Sound for graphics & animations",
+        tl.sfx_graphics || "pop", [["none", "No sound"]].concat(SFX_CHOICES))}`
+        + `<button type="button" class="tl-chip-btn" data-sfx-play="${esc(tl.sfx_graphics || "pop")}" title="Hear it">▶</button></div>`;
+    }
+    sfxBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:4px 0 0">Photos and B-roll stay silent unless you pick a sound on that clip. Pick per clip under its layout settings. Added on <strong>▶ Render</strong>.</p>`;
+    html += propSection("🔊 Sounds", sfxBody, true);
 
     const sc = tl.speaker_colors || {};
     const hb = tl.headline_banner;
@@ -5987,6 +5999,11 @@
           scheduleSave();
         } else if (key === "__sfx_overlays") {
           tl.sfx_overlays = !!inp.checked;
+          renderProps();
+        } else if (key === "__sfx_graphics") {
+          tl.sfx_graphics = inp.value;
+          playSfx(inp.value);
+          renderProps();
         } else if (key && key.startsWith("__sc:")) {
           const spk = key.slice(5);
           tl.speaker_colors = tl.speaker_colors || {};
@@ -6278,6 +6295,25 @@
     return out;
   }
 
+  const SFX_CHOICES = [
+    ["pop", "Pop"], ["soft_pop", "Soft pop"], ["click", "Click"], ["tick", "Tick"],
+    ["ding", "Ding"], ["sparkle", "Sparkle"], ["thud", "Thud"], ["whoosh", "Whoosh"],
+  ];
+  const SFX_LABEL = Object.fromEntries(SFX_CHOICES);
+  let sfxAudio = null;
+  function playSfx(name) {
+    if (!name || !SFX_LABEL[name]) return;
+    try {
+      if (sfxAudio) sfxAudio.pause();
+      sfxAudio = new Audio(`/sfx/${name}.wav`);
+      sfxAudio.play().catch(() => {});
+    } catch (_) {}
+  }
+  document.addEventListener("click", (e) => {
+    const b = e.target && e.target.closest && e.target.closest("[data-sfx-play]");
+    if (b) playSfx(b.dataset.sfxPlay);
+  });
+
   function propSelect(key, label, val, opts) {
     const o = opts.map(([v, t]) => `<option value="${v}" ${v === val ? "selected" : ""}>${t}</option>`).join("");
     return `<div class="tl-prop-row"><label>${label}</label><select data-key="${key}">${o}</select></div>`;
@@ -6308,6 +6344,14 @@
         else if (inp.type === "number" || inp.type === "range") v = parseFloat(inp.value);
         else v = inp.value;
 
+        if (key === "sfx") {
+          if (v === "auto") delete c.sfx;
+          else c.sfx = v;
+          playSfx(v === "auto" ? (c.device ? (tl.sfx_graphics || "pop") : "") : v);
+          renderProps();
+          scheduleSave();
+          return;
+        }
         if (key === "dur") {
           // Titles + Effects lane: `out` stores duration (in is unused / 0).
           if (track === "effects" || track === "text") {
@@ -7114,6 +7158,7 @@
       style: d.style ? normalizeTlStyle(d.style) : null,
       audio: d.audio || null,
       sfx_overlays: d.sfx_overlays !== false,
+      sfx_graphics: d.sfx_graphics || "pop",
       ai_edit: d.ai_edit || null,
       edit_receipt: d.edit_receipt || null,
       last_polish: d.last_polish || null,
@@ -9344,6 +9389,7 @@
     if (seed.template) tl.template = seed.template;
     if (seed.recap) tl.recap = seed.recap;
     if (seed.sfx_overlays != null) tl.sfx_overlays = !!seed.sfx_overlays;
+    if (seed.sfx_graphics) tl.sfx_graphics = seed.sfx_graphics;
     tl.structure = seed.structure || null;
     tl.style_doc = seed.style_doc || null;
     if (label) {
@@ -10184,6 +10230,23 @@
             : `${(ov.device && ov.device.kind || "graphic").replace(/_/g, " ")} graphic`);
           loadAssets().then(() => updateStageCompositor());
           applied++;
+        } else if (name === "set_sound") {
+          if (op.default) {
+            tl.sfx_graphics = op.default;
+            if (op.default !== "none") tl.sfx_overlays = true;
+            notes.push(`graphics sound: ${op.default.replace(/_/g, " ")}`);
+            applied++;
+          } else {
+            const arr = tl.tracks[op.track === "effects" ? "effects" : "overlay"] || [];
+            let i = Number(op.index);
+            if (op.target === "selected" && selected) i = arr.findIndex((x) => x.id === selected.id);
+            if (i >= 0 && i < arr.length) {
+              if (op.sound === "auto") delete arr[i].sfx;
+              else arr[i].sfx = op.sound;
+              notes.push(`sound: ${String(op.sound).replace(/_/g, " ")}`);
+              applied++;
+            }
+          }
         } else if (name === "add_speed") {
           const ec = {
             id: uid(), type: "speed",

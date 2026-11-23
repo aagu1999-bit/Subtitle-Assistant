@@ -140,3 +140,64 @@ def test_the_coeditor_makes_any_animation(app_mod, temp_db, monkeypatch):
     assert clip["device"]["kind"] == "animation" and clip["start"] == 3
     assert (app_mod.ASSET_DIR / f"{clip['asset_id']}.webm").exists()
     assert "ANY OTHER ANIMATION" in calls[0]
+
+
+def test_image_layers_draw_a_real_picture_and_never_take_a_path_from_the_model(tmp_path):
+    from PIL import Image
+    pic = tmp_path / "p.png"
+    Image.new("RGB", (40, 40), (0, 200, 0)).save(pic)
+    spec = motion.normalize({"size": [100, 100], "duration": 2, "layers": [
+        {"id": "img", "type": "image", "photo": "dog", "file": "/etc/passwd",
+         "x": 50, "y": 50, "w": 60, "h": 60, "shape": "circle"},
+    ]})
+    assert "file" not in spec["layers"][0], "a path from the model reached the renderer"
+    assert motion.frame_at(spec, 1.0, (100, 100)).getchannel("A").getextrema()[1] == 0
+    spec["layers"][0]["file"] = str(pic)
+    img = motion.frame_at(spec, 1.0, (100, 100))
+    assert img.getpixel((50, 50))[:3] == (0, 200, 0)
+    assert img.getpixel((22, 22))[3] < 40, "circle mask not applied"
+
+
+def test_pointer_clicks_get_click_sounds_unless_sounds_are_given():
+    auto = motion.normalize(motion.EXAMPLE)
+    assert auto["sounds"] == [{"t": 1.6, "name": "click"}]
+    own = motion.normalize({**motion.EXAMPLE, "sounds": [{"t": 2.0, "name": "ding"},
+                                                         {"t": 1, "name": "airhorn"}]})
+    assert own["sounds"] == [{"t": 2.0, "name": "ding"}]
+
+
+def test_sound_rules(app_mod):
+    assert set(motion.SOUNDS) == set(app_mod.SFX_LIBRARY)
+    hits = app_mod._tl_sound_hits([
+        {"start": 1, "out": 3, "asset_id": "photo"},                       # B-roll: silent
+        {"start": 2, "out": 3, "device": {"kind": "venn"}},               # graphic: default
+        {"start": 4, "out": 3, "device": {"kind": "venn"}, "sfx": "none"},
+        {"start": 5, "out": 3, "asset_id": "photo", "sfx": "whoosh"},     # chosen
+        {"start": 6, "in": 0, "out": 3, "device": {"kind": "animation",
+                                                    "spec": {"sounds": [{"t": 1.6, "name": "click"}]}}},
+    ], [{"type": "punch_zoom", "start": 7}, {"type": "punch_zoom", "start": 8, "sfx": "thud"}],
+        "pop")
+    assert hits == [(2.0, "pop"), (5.0, "whoosh"), (7.6, "click"), (8.0, "thud")]
+    assert app_mod._tl_sound_hits([{"start": 2, "device": {"kind": "venn"}}], [], "none") == []
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not on PATH")
+def test_sounds_mix_under_loud_speech_without_clipping(app_mod, tmp_path, monkeypatch):
+    import json as _json
+    import subprocess
+    monkeypatch.setattr(app_mod, "FFMPEG", FFMPEG)
+    base = tmp_path / "base.mp4"
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=160x90:d=3",
+                    "-f", "lavfi", "-i", "sine=frequency=220:d=3,volume=0.95",
+                    "-c:v", "libx264", "-c:a", "aac", "-shortest", str(base)], check=True)
+    out = tmp_path / "out.mp4"
+    app_mod._tl_mix_overlay_sfx(base, [{"start": 1.0, "device": {"kind": "venn"}},
+                                       {"start": 1.0, "sfx": "thud"}], [], out, "pop")
+    r = subprocess.run([FFMPEG, "-v", "info", "-i", str(out), "-af", "volumedetect", "-f", "null", "-"],
+                       capture_output=True, text=True).stderr
+    peak = float(r.split("max_volume:")[1].split("dB")[0])
+    assert peak <= -0.5, f"mix clips at {peak} dB"
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(out)],
+                           capture_output=True, text=True).stdout
+    kinds = {s["codec_type"] for s in _json.loads(probe)["streams"]}
+    assert kinds == {"video", "audio"}
