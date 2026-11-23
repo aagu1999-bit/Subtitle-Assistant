@@ -650,6 +650,31 @@ def test_the_coeditor_is_told_everything_it_can_do(app_mod, temp_db, monkeypatch
     assert "Never say you cannot make graphics" in p
 
 
+def test_the_coeditor_reads_the_whole_transcript_in_output_time(app_mod, temp_db, monkeypatch):
+    """It used to see ~8 seconds around the playhead, so "pick a mental model
+    for this clip" got "tell me what the clip is about" back."""
+    seen = {}
+
+    def fake(prompt):
+        seen["prompt"] = prompt
+        return {"ops": [], "message": "noted"}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    words = []
+    for i, w in enumerate("skill alone is not enough you also need demand".split()):
+        words.append({"word": w, "start": 100 + i * 0.4, "end": 100.3 + i * 0.4})
+    words.append({"word": "zanzibarquux", "start": 300.0, "end": 300.3})
+    monkeypatch.setitem(app_mod.jobs, "jobT", {"words": words})
+    tl = _coeditor_timeline()
+    tl["tracks"]["main"] = [{"id": "m1", "source_job_id": "jobT", "in": 90, "out": 110}]
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "add a mental model", "timeline": tl})
+    p = seen["prompt"]
+    assert "[00:10] skill alone is not enough you also need demand" in p
+    assert "zanzibarquux" not in p, "words outside the clip leaked in"
+    assert "Never ask the user to describe" in p
+
+
 def test_the_new_ops_survive_the_whitelist(app_mod, temp_db, monkeypatch):
     """An op the server does not allow is dropped before it reaches the UI."""
     ops = [

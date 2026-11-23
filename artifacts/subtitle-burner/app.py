@@ -22647,6 +22647,39 @@ def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
     return {"op": "set_punch_aim", "index": idx, "x": x, "y": y}
 
 
+CO_EDITOR_TRANSCRIPT_CHARS = 12000
+
+
+def _co_editor_transcript(timeline: dict) -> str:
+    """What is said on the timeline, as [mm:ss] lines in OUTPUT time.
+
+    Graphics, titles and B-roll are placed by what is said and when, so a
+    co-editor that only sees a few words around the playhead has to ask the
+    user to retell their own video.
+    """
+    try:
+        layout = _tl_audio_layout(timeline)
+    except Exception:
+        return ""
+    out_words = []
+    for p in layout["pieces"]:
+        words = (jobs.get(p.get("source_job_id")) or {}).get("words") or []
+        for w in words:
+            try:
+                ws, we = float(w.get("start", 0)), float(w.get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            if we <= p["src_in"] or ws >= p["src_out"]:
+                continue
+            t = p["render_start"] + max(0.0, ws - p["src_in"])
+            out_words.append({"word": w.get("word", ""), "start": t,
+                              "end": t + max(0.0, we - ws)})
+    text = _format_transcript_for_llm(out_words)
+    if len(text) > CO_EDITOR_TRANSCRIPT_CHARS:
+        text = text[:CO_EDITOR_TRANSCRIPT_CHARS].rsplit("\n", 1)[0] + "\n[... transcript continues]"
+    return text
+
+
 @app.route("/co-editor", methods=["POST"])
 def co_editor():
     """Natural-language → validated timeline mutation ops (Captions Co-editor).
@@ -22806,6 +22839,22 @@ def co_editor():
                 + "\n".join(turns) + "\n"
             )
 
+    _transcript = _co_editor_transcript(timeline)
+    if _transcript:
+        _transcript_block = (
+            "\nWHAT IS SAID IN THIS VIDEO ([mm:ss] is time in the finished edit). "
+            "You have read it: use it to choose concepts, labels and timing for "
+            "graphics, titles, B-roll and cuts, and to answer questions about the "
+            "content. Never ask the user to describe or summarise their own video.\n"
+            + _transcript + "\n"
+        )
+    else:
+        _transcript_block = (
+            "\nNo transcript is loaded for this timeline yet, so you cannot see what "
+            "is said. If a request depends on the content, say the clip needs "
+            "transcribing first.\n"
+        )
+
     system_prompt = f"""You are the Studio Timeline co-editor — a natural-language REMOTE CONTROL for this project.
 
 PURPOSE
@@ -22843,6 +22892,7 @@ HARD LIMITS (say no in message, ops: [])
 - run_polish starts an async FFmpeg polish job on the Main source (not Timeline Render). Say so in message; do not claim captions were burned.
 
 {_history}
+{_transcript_block}
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
 
@@ -22922,7 +22972,9 @@ Rules:
   [title, body], search_bar = [query, result...], toggle_meter = [label,
   0-100 or on/off], step_tracker/node_map/timeline_scrubber = the steps,
   venn = [left, right, overlap], counter = [number with unit, caption],
-  kinetic_text = [the phrase]. Pull labels from what is said.
+  kinetic_text = [the phrase]. Pull labels and start times from the transcript above;
+  when asked for a graphic without specifics, find the idea in the transcript that
+  suits one best and place it when that idea is said.
 - "Mental model", "framework", "diagram", "kinetic graph", "chart", "visualise this" are
   add_device: pick the kind that fits the idea (two ideas overlapping → venn, a process →
   step_tracker, connected ideas → node_map, a sequence in time → timeline_scrubber, a
