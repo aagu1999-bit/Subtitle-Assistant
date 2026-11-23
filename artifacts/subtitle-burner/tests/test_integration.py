@@ -164,7 +164,7 @@ def test_style_toggles_reach_the_plan(app_mod, talk_job):
 def test_style_packs_describe_the_look(app_mod):
     packs = app_mod.app.test_client().get("/ai-edit/style-packs").get_json()["packs"]
     by = {p["id"]: p for p in packs}
-    assert by["film"]["devices"]["per_minute"] == 1
+    assert by["film"]["graphics_budget"]["per_minute"] == 1
     assert by["pulse"]["style"]["highlight"].startswith("#")
 
 
@@ -172,6 +172,6 @@ def test_page_ships_the_style_first_flow(app_mod):
     html = app_mod.app.test_client().get("/").get_data(as_text=True)
     for needle in ('data-tab="style"', 'data-tab="export"', 'data-tab-group="style"',
                    'data-tab-group="export"', "studio.js", 'id="devicePicker"',
-                   'id="tasteModal"', 'data-ltab="structure"', "Caption preset"):
+                   'id="tasteModal"', 'data-ltab="structure"', 'id="captionLookToStyle"'):
         assert needle in html, needle
     assert "CapCut Template" not in html

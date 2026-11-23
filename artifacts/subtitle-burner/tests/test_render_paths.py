@@ -112,25 +112,27 @@ def test_captions_follow_a_speed_ramp(app_mod, source_job, monkeypatch):
 
 
 @needs_ffmpeg
-def test_behind_subject_restores_the_speaker_over_the_graphic(app_mod, source_job, monkeypatch):
+def test_behind_me_device_goes_under_the_speaker_matte(app_mod, source_job, monkeypatch, tmp_path):
+    """"Behind me" uses the overlay pass's matte, and legacy behind_subject still counts."""
     calls = []
 
-    def fake_matte(video, t0, t1, W, H, fps, out_path):
-        calls.append((round(t0, 2), round(t1, 2)))
+    def fake_matte(src, W, H, fps, dur=None, start=0.0):
+        calls.append((W, H))
+        out = tmp_path / "matte.mp4"
         # Left half "person", right half background.
         subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
-                        f"color=black:s={W}x{H}:r={fps}:d={t1 - t0:.3f}",
+                        f"color=black:s={W}x{H}:r={fps}:d={float(dur or 3):.3f}",
                         "-vf", f"drawbox=x=0:y=0:w={W // 2}:h={H}:color=white:t=fill",
-                        "-pix_fmt", "yuv420p", str(out_path)], check=True)
-        return True
+                        "-pix_fmt", "yuv420p", str(out)], check=True)
+        return out
 
-    monkeypatch.setattr(app_mod, "_tl_subject_matte", fake_matte)
+    monkeypatch.setattr(app_mod, "_tl_matte_video", fake_matte)
     info = app_mod._render_device_asset("kinetic_text", ["BEHIND"], 1.5, "9x16",
                                         ["#FF0000"], None, 30)
     ov = app_mod._device_overlay_clip(info, 0.2)
     ov.update({"x": 0, "y": 0, "w": 1.0, "h": 1.0, "behind_subject": True})
     out, _job = _render(app_mod, _timeline(source_job, overlays=[ov]))
-    assert calls == [(0.2, 1.7)]
+    assert calls, "the behind overlay never asked for a matte"
     assert _dur(out) == pytest.approx(2.0, abs=0.12)
 
 

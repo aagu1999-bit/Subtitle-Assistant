@@ -411,11 +411,15 @@ AI_EDIT_STYLE_PACKS = {
         "photo_match": True,
         "use_ai_photos": False,
         "style": {
+            # Above the bottom 20% where feed UI (username, caption) sits.
+            "position_y": 72,
             "font": "Montserrat Thin Black", "size": 62, "primary": "#FFFFFF",
             "highlight": "#FFE566", "accent": "#FF6B9A", "group": 2,
         },
         "color_grade": {"preset": "warm", "brightness": 0.03, "contrast": 0.06, "saturation": 0.1},
         "ken_burns": {"enabled": True, "direction": "in", "intensity": "med"},
+        # Photos carry this look; graphics stay rare.
+        "graphics_budget": {"per_minute": 1, "allow": ["text", "stat"]},
     },
 }
 
