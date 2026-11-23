@@ -26,17 +26,18 @@ import devices
 from devices import (_bold, _circle, _clamp, _font, _pointer, _rounded, _text_w,
                      _with_alpha, encode_alpha_webm, UI_FONT)
 
-MOTION_VERSION = 1
+MOTION_VERSION = 2
 MAX_LAYERS = 48
 MAX_KEYS = 24
-LAYER_TYPES = ("rect", "circle", "text", "icon", "line", "ring", "cursor", "image")
+LAYER_TYPES = ("rect", "circle", "poly", "text", "icon", "line", "ring", "cursor", "image")
 MAX_IMAGES = 6
 ICONS = ("bell", "heart", "star", "check", "play", "pause", "plus", "close", "arrow_right",
          "arrow_up", "arrow_down", "search", "user", "lock", "mail", "chat", "thumbs_up",
          "bolt", "fire", "share", "bookmark", "eye")
 SOUNDS = ("pop", "soft_pop", "click", "tick", "ding", "sparkle", "thud", "whoosh")
 EASES = ("linear", "in", "out", "in_out", "back", "bounce", "elastic", "step")
-KEYED = ("x", "y", "w", "h", "r", "scale", "opacity", "rotation", "progress", "fill", "color")
+KEYED = ("x", "y", "w", "h", "r", "scale", "opacity", "rotation", "progress", "angle", "fill", "color")
+MAX_ORBIT_KEYS = 96
 PLACEMENTS = {"top": 0.16, "upper": 0.32, "center": 0.5, "lower": 0.66, "bottom": 0.8}
 
 
@@ -63,6 +64,29 @@ def _rgba(hex_color: str, alpha_mul: float = 1.0) -> tuple:
     s = hex_color.lstrip("#")
     a = int(s[6:8], 16) if len(s) == 8 else 255
     return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16), int(a * _clamp(alpha_mul)))
+
+
+def _orbit_steps(steps: dict, angle: float, dur: float) -> list:
+    """Angle keys that turn by *by* degrees every move+hold seconds.
+
+    hold 0 is a continuous spin; a hold leaves the item that reached the
+    front sitting there before the next turn.
+    """
+    by = _num(steps.get("by"), -360, 360, 120)
+    move = _num(steps.get("move"), 0.1, 6, 0.8)
+    hold = _num(steps.get("hold"), 0, 6, 0.3)
+    t = _num(steps.get("start"), 0, dur, 0)
+    ease = str(steps.get("ease") or "in_out")
+    ease = ease if ease in EASES else "in_out"
+    out = [{"t": t, "angle": angle, "ease": "linear"}]
+    while t + move <= dur + 1e-6 and len(out) < MAX_ORBIT_KEYS:
+        t += move
+        angle += by
+        out.append({"t": round(t, 4), "angle": angle, "ease": ease})
+        if hold > 0 and t + hold <= dur:
+            t += hold
+            out.append({"t": round(t, 4), "angle": angle, "ease": "linear"})
+    return out
 
 
 def normalize(spec: dict) -> dict:
@@ -108,6 +132,9 @@ def normalize(spec: dict) -> dict:
         lay["stroke_width"] = _num(raw.get("stroke_width"), 0, 60, 0)
         lay["width_px"] = _num(raw.get("line_width", raw.get("width_px")), 1, 120, 8)
         lay["anchor"] = raw.get("anchor") if raw.get("anchor") in ("left", "right") else "center"
+        lay["angle"] = _num(raw.get("angle"), -36000, 36000, 0)
+        if typ == "poly":
+            lay["sides"] = int(_num(raw.get("sides"), 3, 12, 3))
         if typ == "text":
             lay["text"] = str(raw.get("text") or "")[:80]
             lay["size"] = _num(raw.get("size"), 6, sh * 2, sh * 0.2)
@@ -192,9 +219,24 @@ def normalize(spec: dict) -> dict:
                     key[prop] = _num(k[prop], 0, 8, 1)
                 elif prop == "rotation":
                     key[prop] = _num(k[prop], -3600, 3600, 0)
+                elif prop == "angle":
+                    key[prop] = _num(k[prop], -36000, 36000, 0)
                 else:
                     key[prop] = _num(k[prop], -max(sw, sh) * 2, max(sw, sh) * 3, lay.get(prop, 0))
             keys.append(key)
+        orb = raw.get("orbit")
+        if isinstance(orb, dict):
+            lay["orbit"] = {
+                "cx": _num(orb.get("cx"), -sw, sw * 2, sw / 2),
+                "cy": _num(orb.get("cy"), -sh, sh * 2, sh / 2),
+                "rx": _num(orb.get("rx"), 0, sw * 2, sw * 0.3),
+                "ry": _num(orb.get("ry"), 0, sh * 2, sh * 0.1),
+                "phase": _num(orb.get("phase"), -3600, 3600, 0),
+                "depth": _num(orb.get("depth"), 0, 0.8, 0.35),
+            }
+            steps = orb.get("steps")
+            if isinstance(steps, dict) and not any("angle" in k for k in keys):
+                keys += _orbit_steps(steps, lay["angle"], dur)
         keys.sort(key=lambda k: k["t"])
         lay["keys"] = keys
         ids.add(lay["id"])
@@ -485,6 +527,16 @@ def painter(spec: dict, px_w: int, px_h: int):
         if lay["id"] in memo:
             return memo[lay["id"]]
         st = state_at(lay, t)
+        st["_z"] = None
+        orb = lay.get("orbit")
+        if orb:
+            a = math.radians(orb["phase"] + st["angle"])
+            front = (math.cos(a) + 1) / 2
+            st["x"] = orb["cx"] + orb["rx"] * math.sin(a)
+            st["y"] = orb["cy"] + orb["ry"] * math.cos(a)
+            st["scale"] *= 1 - orb["depth"] * (1 - front)
+            st["opacity"] *= 1 - orb["depth"] * 0.5 * (1 - front)
+            st["_z"] = front
         par = by_id.get(lay.get("parent"))
         if par is not None and par is not lay:
             ps = resolved(par, t, memo)
@@ -492,13 +544,28 @@ def painter(spec: dict, px_w: int, px_h: int):
             st["y"] = ps["y"] + st["y"] * ps["scale"]
             st["scale"] *= ps["scale"]
             st["opacity"] *= ps["opacity"]
+            if st["_z"] is None:
+                st["_z"] = ps["_z"]
         memo[lay["id"]] = st
         return st
 
+    def order(sts):
+        # Orbiting items (and whatever rides on them) are drawn back to front
+        # in the slot of the first of them, so the front one covers the rest.
+        orbiting = [i for i, st in enumerate(sts) if st["_z"] is not None]
+        if not orbiting:
+            return range(len(sts))
+        first = orbiting[0]
+        still = [i for i, st in enumerate(sts) if st["_z"] is None]
+        return ([i for i in still if i < first]
+                + sorted(orbiting, key=lambda i: (round(sts[i]["_z"], 4), i))
+                + [i for i in still if i > first])
+
     def draw(frame, t):
         memo: dict = {}
-        for lay in layers:
-            st = resolved(lay, t, memo)
+        sts = [resolved(lay, t, memo) for lay in layers]
+        for i in order(sts):
+            lay, st = layers[i], sts[i]
             op = st["opacity"]
             if op <= 0.003:
                 continue
@@ -521,6 +588,23 @@ def painter(spec: dict, px_w: int, px_h: int):
                                   lambda: _circle(dm, _rgba(st["fill"]),
                                                   outline=_rgba(lay["stroke"]) if sw_ else None,
                                                   width=sw_))
+                _place(frame, spr, cx, cy, st["scale"], st["rotation"], op)
+            elif typ == "poly":
+                dm = max(4, int(st["r"] * 2 * k))
+                sw_ = int(lay["stroke_width"] * k)
+
+                def mk():
+                    ss = 3
+                    big = Image.new("RGBA", (dm * ss, dm * ss), (0, 0, 0, 0))
+                    c, rr = dm * ss / 2, dm * ss / 2 - max(1, sw_ * ss) / 2
+                    pts = [(c + rr * math.sin(2 * math.pi * j / lay["sides"]),
+                            c - rr * math.cos(2 * math.pi * j / lay["sides"]))
+                           for j in range(lay["sides"])]
+                    ImageDraw.Draw(big).polygon(pts, fill=_rgba(st["fill"]),
+                                                outline=_rgba(lay["stroke"]) if sw_ else None,
+                                                width=sw_ * ss)
+                    return big.resize((dm, dm), Image.LANCZOS)
+                spr = sprites.get(("poly", dm, lay["sides"], st["fill"], lay["stroke"], sw_), mk)
                 _place(frame, spr, cx, cy, st["scale"], st["rotation"], op)
             elif typ == "ring":
                 dm = max(4, int(st["r"] * 2 * k))
@@ -650,7 +734,9 @@ def fit_to_content(spec: dict, margin: float = 0.05) -> dict:
          "keys": [{**k, **({"x": k["x"] + sw} if "x" in k and "parent" not in l else {}),
                    **({"y": k["y"] + sh} if "y" in k and "parent" not in l else {})}
                   for k in l["keys"]],
-         **({"points": [[x + sw, y + sh] for x, y in l["points"]]} if l["type"] == "line" else {})}
+         **({"points": [[x + sw, y + sh] for x, y in l["points"]]} if l["type"] == "line" else {}),
+         **({"orbit": {**l["orbit"], "cx": l["orbit"]["cx"] + sw, "cy": l["orbit"]["cy"] + sh}}
+            if "orbit" in l and "parent" not in l else {})}
         for l in probe["layers"]]}, pw + 2 * pad_x, ph + 2 * pad_y)
     for i in range(12):
         t = spec["duration"] * (0.05 + 0.85 * i / 11)
@@ -678,6 +764,8 @@ def fit_to_content(spec: dict, margin: float = 0.05) -> dict:
                          **({"y": kk["y"] - y0} if "y" in kk else {})} for kk in l["keys"]]}
         if l["type"] == "line":
             out["points"] = [[x - x0, y - y0] for x, y in l["points"]]
+        if "orbit" in l:
+            out["orbit"] = {**l["orbit"], "cx": l["orbit"]["cx"] - x0, "cy": l["orbit"]["cy"] - y0}
         return out
 
     return {**spec, "size": [round(x1 - x0, 2), round(y1 - y0, 2)],
@@ -795,12 +883,14 @@ SCENE FORMAT
   CENTRE -- (0, 0) is dead centre of the parent -- and the layer moves, scales and fades
   with it. Put a button's label on the button with parent = the button and x = y = 0.
 - keys: [{{"t": seconds, "<prop>": value, "ease": linear|in|out|in_out|back|bounce|elastic|step}}].
-  Keyable props: x, y, w, h, r, scale, opacity, rotation, progress, fill, color. Before
+  Keyable props: x, y, w, h, r, scale, opacity, rotation, progress, angle, fill, color. Before
   the first key a prop holds its first key's value; ease applies on the way INTO a key.
 - types:
   rect: w, h, radius, fill, stroke, stroke_width, anchor (left|right makes x the left or
         right edge, so keying w grows it one way: progress bars use anchor left)
   circle: r, fill, stroke, stroke_width
+  poly: a regular polygon pointing up -- sides (3 = triangle, 5, 6...), r, fill, stroke,
+        stroke_width
   text: text (<=80 chars), size (cap height-ish, design units), font (bold | regular |
         display | a font name), color, align (left|center|right -- x is then the left/right
         edge), max_width, stroke, stroke_width, optional count {{from, to, t0, t1, decimals,
@@ -815,6 +905,19 @@ SCENE FORMAT
         {pictures}
         Use pictures wherever a real app would show one: avatars, thumbnails, product shots,
         a post's photo, a profile picture, a before/after.
+- orbit: any layer can travel round an oval instead of using x, y:
+  "orbit": {{"cx", "cy" (the oval's centre), "rx", "ry" (its radii; ry small, about
+  rx*0.25, for a carousel seen from slightly above), "phase" (degrees: 0 = front centre,
+  90 = right, 180 = back, 270 = left), "depth" (0-0.8: how much smaller and fainter the
+  back is), "steps": {{"by" (degrees per turn), "move" (seconds per turn), "hold" (seconds
+  the front item rests; 0 = keep spinning), "start", "ease"}}}}. Or key "angle" yourself.
+  The front item is drawn largest and on top. Give each item the same orbit and steps
+  with phases spread evenly (3 items: 0, 120, 240) and they rotate together, each moving
+  into the next one's place. Children ride with their orbiting parent. Make orbiting
+  items big -- the front one about W*0.3 wide, rx about W*0.32 -- so they nearly touch
+  and fill the scene; small items on a wide oval read as specks on a phone.
+- CAROUSELS, ROTATING, ORBITING, ITEMS TRADING PLACES, A WHEEL OF OPTIONS: use orbit.
+  Never key x/y between the positions -- that slides in straight lines and looks broken.
 - sounds: optional [{{"t": seconds, "name": one of {", ".join(SOUNDS)}}}] timed to the
   action (a click when the pointer clicks, a ding when a counter lands, a pop when
   something appears). Keep it to the moments that matter -- usually 1 to 3.

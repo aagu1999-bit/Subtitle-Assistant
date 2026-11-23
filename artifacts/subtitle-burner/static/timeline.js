@@ -10519,6 +10519,34 @@
   function forgetCoEditorTurns() { coEditorTurns = []; }
   window.forgetCoEditorTurns = forgetCoEditorTurns;
 
+  async function coEditorJson(res) {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      if (res.status >= 500 || res.status === 0) throw new Error(`Server busy (${res.status}). Please try again in a moment.`);
+      throw new Error(`Server unreachable (${res.status}).`);
+    }
+  }
+
+  /** The server answers at once with a token and finishes the turn in the
+   *  background; a long animation design would otherwise outlast the host's
+   *  proxy timeout, which replies with an HTML error page. */
+  async function awaitCoEditorResult(res) {
+    let data = await coEditorJson(res);
+    const began = Date.now();
+    while (data.pending) {
+      if (Date.now() - began > 10 * 60 * 1000) throw new Error("This is taking too long. Please try again.");
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        data = await coEditorJson(await fetch("/co-editor/result/" + encodeURIComponent(data.pending)));
+      } catch (e) {
+        if (!/^Server busy/.test(e.message)) throw e;
+      }
+    }
+    return data;
+  }
+
   async function sendCoEditorPrompt() {
     if (!tl) {
       alert("Open a timeline project first.");
@@ -10553,9 +10581,10 @@
           prompt,
           timeline: timelinePayloadForCoEditor(),
           context: coEditorClientContext(),
+          async: true,
         }),
       });
-      const data = await res.json();
+      const data = await awaitCoEditorResult(res);
       if (thinking) thinking.remove();
       if (data.error) throw new Error(data.error);
       const result = await applyCoEditorOps(data.ops || []);

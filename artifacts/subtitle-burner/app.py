@@ -14,6 +14,7 @@ if sys.platform == "darwin":
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+import difflib
 import re
 import time
 import math
@@ -8207,8 +8208,17 @@ def _resolve_photo_source(ref: str) -> tuple[str | None, str]:
     if not ref:
         return None, "empty photo reference"
     # An id for something already uploaded wins: it is the user's own picture.
-    if _asset_meta_path(ref).exists() or list(ASSET_DIR.glob(f"{ref}.*")):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", ref) and (
+            _asset_meta_path(ref).exists() or list(ASSET_DIR.glob(f"{ref}.*"))):
         return ref, ""
+    if re.fullmatch(r"[0-9a-fA-F]{16,}", ref):
+        # Models copy long ids with a character dropped or doubled; searching
+        # stock photos for the hex string finds nothing.
+        ids = [a["asset_id"] for a in _co_editor_asset_choices()]
+        near = difflib.get_close_matches(ref.lower(), ids, n=1, cutoff=0.85)
+        if near:
+            return near[0], ""
+        return None, "that photo id is not one of the uploaded photos"
     if not _broll_any_photo_provider():
         return None, (
             f"no stock photo provider is configured, so '{ref}' cannot be "
@@ -22926,6 +22936,53 @@ def _co_editor_transcript(timeline: dict) -> str:
     return text
 
 
+_CO_EDITOR_RESULTS: dict[str, dict] = {}
+_CO_EDITOR_RESULTS_LOCK = threading.Lock()
+
+
+def _co_editor_start_async(data: dict) -> str:
+    """Run one co-editor turn off the request and return a token to poll.
+
+    Designing an animation makes several model calls and can outlast the
+    hosting proxy's request timeout, which then answers with its own HTML
+    error page instead of our JSON.
+    """
+    token = uuid.uuid4().hex
+    now = time.time()
+    with _CO_EDITOR_RESULTS_LOCK:
+        for k in [k for k, v in _CO_EDITOR_RESULTS.items() if now - v["at"] > 1800]:
+            _CO_EDITOR_RESULTS.pop(k, None)
+        _CO_EDITOR_RESULTS[token] = {"at": now, "done": False}
+
+    def run():
+        try:
+            with app.test_request_context("/co-editor", method="POST",
+                                          json={**data, "async": False}):
+                resp = app.make_response(co_editor())
+                body = resp.get_json(silent=True) or {"error": f"co-editor failed ({resp.status_code})"}
+        except Exception as e:
+            ai_logger.exception("[co-editor] async turn failed")
+            body = {"error": f"co-editor failed: {e}"}
+        with _CO_EDITOR_RESULTS_LOCK:
+            _CO_EDITOR_RESULTS[token] = {"at": time.time(), "done": True, "result": body}
+
+    threading.Thread(target=run, daemon=True, name=f"co-editor-{token[:8]}").start()
+    return token
+
+
+@app.route("/co-editor/result/<token>")
+def co_editor_result(token):
+    with _CO_EDITOR_RESULTS_LOCK:
+        entry = _CO_EDITOR_RESULTS.get(token)
+        if entry and entry["done"]:
+            _CO_EDITOR_RESULTS.pop(token, None)
+    if not entry:
+        return jsonify({"error": "That request expired. Please send it again."}), 404
+    if not entry["done"]:
+        return jsonify({"pending": token})
+    return jsonify(entry["result"])
+
+
 @app.route("/co-editor", methods=["POST"])
 def co_editor():
     """Natural-language → validated timeline mutation ops (Captions Co-editor).
@@ -22938,6 +22995,8 @@ def co_editor():
     prompt = (data.get("prompt") or "").strip()
     timeline = data.get("timeline") or {}
     client_ctx = data.get("context") or {}
+    if data.get("async") and prompt and timeline:
+        return jsonify({"pending": _co_editor_start_async(data)})
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
     if not timeline:
@@ -23206,7 +23265,11 @@ Rules:
   user already uploaded -- ids when they mean their own pictures, subjects
   when they describe what they want to see. motion names the gesture:
   swipe_left means the photo enters from the right and travels left. size
-  "full" covers the frame, "pip" sits it in a box over the video.
+  "full" covers the frame, "pip" sits it in a box over the video. It is a slideshow:
+  one photo at a time, flat. When things should ROTATE, orbit, spin round, sit in a
+  ring or trade places with each other -- photos or shapes -- use add_animation and
+  say so in the description ("rotating carousel: the three items travel round an oval,
+  each moving into the next one's place, the front one resting 0.3s").
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their
@@ -23261,6 +23324,8 @@ Rules:
   add_animation also take "sound". Sounds are accents: never put one on every clip.
 - In add_animation descriptions, say which pictures appear (one of their photos by its
   name, or what to show) and which sounds land when ("a click as the pointer clicks").
+  Carry over everything the user already asked for when they refine an animation
+  (timing, holds, direction, which items) -- the designer only sees your description.
 - add_speed speeds up (speed > 1) or slows down (< 1) a stretch; 0.25 to 4.
 - set_behind puts an existing overlay behind the speaker ("put it behind me").
 {_taste_block(prompt)}"""

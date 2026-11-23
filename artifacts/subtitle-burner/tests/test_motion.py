@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 BURNER = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BURNER))
@@ -201,3 +202,103 @@ def test_sounds_mix_under_loud_speech_without_clipping(app_mod, tmp_path, monkey
                            capture_output=True, text=True).stdout
     kinds = {s["codec_type"] for s in _json.loads(probe)["streams"]}
     assert kinds == {"video", "audio"}
+
+
+def _carousel(by=-120, hold=0.3):
+    orb = lambda ph: {"cx": 500, "cy": 170, "rx": 330, "ry": 70, "phase": ph, "depth": 0.45,
+                      "steps": {"by": by, "move": 1.0, "hold": hold, "start": 0.4}}
+    return motion.normalize({"duration": 5, "size": [1000, 340], "layers": [
+        {"id": "sq", "type": "rect", "w": 150, "h": 150, "fill": "#FFD60A", "orbit": orb(0)},
+        {"id": "tri", "type": "poly", "sides": 3, "r": 95, "fill": "#00E5FF", "orbit": orb(120)},
+        {"id": "ci", "type": "circle", "r": 80, "fill": "#FF3B6B", "orbit": orb(240)},
+    ]})
+
+
+def test_an_orbit_carousel_turns_each_item_into_the_next_ones_place_and_holds():
+    spec = _carousel()
+    draw = motion.painter(spec, 1000, 340)
+    memo_at = lambda t: {l["id"]: motion.state_at(l, t)["angle"] for l in spec["layers"]}
+
+    def slot(t):
+        out = {}
+        for l in spec["layers"]:
+            out[l["id"]] = round((l["orbit"]["phase"] + motion.state_at(l, t)["angle"]) % 360)
+        return out
+
+    assert slot(0.4) == {"sq": 0, "tri": 120, "ci": 240}
+    # The square moves to where the circle was, the circle to the triangle's
+    # place and the triangle to the front.
+    assert slot(1.4) == {"sq": 240, "tri": 0, "ci": 120}
+    assert slot(1.7) == slot(1.4), "the front item should rest for the hold"
+    mid = slot(0.9)
+    assert all(v % 120 for v in mid.values()), "items should be between places mid-turn"
+    assert memo_at(5.0)["sq"] < memo_at(1.4)["sq"]
+
+    frame = Image.new("RGBA", (1000, 340), (0, 0, 0, 0))
+    draw(frame, 0.4)
+    # The front square is drawn largest and at the bottom of the oval.
+    assert _px(frame, 500, 240)[:3] == (255, 214, 10)
+    assert _px(frame, 500, 170 - 70)[3] == 0
+
+
+def test_the_front_orbit_item_is_drawn_on_top():
+    spec = motion.normalize({"duration": 2, "size": [400, 200], "layers": [
+        {"id": "front", "type": "rect", "w": 120, "h": 120, "fill": "#FF0000",
+         "orbit": {"cx": 200, "cy": 100, "rx": 10, "ry": 10, "phase": 0}},
+        {"id": "back", "type": "rect", "w": 120, "h": 120, "fill": "#0000FF",
+         "orbit": {"cx": 200, "cy": 100, "rx": 10, "ry": 10, "phase": 180, "depth": 0}},
+    ]})
+    img = motion.frame_at(spec, 0.5, (400, 200))
+    assert _px(img, 200, 100)[:3] == (255, 0, 0)
+
+
+def test_orbits_survive_cropping():
+    spec = motion.fit_to_content(_carousel())
+    o = spec["layers"][0]["orbit"]
+    w, h = spec["size"]
+    assert w < 1000 and 0 < o["cx"] < w and 0 < o["cy"] < h
+
+
+def test_a_triangle_polygon_points_up():
+    spec = motion.normalize({"duration": 1, "size": [200, 200], "layers": [
+        {"id": "t", "type": "poly", "sides": 3, "r": 90, "x": 100, "y": 100, "fill": "#00FF00"}]})
+    img = motion.frame_at(spec, 0.5, (200, 200))
+    assert _px(img, 100, 25)[3] > 0 and _px(img, 30, 25)[3] == 0
+    assert _px(img, 40, 140)[3] > 0
+
+
+def test_a_mistyped_photo_id_finds_the_users_photo_not_a_stock_search(app_mod, monkeypatch):
+    real = "091eff0cee0645717898686e868a4e13"
+    monkeypatch.setattr(app_mod, "_co_editor_asset_choices",
+                        lambda: [{"asset_id": real, "name": "beach.jpg"}])
+    monkeypatch.setattr(app_mod, "_fetch_broll_image_for_keyword",
+                        lambda *a: pytest.fail("searched stock photos for an id"))
+    monkeypatch.setattr(app_mod, "_broll_any_photo_provider", lambda: True)
+    assert app_mod._resolve_photo_source(real[:-1] + "ee") == (real, "")
+    aid, why = app_mod._resolve_photo_source("ffffffffffffffffffffffffffffffff")
+    assert aid is None and why
+
+
+def test_slow_coeditor_turns_run_in_the_background(app_mod, temp_db, monkeypatch):
+    import threading
+    import time as _t
+    gate = threading.Event()
+
+    def fake(prompt):
+        gate.wait(5)
+        return {"ops": [], "message": "Done thinking."}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    tl = {"canvas": "9x16", "tracks": {"main": [], "overlay": [], "text": [], "music": [], "effects": []}}
+    c = app_mod.app.test_client()
+    first = c.post("/co-editor", json={"prompt": "hello", "timeline": tl, "async": True}).get_json()
+    token = first["pending"]
+    assert c.get(f"/co-editor/result/{token}").get_json() == {"pending": token}
+    gate.set()
+    for _ in range(100):
+        out = c.get(f"/co-editor/result/{token}").get_json()
+        if "pending" not in out:
+            break
+        _t.sleep(0.05)
+    assert out["message"] == "Done thinking."
+    assert c.get(f"/co-editor/result/{token}").status_code == 404
