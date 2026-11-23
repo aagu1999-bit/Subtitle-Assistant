@@ -29,6 +29,10 @@ from flask import Flask, render_template, request, jsonify, send_from_directory,
 import logging
 from logging.handlers import RotatingFileHandler
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devices  # noqa: E402
+import edit_engine  # noqa: E402
+
 # ---- Local env auto-load ----
 # Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
 # always boots with the same set of API keys regardless of which terminal
@@ -187,6 +191,8 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
         },
         "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
+        # Graphics devices per minute and which kinds suit the look.
+        "devices": {"per_minute": 6, "allow": ["ui", "stat", "text", "step_tracker"]},
     },
     "clarity": {
         "label": "Clarity",
@@ -202,6 +208,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
+        "devices": {"per_minute": 3, "allow": ["mental", "stat"]},
     },
     "magazine": {
         "label": "Magazine",
@@ -215,6 +222,7 @@ AI_EDIT_STYLE_PACKS = {
         },
         "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
         "add_title": True,
+        "devices": {"per_minute": 2, "allow": ["mental", "text"]},
     },
     "velocity": {
         "label": "Velocity",
@@ -227,6 +235,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
         },
         "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
+        "devices": {"per_minute": 8, "allow": []},
     },
     "film": {
         "label": "Film",
@@ -239,6 +248,7 @@ AI_EDIT_STYLE_PACKS = {
             "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
         },
         "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
+        "devices": {"per_minute": 1, "allow": ["timeline_scrubber", "venn", "text"]},
     },
 }
 
@@ -7253,6 +7263,30 @@ def _media_duration(path: Path) -> float:
         return 0.0
 
 
+_ALPHA_PROBE_CACHE: dict = {}
+
+
+def _is_alpha_video(path: Path) -> bool:
+    """True for VP8/VP9 WebM carrying an alpha plane (graphics devices)."""
+    if path.suffix.lower() != ".webm":
+        return False
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return False
+    if key not in _ALPHA_PROBE_CACHE:
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream_tags=alpha_mode", "-of", "csv=p=0", str(path)],
+                capture_output=True, text=True, timeout=20,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _ALPHA_PROBE_CACHE[key] = out == "1"
+    return _ALPHA_PROBE_CACHE[key]
+
+
 def _timeline_clip_source(clip: dict) -> Path | None:
     """Resolve a timeline clip's media: either a source job's video or an asset."""
     sid = clip.get("source_job_id")
@@ -7838,10 +7872,22 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         except (TypeError, ValueError):
             border = 0
 
-        scale = _tl_overlay_scale_filter(ow, oh, fit)
+        alpha_src = kind == "video" and _is_alpha_video(path)
+        if alpha_src:
+            # Graphics devices are drawn at their box size; letterbox onto
+            # transparency rather than cropping or padding with black.
+            scale = (f"scale={ow}:{oh}:force_original_aspect_ratio=decrease,"
+                     f"pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1")
+        else:
+            scale = _tl_overlay_scale_filter(ow, oh, fit)
         if kind == "image":
             inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(path)]
             prep = f"[{in_idx}:v]{scale}"
+        elif alpha_src:
+            # The native vp9 decoder drops the alpha plane; libvpx keeps it.
+            inputs += ["-c:v", "libvpx-vp9", "-ss", f"{o_in:.3f}", "-t", f"{length:.3f}",
+                       "-i", str(path)]
+            prep = f"[{in_idx}:v]format=rgba,{scale},setpts=PTS-STARTPTS"
         else:
             inputs += ["-ss", f"{o_in:.3f}", "-t", f"{length:.3f}", "-i", str(path)]
             prep = f"[{in_idx}:v]{scale},setpts=PTS-STARTPTS"
@@ -7849,7 +7895,7 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         kb = _tl_kenburns_filter(ov.get("ken_burns"), ow, oh, fps, length)
         if kb:
             prep += "," + kb
-        if border > 0:
+        if border > 0 and not alpha_src:
             prep += (
                 f",pad={ow + border * 2}:{oh + border * 2}:{border}:{border}:white"
             )
@@ -8825,6 +8871,136 @@ def timeline_list():
         })
     out.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
     return jsonify({"timelines": out})
+
+
+# ---- Graphics devices (UI mockups + mental-model diagrams) ----
+
+def _device_look(timeline: dict | None, data: dict | None = None) -> tuple[list, str | None]:
+    """Palette + font for devices: explicit request > timeline style doc > captions."""
+    data = data or {}
+    tl = timeline or {}
+    doc = (tl.get("style_doc") or {}).get("devices") or {}
+    pal = data.get("palette") or doc.get("palette")
+    if not pal:
+        st = tl.get("style") or {}
+        pal = [st.get("highlight_color") or st.get("highlight") or "#FFD60A",
+               st.get("accent_color") or st.get("accent") or "#00E5FF"]
+    pal = [str(c) for c in pal if isinstance(c, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", c)]
+    font = data.get("font") or doc.get("font") or (tl.get("style") or {}).get("font_name")
+    return pal or list(devices.DEFAULT_PALETTE), font
+
+
+def _render_device_asset(kind: str, labels: list, duration: float, canvas: str,
+                         palette: list, font: str | None, fps: int = 30) -> dict:
+    """Render (or reuse) a device and register it as a timeline asset.
+
+    The asset id is derived from the render hash, so asking for the same
+    device twice returns the same asset instead of piling up copies.
+    """
+    W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
+    box = devices.box_for(kind, W, H)
+    size = (box["px_w"], box["px_h"])
+    path, cached = devices.render_cached(kind, labels, duration, size, fps, CACHE_DIR,
+                                         palette, font, ffmpeg=FFMPEG)
+    asset_id = hashlib.md5(path.name.encode("utf-8")).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.webm"
+    if not dest.exists():
+        try:
+            os.link(path, dest)
+        except OSError:
+            shutil.copyfile(path, dest)
+    label = devices.CATALOG[kind]["label"]
+    first = next((str(x) for x in labels or [] if str(x).strip()), "")
+    _write_asset_meta(asset_id, filename=f"{label}: {first[:40]}" if first else label,
+                      source="device", device_kind=kind, alpha=True)
+    return {"asset_id": asset_id, "kind": "video", "cached": cached,
+            "duration": round(float(duration), 3), "box": box,
+            "device": {"kind": kind, "labels": list(labels or []),
+                       "palette": palette, "font": font}}
+
+
+def _device_overlay_clip(info: dict, start: float) -> dict:
+    """Overlay-track clip for a rendered device, placed in its default box."""
+    box = info["box"]
+    return {
+        "id": uuid.uuid4().hex[:8], "asset_id": info["asset_id"],
+        "start": round(max(0.0, float(start)), 3), "in": 0.0, "out": info["duration"],
+        "x": box["x"], "y": box["y"], "w": box["w"], "h": box["h"],
+        "fit": "contain", "opacity": 1.0, "device": info["device"],
+    }
+
+
+@app.route("/devices/catalog", methods=["GET"])
+def devices_catalog():
+    packs = {k: (v.get("devices") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
+    return jsonify({"devices": devices.catalog_public(), "pack_budgets": packs})
+
+
+@app.route("/devices/preview.png", methods=["GET"])
+def devices_preview():
+    """A still from late in the animation, for the picker cards."""
+    kind = request.args.get("kind", "")
+    if kind not in devices.CATALOG:
+        return jsonify({"error": "Unknown device"}), 400
+    try:
+        labels = json.loads(request.args.get("labels") or "[]")
+    except ValueError:
+        labels = []
+    canvas = request.args.get("canvas") or "9x16"
+    W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
+    box = devices.box_for(kind, W, H)
+    scale = min(1.0, 480 / box["px_w"])
+    size = (max(64, int(box["px_w"] * scale)), max(48, int(box["px_h"] * scale)))
+    tl = (jobs.get(request.args.get("job_id") or "") or {}).get("timeline")
+    pal, font = _device_look(tl)
+    dur = devices.CATALOG[kind]["dur"]
+    img = devices.frame_at(kind, labels if isinstance(labels, list) else [], dur * 0.78,
+                           size, dur, pal, font)
+    import io
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    resp = make_response(buf.getvalue())
+    resp.headers["Content-Type"] = "image/png"
+    resp.headers["Cache-Control"] = "max-age=300"
+    return resp
+
+
+@app.route("/devices/suggest", methods=["POST"])
+def devices_suggest():
+    """Which device fits a highlighted phrase, with labels pulled from it."""
+    data = request.get_json(force=True) or {}
+    text = str(data.get("text") or "").strip()[:400]
+    if not text:
+        return jsonify({"error": "No text"}), 400
+    return jsonify(edit_engine.suggest_device(text))
+
+
+@app.route("/devices/render", methods=["POST"])
+def devices_render():
+    """Render a device to a transparent clip and hand back an overlay clip."""
+    data = request.get_json(force=True) or {}
+    kind = str(data.get("kind") or "")
+    if kind not in devices.CATALOG:
+        return jsonify({"error": "Unknown device"}), 400
+    labels = [str(x)[:120] for x in (data.get("labels") or []) if x is not None][:6]
+    try:
+        duration = float(data.get("duration") or devices.CATALOG[kind]["dur"])
+    except (TypeError, ValueError):
+        duration = devices.CATALOG[kind]["dur"]
+    duration = max(0.8, min(12.0, duration))
+    tl = (jobs.get(data.get("job_id") or "") or {}).get("timeline") or {}
+    canvas = data.get("canvas") or tl.get("canvas") or "9x16"
+    pal, font = _device_look(tl, data)
+    try:
+        info = _render_device_asset(kind, labels, duration, canvas, pal, font,
+                                    int(tl.get("fps") or 30))
+    except (RuntimeError, OSError, ValueError) as e:
+        return jsonify({"error": str(e)[:300]}), 500
+    try:
+        start = float(data.get("start") or 0)
+    except (TypeError, ValueError):
+        start = 0.0
+    return jsonify({**info, "clip": _device_overlay_clip(info, start)})
 
 
 # =====================================================================
