@@ -41,6 +41,7 @@ import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
 import qa  # noqa: E402
+import taste  # noqa: E402
 
 # ---- Local env auto-load ----
 # Loads KEY=VALUE pairs from .env / .env.local in the project root so Flask
@@ -570,6 +571,18 @@ jobs = {}  # job_id -> {status, progress, output, error, words, completed_at}
 
 # ---- SQLite persistence ----
 DB_PATH = BASE_DIR / "jobs.db"
+# Taste memory: the editor's own rules plus what was learned from their
+# corrections. A JSON file rather than a table so it can be read, diffed and
+# hand-edited.
+TASTE = taste.TasteStore(Path(os.environ.get("TASTE_PATH") or (BASE_DIR / "data" / "taste.json")))
+
+
+def _taste_block(query: str, k: int = 6) -> str:
+    try:
+        return TASTE.prompt_block(query, k)
+    except Exception as e:  # never let memory break a prompt
+        ai_logger.warning(f"taste retrieval failed: {e}")
+        return ""
 _db_lock = threading.Lock()
 
 
@@ -1080,6 +1093,12 @@ def _cleanup_loop() -> None:
         output_cutoff = now - OUTPUT_TTL_SECONDS
         upload_cutoff = now - UPLOAD_TTL_SECONDS
         referenced = _timeline_referenced_job_ids()
+
+        # 0. Context hygiene: decay and drop stale learned taste.
+        try:
+            TASTE.prune()
+        except Exception:
+            pass
 
         # 1. Remove expired output files.
         for mp4 in list(OUTPUT_DIR.glob("*.mp4")):
@@ -5732,6 +5751,7 @@ Return JSON in exactly this shape:
   ]{hook_shape}{devices_shape}
 }}
 
+{_taste_block("camera moves punch zoom ken burns intensity aim")}
 TRANSCRIPT:
 {transcript}
 """
@@ -9350,7 +9370,26 @@ def suggestion_feedback():
         # The edit itself already happened client-side; say so rather than
         # failing the interaction over a telemetry write.
         return jsonify({"ok": False, "error": "could not record"}), 200
-    return jsonify({"ok": True, "suggestion_id": row_id})
+    learned = []
+    if outcome != "proposed":
+        proposed = data.get("proposed") or _suggestion_proposed(row_id)
+        try:
+            learned = TASTE.learn_from_suggestion(kind, proposed, outcome, data.get("final"))
+        except Exception as e:
+            ai_logger.warning(f"taste learning failed: {e}")
+    return jsonify({"ok": True, "suggestion_id": row_id,
+                    "learned": [i["text"] for i in learned]})
+
+
+def _suggestion_proposed(row_id: int):
+    try:
+        with _db_lock:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                row = conn.execute("SELECT proposed FROM suggestions WHERE id = ?",
+                                   (row_id,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+    except (sqlite3.Error, ValueError):
+        return None
 
 
 @app.route("/suggestion-feedback/<job_id>")
@@ -18496,6 +18535,58 @@ def timeline_speakers_status(job_id: str):
     return jsonify(out)
 
 
+@app.route("/taste", methods=["GET"])
+def taste_list():
+    items = sorted(TASTE.items(), key=lambda i: (i["source"] != "user", -(i.get("updated_at") or 0)))
+    return jsonify({"items": items, "hints": TASTE.plan_hints(), "path": str(TASTE.path.name)})
+
+
+@app.route("/taste", methods=["POST"])
+def taste_add():
+    """Add a brand rule or a bad example by hand."""
+    data = request.get_json(force=True) or {}
+    kind = str(data.get("kind") or "rule")
+    if kind not in taste.USER_KINDS:
+        return jsonify({"error": f"kind must be one of {taste.USER_KINDS}"}), 400
+    key = data.get("key")
+    try:
+        item = TASTE.add(kind, data.get("text") or "", tags=data.get("tags") or [],
+                         key=str(key)[:40] if key else None, source="user")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"item": item})
+
+
+@app.route("/taste/<item_id>", methods=["DELETE"])
+def taste_delete(item_id: str):
+    return jsonify({"ok": TASTE.remove(item_id)})
+
+
+@app.route("/taste/prune", methods=["POST"])
+def taste_prune():
+    data = request.get_json(silent=True) or {}
+    try:
+        ttl = float(data.get("ttl_days") or 120)
+    except (TypeError, ValueError):
+        ttl = 120.0
+    return jsonify(TASTE.prune(ttl_days=ttl))
+
+
+@app.route("/taste/reset", methods=["POST"])
+def taste_reset():
+    data = request.get_json(silent=True) or {}
+    scope = "all" if data.get("scope") == "all" else "learned"
+    return jsonify({"removed": TASTE.reset(scope), "scope": scope})
+
+
+@app.route("/taste/preview", methods=["POST"])
+def taste_preview():
+    """Exactly what would be injected into a prompt for this request."""
+    data = request.get_json(force=True) or {}
+    q = str(data.get("query") or "")[:400]
+    return jsonify({"block": _taste_block(q), "hints": TASTE.plan_hints()})
+
+
 @app.route("/qa/<job_id>", methods=["GET"])
 def qa_report(job_id: str):
     job = jobs.get(job_id)
@@ -22401,7 +22492,7 @@ Rules:
   specific text, use add_text_message, which DRAWS an iMessage-style thread
   with the words exactly as given. If they want a conversation on screen,
   that is the op, not make_image.
-"""
+{_taste_block(prompt)}"""
     try:
         result = _gemini_generate_clip_suggestions(system_prompt + "\n\nUser request: " + prompt)
     except RuntimeError as e:

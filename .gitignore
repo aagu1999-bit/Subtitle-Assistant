@@ -66,6 +66,7 @@ artifacts/subtitle-burner/assets/
 artifacts/subtitle-burner/references/
 artifacts/subtitle-burner/cache/
 artifacts/subtitle-burner/logs/
+artifacts/subtitle-burner/data/
 
 # Local virtualenv — multi-GB with torch/whisper models, never commit it
 artifacts/subtitle-burner/.venv/
