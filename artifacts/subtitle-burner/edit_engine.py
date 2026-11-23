@@ -396,6 +396,28 @@ class VarietyState:
 
 DENSITY = {"low": 0.5, "med": 1.0, "high": 1.6}
 
+DEVICE_FAMILY = {
+    "chat_bubbles": "ui", "notification": "ui", "search_bar": "ui", "toggle_meter": "ui",
+    "step_tracker": "mental", "venn": "mental", "node_map": "mental",
+    "timeline_scrubber": "mental", "counter": "stat", "kinetic_text": "text",
+}
+
+
+def device_budget(pack: dict | None, seconds: float, intensity: str = "med") -> tuple[int, set]:
+    """(max devices for this window, allowed kinds/families) from a style pack."""
+    cfg = (pack or {}).get("devices") or {}
+    allow = set(cfg.get("allow") or [])
+    per_min = cfg.get("per_minute")
+    if per_min is None:
+        return 10 ** 6, allow
+    density = DENSITY.get((intensity or "med").lower(), 1.0)
+    n = float(per_min) * max(0.0, seconds) / 60.0 * density
+    return (max(1, int(round(n))) if per_min > 0 else 0), allow
+
+
+def device_allowed(kind: str, allow: set) -> bool:
+    return not allow or kind in allow or DEVICE_FAMILY.get(kind) in allow
+
 
 def _device_for(span: dict) -> str | None:
     text = span.get("text", "")
@@ -441,6 +463,23 @@ def _labels_for(kind: str, span: dict) -> list[str]:
     return [text[:60]]
 
 
+def suggest_device(text: str) -> dict:
+    """Best device for a highlighted phrase, with labels and runners-up."""
+    role, reason = classify_role(text, 999.0, 0.0)
+    span = {"text": text, "role": role}
+    best = _device_for(span)
+    ranked = [best] if best else []
+    for kind, rx in _DEVICE_CUES:
+        if kind not in ranked and rx.search(text or ""):
+            ranked.append(kind)
+    for kind in ("kinetic_text", "counter", "step_tracker", "venn", "node_map"):
+        if kind not in ranked:
+            ranked.append(kind)
+    kind = ranked[0]
+    return {"kind": kind, "labels": _labels_for(kind, span), "role": role, "reason": reason,
+            "alternatives": [{"kind": k, "labels": _labels_for(k, span)} for k in ranked[1:5]]}
+
+
 def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
               style_pack: dict | None = None, prosody: dict | None = None,
               taste: dict | None = None, spans: list | None = None) -> dict:
@@ -467,6 +506,8 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
     if pace == "fast":
         budget += 1
     used = 0
+    dev_budget, dev_allow = device_budget(style_pack, total, intensity)
+    dev_used = 0
     decisions = []
 
     def candidates(span: dict) -> list[str]:
@@ -498,6 +539,10 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
             for key in cand:
                 if key in avoid and len(cand) > 1:
                     continue
+                dev_kind = key.split(":", 1)[1] if key.startswith("device:") else (
+                    "kinetic_text" if key == "kinetic_text" else None)
+                if dev_kind and (dev_used >= dev_budget or not device_allowed(dev_kind, dev_allow)):
+                    continue
                 if state.allows(key, span["start"]):
                     chosen = key
                     break
@@ -525,6 +570,8 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
         elif chosen == "broll":
             row["broll"] = concept_queries(span["text"])
         if chosen != "none":
+            if "device" in row:
+                dev_used += 1
             state.push(chosen, span["start"])
             if not must:
                 used += 1
@@ -563,6 +610,8 @@ def style_from_pack(pack: dict, intensity: str = "med") -> dict:
             "palette": [accent, second, "#FFFFFF", "#0F1220"],
             "font": st.get("font") or st.get("font_name") or "DM Sans",
             "corner": 28,
+            "per_minute": ((pack.get("devices") or {}).get("per_minute")),
+            "allow": list((pack.get("devices") or {}).get("allow") or []),
         },
     }
 
