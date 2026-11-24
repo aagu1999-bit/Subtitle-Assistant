@@ -4,3 +4,6 @@ import { Config } from "@remotion/cli/config";
 Config.setVideoImageFormat("png");
 Config.setPixelFormat("yuva420p");
 Config.setCodec("vp8");
+// Replit's Docker cap is below Remotion's default ~4GB guess.
+Config.setConcurrency(1);
+

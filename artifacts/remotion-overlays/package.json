@@ -4,9 +4,10 @@
   "private": true,
   "description": "Sidecar Remotion renderer for Studio overlays. Does not replace motion.py.",
   "scripts": {
-    "dev": "remotion studio",
-    "render": "remotion render OrbitCarousel out/orbit.webm --codec=vp8 --image-format=png",
-    "still": "remotion still OrbitCarousel out/orbit.png"
+    "dev": "remotion studio --no-open --ipv4 --port 8000 --disable-git-source",
+    "studio": "remotion studio --no-open --ipv4 --port 8000 --disable-git-source",
+    "render": "remotion render OrbitCarousel out/orbit.webm --codec=vp8 --image-format=png --concurrency=1 --gl=swangle",
+    "still": "remotion still OrbitCarousel out/orbit.png --gl=swangle"
   },
   "dependencies": {
     "react": "catalog:",
