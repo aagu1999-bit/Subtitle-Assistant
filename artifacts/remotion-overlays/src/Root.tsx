@@ -12,6 +12,7 @@ import { YoutubeSubscribeNudgeLook } from "./looks/YoutubeSubscribeNudge";
 import { PolaroidPicturesLook } from "./looks/PolaroidPictures";
 import { OnScreenMessagesLook } from "./looks/OnScreenMessages";
 import { SplitTextLook } from "./looks/SplitText";
+import * as Bits from "./looks/bits";
 
 type DurProps = { duration?: number };
 
@@ -25,6 +26,10 @@ const NINE_BY_SIXTEEN = {
   height: 1920,
   calculateMetadata: durationMeta,
 };
+
+const TITLE = { text: "WATCH THIS", color: "#FFD60A", duration: 3 };
+const WORDS = { words: ["START", "GROW", "WIN"], color: "#FFD60A", duration: 4 };
+const CARDS = { labels: ["One", "Two", "Three"], duration: 4 };
 
 export const RemotionRoot: React.FC = () => (
   <>
@@ -61,6 +66,45 @@ export const RemotionRoot: React.FC = () => (
     <Composition id="OnScreenMessages" component={OnScreenMessagesLook} durationInFrames={162}
       defaultProps={{ duration: 5.4 }} {...NINE_BY_SIXTEEN} />
     <Composition id="SplitText" component={SplitTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN}
-      defaultProps={{ text: "WATCH THIS", color: "#FFD60A", duration: 3 }} />
+      defaultProps={TITLE} />
+
+    <Composition id="BlurText" component={Bits.BlurTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="CountUp" component={Bits.CountUpLook} durationInFrames={90} {...NINE_BY_SIXTEEN}
+      defaultProps={{ to: 10000, color: "#FFD60A", duration: 3 }} />
+    <Composition id="TextType" component={Bits.TextTypeLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="GradientText" component={Bits.GradientTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="GlitchText" component={Bits.GlitchTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="ShuffleText" component={Bits.ShuffleTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="DecryptedText" component={Bits.DecryptedTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+    <Composition id="RotatingText" component={Bits.RotatingTextLook} durationInFrames={120} {...NINE_BY_SIXTEEN} defaultProps={WORDS} />
+    <Composition id="ShinyText" component={Bits.ShinyTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
+
+    <Composition id="ProfileCard" component={Bits.ProfileCardLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
+      defaultProps={{ text: "ALEX CHEN", duration: 4 }} />
+    <Composition id="SpotlightCard" component={Bits.SpotlightCardLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
+      defaultProps={{ text: "SPOTLIGHT", duration: 4 }} />
+    <Composition id="GlassSurface" component={Bits.GlassSurfaceLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
+      defaultProps={{ text: "GLASS", duration: 4 }} />
+    <Composition id="TiltedCard" component={Bits.TiltedCardLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
+      defaultProps={{ text: "TILT", duration: 4 }} />
+    <Composition id="CardSwap" component={Bits.CardSwapLook} durationInFrames={120} {...NINE_BY_SIXTEEN} defaultProps={CARDS} />
+    <Composition id="CardStack" component={Bits.CardStackLook} durationInFrames={120} {...NINE_BY_SIXTEEN} defaultProps={CARDS} />
+    <Composition id="CircularCarousel" component={Bits.CircularCarouselLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={CARDS} />
+    <Composition id="BounceCards" component={Bits.BounceCardsLook} durationInFrames={120} {...NINE_BY_SIXTEEN} defaultProps={CARDS} />
+    <Composition id="HoloCard" component={Bits.HoloCardLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
+      defaultProps={{ text: "HOLO", duration: 4 }} />
+    <Composition id="BitsCounter" component={Bits.BitsCounterLook} durationInFrames={90} {...NINE_BY_SIXTEEN}
+      defaultProps={{ to: 10000, color: "#FFD60A", duration: 3 }} />
+
+    <Composition id="Aurora" component={Bits.AuroraLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="SoftAurora" component={Bits.SoftAuroraLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Silk" component={Bits.SilkLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Beams" component={Bits.BeamsLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Particles" component={Bits.ParticlesLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Lightning" component={Bits.LightningLook} durationInFrames={120} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 4 }} />
+    <Composition id="LiquidChrome" component={Bits.LiquidChromeLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Galaxy" component={Bits.GalaxyLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="LightRays" component={Bits.LightRaysLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="Plasma" component={Bits.PlasmaLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
   </>
 );

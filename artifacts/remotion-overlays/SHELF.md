@@ -12,8 +12,16 @@ VerticalBarChart, LineChart, WordHighlightCaptions, PoppingWordCaptions,
 NameLowerThird, YoutubeCommentHighlight, YoutubeSubscribeNudge,
 PolaroidPictures, OnScreenMessages.
 
-Plus OrbitCarousel (photo/shape orbit) and SplitText (first Bits-style look:
-letters pop in on the frame clock). Ask in the co-editor by those names.
+Plus OrbitCarousel (photo/shape orbit).
+
+Bits-style looks (frame-clock ports, not the Bits library): Split Text,
+Blur Text, Count Up, Text Type, Gradient Text, Glitch Text, Shuffle,
+Decrypted Text, Rotating Text, Shiny Text; Profile Card, Spotlight Card,
+Glass Surface, Tilted Card, Card Swap, Card Stack, Circular Carousel,
+Bounce Cards, Holo Card, Counter card; Aurora, Silk, Beams, Particles,
+Lightning, Liquid Chrome, Galaxy, Soft Aurora, Light Rays, Plasma.
+
+Ask in the co-editor by those names. Backgrounds sit behind the speaker.
 
 ## Remotion official Elements
 

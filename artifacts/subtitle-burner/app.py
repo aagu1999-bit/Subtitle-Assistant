@@ -19086,12 +19086,15 @@ def _render_device_asset(kind: str, labels: list, duration: float, canvas: str,
 def _device_overlay_clip(info: dict, start: float) -> dict:
     """Overlay-track clip for a rendered device, placed in its default box."""
     box = info["box"]
-    return {
+    clip = {
         "id": uuid.uuid4().hex[:8], "asset_id": info["asset_id"],
         "start": round(max(0.0, float(start)), 3), "in": 0.0, "out": info["duration"],
         "x": box["x"], "y": box["y"], "w": box["w"], "h": box["h"],
         "fit": "contain", "opacity": 1.0, "device": info["device"],
     }
+    if info.get("behind"):
+        clip["behind"] = True
+    return clip
 
 
 def _resolve_motion_images(spec: dict) -> dict:
@@ -19271,7 +19274,7 @@ REMOTION_RECIPES = (
      "words": ("lower third", "name plate", "lower-third"),
      "dur": 3.0, "place": "full"},
     {"id": "NumberCounter",
-     "words": ("number counter", "count up", "counting number", "counter"),
+     "words": ("number counter", "counting number", "counter"),
      "dur": 3.0, "place": "full"},
     {"id": "VerticalBarChart",
      "words": ("bar chart", "vertical bar", "bar graph"),
@@ -19293,7 +19296,94 @@ REMOTION_RECIPES = (
      "dur": 5.4, "place": "full"},
     {"id": "SplitText",
      "words": ("split text", "split title", "kinetic title", "hook title"),
-     "dur": 3.0, "place": "full"},
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "BlurText",
+     "words": ("blur text", "blur title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "CountUp",
+     "words": ("count up", "count-up text", "counting text"),
+     "dur": 3.0, "place": "full", "props": "count"},
+    {"id": "TextType",
+     "words": ("text type", "typewriter", "typed title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "GradientText",
+     "words": ("gradient text", "gradient title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "GlitchText",
+     "words": ("glitch text", "glitch title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "ShuffleText",
+     "words": ("shuffle text", "shuffle title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "DecryptedText",
+     "words": ("decrypted text", "decrypt text", "matrix text"),
+     "dur": 3.5, "place": "full", "props": "text"},
+    {"id": "RotatingText",
+     "words": ("rotating text", "rotating words", "word cycle"),
+     "dur": 4.0, "place": "full", "props": "words"},
+    {"id": "ShinyText",
+     "words": ("shiny text", "shine text"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "ProfileCard",
+     "words": ("profile card",),
+     "dur": 4.0, "place": "full", "props": "text"},
+    {"id": "SpotlightCard",
+     "words": ("spotlight card",),
+     "dur": 4.0, "place": "full", "props": "text"},
+    {"id": "GlassSurface",
+     "words": ("glass surface", "glass card"),
+     "dur": 4.0, "place": "full", "props": "text"},
+    {"id": "TiltedCard",
+     "words": ("tilted card", "tilt card"),
+     "dur": 4.0, "place": "full", "props": "text"},
+    {"id": "CardSwap",
+     "words": ("card swap", "swap cards"),
+     "dur": 4.0, "place": "full", "props": "cards"},
+    {"id": "CardStack",
+     "words": ("card stack", "stack of cards"),
+     "dur": 4.0, "place": "full", "props": "cards"},
+    {"id": "CircularCarousel",
+     "words": ("circular carousel", "circle of cards"),
+     "dur": 5.0, "place": "full", "props": "cards"},
+    {"id": "BounceCards",
+     "words": ("bounce cards", "bouncing cards"),
+     "dur": 4.0, "place": "full", "props": "cards"},
+    {"id": "HoloCard",
+     "words": ("holo card", "holographic card"),
+     "dur": 4.0, "place": "full", "props": "text"},
+    {"id": "BitsCounter",
+     "words": ("counter card", "bits counter"),
+     "dur": 3.0, "place": "full", "props": "count"},
+    {"id": "Aurora",
+     "words": ("aurora background", "aurora"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "SoftAurora",
+     "words": ("soft aurora",),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Silk",
+     "words": ("silk background", "silk"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Beams",
+     "words": ("beams background", "light beams"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Particles",
+     "words": ("particles background", "particle field", "particles"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Lightning",
+     "words": ("lightning background", "lightning bolts"),
+     "dur": 4.0, "place": "full", "behind": True},
+    {"id": "LiquidChrome",
+     "words": ("liquid chrome",),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Galaxy",
+     "words": ("galaxy background", "galaxy"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "LightRays",
+     "words": ("light rays", "god rays"),
+     "dur": 5.0, "place": "full", "behind": True},
+    {"id": "Plasma",
+     "words": ("plasma background", "plasma"),
+     "dur": 5.0, "place": "full", "behind": True},
 )
 
 
@@ -19307,6 +19397,31 @@ def _match_remotion_recipe(description: str) -> dict | None:
 
 def _remotion_recipe_prompt() -> str:
     return ", ".join(f'{rec["words"][0]} ({rec["id"]})' for rec in REMOTION_RECIPES)
+
+
+def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
+    m = re.search(r'[“"\']([^”"\']+)[”"\']', description or "")
+    return (m.group(1) if m else default)[:48]
+
+
+def _remotion_look_props(rec: dict, description: str) -> dict:
+    kind = rec.get("props")
+    if kind == "text":
+        default = "ALEX CHEN" if rec["id"] == "ProfileCard" else "WATCH THIS"
+        return {"text": _quoted_look_text(description, default), "color": "#FFD60A"}
+    if kind == "count":
+        m = re.search(r"(\d[\d,]*)", description or "")
+        n = int(m.group(1).replace(",", "")) if m else 10000
+        return {"to": min(max(n, 0), 99_999_999), "color": "#FFD60A"}
+    if kind == "words":
+        raw = _quoted_look_text(description, "START, GROW, WIN")
+        words = [w.strip()[:24] for w in re.split(r"[,/|]", raw) if w.strip()][:6]
+        return {"words": words or ["START", "GROW", "WIN"], "color": "#FFD60A"}
+    if kind == "cards":
+        raw = _quoted_look_text(description, "One, Two, Three")
+        labels = [w.strip()[:20] for w in re.split(r"[,/|]", raw) if w.strip()][:4]
+        return {"labels": labels or ["One", "Two", "Three"]}
+    return {}
 
 
 def _wants_remotion_orbit(description: str) -> bool:
@@ -19447,12 +19562,9 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None
 
 def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
                         duration: float | None) -> dict:
-    """Render a named official Element (or SplitText) onto the overlay track."""
+    """Render a named official Element or Bits-style look onto the overlay track."""
     dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
-    props: dict = {}
-    if rec["id"] == "SplitText":
-        m = re.search(r'[“"\']([^”"\']+)[”"\']', description or "")
-        props = {"text": (m.group(1) if m else "WATCH THIS")[:48], "color": "#FFD60A"}
+    props = _remotion_look_props(rec, description)
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
@@ -19469,11 +19581,14 @@ def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
                       source="device", device_kind="animation", alpha=True)
     tl = timeline or {}
     box = _remotion_overlay_box(tl.get("canvas") or "9x16", rec["place"])
-    return {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
-            "box": box,
-            "device": {"kind": "animation", "engine": "remotion",
-                       "composition": rec["id"], "description": description,
-                       "spec": {"props": props}}}
+    out = {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
+           "box": box,
+           "device": {"kind": "animation", "engine": "remotion",
+                      "composition": rec["id"], "description": description,
+                      "spec": {"props": props}}}
+    if rec.get("behind"):
+        out["behind"] = True
+    return out
 
 
 def _make_remotion_orbit(description: str, timeline: dict | None,
@@ -23138,7 +23253,7 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
     except (RuntimeError, OSError, ValueError) as e:
         return None, f"the animation could not be made ({str(e)[:120]})"
     clip = _device_overlay_clip(info, start)
-    if op.get("behind"):
+    if op.get("behind") or info.get("behind"):
         clip["behind"] = True
     if op.get("sound") in SFX_LIBRARY or op.get("sound") == "none":
         clip["sfx"] = op["sound"]
@@ -23572,6 +23687,10 @@ Rules:
   A counting figure on screen → "number counter".
   A bar chart or line chart → those words.
   A kinetic hook title → "split text" plus the exact words in quotes.
+  Bits-style titles and cards (blur text, typewriter, glitch, shiny, profile card,
+  glass, holo, bounce cards, circular carousel of cards): put on-screen words in quotes.
+  Background looks (aurora, silk, beams, particles, lightning, liquid chrome, galaxy,
+  light rays, plasma) sit BEHIND the speaker -- set "behind": true.
   Exact chat wording the user dictates is still add_text_message; "on-screen messages"
   is the Remotion iMessage look when they want that graphic, not a dictated thread.
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,

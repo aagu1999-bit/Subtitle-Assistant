@@ -385,6 +385,16 @@ def test_wired_remotion_looks_match_their_phrases(app_mod):
         "on-screen messages look": "OnScreenMessages",
         'split text "WATCH THIS"': "SplitText",
         "youtube comment highlight": "YoutubeCommentHighlight",
+        'blur text "HELLO"': "BlurText",
+        "count up to 5000": "CountUp",
+        "typewriter title": "TextType",
+        "glitch text": "GlitchText",
+        "rotating text": "RotatingText",
+        "profile card": "ProfileCard",
+        "circular carousel of cards": "CircularCarousel",
+        "holo card": "HoloCard",
+        "aurora background": "Aurora",
+        "liquid chrome": "LiquidChrome",
     }
     for desc, cid in cases.items():
         rec = app_mod._match_remotion_recipe(desc)
@@ -437,4 +447,15 @@ def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
     p = seen["p"]
     assert "YouTube subscribe nudge" in p
     assert "number counter" in p and "split text" in p
+    assert "blur text" in p and "aurora background" in p
     assert "WIRED REMOTION LOOKS" in p
+
+
+def test_bits_backgrounds_sit_behind(app_mod):
+    rec = app_mod._match_remotion_recipe("aurora background")
+    assert rec["id"] == "Aurora" and rec.get("behind")
+    clip = app_mod._device_overlay_clip({
+        "asset_id": "a", "duration": 5, "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "device": {}, "behind": True,
+    }, 0)
+    assert clip["behind"] is True
