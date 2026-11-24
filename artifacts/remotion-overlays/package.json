@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "remotion studio --no-open --ipv4 --port 8000 --disable-git-source",
     "studio": "remotion studio --no-open --ipv4 --port 8000 --disable-git-source",
-    "render": "remotion render OrbitCarousel out/orbit.webm --codec=vp8 --image-format=png --concurrency=1 --gl=swangle",
+    "render": "remotion render OrbitCarousel out/orbit.webm --codec=vp8 --image-format=png --concurrency=1 --gl=swangle --scale=0.5 --timeout=120000",
     "still": "remotion still OrbitCarousel out/orbit.png --gl=swangle"
   },
   "dependencies": {
