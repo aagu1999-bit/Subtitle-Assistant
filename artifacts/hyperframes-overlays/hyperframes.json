@@ -25,6 +25,221 @@
       "name": "caption-pill-karaoke",
       "type": "hyperframes:component",
       "target": "compositions/components/caption-pill-karaoke.html"
+    },
+    {
+      "name": "caption-blend-difference",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-blend-difference.html"
+    },
+    {
+      "name": "caption-camera-follow",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-camera-follow.html"
+    },
+    {
+      "name": "caption-clip-wipe",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-clip-wipe.html"
+    },
+    {
+      "name": "caption-editorial-emphasis",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-editorial-emphasis.html"
+    },
+    {
+      "name": "caption-emoji-pop",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-emoji-pop.html"
+    },
+    {
+      "name": "caption-gradient-fill",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-gradient-fill.html"
+    },
+    {
+      "name": "caption-highlight",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-highlight.html"
+    },
+    {
+      "name": "caption-matrix-decode",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-matrix-decode.html"
+    },
+    {
+      "name": "caption-neon-accent",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-neon-accent.html"
+    },
+    {
+      "name": "caption-neon-glow",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-neon-glow.html"
+    },
+    {
+      "name": "caption-parallax-layers",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-parallax-layers.html"
+    },
+    {
+      "name": "caption-particle-burst",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-particle-burst.html"
+    },
+    {
+      "name": "caption-texture",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-texture.html"
+    },
+    {
+      "name": "caption-weight-shift",
+      "type": "hyperframes:component",
+      "target": "compositions/components/caption-weight-shift.html"
+    },
+    {
+      "name": "lower-third-bild",
+      "type": "hyperframes:block",
+      "target": "compositions/lower-third-bild.html"
+    },
+    {
+      "name": "lt-accent-underline",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-accent-underline.html"
+    },
+    {
+      "name": "lt-bold-block",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-bold-block.html"
+    },
+    {
+      "name": "lt-clean-bar",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-clean-bar.html"
+    },
+    {
+      "name": "lt-color-block",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-color-block.html"
+    },
+    {
+      "name": "lt-dark-card",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-dark-card.html"
+    },
+    {
+      "name": "lt-kicker-name",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-kicker-name.html"
+    },
+    {
+      "name": "lt-mask-reveal",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-mask-reveal.html"
+    },
+    {
+      "name": "lt-neon-border",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-neon-border.html"
+    },
+    {
+      "name": "lt-side-rule",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-side-rule.html"
+    },
+    {
+      "name": "lt-soft-pill",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-soft-pill.html"
+    },
+    {
+      "name": "lt-stack-bars",
+      "type": "hyperframes:block",
+      "target": "compositions/lt-stack-bars.html"
+    },
+    {
+      "name": "news-ticker",
+      "type": "hyperframes:block",
+      "target": "compositions/news-ticker.html"
+    },
+    {
+      "name": "yt-lower-third",
+      "type": "hyperframes:block",
+      "target": "compositions/yt-lower-third.html"
+    },
+    {
+      "name": "instagram-follow",
+      "type": "hyperframes:block",
+      "target": "compositions/instagram-follow.html"
+    },
+    {
+      "name": "tiktok-follow",
+      "type": "hyperframes:block",
+      "target": "compositions/tiktok-follow.html"
+    },
+    {
+      "name": "x-post",
+      "type": "hyperframes:block",
+      "target": "compositions/x-post.html"
+    },
+    {
+      "name": "reddit-post",
+      "type": "hyperframes:block",
+      "target": "compositions/reddit-post.html"
+    },
+    {
+      "name": "spotify-card",
+      "type": "hyperframes:block",
+      "target": "compositions/spotify-card.html"
+    },
+    {
+      "name": "macos-notification",
+      "type": "hyperframes:block",
+      "target": "compositions/macos-notification.html"
+    },
+    {
+      "name": "yt-comment-card",
+      "type": "hyperframes:block",
+      "target": "compositions/yt-comment-card.html"
+    },
+    {
+      "name": "camcorder-hud",
+      "type": "hyperframes:block",
+      "target": "compositions/camcorder-hud.html"
+    },
+    {
+      "name": "hw-title",
+      "type": "hyperframes:block",
+      "target": "compositions/hw-title.html"
+    },
+    {
+      "name": "hw-write-title",
+      "type": "hyperframes:block",
+      "target": "compositions/hw-write-title.html"
+    },
+    {
+      "name": "hw-text-cloud",
+      "type": "hyperframes:block",
+      "target": "compositions/hw-text-cloud.html"
+    },
+    {
+      "name": "hw-path-text",
+      "type": "hyperframes:block",
+      "target": "compositions/hw-path-text.html"
+    },
+    {
+      "name": "hw-arrow",
+      "type": "hyperframes:component",
+      "target": "compositions/components/hw-arrow.html"
+    },
+    {
+      "name": "hw-box-label",
+      "type": "hyperframes:component",
+      "target": "compositions/components/hw-box-label.html"
+    },
+    {
+      "name": "hw-callout-circle",
+      "type": "hyperframes:component",
+      "target": "compositions/components/hw-callout-circle.html"
     }
   ]
 }

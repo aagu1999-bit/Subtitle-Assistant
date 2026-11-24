@@ -19301,14 +19301,13 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 def _make_animation(description: str, timeline: dict | None,
                     duration: float | None = None) -> dict:
-    rec = _match_remotion_recipe(description)
-    if rec:
+    engine, rec = _match_named_look(description)
+    if engine == "remotion" and rec:
         try:
             return _make_remotion_look(rec, description, timeline, duration)
         except Exception as e:
             ai_logger.info(f"[remotion] {rec['id']} failed, falling back: {e}")
-    rec = _match_hyperframes_recipe(description)
-    if rec:
+    if engine == "hyperframes" and rec:
         try:
             return _make_hyperframes_look(rec, description, timeline, duration)
         except Exception as e:
@@ -19463,44 +19462,205 @@ REMOTION_RECIPES = (
 )
 
 
-def _match_remotion_recipe(description: str) -> dict | None:
+def _match_recipe_words(description: str, recipes) -> tuple[dict | None, int]:
+    """Return the recipe whose matching phrase is longest, so specific names win."""
     d = (description or "").lower()
-    for rec in REMOTION_RECIPES:
-        if any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", d) for w in rec["words"]):
-            return rec
-    return None
+    best, best_len = None, -1
+    for rec in recipes:
+        for w in rec["words"]:
+            if len(w) <= best_len:
+                continue
+            if re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", d):
+                best, best_len = rec, len(w)
+    return best, best_len
+
+
+def _match_remotion_recipe(description: str) -> dict | None:
+    rec, _ = _match_recipe_words(description, REMOTION_RECIPES)
+    return rec
+
+
+def _match_named_look(description: str) -> tuple[str | None, dict | None]:
+    """Pick Remotion or Hyperframes by the longest matching phrase."""
+    r_rec, r_len = _match_recipe_words(description, REMOTION_RECIPES)
+    h_rec, h_len = _match_recipe_words(description, _hyperframes_recipes())
+    if h_len > r_len:
+        return "hyperframes", h_rec
+    if r_rec:
+        return "remotion", r_rec
+    if h_rec:
+        return "hyperframes", h_rec
+    return None, None
 
 
 def _remotion_recipe_prompt() -> str:
     return ", ".join(rec["words"][0] for rec in REMOTION_RECIPES)
 
 
-HYPERFRAMES_RECIPES = (
-    {"id": "HyperTitle", "file": "index.html",
-     "words": ("hyper title", "hyperframes title"),
-     "dur": 3.0, "place": "full", "props": "text"},
-    {"id": "KineticSlam", "file": "compositions/components/caption-kinetic-slam.html",
-     "words": ("kinetic slam", "slam captions", "slam caption"),
-     "dur": 8.0, "place": "wide"},
-    {"id": "GlitchRgbCaption", "file": "compositions/components/caption-glitch-rgb.html",
-     "words": ("glitch rgb caption", "glitch rgb captions"),
-     "dur": 6.0, "place": "wide"},
-    {"id": "PillKaraoke", "file": "compositions/components/caption-pill-karaoke.html",
-     "words": ("pill karaoke", "karaoke pills"),
-     "dur": 6.0, "place": "lower"},
-)
+_HYPERFRAMES_SKIP = {"caption-blend-difference"}
+_HYPERFRAMES_WORD_OVERRIDES = {
+    "caption-kinetic-slam": ("kinetic slam", "slam captions", "slam caption"),
+    "caption-glitch-rgb": ("glitch rgb caption", "glitch rgb captions"),
+    "caption-pill-karaoke": ("pill karaoke", "karaoke pills"),
+    "caption-highlight": ("highlight captions", "tiktok highlight captions"),
+    "caption-texture": ("texture captions", "lava captions"),
+    "caption-weight-shift": ("weight shift captions", "weight shift"),
+    "caption-camera-follow": ("camera follow captions", "camera follow caption"),
+    "caption-clip-wipe": ("clip wipe", "clip wipe captions"),
+    "caption-editorial-emphasis": ("editorial emphasis captions", "editorial emphasis"),
+    "caption-emoji-pop": ("emoji pop", "emoji pop captions"),
+    "caption-gradient-fill": ("gradient fill captions", "gradient fill caption"),
+    "caption-matrix-decode": ("matrix decode captions", "matrix decode caption"),
+    "caption-neon-accent": ("neon accent captions", "neon accent caption"),
+    "caption-neon-glow": ("neon glow captions", "neon glow caption"),
+    "caption-parallax-layers": ("parallax captions", "parallax layers captions"),
+    "caption-particle-burst": ("particle burst captions", "particle burst caption"),
+    "lower-third-bild": ("bild lower third", "bild name plate"),
+    "news-ticker": ("news ticker",),
+    "yt-lower-third": ("youtube lower third", "yt lower third"),
+    "instagram-follow": ("instagram follow",),
+    "tiktok-follow": ("tiktok follow",),
+    "x-post": ("x post card", "tweet card"),
+    "reddit-post": ("reddit post card", "reddit post"),
+    "spotify-card": ("spotify card", "now playing card"),
+    "macos-notification": ("macos notification", "mac notification"),
+    "yt-comment-card": ("comment cards", "yt comment cards"),
+    "camcorder-hud": ("camcorder hud", "rec hud"),
+    "hw-title": ("handwritten title",),
+    "hw-write-title": ("handwritten write-on title", "write-on title"),
+    "hw-text-cloud": ("speech bubble", "handwritten speech bubble"),
+    "hw-path-text": ("text along a path", "handwritten path text"),
+    "hw-arrow": ("hand-drawn arrow",),
+    "hw-box-label": ("hand-drawn box label",),
+    "hw-callout-circle": ("scribble callout", "callout circle"),
+}
+_HYPERFRAMES_RECIPES_CACHE: tuple | None = None
+
+
+def _pascal_look_id(name: str) -> str:
+    return "".join(p[:1].upper() + p[1:] for p in re.split(r"[-_]+", name) if p)
+
+
+def _hyperframes_words(name: str) -> tuple:
+    if name in _HYPERFRAMES_WORD_OVERRIDES:
+        return _HYPERFRAMES_WORD_OVERRIDES[name]
+    pretty = name.replace("-", " ")
+    if pretty.startswith("lt "):
+        return (f"{pretty[3:]} lower third", pretty)
+    if pretty.startswith("caption ") and " " in pretty[8:]:
+        rest = pretty[8:]
+        return (rest, f"{rest} captions")
+    return (pretty,)
+
+
+def _hyperframes_place(name: str, html: str) -> str:
+    if name.startswith("caption-"):
+        if "pill" in name:
+            return "lower"
+        if name in ("caption-kinetic-slam", "caption-camera-follow", "caption-parallax-layers"):
+            return "wide" if "slam" in name else "full"
+        return "wide"
+    if (name.startswith("lt-") or name.startswith("lower-third")
+            or name in ("news-ticker", "yt-lower-third", "instagram-follow", "tiktok-follow")):
+        return "lower" if name not in ("instagram-follow", "tiktok-follow") else "full"
+    if name == "camcorder-hud":
+        return "full"
+    w = re.search(r'data-width="(\d+)"', html)
+    h = re.search(r'data-height="(\d+)"', html)
+    if w and h and int(w.group(1)) <= 1080 and int(h.group(1)) >= 1600:
+        return "full"
+    if name.startswith("hw-"):
+        return "full"
+    return "center"
+
+
+def _hyperframes_group(name: str) -> str:
+    if name.startswith("caption-"):
+        return "Captions"
+    if (name.startswith("lt-") or name.startswith("lower-third")
+            or name in ("news-ticker", "yt-lower-third")):
+        return "Lower thirds"
+    if name.startswith("hw-"):
+        return "Handwritten"
+    if name in ("instagram-follow", "tiktok-follow", "x-post", "reddit-post",
+                "spotify-card", "macos-notification", "yt-comment-card", "camcorder-hud"):
+        return "Social"
+    return "Titles"
+
+
+def _hyperframes_duration(html: str, default: float = 6.0) -> float:
+    m = re.search(r'data-duration="([\d.]+)"', html)
+    try:
+        return max(0.8, min(12.0, float(m.group(1)))) if m else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_hyperframes_recipes() -> tuple:
+    """Named looks = HyperTitle plus every installed registry overlay."""
+    recs = [{
+        "id": "HyperTitle", "file": "index.html", "group": "Titles",
+        "words": ("hyper title", "hyperframes title"),
+        "dur": 3.0, "place": "full", "props": "text",
+    }]
+    manifest = HYPERFRAMES_DIR / "hyperframes.json"
+    try:
+        items = json.loads(manifest.read_text(encoding="utf-8")).get("registryItems") or []
+    except (OSError, json.JSONDecodeError):
+        return tuple(recs)
+    seen = {"index.html"}
+    for item in items:
+        name = str(item.get("name") or "")
+        rel = str(item.get("target") or "")
+        if not name or not rel or name in _HYPERFRAMES_SKIP or rel in seen:
+            continue
+        path = HYPERFRAMES_DIR / rel
+        if not path.is_file():
+            continue
+        try:
+            html = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "<html" not in html.lower() or "data-composition-id" not in html:
+            continue
+        rec = {
+            "id": _pascal_look_id(name),
+            "file": rel.replace("\\", "/"),
+            "words": _hyperframes_words(name),
+            "dur": _hyperframes_duration(html),
+            "place": _hyperframes_place(name, html),
+            "group": _hyperframes_group(name),
+        }
+        recs.append(rec)
+        seen.add(rel)
+    return tuple(recs)
+
+
+def _hyperframes_recipes() -> tuple:
+    global _HYPERFRAMES_RECIPES_CACHE
+    if _HYPERFRAMES_RECIPES_CACHE is None:
+        _HYPERFRAMES_RECIPES_CACHE = _load_hyperframes_recipes()
+    return _HYPERFRAMES_RECIPES_CACHE
+
+
+HYPERFRAMES_RECIPES = _hyperframes_recipes()
 
 
 def _match_hyperframes_recipe(description: str) -> dict | None:
-    d = (description or "").lower()
-    for rec in HYPERFRAMES_RECIPES:
-        if any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", d) for w in rec["words"]):
-            return rec
-    return None
+    rec, _ = _match_recipe_words(description, _hyperframes_recipes())
+    return rec
 
 
 def _hyperframes_recipe_prompt() -> str:
-    return ", ".join(rec["words"][0] for rec in HYPERFRAMES_RECIPES)
+    groups: dict[str, list[str]] = {}
+    for rec in _hyperframes_recipes():
+        groups.setdefault(rec.get("group") or "Looks", []).append(rec["words"][0])
+    order = ("Titles", "Captions", "Lower thirds", "Social", "Handwritten")
+    parts = []
+    for key in (*order, *([k for k in groups if k not in order])):
+        if groups.get(key):
+            parts.append(f"{key}: {', '.join(groups[key])}")
+    return ". ".join(parts)
 
 
 def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
@@ -23520,8 +23680,11 @@ def _co_editor_capability_message() -> str:
         "• Any other animation described in words, including pictures\n"
         "• Named looks: subscribe nudge, number counter, charts, captions, polaroid, "
         "split/blur/glitch titles, cards, aurora and other backgrounds, "
-        "looks like this, screenshot tour, rotating carousel, "
-        "kinetic slam, glitch RGB captions, pill karaoke\n"
+        "looks like this, screenshot tour, rotating carousel\n"
+        "• Hyperframes overlays: kinetic slam, clip wipe, emoji pop, neon glow, "
+        "pill karaoke, soft pill / youtube / bild lower thirds, news ticker, "
+        "instagram follow, tiktok follow, comment cards, handwritten title, "
+        "speech bubble — ask for the look by name\n"
         "• Sounds (pop, click, whoosh) on graphics; photos stay silent unless you add one\n\n"
         "Pictures\n"
         "• Generate images, stock or your photos as backgrounds or carousels\n"
@@ -23931,8 +24094,11 @@ Rules:
   light rays, plasma) sit BEHIND the speaker -- set "behind": true.
   Exact chat wording the user dictates is still add_text_message; "on-screen messages"
   is the Remotion iMessage look when they want that graphic, not a dictated thread.
-- HYPERFRAMES LOOKS (HTML captions, transparent WebM): {_hyperframes_recipe_prompt()}.
-  These are not Remotion and not freehand motion.py. Use add_animation with those phrases.
+- HYPERFRAMES LOOKS (HTML overlays, transparent WebM). These are not Remotion and
+  not freehand motion.py. Use add_animation and put the phrase in the description:
+  {_hyperframes_recipe_prompt()}.
+  Captions and lower thirds sit over the talking head. Follow cards, comment cards,
+  HUDs and handwritten titles do too. Quoted words go on screen when the look takes text.
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their
