@@ -19300,7 +19300,7 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 
 def _make_animation(description: str, timeline: dict | None,
-                    duration: float | None = None) -> dict:
+                    duration: float | None = None, freehand: bool = True) -> dict:
     engine, rec = _match_named_look(description)
     if engine == "remotion" and rec:
         try:
@@ -19327,6 +19327,8 @@ def _make_animation(description: str, timeline: dict | None,
             if _orbit_photo_queries(description):
                 raise
             ai_logger.info(f"[remotion] falling back to motion.py: {e}")
+    if not freehand:
+        raise RuntimeError("no wired look for this beat")
     spec = _design_animation(description, timeline, duration)
     tl = timeline or {}
     return _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
@@ -22999,7 +23001,7 @@ def _prosody_for(job_id: str, words: list, t_in: float, t_out: float) -> dict | 
 
 
 def _edit_plan_for(job_id: str, t_in: float, t_out: float, pack: dict, intensity: str,
-                   use_llm: bool = True) -> dict:
+                   use_llm: bool = True, format: str | None = None) -> dict:
     words = (jobs.get(job_id) or {}).get("words") or []
     spans = edit_engine.classify_spans(words, t_in, t_out)
     if use_llm and os.environ.get("GEMINI_API_KEY"):
@@ -23009,7 +23011,9 @@ def _edit_plan_for(job_id: str, t_in: float, t_out: float, pack: dict, intensity
         hints = TASTE.plan_hints()
     except Exception:
         hints = {}
-    return edit_engine.plan_edit(words, t_in, t_out, intensity, pack, prosody, hints, spans)
+    return edit_engine.plan_edit(
+        words, t_in, t_out, intensity, pack, prosody, hints, spans,
+        format=format or (pack or {}).get("format"))
 
 
 def _src_to_timeline(t: float, t_in: float, cuts: list) -> float:
@@ -23076,6 +23080,22 @@ def _place_plan(timeline: dict, plan: dict, job_id: str, t_in: float, cuts: list
                   "plan_ref": row["index"]}
             tracks["effects"].append(_plan_fx_origin(fx, job_id))
             placed["effects"] += 1
+        elif tr.startswith("look:"):
+            look = row.get("look") or {}
+            phrase = str(look.get("phrase") or tr.split(":", 1)[1].replace("-", " "))
+            text = str(look.get("text") or "").strip()
+            desc = f'{phrase} "{text}"' if text else phrase
+            try:
+                info = _make_animation(desc, tl, min(8.0, dur), freehand=False)
+            except Exception as e:
+                placed["notes"].append(f"{phrase} at {start:.1f}s skipped: {str(e)[:80]}")
+                continue
+            clip = _device_overlay_clip(info, start)
+            clip["plan_ref"] = row["index"]
+            if info.get("behind"):
+                clip["behind"] = True
+            tracks["overlay"].append(clip)
+            placed["devices"] += 1
         elif tr.startswith("device:") or tr == "kinetic_text":
             dev = row.get("device") or {"kind": "kinetic_text", "labels": [row["text"][:48]]}
             kind = dev["kind"]
@@ -23134,11 +23154,19 @@ def _apply_plan_toggles(plan: dict, toggles: dict) -> dict:
     going flat; otherwise it becomes plain talking head.
     """
     graphics, broll, moves = toggles["graphics"], toggles["broll"], toggles["moves"]
+    fmt = (plan.get("structure") or {}).get("format")
     for row in plan["structure"]["spans"]:
         tr, new = row["treatment"], None
-        if (tr.startswith("device:") or tr == "kinetic_text") and not graphics:
-            new = "punch" if moves and row.get("role") in ("hook", "data") else (
-                "clean_zoom" if moves else "none")
+        if (tr.startswith("device:") or tr.startswith("look:") or tr == "kinetic_text") and not graphics:
+            if fmt:
+                allowed = edit_engine.format_candidates(fmt, {
+                    "role": row.get("role"), "visual": row.get("visual") or "none",
+                    "text": row.get("text") or "",
+                })
+                new = "punch" if moves and "punch" in allowed else "none"
+            else:
+                new = "punch" if moves and row.get("role") in ("hook", "data") else (
+                    "clean_zoom" if moves else "none")
         elif tr == "broll" and not broll:
             new = "clean_zoom" if moves else "none"
         elif tr in ("punch", "clean_zoom") and not moves:
@@ -23146,6 +23174,7 @@ def _apply_plan_toggles(plan: dict, toggles: dict) -> dict:
         if new is not None:
             row["treatment"] = new
             row.pop("device", None)
+            row.pop("look", None)
             row["reason"] = (row.get("reason") or "") + " (style toggle)"
     return plan
 
@@ -23171,7 +23200,8 @@ def edit_plan():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid start/end"}), 400
     plan = _edit_plan_for(job_id, t_in, t_out, pack, intensity,
-                          use_llm=bool(data.get("use_llm", False)))
+                          use_llm=bool(data.get("use_llm", False)),
+                          format=data.get("format") or data.get("format_type"))
     plan = _apply_plan_toggles(plan, _plan_toggles(data))
     return jsonify({**plan, "style_pack": pack_id, "intensity": intensity})
 
@@ -23257,7 +23287,8 @@ def ai_edit_seed():
 
     if smart:
         plan = _edit_plan_for(work_job_id, work_in, work_out, pack, intensity,
-                              use_llm=bool(data.get("use_llm", True)))
+                              use_llm=bool(data.get("use_llm", True)),
+                              format=data.get("format") or data.get("format_type"))
         plan = _apply_plan_toggles(plan, _plan_toggles(data))
         timeline = _build_ai_edit_timeline(
             work_job_id, work_in, work_out, pack, intensity, cuts, [],

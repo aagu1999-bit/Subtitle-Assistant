@@ -315,6 +315,12 @@ def test_rotating_carousel_requests_are_sent_to_remotion(app_mod):
     assert app_mod._wants_remotion_orbit("replace the shapes with three photos of beaches in bali")
 
 
+def test_a_planned_beat_does_not_invent_a_motion_scene(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py should not run"))
+    with pytest.raises(RuntimeError, match="no wired look"):
+        app_mod._make_animation("a loading bar filling up", {"canvas": "9x16"}, 3, freehand=False)
+
+
 def test_make_animation_uses_remotion_for_an_orbit(app_mod, monkeypatch):
     seen = {}
 

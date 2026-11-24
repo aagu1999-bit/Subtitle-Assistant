@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 
 ROLES = ("hook", "data", "list", "comparison", "story", "thesis", "body")
+VISUAL_TYPES = ("mechanism", "transform", "before_after", "quote", "none")
 
 # Treatments the planner can choose. "device:<kind>" names a graphics device.
 TREATMENTS = ("device", "broll", "punch", "clean_zoom", "kinetic_text", "none")
@@ -192,16 +193,60 @@ def classify_role(text: str, start: float, window_start: float,
     return "body", "supporting talk"
 
 
+_BEFORE_AFTER_RE = re.compile(
+    r"\b(before|after|used to|back then|nowadays|these days|no longer|"
+    r"vs\.?|versus|compared to|compared with|instead of|rather than|"
+    r"the difference between|on the other hand)\b", re.I)
+_TRANSFORM_RE = re.compile(
+    r"\b(became|becomes|turned into|turns into|changed|changes|grew|grows|"
+    r"jumped|doubled|tripled|from \w+ to \w+|went from|now it's|now it is)\b|"
+    r"(\d|%|\$|£|€)", re.I)
+_MECHANISM_RE = re.compile(
+    r"\b(how (it|this|that|to)|the way|because|which leads|leads to|"
+    r"works by|the process|step|system|workflow|mechanism|that's why|"
+    r"the reason)\b", re.I)
+_QUOTE_RE = re.compile(
+    r"\b(here'?s the thing|the (point|lesson|truth|takeaway) is|"
+    r"remember this|bottom line|if you (take|remember) one thing)\b", re.I)
+
+
+def classify_visual(text: str, role: str) -> tuple[str, str]:
+    """What the viewer should *see*, separate from the rhetorical role.
+
+    mechanism = how it works, transform = a change, before_after = two states,
+    quote = a line that should stand alone, none = the face is enough.
+    """
+    t = text or ""
+    if role == "comparison" or _BEFORE_AFTER_RE.search(t):
+        return "before_after", "two states"
+    # The open and the closer are lines, not an excuse to invent a chart.
+    if role in ("hook", "thesis"):
+        return "quote", "a line that stands alone"
+    if role == "data" or _TRANSFORM_RE.search(t):
+        return "transform", "a change or a number"
+    if role == "list" or _MECHANISM_RE.search(t):
+        return "mechanism", "how it works"
+    if _QUOTE_RE.search(t):
+        return "quote", "a line that stands alone"
+    return "none", "the face carries it"
+
+
 def classify_spans(words: list, t_in: float = 0.0, t_out: float = 1e9) -> list[dict]:
     spans = segment_spans(words, t_in, t_out)
     for s in spans:
         role, why = classify_role(s["text"], s["start"], t_in)
         s["role"] = role
         s["reason"] = why
+        vis, vwhy = classify_visual(s["text"], role)
+        s["visual"] = vis
+        s["visual_reason"] = vwhy
     # The last line of a clip is the payoff when nothing stronger claimed it.
     if len(spans) >= 3 and spans[-1]["role"] == "body":
         spans[-1]["role"] = "thesis"
         spans[-1]["reason"] = "closes the video"
+        vis, vwhy = classify_visual(spans[-1]["text"], "thesis")
+        spans[-1]["visual"] = vis
+        spans[-1]["visual_reason"] = vwhy
     return spans
 
 
@@ -237,6 +282,9 @@ def refine_roles_with_llm(spans: list[dict], llm) -> list[dict]:
             if by_idx[idx]["role"] != role:
                 by_idx[idx]["reason"] = "model relabelled"
             by_idx[idx]["role"] = role
+            vis, vwhy = classify_visual(by_idx[idx]["text"], role)
+            by_idx[idx]["visual"] = vis
+            by_idx[idx]["visual_reason"] = vwhy
     return spans
 
 
@@ -391,10 +439,14 @@ class VarietyState:
     def allows(self, key: str, t: float) -> bool:
         if self.last() == key:
             return False
-        family = key.split(":")[0]
+        # look:todo and look:kinetic-slam are different moves. device:* stays
+        # one family so two charts don't land on top of each other.
+        family = key.split(":", 1)[1] if key.startswith("look:") else key.split(":")[0]
         recent = self.recent(t)
         # Two of the same family inside the window reads as a template.
-        return sum(1 for k in recent if k.split(":")[0] == family) < 2
+        return sum(1 for k in recent if (
+            k.split(":", 1)[1] if k.startswith("look:") else k.split(":")[0]
+        ) == family) < 2
 
     def push(self, key: str, t: float) -> None:
         self.history.append((t, key))
@@ -480,6 +532,89 @@ def _labels_for(kind: str, span: dict) -> list[str]:
     return [text[:60]]
 
 
+# One motion system per format. A span may only become a look on this list.
+# punch is the lean-in. Anything else is a named look the shelf already renders.
+# Unlisted catalog looks stay on the / menu for a person to place by hand.
+_INTERVIEW_MOTION = (
+    {"treatment": "look:lower-third", "roles": ("hook",), "visual": ("quote", "none"), "max": 1},
+    {"treatment": "punch", "roles": ("hook",), "visual": ("quote", "none"), "max": 1},
+    {"treatment": "look:backdrop-word", "roles": ("thesis",), "visual": ("quote",), "max": 1},
+    {"treatment": "look:huge-strike", "roles": ("thesis",), "visual": ("quote",), "max": 1},
+    {"treatment": "punch", "roles": ("thesis",), "visual": ("quote",), "max": 1},
+)
+MOTION_PACKS = {
+    "interview": _INTERVIEW_MOTION,
+    "vendor_interview": _INTERVIEW_MOTION,
+    "event_recap": (
+        {"treatment": "look:kinetic-slam", "roles": ("hook", "thesis"), "visual": ("quote",), "max": 1},
+        {"treatment": "look:todo", "roles": ("list",), "visual": ("mechanism", "none"), "max": 1},
+        {"treatment": "look:number-counter", "roles": ("data",), "visual": ("transform", "none"), "max": 1},
+        {"treatment": "look:screenshot-tour", "roles": ("comparison", "story", "body"),
+         "visual": ("before_after",), "max": 1},
+        {"treatment": "punch", "roles": ("hook",), "visual": ("quote", "none"), "max": 1},
+    ),
+    "comedy": (
+        {"treatment": "punch", "roles": ("thesis",), "visual": ("quote",), "max": 1},
+        {"treatment": "look:reject-stamp", "roles": ("thesis",), "visual": ("quote",), "max": 1},
+    ),
+}
+FORMAT_ALIASES = {"recap": "event_recap", "vendor": "vendor_interview"}
+LOOK_PHRASES = {
+    "lower-third": "name lower third",
+    "backdrop-word": "backdrop word",
+    "huge-strike": "huge strike",
+    "todo": "todo list",
+    "number-counter": "number counter",
+    "screenshot-tour": "screenshot tour",
+    "kinetic-slam": "kinetic slam",
+    "reject-stamp": "reject stamp",
+}
+
+
+def normalize_format(fmt) -> str | None:
+    raw = re.sub(r"[\s\-]+", "_", str(fmt or "").strip().lower())
+    raw = FORMAT_ALIASES.get(raw, raw)
+    return raw if raw in MOTION_PACKS else None
+
+
+def _look_text(look_id: str, span: dict) -> str:
+    text = span.get("text") or ""
+    toks = [t for t in _clean_tokens(text) if not t.isdigit()]
+    if look_id in ("backdrop-word", "huge-strike", "kinetic-slam"):
+        return (" ".join(toks[:3]).upper() or "WATCH")[:24]
+    if look_id == "reject-stamp":
+        return (toks[-1] if toks else "NO").upper()[:16]
+    if look_id == "lower-third":
+        return " ".join(_cap(w) for w in toks[:2]) or "Guest"
+    if look_id == "todo":
+        return ", ".join(_cap(w) for w in toks[:3]) or "One, Two, Three"
+    if look_id == "number-counter":
+        m = re.search(r"(\$|£|€)?\s?(\d[\d,\.]*)\s?(%|percent|x|k|m|million|billion)?", text, re.I)
+        if m:
+            unit = (m.group(3) or "").lower()
+            unit = {"percent": "%", "million": "M", "billion": "B"}.get(unit, unit)
+            return f"{m.group(1) or ''}{m.group(2)}{unit}"
+        return ""
+    return ""
+
+
+def format_candidates(fmt: str, span: dict, used: dict) -> list[str]:
+    """Allowlisted treatments for this role and visual type. Empty means none."""
+    out = []
+    visual = span.get("visual") or "none"
+    for rule in MOTION_PACKS.get(fmt) or ():
+        if span.get("role") not in rule["roles"]:
+            continue
+        vis = rule.get("visual")
+        if vis and visual not in vis:
+            continue
+        key = rule["treatment"]
+        if used.get(key, 0) >= int(rule.get("max") or 1):
+            continue
+        out.append(key)
+    return out
+
+
 def suggest_device(text: str) -> dict:
     """Best device for a highlighted phrase, with labels and runners-up."""
     role, reason = classify_role(text, 999.0, 0.0)
@@ -499,7 +634,8 @@ def suggest_device(text: str) -> dict:
 
 def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
               style_pack: dict | None = None, prosody: dict | None = None,
-              taste: dict | None = None, spans: list | None = None) -> dict:
+              taste: dict | None = None, spans: list | None = None,
+              format: str | None = None) -> dict:
     """Pick a treatment for every span. Returns {"structure", "style"}.
 
     *taste* may carry {"avoid": [treatment keys], "prefer": [...]} learned from
@@ -507,7 +643,12 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
     exists.
     """
     density = DENSITY.get((intensity or "med").lower(), 1.0)
+    fmt = normalize_format(format or (style_pack or {}).get("format"))
     spans = spans if spans is not None else classify_spans(words, t_in, t_out)
+    for span in spans:
+        vis, vwhy = classify_visual(span.get("text", ""), span.get("role") or "body")
+        span["visual"] = vis
+        span["visual_reason"] = vwhy
     prosody = prosody or {}
     emphasis = prosody.get("emphasis") or []
     pauses = prosody.get("pauses") or breathing_pauses(words)
@@ -525,9 +666,12 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
     used = 0
     dev_budget, dev_allow = device_budget(style_pack, total, intensity)
     dev_used = 0
+    look_used: dict[str, int] = {}
     decisions = []
 
     def candidates(span: dict) -> list[str]:
+        if fmt:
+            return format_candidates(fmt, span, look_used)
         role = span["role"]
         dev = _device_for(span)
         c: list[str] = []
@@ -563,6 +707,8 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
                     continue
                 dev_kind = key.split(":", 1)[1] if key.startswith("device:") else (
                     "kinetic_text" if key == "kinetic_text" else None)
+                if key.startswith("look:") and dev_used >= dev_budget:
+                    continue
                 if dev_kind and (dev_used >= dev_budget or not device_allowed(dev_kind, dev_allow)):
                     continue
                 if state.allows(key, span["start"]):
@@ -581,6 +727,8 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
             end = max(start + 1.2, snap_to_pause(end, pauses))
         row = {
             "index": span["index"], "role": span["role"], "reason": span["reason"],
+            "visual": span.get("visual") or "none",
+            "visual_reason": span.get("visual_reason") or "",
             "text": span["text"], "start": round(start, 3), "end": round(end, 3),
             "treatment": chosen, "hit": round(hit, 3) if hit is not None else None,
         }
@@ -589,11 +737,16 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
             row["device"] = {"kind": kind, "labels": _labels_for(kind, span)}
         elif chosen == "kinetic_text":
             row["device"] = {"kind": "kinetic_text", "labels": _labels_for("kinetic_text", span)}
+        elif chosen.startswith("look:"):
+            look_id = chosen.split(":", 1)[1]
+            row["look"] = {"id": look_id, "phrase": LOOK_PHRASES.get(look_id, look_id.replace("-", " ")),
+                           "text": _look_text(look_id, span)}
         elif chosen == "broll":
             row["broll"] = concept_queries(span["text"])
         if chosen != "none":
-            if "device" in row:
+            if "device" in row or "look" in row:
                 dev_used += 1
+            look_used[chosen] = look_used.get(chosen, 0) + 1
             state.push(chosen, span["start"])
             if not must:
                 used += 1
@@ -604,6 +757,7 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
         "structure": {
             "version": 1,
             "in": t_in, "out": t_out,
+            "format": fmt,
             "pace": pace, "wpm": wpm,
             "spans": decisions,
             "emphasis": [{"start": e["start"], "word": e["word"]} for e in emphasis[:40]],

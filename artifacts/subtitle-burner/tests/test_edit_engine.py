@@ -188,6 +188,65 @@ def test_a_texting_story_shows_the_texts_not_a_stock_photo():
     assert row["treatment"] == "device:chat_bubbles"
 
 
+def test_spans_carry_a_visual_type():
+    spans = ee.classify_spans(TALK, 0, 40)
+    by_role = {}
+    for s in spans:
+        by_role.setdefault(s["role"], []).append(s)
+        assert s["visual"] in ee.VISUAL_TYPES
+    assert by_role["hook"][0]["visual"] == "quote"
+    assert by_role["list"][0]["visual"] == "mechanism"
+    assert by_role["data"][0]["visual"] == "transform"
+    assert by_role["comparison"][0]["visual"] == "before_after"
+    assert by_role["thesis"][0]["visual"] == "quote"
+    assert by_role["story"][0]["visual"] == "none"
+
+
+def test_interview_only_uses_its_motion_pack():
+    plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="interview")
+    allowed = {"none", "punch", "look:lower-third", "look:backdrop-word", "look:huge-strike"}
+    rows = plan["structure"]["spans"]
+    assert plan["structure"]["format"] == "interview"
+    assert {r["treatment"] for r in rows} <= allowed
+    assert rows[0]["treatment"] == "look:lower-third"
+    assert rows[0]["look"]["phrase"] == "name lower third"
+    thesis = [r for r in rows if r["role"] == "thesis"][0]
+    assert thesis["treatment"] == "look:backdrop-word"
+    texted = [r for r in rows if "texted" in r["text"]][0]
+    assert texted["treatment"] == "none"
+    assert "device:chat_bubbles" not in {r["treatment"] for r in rows}
+
+
+def test_recap_maps_roles_onto_named_looks():
+    plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="recap")
+    by_role = {}
+    for row in plan["structure"]["spans"]:
+        by_role.setdefault(row["role"], []).append(row)
+    assert plan["structure"]["format"] == "event_recap"
+    assert by_role["hook"][0]["treatment"] == "look:kinetic-slam"
+    assert by_role["list"][0]["treatment"] == "look:todo"
+    assert by_role["data"][0]["treatment"] == "look:number-counter"
+    assert by_role["data"][0]["look"]["text"].startswith("40")
+    assert by_role["comparison"][0]["treatment"] == "look:screenshot-tour"
+    assert by_role["story"][0]["treatment"] == "none"
+
+
+def test_comedy_only_moves_on_the_punchline():
+    plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="comedy")
+    rows = plan["structure"]["spans"]
+    thesis = [r for r in rows if r["role"] == "thesis"][0]
+    assert thesis["treatment"] in ("punch", "look:reject-stamp")
+    assert all(r["treatment"] == "none" for r in rows if r["role"] != "thesis")
+
+
+def test_an_unknown_format_keeps_the_old_planner():
+    plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="documentary")
+    data = [r for r in plan["structure"]["spans"] if r["role"] == "data"][0]
+    assert plan["structure"]["format"] is None
+    assert data["treatment"] == "device:counter"
+    assert data["visual"] == "transform"
+
+
 def test_labels_keep_apostrophes_lowercase():
     alts = {a["kind"]: a["labels"] for a in ee.suggest_device("here's the thing: consistency beats talent")["alternatives"]}
     assert alts["venn"][0] == "Here's"
