@@ -10,6 +10,11 @@
     "still": "remotion still OrbitCarousel out/orbit.png --gl=swangle"
   },
   "dependencies": {
+    "@remotion/captions": "4.0.545",
+    "@remotion/google-fonts": "4.0.545",
+    "@remotion/layout-utils": "4.0.545",
+    "@remotion/media": "4.0.545",
+    "@remotion/sfx": "4.0.545",
     "react": "catalog:",
     "react-dom": "catalog:",
     "remotion": "^4.0.355"

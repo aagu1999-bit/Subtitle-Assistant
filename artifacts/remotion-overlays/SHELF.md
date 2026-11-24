@@ -5,6 +5,16 @@ official groups have 3–6 items. Take **the whole official Element set** as
 the Remotion shelf, and **ten video-usable looks per Bits group** as the
 Bits shelf. Star in Studio / on the sites; we wire what you star.
 
+## Wired now (co-editor can pick these)
+
+Remotion Elements (brand: gold `#FFD60A`, white labels): NumberCounter,
+VerticalBarChart, LineChart, WordHighlightCaptions, PoppingWordCaptions,
+NameLowerThird, YoutubeCommentHighlight, YoutubeSubscribeNudge,
+PolaroidPictures, OnScreenMessages.
+
+Plus OrbitCarousel (photo/shape orbit) and SplitText (first Bits-style look:
+letters pop in on the frame clock). Ask in the co-editor by those names.
+
 ## Remotion official Elements
 
 Source: https://www.remotion.dev/elements  

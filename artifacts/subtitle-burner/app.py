@@ -19235,6 +19235,12 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 def _make_animation(description: str, timeline: dict | None,
                     duration: float | None = None) -> dict:
+    rec = _match_remotion_recipe(description)
+    if rec:
+        try:
+            return _make_remotion_look(rec, description, timeline, duration)
+        except Exception as e:
+            ai_logger.info(f"[remotion] {rec['id']} failed, falling back: {e}")
     if _wants_remotion_orbit(description):
         try:
             return _make_remotion_orbit(description, timeline, duration)
@@ -19252,6 +19258,55 @@ def _make_animation(description: str, timeline: dict | None,
 REMOTION_DIR = Path(__file__).resolve().parent.parent / "remotion-overlays"
 _ORBIT_WORDS = ("orbit", "rotat", "carousel", "turntable", "trade places",
                 "circular permutation", "into the next")
+
+
+REMOTION_RECIPES = (
+    {"id": "YoutubeSubscribeNudge",
+     "words": ("subscribe nudge", "subscribe button", "hit subscribe", "hit the bell", "subscribe"),
+     "dur": 4.0, "place": "full"},
+    {"id": "YoutubeCommentHighlight",
+     "words": ("comment highlight", "youtube comment", "pinned comment"),
+     "dur": 6.0, "place": "full"},
+    {"id": "NameLowerThird",
+     "words": ("lower third", "name plate", "lower-third"),
+     "dur": 3.0, "place": "full"},
+    {"id": "NumberCounter",
+     "words": ("number counter", "count up", "counting number", "counter"),
+     "dur": 3.0, "place": "full"},
+    {"id": "VerticalBarChart",
+     "words": ("bar chart", "vertical bar", "bar graph"),
+     "dur": 4.0, "place": "full"},
+    {"id": "LineChart",
+     "words": ("line chart", "line graph", "trend line"),
+     "dur": 4.0, "place": "full"},
+    {"id": "WordHighlightCaptions",
+     "words": ("word highlight caption", "highlight captions", "karaoke caption"),
+     "dur": 7.0, "place": "full"},
+    {"id": "PoppingWordCaptions",
+     "words": ("popping caption", "popping word", "pop captions"),
+     "dur": 7.0, "place": "full"},
+    {"id": "PolaroidPictures",
+     "words": ("polaroid",),
+     "dur": 5.0, "place": "full"},
+    {"id": "OnScreenMessages",
+     "words": ("on-screen message", "on-screen messages", "imessage overlay", "text message overlay"),
+     "dur": 5.4, "place": "full"},
+    {"id": "SplitText",
+     "words": ("split text", "split title", "kinetic title", "hook title"),
+     "dur": 3.0, "place": "full"},
+)
+
+
+def _match_remotion_recipe(description: str) -> dict | None:
+    d = (description or "").lower()
+    for rec in REMOTION_RECIPES:
+        if any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", d) for w in rec["words"]):
+            return rec
+    return None
+
+
+def _remotion_recipe_prompt() -> str:
+    return ", ".join(f'{rec["words"][0]} ({rec["id"]})' for rec in REMOTION_RECIPES)
 
 
 def _wants_remotion_orbit(description: str) -> bool:
@@ -19348,12 +19403,22 @@ def _remotion_stage_photos(queries: list[str], want: int = 3) -> list[dict]:
     return items
 
 
-def _remotion_overlay_box(canvas: str) -> dict:
+def _remotion_overlay_box(canvas: str, place: str = "top") -> dict:
     W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
+    if place == "full":
+        return {"x": 0, "y": 0, "w": 1, "h": 1,
+                "px_w": W // 2 * 2, "px_h": H // 2 * 2}
     bw = 0.92
-    bh = bw * (420 / 1080) * (W / H)
-    bh = min(bh, 0.28)
-    return {"x": round((1 - bw) / 2, 4), "y": 0.06, "w": round(bw, 4), "h": round(bh, 4),
+    if place == "bottom":
+        bh, y = 0.18, 0.74
+    elif place == "lower":
+        bh, y = 0.28, 0.52
+    elif place == "center":
+        bh, y = 0.42, 0.28
+    else:
+        bh = min(0.28, bw * (420 / 1080) * (W / H))
+        y = 0.06
+    return {"x": round((1 - bw) / 2, 4), "y": round(y, 4), "w": round(bw, 4), "h": round(bh, 4),
             "px_w": int(W * bw) // 2 * 2, "px_h": max(48, int(H * bh) // 2 * 2)}
 
 
@@ -19364,8 +19429,11 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None
     props_file = CACHE_DIR / f"remotion_props_{hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]}.json"
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     props_file.write_text(json.dumps(props), encoding="utf-8")
+    pnpm = shutil.which("pnpm")
+    if not pnpm:
+        raise RuntimeError("pnpm is not on PATH")
     cmd = [
-        shutil.which("pnpm"), "exec", "remotion", "render",
+        pnpm, "exec", "remotion", "render",
         "src/index.ts", composition, str(out_path),
         f"--props={props_file}",
         "--codec=vp8", "--image-format=png", "--concurrency=1", "--gl=swangle",
@@ -19375,6 +19443,37 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
         err = (r.stderr or r.stdout or "remotion render failed")[-500:]
         raise RuntimeError(err)
+
+
+def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
+                        duration: float | None) -> dict:
+    """Render a named official Element (or SplitText) onto the overlay track."""
+    dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
+    props: dict = {}
+    if rec["id"] == "SplitText":
+        m = re.search(r'[“"\']([^”"\']+)[”"\']', description or "")
+        props = {"text": (m.group(1) if m else "WATCH THIS")[:48], "color": "#FFD60A"}
+    key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
+    src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
+    if not (src.exists() and src.stat().st_size > 200):
+        _render_remotion_webm(rec["id"], {**props, "duration": dur}, src)
+    asset_id = hashlib.md5(src.name.encode()).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.webm"
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copyfile(src, dest)
+    _write_asset_meta(asset_id, filename=f"Animation: {description[:48]}",
+                      source="device", device_kind="animation", alpha=True)
+    tl = timeline or {}
+    box = _remotion_overlay_box(tl.get("canvas") or "9x16", rec["place"])
+    return {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
+            "box": box,
+            "device": {"kind": "animation", "engine": "remotion",
+                       "composition": rec["id"], "description": description,
+                       "spec": {"props": props}}}
 
 
 def _make_remotion_orbit(description: str, timeline: dict | None,
@@ -23371,8 +23470,7 @@ WHAT YOU CAN DO (every item is an op below)
   speed ramps (speed up / slow down a stretch).
 - Animated graphics ({", ".join(devices.CATALOG)}): diagrams, frameworks and mental
   models (venn, node_map, step_tracker, timeline_scrubber), stats and kinetic numbers
-  (counter, toggle_meter), app mockups (chat_bubbles, notification, search_bar,
-  subscribe_button: a YouTube subscribe button a mouse hovers over and clicks) and kinetic_text.
+  (toggle_meter), app mockups (chat_bubbles, notification, search_bar) and kinetic_text.
 - ANY OTHER ANIMATION, described in words (add_animation): buttons, icons, like/heart
   bursts, progress bars, loading rings, charts, price tags, app screens, cursors clicking
   things, logo-style reveals, arrows pointing at something, checklists ticking off -- if
@@ -23466,6 +23564,16 @@ Rules:
   say so in the description ("rotating carousel: the three items travel round an oval,
   each moving into the next one's place, the front one resting 0.3s"). Those requests
   render through Remotion (orbiting clip above the speakers).
+- WIRED REMOTION LOOKS -- when the user asks for one of these, use add_animation
+  and put the phrase in the description so the renderer picks the official Element
+  (do not invent a freehand version, and do not use add_device for these):
+  {_remotion_recipe_prompt()}.
+  "subscribe" / "hit the bell" / end-screen CTA → "YouTube subscribe nudge".
+  A counting figure on screen → "number counter".
+  A bar chart or line chart → those words.
+  A kinetic hook title → "split text" plus the exact words in quotes.
+  Exact chat wording the user dictates is still add_text_message; "on-screen messages"
+  is the Remotion iMessage look when they want that graphic, not a dictated thread.
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their
@@ -23491,18 +23599,17 @@ Rules:
   that is the op, not make_image.
 - add_device places an animated graphic. kind is one of {", ".join(devices.CATALOG)}.
   labels are the words it shows: chat_bubbles = messages, notification =
-  [title, body], search_bar = [query, result...], subscribe_button = [channel name,
-  subscriber count like "1.2M"] (use it for "subscribe", "hit the bell" and end-screen
-  calls to action), toggle_meter = [label,
+  [title, body], search_bar = [query, result...], toggle_meter = [label,
   0-100 or on/off], step_tracker/node_map/timeline_scrubber = the steps,
-  venn = [left, right, overlap], counter = [number with unit, caption],
+  venn = [left, right, overlap],
   kinetic_text = [the phrase]. Pull labels and start times from the transcript above;
   when asked for a graphic without specifics, find the idea in the transcript that
   suits one best and place it when that idea is said.
-- "Mental model", "framework", "diagram", "kinetic graph", "chart", "visualise this" are
+- "Mental model", "framework", "diagram", "kinetic graph", "visualise this" are
   add_device: pick the kind that fits the idea (two ideas overlapping → venn, a process →
   step_tracker, connected ideas → node_map, a sequence in time → timeline_scrubber, a
-  number → counter, a level → toggle_meter). Never say you cannot make graphics.
+  level → toggle_meter). A bar chart, line chart or number counter is add_animation
+  with those words (Remotion). Never say you cannot make graphics.
 - "Captions / text / words behind me" is add_device kinetic_text with "behind": true and
   the phrase in labels, timed to when it is said. The running word-by-word captions
   themselves always burn on top; say so only if they ask for those specifically.

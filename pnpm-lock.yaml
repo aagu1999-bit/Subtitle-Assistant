@@ -398,6 +398,21 @@ importers:
 
   artifacts/remotion-overlays:
     dependencies:
+      '@remotion/captions':
+        specifier: 4.0.545
+        version: 4.0.545
+      '@remotion/google-fonts':
+        specifier: 4.0.545
+        version: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@remotion/layout-utils':
+        specifier: 4.0.545
+        version: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@remotion/media':
+        specifier: 4.0.545
+        version: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@remotion/sfx':
+        specifier: 4.0.545
+        version: 4.0.545
       react:
         specifier: 'catalog:'
         version: 19.1.0
@@ -1430,6 +1445,12 @@ packages:
   '@remotion/elevenlabs@4.0.545':
     resolution: {integrity: sha512-HFqaVEKTQgmzMiTXmtdHorK3oClaWSocC5iTBpX6kWdxByimLQDa8DCewEjNOIJhB+Zg01HFQSJRopyps3Ei8g==}
 
+  '@remotion/google-fonts@4.0.545':
+    resolution: {integrity: sha512-6Mr929E+ydjbqWVY2+3H6/V6D6uYhl3bQNLMif35INozGT2YXtHmFc5D4kWIE3RwQrP29WH10VGTq2bt4890/w==}
+
+  '@remotion/layout-utils@4.0.545':
+    resolution: {integrity: sha512-YAsT/kD9Pdphv8UcUnE5X/l8n2vUO8CWsQDQQzEZD2sYXGDP/BN5HiGR4ULr8IR8Kc+KBU3pDiqWOns0dNqIgg==}
+
   '@remotion/licensing@4.0.545':
     resolution: {integrity: sha512-3xXYhNShkGezJUMCJMCpm7tR7OIqGL6hTWn9EXNi0Vde92hGZmLOsNIjkjA7NYHo5lzlTmvyvklIUUgINVZ1lQ==}
 
@@ -1468,6 +1489,9 @@ packages:
     peerDependencies:
       react: '>=16.8.0'
       react-dom: '>=16.8.0'
+
+  '@remotion/sfx@4.0.545':
+    resolution: {integrity: sha512-bG0PIpPU/lRl5ZDgLXEdg+o/0WJNvl/pR+9l5FXl+v/zg0jAqcGHn7lbzSkzc1Pv8v3HGwYoHXJdGofqEJyR7w==}
 
   '@remotion/streaming@4.0.545':
     resolution: {integrity: sha512-hnidfXkK/S3LxzmxrSIcaYC8TJNm4wAu9ss12Pq8p33blCl3wzvTnHpcfU4Khykiq11Vrl0IWQ/I++rqJFF27A==}
@@ -3818,9 +3842,6 @@ packages:
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
-  zod@4.3.6:
-    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
-
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
@@ -4992,6 +5013,20 @@ snapshots:
       '@remotion/captions': 4.0.545
       zod: 4.6.7
 
+  '@remotion/google-fonts@4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      remotion: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+    transitivePeerDependencies:
+      - react
+      - react-dom
+
+  '@remotion/layout-utils@4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      remotion: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+    transitivePeerDependencies:
+      - react
+      - react-dom
+
   '@remotion/licensing@4.0.545': {}
 
   '@remotion/media-utils@4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
@@ -5056,6 +5091,8 @@ snapshots:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
       remotion: 4.0.545(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+
+  '@remotion/sfx@4.0.545': {}
 
   '@remotion/streaming@4.0.545': {}
 
@@ -5287,11 +5324,11 @@ snapshots:
 
   '@scalar/openapi-types@0.5.3':
     dependencies:
-      zod: 4.3.6
+      zod: 4.6.7
 
   '@scalar/openapi-types@0.5.4':
     dependencies:
-      zod: 4.3.6
+      zod: 4.6.7
 
   '@scalar/openapi-upgrader@0.1.11':
     dependencies:
@@ -7306,7 +7343,5 @@ snapshots:
   yoctocolors@2.1.2: {}
 
   zod@3.25.76: {}
-
-  zod@4.3.6: {}
 
   zod@4.6.7: {}

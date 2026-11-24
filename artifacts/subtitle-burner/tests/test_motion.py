@@ -368,3 +368,73 @@ def test_photo_orbit_does_not_silently_become_shapes(app_mod, tmp_path, monkeypa
     monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py must not swallow a photo carousel"))
     with pytest.raises(RuntimeError, match="no photos"):
         app_mod._make_animation("replace the shapes with photos of bali beaches", {"canvas": "9x16"}, 5)
+
+
+def test_wired_remotion_looks_match_their_phrases(app_mod):
+    cases = {
+        "a YouTube subscribe button": "YoutubeSubscribeNudge",
+        "hit the bell": "YoutubeSubscribeNudge",
+        "number counter to 24813": "NumberCounter",
+        "a counter that goes to 10000": "NumberCounter",
+        "vertical bar chart of views": "VerticalBarChart",
+        "a line chart of the trend": "LineChart",
+        "name lower third": "NameLowerThird",
+        "word highlight captions": "WordHighlightCaptions",
+        "popping word captions": "PoppingWordCaptions",
+        "polaroid pictures of the trip": "PolaroidPictures",
+        "on-screen messages look": "OnScreenMessages",
+        'split text "WATCH THIS"': "SplitText",
+        "youtube comment highlight": "YoutubeCommentHighlight",
+    }
+    for desc, cid in cases.items():
+        rec = app_mod._match_remotion_recipe(desc)
+        assert rec and rec["id"] == cid, desc
+    assert app_mod._match_remotion_recipe("rotating carousel of shapes") is None
+    assert app_mod._match_remotion_recipe("an encounter with a client") is None
+    box = app_mod._remotion_overlay_box("9x16", "full")
+    assert box["w"] == 1 and box["h"] == 1 and box["px_w"] == 1080
+
+
+def test_make_animation_uses_remotion_for_a_wired_look(app_mod, monkeypatch):
+    seen = {}
+
+    def fake(rec, desc, tl, dur):
+        seen["id"] = rec["id"]
+        return {"asset_id": "r1", "duration": 4, "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "device": {"kind": "animation", "engine": "remotion", "composition": rec["id"]}}
+
+    monkeypatch.setattr(app_mod, "_make_remotion_look", fake)
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py should not run"))
+    out = app_mod._make_animation("YouTube subscribe nudge on the end card", {"canvas": "9x16"}, 4)
+    assert seen["id"] == "YoutubeSubscribeNudge" and out["device"]["engine"] == "remotion"
+
+
+def test_split_text_passes_quoted_words(app_mod, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(comp, props, out):
+        seen["comp"] = comp
+        seen["props"] = props
+        out.write_bytes(b"webm" + b"\0" * 400)
+
+    monkeypatch.setattr(app_mod, "_render_remotion_webm", fake)
+    monkeypatch.setattr(app_mod, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    rec = app_mod._match_remotion_recipe('split text "WATCH THIS"')
+    out = app_mod._make_remotion_look(rec, 'split text "WATCH THIS"', {"canvas": "9x16"}, 3)
+    assert seen["comp"] == "SplitText" and seen["props"]["text"] == "WATCH THIS"
+    assert seen["props"]["duration"] == 3 and out["box"]["w"] == 1
+
+
+def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: (seen.setdefault("p", p), {"ops": []})[1])
+    tl = {"canvas": "9x16", "tracks": {"main": [], "overlay": [], "text": [], "music": [], "effects": []}}
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "what animations can you make", "timeline": tl})
+    p = seen["p"]
+    assert "YouTube subscribe nudge" in p
+    assert "number counter" in p and "split text" in p
+    assert "WIRED REMOTION LOOKS" in p
