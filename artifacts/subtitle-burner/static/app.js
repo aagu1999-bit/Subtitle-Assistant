@@ -4457,11 +4457,38 @@ function _syncAiEditScopeUi() {
   }
 }
 
+const MOTION_FORMAT_LABEL = {
+  interview: "Interview",
+  vendor_interview: "Vendor interview",
+  event_recap: "Event recap",
+  comedy: "Comedy",
+  recap: "Event recap",
+  vendor: "Vendor interview",
+};
+
+function shortsMotionFormat() {
+  const el = $("hlFormat");
+  const v = el ? String(el.value || "").toLowerCase() : "";
+  return MOTION_FORMAT_LABEL[v] ? v : "";
+}
+
 async function openAiEditPlan(ctx) {
   _aiEditCtx = ctx || null;
   _aiEditRecCuts = [];
   const modal = $("aiEditModal");
   if (!modal || !_aiEditCtx) return;
+  if (!_aiEditCtx.format) {
+    const lane = shortsMotionFormat();
+    if (lane) _aiEditCtx.format = lane;
+  }
+  const laneEl = $("aiEditLane");
+  if (laneEl) {
+    const label = MOTION_FORMAT_LABEL[_aiEditCtx.format];
+    laneEl.hidden = !label;
+    laneEl.textContent = label
+      ? `${label} locks the graphics to that lane. A line that does not fit stays on the face.`
+      : "";
+  }
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
 
@@ -4716,6 +4743,10 @@ async function runAiEditGenerate() {
         create_clip: createClip,
         insert_media: insertMedia,
         cuts,
+        format: _aiEditCtx.format || undefined,
+        // A named lane uses the beat sheet. Auto keeps the older effect pass.
+        smart: !!(_aiEditCtx.format && MOTION_FORMAT_LABEL[_aiEditCtx.format]),
+        use_llm: false,
       }),
     });
     const data = await res.json();

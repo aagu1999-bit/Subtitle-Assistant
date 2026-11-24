@@ -49,12 +49,30 @@
   };
   const FAMILY_LABEL = { ui: "UI", mental: "diagrams", stat: "stats", text: "type" };
 
+  const LOOK_LABEL = {
+    "lower-third": "Name lower third",
+    "backdrop-word": "Backdrop word",
+    "huge-strike": "Huge strike",
+    todo: "To-do",
+    "number-counter": "Number counter",
+    "screenshot-tour": "Screenshot tour",
+    "kinetic-slam": "Kinetic slam",
+    "reject-stamp": "Reject stamp",
+  };
+  const MOTION_FORMATS = {
+    interview: 1, vendor_interview: 1, event_recap: 1, comedy: 1, recap: 1, vendor: 1,
+  };
+
   function treatmentLabel(tr) {
     if (!tr || tr === "none") return { icon: "·", text: "Talking head" };
     if (tr === "punch") return { icon: "⚡", text: "Punch zoom" };
     if (tr === "clean_zoom") return { icon: "🔍", text: "Slow push" };
     if (tr === "broll") return { icon: "🖼", text: "B-roll" };
     if (tr === "kinetic_text") return { icon: "🔤", text: "Kinetic type" };
+    if (tr.startsWith("look:")) {
+      const id = tr.slice(5);
+      return { icon: "✦", text: LOOK_LABEL[id] || id.replace(/-/g, " ") };
+    }
     if (tr.startsWith("device:")) {
       const kind = tr.slice(7);
       const c = catalog.byKind[kind];
@@ -118,6 +136,10 @@
         $("styleStart").value = 0;
         $("styleEnd").value = end ? end.toFixed(1) : "";
         $("styleStatus").textContent = `${st.filename || "This video"} · ${fmt(end)} of speech. Pick a style, then Preview or Build.`;
+        const fmtEl = $("styleFormat");
+        if (fmtEl && !fmtEl.dataset.touched && MOTION_FORMATS[st.clip_format]) {
+          fmtEl.value = st.clip_format;
+        }
       } catch (e) { /* status text stays */ }
     }
   }
@@ -174,6 +196,8 @@
       graphics: $("styleGraphics").checked, broll: $("styleBroll").checked,
       moves: $("styleMoves").checked,
     };
+    const format = ($("styleFormat") && $("styleFormat").value) || "";
+    if (MOTION_FORMATS[format]) body.format = format;
     if (endRaw > start) body.end_time = endRaw;
     return body;
   }
@@ -203,7 +227,7 @@
     let graphics = 0, broll = 0, moves = 0;
     spans.forEach((s) => {
       counts[s.role] = (counts[s.role] || 0) + 1;
-      if (s.treatment.startsWith("device:") || s.treatment === "kinetic_text") graphics++;
+      if (s.treatment.startsWith("device:") || s.treatment.startsWith("look:") || s.treatment === "kinetic_text") graphics++;
       else if (s.treatment === "broll") broll++;
       else if (s.treatment === "punch" || s.treatment === "clean_zoom") moves++;
     });
@@ -238,7 +262,7 @@
         ${visual}
         <div class="sb-meta">
           <span class="sb-time">${fmt(s.start - (plan.structure.in || 0))}</span>
-          <span class="sb-role">${esc(ROLE_LABEL[s.role] || s.role)}</span>
+          <span class="sb-role">${esc(ROLE_LABEL[s.role] || s.role)}${s.visual && s.visual !== "none" ? " · " + esc(String(s.visual).replace(/_/g, " ")) : ""}</span>
           <span class="sb-tr">${tr.icon} ${esc(tr.text)}</span>
         </div>
         <p class="sb-text">“${esc((s.text || "").slice(0, 140))}${(s.text || "").length > 140 ? "…" : ""}”</p>
@@ -308,6 +332,11 @@
     ["styleGraphics", "styleBroll", "styleMoves"].forEach((id) => {
       const el = $(id);
       if (el) el.addEventListener("change", () => { if (style.plan) previewPlan(); });
+    });
+    const fmtEl = $("styleFormat");
+    if (fmtEl) fmtEl.addEventListener("change", () => {
+      fmtEl.dataset.touched = "1";
+      if (style.plan) previewPlan();
     });
     if ($("stylePreviewBtn")) $("stylePreviewBtn").onclick = previewPlan;
     if ($("styleBuildBtn")) $("styleBuildBtn").onclick = buildEdit;
@@ -988,7 +1017,8 @@
       const row = document.createElement("button");
       row.type = "button";
       row.className = `tl-structure-row role-${s.role}`;
-      row.innerHTML = `<span class="sb-time">${fmt(t)}</span><span class="sb-role">${esc(ROLE_LABEL[s.role] || s.role)}</span>
+      const vis = s.visual && s.visual !== "none" ? " · " + String(s.visual).replace(/_/g, " ") : "";
+      row.innerHTML = `<span class="sb-time">${fmt(t)}</span><span class="sb-role">${esc((ROLE_LABEL[s.role] || s.role) + vis)}</span>
         <span class="tl-structure-tr" title="${esc(s.reason || "")}">${tr.icon} ${esc(tr.text)}</span>
         <span class="tl-structure-text">${esc((s.text || "").slice(0, 90))}</span>`;
       row.onclick = () => api_.seek(t + 0.01);

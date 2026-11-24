@@ -425,7 +425,7 @@
         <div class="style-head">
           <div>
             <h2 style="margin:0">🎨 Style</h2>
-            <p class="muted" style="margin:4px 0 0;font-size:.8rem">A style decides pacing, camera moves, which graphics are allowed and how often, and the caption look. The edit is planned from what is said: hooks, numbers, lists, stories.</p>
+            <p class="muted" style="margin:4px 0 0;font-size:.8rem">A style decides pacing, camera moves, and the caption look. Pick a format to lock the graphics to that lane. Any graphic plans from the words the way it does today.</p>
           </div>
           <div class="style-window">
             <label class="muted">Window
@@ -448,6 +448,15 @@
           <label class="style-toggle"><input type="checkbox" id="styleBroll" checked> 🖼 B-roll</label>
           <label class="style-toggle" title="When no library or stock clip fits, render an abstract moving texture (never people, hands or text)"><input type="checkbox" id="styleGenerate" checked> 🌀 Generated fills</label>
           <label class="style-toggle" title="Ask Gemini to label the beats (hook / data / story…). Off = fast local rules."><input type="checkbox" id="styleLlm"> 🤖 Gemini roles</label>
+          <label class="style-format" for="styleFormat" title="A format may only use its own looks. Anything else stays on the face.">Format
+            <select id="styleFormat">
+              <option value="">Any graphic</option>
+              <option value="interview">Interview</option>
+              <option value="vendor_interview">Vendor interview</option>
+              <option value="event_recap">Event recap</option>
+              <option value="comedy">Comedy</option>
+            </select>
+          </label>
         </div>
         <div class="style-actions">
           <button type="button" id="stylePreviewBtn" class="btn btn-secondary">👁 Preview edit</button>
@@ -2063,6 +2072,7 @@
       <div class="ai-edit-modal-head">
         <strong>AI Edit</strong>
         <span id="aiEditScopeLabel" class="muted" style="font-size:.78rem">Full video or clip window → cuts, zooms, captions → Timeline</span>
+        <span id="aiEditLane" class="muted" hidden style="font-size:.78rem"></span>
         <button type="button" id="aiEditClose" class="tl-chip-btn" style="margin-left:auto">✕</button>
       </div>
       <div class="ai-edit-modal-body">

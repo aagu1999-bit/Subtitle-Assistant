@@ -50,6 +50,18 @@ def test_edit_plan_is_a_storyboard_without_media(app_mod, talk_job):
     assert "spans" not in r["style"] and "caption" not in r["structure"]
 
 
+def test_edit_plan_format_locks_motion_to_the_lane(app_mod, talk_job):
+    c = app_mod.app.test_client()
+    r = c.post("/edit-plan", json={"job_id": talk_job, "style_pack": "pulse",
+                                   "intensity": "high", "format": "interview"}).get_json()
+    assert r["structure"]["format"] == "interview"
+    allowed = {"none", "punch", "look:lower-third", "look:backdrop-word", "look:huge-strike"}
+    assert {s["treatment"] for s in r["structure"]["spans"]} <= allowed
+    texted = [s for s in r["structure"]["spans"] if "texted" in s["text"]][0]
+    assert texted["treatment"] == "none"
+    assert all(s.get("visual") for s in r["structure"]["spans"])
+
+
 def test_src_to_timeline_respects_cuts(app_mod):
     assert app_mod._src_to_timeline(5.0, 1.0, [[2.0, 3.0]]) == pytest.approx(3.0)
     assert app_mod._src_to_timeline(2.5, 1.0, [[2.0, 3.0]]) == pytest.approx(1.0)

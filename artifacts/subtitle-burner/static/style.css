@@ -2137,6 +2137,8 @@ header.app-header {
 .style-intensity { display: inline-flex; gap: 4px; align-items: center; margin-right: 6px; }
 .style-intensity .tl-chip-btn.active { background: #6c5cff; color: #fff; border-color: #6c5cff; }
 .style-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; color: #cfd3dc; cursor: pointer; }
+.style-format { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; color: #cfd3dc; }
+.style-format select { padding: 4px 8px; background: #10131d; border: 1px solid #3b4252; color: #fff; border-radius: 8px; font: inherit; }
 .style-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .style-summary { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: .8rem; padding: 8px 12px; background: #12151f; border: 1px solid #2a2f3a; border-radius: 10px; margin-bottom: 12px; }
 .style-storyboard { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
