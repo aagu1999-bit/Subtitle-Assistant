@@ -631,7 +631,18 @@ def test_the_coeditor_is_told_everything_it_can_do(app_mod, temp_db, monkeypatch
     That section once listed only captions, shots, overlays, music, titles and
     styles, so it told people it could not make graphics or put text behind
     them -- both of which are ops.
+
+    The chip itself is answered locally: asking the model to dump the full
+    list into a JSON string blew up once the look recipes got long.
     """
+    out = app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "What can you change on this timeline, and what can't you do?",
+        "timeline": _coeditor_timeline()}).get_json()
+    msg = (out.get("message") or "").lower()
+    assert out["ops"] == []
+    for phrase in ("captions", "punch zoom", "graphics", "behind", "cannot"):
+        assert phrase in msg, phrase
+
     seen = {}
 
     def fake(prompt):
@@ -640,7 +651,7 @@ def test_the_coeditor_is_told_everything_it_can_do(app_mod, temp_db, monkeypatch
 
     monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
     app_mod.app.test_client().post("/co-editor", json={
-        "prompt": "what can you do?", "timeline": _coeditor_timeline()})
+        "prompt": "add a punch zoom", "timeline": _coeditor_timeline()})
     p = seen["prompt"]
     head = p[:p.index("Current timeline")]
     for capability in ("Animated graphics", "mental", "Behind the speaker",

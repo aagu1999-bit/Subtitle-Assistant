@@ -6129,6 +6129,69 @@ def _ensure_effects_span_timeline(effects: list, t_in: float, t_out: float,
     return effects
 
 
+def _salvage_ops_message(text: str) -> dict | None:
+    """Pull ops + message out of almost-JSON (unescaped quotes in the message)."""
+    ops: list = []
+    om = re.search(r'"ops"\s*:\s*(\[(?:[^\[\]]|\[[^\[\]]*\])*\])', text or "")
+    if om:
+        try:
+            got = json.loads(om.group(1))
+            if isinstance(got, list):
+                ops = got
+        except json.JSONDecodeError:
+            ops = []
+    mm = re.search(r'"message"\s*:\s*"', text or "")
+    if not mm:
+        return {"ops": ops, "message": ""} if ops else None
+    i = mm.end()
+    out: list[str] = []
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            out.append({"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}.get(nxt, nxt))
+            i += 2
+            continue
+        if ch == '"':
+            rest = text[i + 1:].lstrip()
+            if rest.startswith("}") or rest.startswith(",") or rest == "":
+                break
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return {"ops": ops, "message": "".join(out)}
+
+
+def _loads_model_json(text: str) -> dict:
+    """Parse Gemini JSON; salvage a message if quotes inside it were not escaped."""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, list):
+            return {"ops": obj, "message": ""}
+    except json.JSONDecodeError:
+        pass
+    start, end = raw.find("{"), raw.rfind("}")
+    if 0 <= start < end:
+        try:
+            obj = json.loads(raw[start:end + 1])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    salvaged = _salvage_ops_message(raw)
+    if salvaged is not None:
+        return salvaged
+    raise json.JSONDecodeError("not JSON", raw, 0)
+
+
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
     """Call Gemini and parse a JSON-mode response. Raises on failure."""
     import requests
@@ -6154,7 +6217,7 @@ def _gemini_generate_clip_suggestions(prompt: str) -> dict:
     except (KeyError, IndexError) as e:
         raise RuntimeError(f"Gemini returned an unexpected response shape: {e}")
     try:
-        parsed = json.loads(text)
+        parsed = _loads_model_json(text)
         ai_logger.info(f"Gemini prompt len: {len(prompt)}, response len: {len(text)}")
         return parsed
     except json.JSONDecodeError as e:
@@ -19402,7 +19465,7 @@ def _match_remotion_recipe(description: str) -> dict | None:
 
 
 def _remotion_recipe_prompt() -> str:
-    return ", ".join(f'{rec["words"][0]} ({rec["id"]})' for rec in REMOTION_RECIPES)
+    return ", ".join(rec["words"][0] for rec in REMOTION_RECIPES)
 
 
 def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
@@ -23340,6 +23403,45 @@ def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
 CO_EDITOR_TRANSCRIPT_CHARS = 12000
 
 
+def _co_editor_capability_question(prompt: str) -> bool:
+    p = re.sub(r"\s+", " ", (prompt or "").strip().lower())
+    return bool(re.search(r"what can you (do|change)|what can'?t you|what can you not", p))
+
+
+def _co_editor_capability_message() -> str:
+    """Answer the 'what can you do' chip without asking the model to serialise it."""
+    return (
+        "I can change this timeline. You still click Render to bake the MP4.\n\n"
+        "Captions\n"
+        "• Font, size, colours, highlight, position, words per line, speaker colours\n\n"
+        "Shots\n"
+        "• Cut, trim, split, merge, reorder, swap\n"
+        "• Silence cuts, transitions, colour grade\n\n"
+        "Camera\n"
+        "• Punch zoom on the speaker, zooms, Ken Burns, split screen, speed ramps\n\n"
+        "Graphics and animation\n"
+        "• Diagrams (venn, steps, maps), chat bubbles, search bars, kinetic text\n"
+        "• Any other animation described in words, including pictures\n"
+        "• Named looks: subscribe nudge, number counter, charts, captions, polaroid, "
+        "split/blur/glitch titles, cards, aurora and other backgrounds, "
+        "looks like this, screenshot tour, rotating carousel\n"
+        "• Sounds (pop, click, whoosh) on graphics; photos stay silent unless you add one\n\n"
+        "Pictures\n"
+        "• Generate images, stock or your photos as backgrounds or carousels\n"
+        "• Put anything behind you (you stay in front)\n"
+        "• iMessage threads with the exact words you give\n\n"
+        "Also\n"
+        "• Titles, overlay layout, music ducking, canvas, clip styles, polish cut\n"
+        "• Story shape (hook, body, closer) as concrete timeline edits\n\n"
+        "I cannot\n"
+        "• Rewrite individual transcript words\n"
+        "• Accept B-roll one clip at a time (accept all, or skip all)\n"
+        "• Download files, change API keys, or run code\n"
+        "• Invent a new kind of edit that is not on this list\n"
+        "• Finish export for you"
+    )
+
+
 def _plain_co_editor_message(text: str) -> str:
     """The chat bubble shows plain text, so markdown arrives as stray symbols."""
     import re as _re
@@ -23438,6 +23540,8 @@ def co_editor():
     prompt = (data.get("prompt") or "").strip()
     timeline = data.get("timeline") or {}
     client_ctx = data.get("context") or {}
+    if _co_editor_capability_question(prompt):
+        return jsonify({"ops": [], "message": _co_editor_capability_message()})
     if data.get("async") and prompt and timeline:
         return jsonify({"pending": _co_editor_start_async(data)})
     if not prompt:
@@ -23609,8 +23713,9 @@ PURPOSE
 - User describes an edit in plain language → you return structured ops the UI applies now.
 - You are NOT a general assistant and you cannot finish export. After ops apply,
   the user still clicks ▶ Render / Instant Export to bake the MP4.
-- If they ask what you can do / how something works, return ops: [] and explain clearly in
-  message, drawing on the full list below -- never a shorter one.
+- If they ask what you can do / how something works, return ops: [] and explain in
+  grouped everyday words. Do not paste op names, composition ids, JSON, or the
+  whole recipe list. Keep the message under 1200 characters.
 
 WHAT YOU CAN DO (every item is an op below)
 - Captions: font, size, colours, highlight, position, words per line, speaker colours.

@@ -438,6 +438,16 @@ def test_split_text_passes_quoted_words(app_mod, monkeypatch, tmp_path):
     assert seen["props"]["duration"] == 3 and out["box"]["w"] == 1
 
 
+def test_gemini_json_with_quotes_in_the_message_is_salvaged(app_mod):
+    broken = (
+        '{\n"ops": [],\n"message": "I can help. Captions and "looks like this" '
+        'and screenshot tour.\n"\n}'
+    )
+    out = app_mod._loads_model_json(broken)
+    assert out["ops"] == []
+    assert "looks like this" in out["message"] and "screenshot tour" in out["message"]
+
+
 def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
     seen = {}
     monkeypatch.setattr(
