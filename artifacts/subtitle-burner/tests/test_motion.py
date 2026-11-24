@@ -474,12 +474,34 @@ def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
     assert "kinetic slam" in p and "HYPERFRAMES LOOKS" in p
     assert "clip wipe" in p and "instagram follow" in p
     assert "soft pill lower third" in p and "handwritten title" in p
+    assert "TALKING-HEAD EFFECTS LOOK BOOK" in p
+    assert "backdrop word" in p and "lean in" in p
 
 
 def test_capability_lists_hyperframes_overlays(app_mod):
     msg = app_mod._co_editor_capability_message().lower()
     assert "hyperframes" in msg
     assert "kinetic slam" in msg and "instagram follow" in msg
+    assert "backdrop word" in msg and "lean in" in msg
+
+
+def test_effects_lookbook_wires_a_shortlist(app_mod):
+    import motion as motion_mod
+    assert app_mod._match_effects_look("backdrop word")["id"] == "backdrop-word"
+    assert app_mod._match_effects_look("kill the lights")["id"] == "spotlight"
+    assert app_mod._match_named_look("lean in") == (
+        "effects", app_mod._match_effects_look("lean in"))
+    assert app_mod._match_named_look("orbit around me")[0] == "effects"
+    assert app_mod._match_named_look("rotating carousel of shapes")[0] is None
+    spec = motion_mod.normalize(app_mod._effects_motion_spec(
+        app_mod._match_effects_look('backdrop word "GO"'),
+        'backdrop word "GO"', 2.5))
+    assert any(l.get("text") == "GO" for l in spec["layers"])
+    op, note = app_mod._resolve_add_animation(
+        {"description": "lean in", "start": 4.2}, {"canvas": "9x16"})
+    assert note == "" and op["op"] == "add_effect" and op["type"] == "punch_zoom"
+    assert "lean in" in app_mod._effects_lookbook_prompt()
+    assert len(app_mod._effects_lookbook()) == 51
 
 
 def test_make_animation_uses_hyperframes_for_slam_captions(app_mod, monkeypatch):

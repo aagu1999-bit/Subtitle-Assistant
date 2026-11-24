@@ -19312,6 +19312,13 @@ def _make_animation(description: str, timeline: dict | None,
             return _make_hyperframes_look(rec, description, timeline, duration)
         except Exception as e:
             ai_logger.info(f"[hyperframes] {rec['id']} failed, falling back: {e}")
+    if engine == "effects" and rec:
+        if rec.get("engine") == "effect":
+            raise ValueError("lean in is a punch zoom on the speaker, not an overlay")
+        try:
+            return _make_effects_look(rec, description, timeline, duration)
+        except Exception as e:
+            ai_logger.info(f"[effects] {rec['id']} failed, falling back: {e}")
     if _wants_remotion_orbit(description):
         try:
             return _make_remotion_orbit(description, timeline, duration)
@@ -19328,6 +19335,7 @@ def _make_animation(description: str, timeline: dict | None,
 
 REMOTION_DIR = Path(__file__).resolve().parent.parent / "remotion-overlays"
 HYPERFRAMES_DIR = Path(__file__).resolve().parent.parent / "hyperframes-overlays"
+EFFECTS_LOOKBOOK_DIR = Path(__file__).resolve().parent.parent / "effects-lookbook"
 _ORBIT_WORDS = ("orbit", "rotat", "carousel", "turntable", "trade places",
                 "circular permutation", "into the next")
 
@@ -19481,15 +19489,20 @@ def _match_remotion_recipe(description: str) -> dict | None:
 
 
 def _match_named_look(description: str) -> tuple[str | None, dict | None]:
-    """Pick Remotion or Hyperframes by the longest matching phrase."""
+    """Pick Remotion, Hyperframes or the effects look book by longest phrase."""
     r_rec, r_len = _match_recipe_words(description, REMOTION_RECIPES)
     h_rec, h_len = _match_recipe_words(description, _hyperframes_recipes())
+    e_rec, e_len = _match_recipe_words(description, _effects_wired())
+    if e_len > r_len and e_len > h_len:
+        return "effects", e_rec
     if h_len > r_len:
         return "hyperframes", h_rec
     if r_rec:
         return "remotion", r_rec
     if h_rec:
         return "hyperframes", h_rec
+    if e_rec:
+        return "effects", e_rec
     return None, None
 
 
@@ -19661,6 +19674,193 @@ def _hyperframes_recipe_prompt() -> str:
         if groups.get(key):
             parts.append(f"{key}: {', '.join(groups[key])}")
     return ". ".join(parts)
+
+
+_EFFECTS_LOOKBOOK_CACHE: tuple | None = None
+_EFFECTS_WIRED_CACHE: tuple | None = None
+
+
+def _load_effects_lookbook() -> tuple:
+    path = EFFECTS_LOOKBOOK_DIR / "looks.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    looks = data.get("looks") if isinstance(data, dict) else None
+    return tuple(looks) if isinstance(looks, list) else ()
+
+
+def _effects_lookbook() -> tuple:
+    global _EFFECTS_LOOKBOOK_CACHE
+    if _EFFECTS_LOOKBOOK_CACHE is None:
+        _EFFECTS_LOOKBOOK_CACHE = _load_effects_lookbook()
+    return _EFFECTS_LOOKBOOK_CACHE
+
+
+def _effects_wired() -> tuple:
+    global _EFFECTS_WIRED_CACHE
+    if _EFFECTS_WIRED_CACHE is None:
+        recs = []
+        for look in _effects_lookbook():
+            if not isinstance(look, dict) or not look.get("wired"):
+                continue
+            words = look.get("words") or []
+            if not words:
+                continue
+            recs.append({
+                "id": str(look.get("id") or ""),
+                "words": tuple(str(w) for w in words if w),
+                "engine": str(look.get("engine") or "motion"),
+                "type": look.get("type"),
+                "dur": float(look.get("dur") or 3.0),
+                "behind": bool(look.get("behind")),
+                "props": look.get("props"),
+            })
+        _EFFECTS_WIRED_CACHE = tuple(recs)
+    return _EFFECTS_WIRED_CACHE
+
+
+def _match_effects_look(description: str) -> dict | None:
+    rec, _ = _match_recipe_words(description, _effects_wired())
+    return rec
+
+
+def _effects_lookbook_prompt() -> str:
+    wired = ", ".join(rec["words"][0] for rec in _effects_wired())
+    n = len(_effects_lookbook())
+    return (
+        f"Wired talking-head looks: {wired}. "
+        f"The look book has {n} names (Hop / claude-video-effects). "
+        "If they ask for one that is not wired, say so and offer the closest wired look. "
+        "Do not invent a freehand copy. lean in is add_effect punch_zoom, not add_animation. "
+        "The others are add_animation with the phrase in the description; "
+        "backdrop word / spotlight / huge strike / todo list / head orbit sit BEHIND the speaker "
+        '("behind": true). Quoted words go on screen.'
+    )
+
+
+def _effects_items(description: str, n: int = 3) -> list[str]:
+    raw = _quoted_look_text(description, "one, two, three")
+    items = [w.strip()[:24] for w in re.split(r"[,/|]", raw) if w.strip()][:n]
+    while len(items) < n:
+        items.append(("One", "Two", "Three")[len(items)])
+    return items
+
+
+def _effects_motion_spec(rec: dict, description: str, duration: float | None) -> dict:
+    """Canned motion.py scenes for wired look-book overlays (not their fx.py)."""
+    dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
+    rid = rec["id"]
+    gold, ink, red = "#FFD60A", "#0F1220", "#E11D2E"
+    text = _quoted_look_text(description, {
+        "backdrop-word": "WATCH THIS", "reject-stamp": "REJECT",
+        "comment-box": "nice", "huge-strike": "NO", "spotlight": "WATCH",
+    }.get(rid, "WATCH THIS"))
+    if rid == "backdrop-word":
+        return {"duration": dur, "size": [1080, 1920], "placement": "full",
+                "layers": [
+                    {"id": "w", "type": "text", "text": text.upper(), "x": 540, "y": 820,
+                     "size": 160, "font": "Anton", "color": gold, "max_width": 1000,
+                     "keys": [{"t": 0, "y": 1180, "opacity": 0, "scale": 0.7},
+                              {"t": 0.45, "y": 820, "opacity": 1, "scale": 1, "ease": "back"},
+                              {"t": dur, "opacity": 1}]}]}
+    if rid == "spotlight":
+        quoted = re.search(r'[“"\']([^”"\']+)[”"\']', description or "")
+        layers = [{"id": "dark", "type": "rect", "x": 540, "y": 960, "w": 1080, "h": 1920,
+                   "fill": "#000000CC",
+                   "keys": [{"t": 0, "opacity": 0}, {"t": 0.35, "opacity": 1, "ease": "out"}]}]
+        if quoted:
+            layers.append({"id": "w", "type": "text", "text": quoted.group(1)[:48].upper(),
+                           "x": 540, "y": 640, "size": 140, "font": "Anton", "color": gold,
+                           "max_width": 960,
+                           "keys": [{"t": 0.2, "opacity": 0, "scale": 0.85},
+                                    {"t": 0.55, "opacity": 1, "scale": 1, "ease": "out"}]})
+        return {"duration": dur, "size": [1080, 1920], "placement": "full", "layers": layers}
+    if rid == "reject-stamp":
+        return {"duration": dur, "size": [1000, 700], "placement": "center", "width": 0.86,
+                "layers": [
+                    {"id": "stamp", "type": "rect", "x": 500, "y": 350, "w": 720, "h": 280,
+                     "radius": 18, "fill": "#00000000", "stroke": red, "stroke_width": 18,
+                     "rotation": -14,
+                     "keys": [{"t": 0, "scale": 2.4, "opacity": 0, "rotation": 12},
+                              {"t": 0.28, "scale": 1, "opacity": 1, "rotation": -14, "ease": "back"}]},
+                    {"id": "t", "type": "text", "parent": "stamp", "text": text.upper()[:16],
+                     "x": 0, "y": 0, "size": 96, "font": "Anton", "color": red}]}
+    if rid == "comment-box":
+        return {"duration": dur, "size": [1000, 240], "placement": "lower", "width": 0.92,
+                "layers": [
+                    {"id": "bar", "type": "rect", "x": 500, "y": 130, "w": 960, "h": 180,
+                     "radius": 90, "fill": "#1A1A1AF2",
+                     "keys": [{"t": 0, "y": 260, "opacity": 0},
+                              {"t": 0.3, "y": 130, "opacity": 1, "ease": "out"}]},
+                    {"id": "av", "type": "circle", "parent": "bar", "x": -360, "y": 0,
+                     "r": 52, "fill": gold},
+                    {"id": "name", "type": "text", "parent": "bar", "text": "you",
+                     "x": -250, "y": -28, "size": 28, "font": "bold", "color": "#AAAAAA",
+                     "align": "left", "max_width": 200},
+                    {"id": "msg", "type": "text", "parent": "bar", "text": text,
+                     "x": -250, "y": 18, "size": 40, "font": "bold", "color": "#FFFFFF",
+                     "align": "left", "max_width": 520, "type_on": [0.35, min(dur * 0.7, 2.0)]},
+                    {"id": "heart", "type": "icon", "parent": "bar", "name": "heart",
+                     "x": 380, "y": 0, "size": 42, "color": "#FF3B6B",
+                     "keys": [{"t": 1.1, "opacity": 0, "scale": 0.4},
+                              {"t": 1.35, "opacity": 1, "scale": 1.15, "ease": "back"},
+                              {"t": 1.5, "scale": 1}]}]}
+    if rid == "todo":
+        items = _effects_items(description, 3)
+        layers = [{"id": "card", "type": "rect", "x": 540, "y": 420, "w": 860, "h": 520,
+                   "radius": 36, "fill": "#FFFFFF",
+                   "keys": [{"t": 0, "y": 520, "opacity": 0},
+                            {"t": 0.35, "y": 420, "opacity": 1, "ease": "out"}]}]
+        for i, item in enumerate(items):
+            y = -140 + i * 140
+            t0 = 0.5 + i * 0.55
+            layers += [
+                {"id": f"box{i}", "type": "rect", "parent": "card", "x": -340, "y": y,
+                 "w": 56, "h": 56, "radius": 10, "fill": "#FFFFFF", "stroke": ink,
+                 "stroke_width": 4},
+                {"id": f"ck{i}", "type": "icon", "parent": f"box{i}", "name": "check",
+                 "x": 0, "y": 0, "size": 36, "color": "#00C853",
+                 "keys": [{"t": t0, "opacity": 0, "scale": 0.4},
+                          {"t": t0 + 0.2, "opacity": 1, "scale": 1, "ease": "back"}]},
+                {"id": f"lb{i}", "type": "text", "parent": "card", "text": item,
+                 "x": -280, "y": y, "size": 44, "font": "bold", "color": ink,
+                 "align": "left", "max_width": 560},
+            ]
+        return {"duration": dur, "size": [1080, 900], "placement": "upper", "width": 0.88,
+                "layers": layers}
+    if rid == "huge-strike":
+        return {"duration": dur, "size": [1080, 1920], "placement": "full",
+                "layers": [
+                    {"id": "w", "type": "text", "text": text.upper(), "x": 540, "y": 760,
+                     "size": 180, "font": "Anton", "color": "#F8FAFC", "max_width": 1000,
+                     "keys": [{"t": 0, "opacity": 0, "scale": 0.8},
+                              {"t": 0.4, "opacity": 1, "scale": 1, "ease": "out"}]},
+                    {"id": "line", "type": "rect", "x": 540, "y": 760, "w": 40, "h": 18,
+                     "fill": red, "anchor": "left",
+                     "keys": [{"t": 0.7, "w": 40, "opacity": 0},
+                              {"t": 0.75, "opacity": 1},
+                              {"t": 1.15, "w": 920, "ease": "out"}]}]}
+    raise ValueError(f"no motion spec for {rid}")
+
+
+def _make_effects_look(rec: dict, description: str, timeline: dict | None,
+                       duration: float | None) -> dict:
+    """Render a wired look-book overlay (motion.py or Remotion orbit)."""
+    tl = timeline or {}
+    if rec.get("engine") == "remotion_orbit":
+        out = _make_remotion_orbit(description, timeline, duration)
+        out["behind"] = True
+        return out
+    spec = motion.normalize(_effects_motion_spec(rec, description, duration))
+    spec = motion.fit_to_content(spec)
+    out = _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
+                               int(tl.get("fps") or 30))
+    if rec.get("behind"):
+        out["behind"] = True
+    out.setdefault("device", {})["engine"] = "effects"
+    out["device"]["composition"] = rec["id"]
+    return out
 
 
 def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
@@ -23601,6 +23801,12 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
         dur = max(0.8, min(12.0, float(dur))) if dur is not None else None
     except (TypeError, ValueError):
         return None, "the animation had no usable time"
+    rec = _match_effects_look(desc)
+    if rec and rec.get("engine") == "effect":
+        fx = {"type": rec.get("type") or "punch_zoom", "start": start,
+              "duration": dur if dur is not None else rec.get("dur") or 1.2,
+              "intensity": "high"}
+        return _resolve_add_effect(fx)
     try:
         info = _make_animation(desc, timeline, dur)
     except (RuntimeError, OSError, ValueError) as e:
@@ -23685,6 +23891,9 @@ def _co_editor_capability_message() -> str:
         "pill karaoke, soft pill / youtube / bild lower thirds, news ticker, "
         "instagram follow, tiktok follow, comment cards, handwritten title, "
         "speech bubble — ask for the look by name\n"
+        "• Talking-head effects: lean in, backdrop word, spotlight, reject stamp, "
+        "comment box, todo list, huge strike, head orbit (behind you). "
+        "A look book of 51 names exists; unwired ones I will say so\n"
         "• Sounds (pop, click, whoosh) on graphics; photos stay silent unless you add one\n\n"
         "Pictures\n"
         "• Generate images, stock or your photos as backgrounds or carousels\n"
@@ -24099,6 +24308,7 @@ Rules:
   {_hyperframes_recipe_prompt()}.
   Captions and lower thirds sit over the talking head. Follow cards, comment cards,
   HUDs and handwritten titles do too. Quoted words go on screen when the look takes text.
+- TALKING-HEAD EFFECTS LOOK BOOK (Hop / claude-video-effects names). {_effects_lookbook_prompt()}
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their
