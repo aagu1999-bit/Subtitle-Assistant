@@ -76,6 +76,18 @@ PORT = "8082"
 BASE_PATH = "/__mockup"
 
 [[workflows.workflow]]
+name = "Remotion Studio"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd /home/runner/workspace/artifacts/remotion-overlays && pnpm remotion studio --no-open --ipv4 --port 8000 --disable-git-source"
+waitForPort = 8000
+
+[[workflows.workflow]]
 name = "Project"
 mode = "parallel"
 author = "agent"

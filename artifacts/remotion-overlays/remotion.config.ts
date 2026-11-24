@@ -7,3 +7,10 @@ Config.setCodec("vp8");
 // Replit's Docker cap is below Remotion's default ~4GB guess.
 Config.setConcurrency(1);
 
+// Official video building blocks (charts, maps, captions, lower thirds…).
+// Browse in Studio → Actions → Browse Elements. Copies source when you add one.
+Config.addElementLibrary({
+  url: "https://www.remotion.dev/elements",
+  displayName: "Remotion Elements",
+});
+
