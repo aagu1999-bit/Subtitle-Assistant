@@ -528,7 +528,8 @@ def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
     cat = c.get("/co-editor/looks").get_json()
     ids = {g["id"] for g in cat["groups"]}
     assert ids == {"effects", "hyperframes", "remotion", "effects-ref"}
-    assert any(it["slash"] == "lean-in" for it in cat["groups"][0]["items"])
+    lean_item = next(it for it in cat["groups"][0]["items"] if it["slash"] == "lean-in")
+    assert lean_item["blurb"]
     lean = c.post("/co-editor", json={"prompt": "/lean-in", "timeline": tl}).get_json()
     assert lean["ops"][0]["op"] == "add_effect" and lean["ops"][0]["type"] == "punch_zoom"
     word = c.post("/co-editor", json={

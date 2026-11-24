@@ -24040,6 +24040,21 @@ def _library_look_entries() -> list[dict]:
     return out
 
 
+def _look_menu_blurb(engine: str, rec: dict) -> str:
+    """One line under the slash name, so the menu is not only a title."""
+    if engine == "effects":
+        for look in _effects_lookbook():
+            if isinstance(look, dict) and look.get("id") == rec.get("id"):
+                text = str(look.get("blurb") or "").strip()
+                if text:
+                    return text
+    phrase = str((rec.get("words") or ["this look"])[0])
+    group = str(rec.get("group") or "").strip()
+    if engine == "hyperframes" and group:
+        return f"{group}. {phrase[:1].upper()}{phrase[1:]}."
+    return f"Places {phrase} on the picture."
+
+
 def _co_editor_looks_catalog() -> dict:
     """Slash-menu payload: subsections of wired looks plus the 51-name book."""
     groups = [
@@ -24063,7 +24078,8 @@ def _co_editor_looks_catalog() -> dict:
                "remotion": "remotion"}[entry["engine"]]
         phrase = rec["words"][0]
         item = {"id": rec["id"], "slash": _look_slash_id(rec["id"]),
-                "phrase": phrase, "wired": True,
+                "phrase": phrase, "blurb": _look_menu_blurb(entry["engine"], rec),
+                "wired": True,
                 "needs_text": rec.get("props") in ("text", "words", "count")}
         by_id[gid]["items"].append(item)
     wired_ids = {rec["id"] for rec in _effects_wired()}

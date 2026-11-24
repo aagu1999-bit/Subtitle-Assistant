@@ -239,6 +239,25 @@ def test_comedy_only_moves_on_the_punchline():
     assert all(r["treatment"] == "none" for r in rows if r["role"] != "thesis")
 
 
+def test_auto_picks_a_motion_pack_instead_of_inventing_cards():
+    plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="auto")
+    assert plan["structure"]["format"] == "interview"
+    assert {r["treatment"] for r in plan["structure"]["spans"]} <= {
+        "none", "punch", "look:lower-third", "look:backdrop-word", "look:huge-strike"}
+    words = words_from([
+        (0.0, "Okay so I have a joke."),
+        (4.0, "The punchline is I still brought a spreadsheet."),
+    ])
+    comedy = ee.plan_edit(words, 0, 12, intensity="high", format="auto")
+    assert comedy["structure"]["format"] == "comedy"
+    recap_words = words_from([
+        (0.0, "The crowd at the festival lost it."),
+        (5.0, "On stage it looked like the whole venue cheered."),
+    ])
+    recap = ee.plan_edit(recap_words, 0, 12, intensity="high", format="auto")
+    assert recap["structure"]["format"] == "event_recap"
+
+
 def test_an_unknown_format_keeps_the_old_planner():
     plan = ee.plan_edit(TALK, 0, 40, intensity="high", format="documentary")
     data = [r for r in plan["structure"]["spans"] if r["role"] == "data"][0]

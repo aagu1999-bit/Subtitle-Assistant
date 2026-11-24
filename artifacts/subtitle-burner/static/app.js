@@ -4469,6 +4469,7 @@ const MOTION_FORMAT_LABEL = {
 function shortsMotionFormat() {
   const el = $("hlFormat");
   const v = el ? String(el.value || "").toLowerCase() : "";
+  if (v === "auto") return "auto";
   return MOTION_FORMAT_LABEL[v] ? v : "";
 }
 
@@ -4484,10 +4485,13 @@ async function openAiEditPlan(ctx) {
   const laneEl = $("aiEditLane");
   if (laneEl) {
     const label = MOTION_FORMAT_LABEL[_aiEditCtx.format];
-    laneEl.hidden = !label;
-    laneEl.textContent = label
-      ? `${label} locks the graphics to that lane. A line that does not fit stays on the face.`
-      : "";
+    const isAuto = _aiEditCtx.format === "auto";
+    laneEl.hidden = !label && !isAuto;
+    laneEl.textContent = isAuto
+      ? "Auto reads the words and locks graphics to interview, recap, or comedy. A line that does not fit stays on the face."
+      : (label
+        ? `${label} locks the graphics to that lane. A line that does not fit stays on the face.`
+        : "");
   }
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
@@ -4744,8 +4748,9 @@ async function runAiEditGenerate() {
         insert_media: insertMedia,
         cuts,
         format: _aiEditCtx.format || undefined,
-        // A named lane uses the beat sheet. Auto keeps the older effect pass.
-        smart: !!(_aiEditCtx.format && MOTION_FORMAT_LABEL[_aiEditCtx.format]),
+        // A named lane, or Auto, uses the beat sheet. Any graphic stays on the old pass.
+        smart: !!(_aiEditCtx.format && (
+          _aiEditCtx.format === "auto" || MOTION_FORMAT_LABEL[_aiEditCtx.format])),
         use_llm: false,
       }),
     });

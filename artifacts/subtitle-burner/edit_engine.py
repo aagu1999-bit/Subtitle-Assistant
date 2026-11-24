@@ -577,6 +577,22 @@ def normalize_format(fmt) -> str | None:
     return raw if raw in MOTION_PACKS else None
 
 
+_COMEDY_HINT = re.compile(
+    r"\b(joke|punchline|kidding|just kidding|funny thing|the bit|laughs?)\b", re.I)
+_RECAP_HINT = re.compile(
+    r"\b(crowd|audience|on stage|the stage|festival|the event|cheered|looked like|venue)\b", re.I)
+
+
+def infer_format(spans: list) -> str:
+    """Auto's lane. Talking-head interview unless the words are a bit or an event."""
+    text = " ".join(str(s.get("text") or "") for s in spans or [])
+    if _COMEDY_HINT.search(text):
+        return "comedy"
+    if _RECAP_HINT.search(text):
+        return "event_recap"
+    return "interview"
+
+
 def _look_text(look_id: str, span: dict) -> str:
     text = span.get("text") or ""
     toks = [t for t in _clean_tokens(text) if not t.isdigit()]
@@ -643,8 +659,9 @@ def plan_edit(words: list, t_in: float, t_out: float, intensity: str = "med",
     exists.
     """
     density = DENSITY.get((intensity or "med").lower(), 1.0)
-    fmt = normalize_format(format or (style_pack or {}).get("format"))
+    requested = re.sub(r"[\s\-]+", "_", str(format or (style_pack or {}).get("format") or "").strip().lower())
     spans = spans if spans is not None else classify_spans(words, t_in, t_out)
+    fmt = infer_format(spans) if requested in ("auto", "auto_detect") else normalize_format(requested)
     for span in spans:
         vis, vwhy = classify_visual(span.get("text", ""), span.get("role") or "body")
         span["visual"] = vis
