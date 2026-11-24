@@ -2,3 +2,4 @@ node_modules
 out
 .remotion
 *.js.map
+public/orbit_*

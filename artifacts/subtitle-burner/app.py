@@ -19239,6 +19239,9 @@ def _make_animation(description: str, timeline: dict | None,
         try:
             return _make_remotion_orbit(description, timeline, duration)
         except Exception as e:
+            # Photo carousels must not silently become shapes or a slideshow.
+            if _orbit_photo_queries(description):
+                raise
             ai_logger.info(f"[remotion] falling back to motion.py: {e}")
     spec = _design_animation(description, timeline, duration)
     tl = timeline or {}
@@ -19253,7 +19256,13 @@ _ORBIT_WORDS = ("orbit", "rotat", "carousel", "turntable", "trade places",
 
 def _wants_remotion_orbit(description: str) -> bool:
     d = (description or "").lower()
-    return any(w in d for w in _ORBIT_WORDS)
+    if any(w in d for w in _ORBIT_WORDS):
+        return True
+    # "replace the shapes with photos of Bali" has no orbit verb, but it is
+    # still the carousel they already asked for.
+    photos = bool(_orbit_photo_queries(description))
+    swap = any(w in d for w in ("replace", "instead", "swap", "use photos", "with photos"))
+    return photos and swap
 
 
 def _remotion_ready() -> bool:
@@ -19281,27 +19290,61 @@ def _orbit_photo_queries(description: str) -> list[str]:
     return [subject, f"{subject} sunset", f"{subject} wide"]
 
 
-def _remotion_stage_photos(queries: list[str]) -> list[dict]:
-    """Copy resolved pictures into Remotion's public/ so Img can load them."""
+def _remotion_copy_public(src: Path) -> str:
     pub = REMOTION_DIR / "public"
     pub.mkdir(parents=True, exist_ok=True)
+    name = f"orbit_{hashlib.md5(str(src).encode()).hexdigest()[:12]}{src.suffix.lower() or '.jpg'}"
+    dest = pub / name
+    if not dest.exists():
+        shutil.copyfile(src, dest)
+    return name
+
+
+def _remotion_generate_photo(query: str, slot: int) -> Path | None:
+    if not _gemini_image_ready():
+        return None
+    stem = CACHE_DIR / f"orbitgen_{hashlib.md5(f'{query}:{slot}'.encode()).hexdigest()[:12]}"
+    prompt = (f"A still photograph, no text, no watermark, no collage: {query}. "
+              f"Variation {slot + 1}, a different angle and crop.")
+    try:
+        return gemini_image(prompt, stem)
+    except Exception as e:
+        ai_logger.info(f"[remotion] generate {query!r} failed: {e}")
+        return None
+
+
+def _remotion_stage_photos(queries: list[str], want: int = 3) -> list[dict]:
+    """Stock first, then generated stills. Never returns shapes."""
     items = []
-    seen = set()
-    for i, q in enumerate(queries[:6]):
-        aid, _why = _resolve_photo_source(q)
-        src = _find_asset_path(aid) if aid else None
-        if src is None or str(src) in seen:
-            continue
+    seen: set[str] = set()
+    want = max(2, min(6, int(want)))
+
+    def add(src: Path | None) -> bool:
+        if src is None or not Path(src).exists() or str(src) in seen:
+            return False
         seen.add(str(src))
-        name = f"orbit_{hashlib.md5(str(src).encode()).hexdigest()[:12]}{src.suffix.lower() or '.jpg'}"
-        dest = pub / name
-        if not dest.exists():
-            shutil.copyfile(src, dest)
-        items.append({"id": f"p{i}", "phase": round(360 * len(items) / max(1, len(queries)), 1),
-                      "kind": "image", "src": name})
+        items.append({"id": f"p{len(items)}", "phase": 0, "kind": "image",
+                      "src": _remotion_copy_public(Path(src))})
+        return True
+
+    for q in queries[:6]:
+        if len(items) >= want:
+            break
+        aid, why = _resolve_photo_source(q)
+        if not add(_find_asset_path(aid) if aid else None):
+            ai_logger.info(f"[remotion] stock miss {q!r}: {why}")
+            add(_remotion_generate_photo(q, len(items)))
+    while len(items) < want:
+        q = queries[0] if queries else "photograph"
+        if not add(_remotion_generate_photo(q, len(items))):
+            break
+    if len(items) < 2:
+        raise RuntimeError(
+            "couldn't get photos for this carousel (stock search and image "
+            "generation both came up empty). Name a subject or upload pictures.")
     n = len(items)
     for i, it in enumerate(items):
-        it["phase"] = round(360 * i / n, 1) if n else 0
+        it["phase"] = round(360 * i / n, 1)
     return items
 
 
@@ -19340,8 +19383,9 @@ def _make_remotion_orbit(description: str, timeline: dict | None,
     dur = max(0.8, min(12.0, float(duration))) if duration else 5.0
     hold = _orbit_hold(description)
     queries = _orbit_photo_queries(description)
-    items = _remotion_stage_photos(queries) if queries else []
-    if len(items) < 2:
+    if queries:
+        items = _remotion_stage_photos(queries)
+    else:
         items = [
             {"id": "sq", "phase": 0, "kind": "shape", "shape": "square", "bg": "#FFD60A"},
             {"id": "tri", "phase": 120, "kind": "shape", "shape": "triangle", "bg": "#00E5FF"},

@@ -312,6 +312,7 @@ def test_rotating_carousel_requests_are_sent_to_remotion(app_mod):
     assert app_mod._orbit_hold("the front one rests 0.3 seconds") == 0.3
     assert app_mod._orbit_photo_queries("rotating carousel of three photos of bali beaches")
     assert not app_mod._orbit_photo_queries("rotating square triangle circle")
+    assert app_mod._wants_remotion_orbit("replace the shapes with three photos of beaches in bali")
 
 
 def test_make_animation_uses_remotion_for_an_orbit(app_mod, monkeypatch):
@@ -337,3 +338,33 @@ def test_remotion_render_route_places_an_overlay(app_mod, temp_db, monkeypatch):
     d = app_mod.app.test_client().post("/remotion/render", json={
         "description": "rotating carousel", "start": 5, "duration": 5}).get_json()
     assert d["clip"]["start"] == 5 and d["clip"]["device"]["engine"] == "remotion"
+
+
+def test_photo_orbit_does_not_silently_become_shapes(app_mod, tmp_path, monkeypatch):
+    from PIL import Image
+    pics = []
+    for i, c in enumerate([(20, 80, 180), (200, 140, 40), (40, 160, 90)]):
+        p = tmp_path / f"b{i}.jpg"
+        Image.new("RGB", (32, 32), c).save(p)
+        pics.append(p)
+
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", lambda q: (None, "no stock"))
+    monkeypatch.setattr(app_mod, "_gemini_image_ready", lambda: True)
+
+    n = {"i": 0}
+
+    def gen(prompt, stem):
+        p = pics[n["i"] % 3]
+        n["i"] += 1
+        return p
+
+    monkeypatch.setattr(app_mod, "gemini_image", gen)
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    items = app_mod._remotion_stage_photos(["bali beach"], want=3)
+    assert [it["kind"] for it in items] == ["image", "image", "image"]
+    assert {it["src"] for it in items}  # copied into public/
+    # Asking for photos must not fall back to the square/triangle/circle.
+    monkeypatch.setattr(app_mod, "_remotion_stage_photos", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no photos")))
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py must not swallow a photo carousel"))
+    with pytest.raises(RuntimeError, match="no photos"):
+        app_mod._make_animation("replace the shapes with photos of bali beaches", {"canvas": "9x16"}, 5)
