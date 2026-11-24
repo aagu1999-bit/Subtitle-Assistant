@@ -5,3 +5,4 @@ export { ProfileCardLook, SpotlightCardLook, GlassSurfaceLook, TiltedCardLook,
   BitsCounterLook } from "./cards";
 export { AuroraLook, SilkLook, BeamsLook, ParticlesLook, LightningLook,
   LiquidChromeLook, GalaxyLook, SoftAuroraLook, LightRaysLook, PlasmaLook } from "./backgrounds";
+export { ScreenshotTourLook, LooksLikeThisLook } from "./screenshots";

@@ -21,6 +21,10 @@ Glass Surface, Tilted Card, Card Swap, Card Stack, Circular Carousel,
 Bounce Cards, Holo Card, Counter card; Aurora, Silk, Beams, Particles,
 Lightning, Liquid Chrome, Galaxy, Soft Aurora, Light Rays, Plasma.
 
+Plus two screenshot walkthroughs: LooksLikeThis (fan of phones) and
+ScreenshotTour (one screen pops, then the next). Fake app chrome, or their
+photos if they name them.
+
 Ask in the co-editor by those names. Backgrounds sit behind the speaker.
 
 ## Remotion official Elements

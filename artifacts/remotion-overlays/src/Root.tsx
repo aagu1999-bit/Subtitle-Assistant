@@ -106,5 +106,9 @@ export const RemotionRoot: React.FC = () => (
     <Composition id="Galaxy" component={Bits.GalaxyLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
     <Composition id="LightRays" component={Bits.LightRaysLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
     <Composition id="Plasma" component={Bits.PlasmaLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
+    <Composition id="ScreenshotTour" component={Bits.ScreenshotTourLook} durationInFrames={180} {...NINE_BY_SIXTEEN}
+      defaultProps={{ caption: "screenshot tour", items: [], duration: 6 }} />
+    <Composition id="LooksLikeThis" component={Bits.LooksLikeThisLook} durationInFrames={150} {...NINE_BY_SIXTEEN}
+      defaultProps={{ caption: "looks like this", items: [], duration: 5 }} />
   </>
 );

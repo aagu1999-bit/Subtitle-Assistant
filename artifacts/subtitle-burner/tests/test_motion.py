@@ -395,6 +395,8 @@ def test_wired_remotion_looks_match_their_phrases(app_mod):
         "holo card": "HoloCard",
         "aurora background": "Aurora",
         "liquid chrome": "LiquidChrome",
+        "looks like this": "LooksLikeThis",
+        "screenshot tour": "ScreenshotTour",
     }
     for desc, cid in cases.items():
         rec = app_mod._match_remotion_recipe(desc)
@@ -448,7 +450,16 @@ def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
     assert "YouTube subscribe nudge" in p
     assert "number counter" in p and "split text" in p
     assert "blur text" in p and "aurora background" in p
+    assert "looks like this" in p and "screenshot tour" in p
     assert "WIRED REMOTION LOOKS" in p
+
+
+def test_screenshot_tours_do_not_require_photos(app_mod):
+    assert app_mod._shot_queries("screenshot tour") == []
+    assert app_mod._shot_queries("looks like this") == []
+    rec = app_mod._match_remotion_recipe("looks like this")
+    props = app_mod._remotion_look_props(rec, "looks like this")
+    assert props["caption"] == "looks like this" and props["items"] == []
 
 
 def test_bits_backgrounds_sit_behind(app_mod):

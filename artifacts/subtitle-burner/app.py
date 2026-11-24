@@ -19384,6 +19384,12 @@ REMOTION_RECIPES = (
     {"id": "Plasma",
      "words": ("plasma background", "plasma"),
      "dur": 5.0, "place": "full", "behind": True},
+    {"id": "LooksLikeThis",
+     "words": ("looks like this", "look like this"),
+     "dur": 5.0, "place": "full", "props": "shots"},
+    {"id": "ScreenshotTour",
+     "words": ("screenshot tour", "screenshot walkthrough", "app screenshots", "screen tour"),
+     "dur": 6.0, "place": "full", "props": "shots"},
 )
 
 
@@ -19421,6 +19427,19 @@ def _remotion_look_props(rec: dict, description: str) -> dict:
         raw = _quoted_look_text(description, "One, Two, Three")
         labels = [w.strip()[:20] for w in re.split(r"[,/|]", raw) if w.strip()][:4]
         return {"labels": labels or ["One", "Two", "Three"]}
+    if kind == "shots":
+        default = "looks like this" if rec["id"] == "LooksLikeThis" else "screenshot tour"
+        caption = _quoted_look_text(description, default)
+        queries = _shot_queries(description)
+        items: list[dict] = []
+        if queries:
+            try:
+                staged = _remotion_stage_photos(queries, want=3)
+                items = [{"id": it["id"], "src": it["src"]}
+                         for it in staged if it.get("kind") == "image" and it.get("src")]
+            except Exception as e:
+                ai_logger.info(f"[remotion] screenshot photos skipped: {e}")
+        return {"caption": caption, "items": items}
     return {}
 
 
@@ -19447,6 +19466,21 @@ def _orbit_hold(description: str) -> float:
     if m:
         return max(0.0, min(2.0, float(m.group(1))))
     return 0.3
+
+
+def _shot_queries(description: str) -> list[str]:
+    """Subjects for a screenshot tour. Empty means branded fake app screens."""
+    d = description or ""
+    if not re.search(r"\b(photos?|images?|pictures?|pics?|screenshots?|screens?)\b", d, re.I):
+        return []
+    subject = re.sub(
+        r"\b(a|an|the|mini|screenshot tour|screenshots?|walkthrough|looks? like this|"
+        r"photos?|images?|pictures?|pics?|screens?|of|above|app|tour)\b",
+        " ", d, flags=re.I)
+    subject = " ".join(subject.split())[:80]
+    if not subject or subject.lower() in {"photo", "screenshot"}:
+        return []
+    return [subject, f"{subject} ui", f"{subject} screen"]
 
 
 def _orbit_photo_queries(description: str) -> list[str]:
@@ -23689,6 +23723,8 @@ Rules:
   A kinetic hook title → "split text" plus the exact words in quotes.
   Bits-style titles and cards (blur text, typewriter, glitch, shiny, profile card,
   glass, holo, bounce cards, circular carousel of cards): put on-screen words in quotes.
+  "looks like this" and "screenshot tour" are phone-framed screenshot walkthroughs
+  (fake app screens, or their photos if they name them).
   Background looks (aurora, silk, beams, particles, lightning, liquid chrome, galaxy,
   light rays, plasma) sit BEHIND the speaker -- set "behind": true.
   Exact chat wording the user dictates is still add_text_message; "on-screen messages"
