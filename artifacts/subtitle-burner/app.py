@@ -23984,6 +23984,164 @@ def _co_editor_start_async(data: dict) -> str:
     return token
 
 
+def _look_slash_id(look_id: str) -> str:
+    s = str(look_id or "").strip()
+    if not s:
+        return ""
+    if "-" in s:
+        return s.lower()
+    return re.sub(r"(?<!^)(?=[A-Z])", "-", s).lower()
+
+
+def _library_look_entries() -> list[dict]:
+    """Named looks the slash picker can search: engine + recipe + phrases."""
+    out = []
+    for rec in _effects_wired():
+        out.append({"engine": "effects", "rec": rec, "group": "Talking-head",
+                    "blurb": "", "wired": True})
+    for rec in _hyperframes_recipes():
+        out.append({"engine": "hyperframes", "rec": rec,
+                    "group": rec.get("group") or "Hyperframes",
+                    "blurb": "", "wired": True})
+    for rec in REMOTION_RECIPES:
+        out.append({"engine": "remotion", "rec": rec, "group": "Remotion / Bits",
+                    "blurb": "", "wired": True})
+    return out
+
+
+def _co_editor_looks_catalog() -> dict:
+    """Slash-menu payload: subsections of wired looks plus the 51-name book."""
+    groups = [
+        {"id": "effects", "label": "Talking-head",
+         "hint": "Behind you or a punch zoom. Studio ports — not the Hop GitHub renderer.",
+         "items": []},
+        {"id": "hyperframes", "label": "Hyperframes",
+         "hint": "HTML captions, lower thirds, follow cards.",
+         "items": []},
+        {"id": "remotion", "label": "Remotion / Bits",
+         "hint": "Subscribe, charts, titles, cards, backgrounds.",
+         "items": []},
+        {"id": "effects-ref", "label": "Talking-head (not wired)",
+         "hint": "In the look book only. Picking one will say so.",
+         "items": []},
+    ]
+    by_id = {g["id"]: g for g in groups}
+    for entry in _library_look_entries():
+        rec = entry["rec"]
+        gid = {"effects": "effects", "hyperframes": "hyperframes",
+               "remotion": "remotion"}[entry["engine"]]
+        phrase = rec["words"][0]
+        item = {"id": rec["id"], "slash": _look_slash_id(rec["id"]),
+                "phrase": phrase, "wired": True,
+                "needs_text": rec.get("props") in ("text", "words", "count")}
+        by_id[gid]["items"].append(item)
+    wired_ids = {rec["id"] for rec in _effects_wired()}
+    for look in _effects_lookbook():
+        if not isinstance(look, dict):
+            continue
+        lid = str(look.get("id") or "")
+        if not lid or lid in wired_ids:
+            continue
+        by_id["effects-ref"]["items"].append({
+            "id": lid, "slash": lid, "phrase": lid.replace("-", " "),
+            "blurb": str(look.get("blurb") or look.get("title") or ""),
+            "wired": False, "needs_text": False,
+        })
+    return {"groups": groups}
+
+
+def _parse_slash_look(prompt: str) -> dict | None:
+    """`/lean-in`, `/effects orbit`, `/backdrop-word GO` → a catalog hit or menu."""
+    raw = (prompt or "").strip()
+    if not raw.startswith("/"):
+        return None
+    body = re.sub(r"^/+", "", raw).strip()
+    if not body:
+        return {"kind": "menu"}
+    effects_prefix = body.lower().startswith("effects ")
+    if effects_prefix:
+        body = body[8:].strip()
+    if not body:
+        return {"kind": "menu"}
+    d = body.lower()
+    best, best_len, best_engine = None, -1, None
+    for entry in _library_look_entries():
+        rec = entry["rec"]
+        tokens = [_look_slash_id(rec["id"]), *rec["words"]]
+        for tok in tokens:
+            t = str(tok).lower()
+            if not t or len(t) < best_len:
+                continue
+            if d == t or d.startswith(t + " "):
+                best, best_len, best_engine = rec, len(t), entry["engine"]
+    if best is None and effects_prefix and re.match(r"^orbit\b", d):
+        rec = _match_effects_look("effects orbit")
+        if rec:
+            best, best_len, best_engine = rec, 5, "effects"
+    if best is None:
+        token = re.split(r"\s+", d, 1)[0]
+        for look in _effects_lookbook():
+            if isinstance(look, dict) and str(look.get("id") or "").lower() == token:
+                return {"kind": "unwired", "id": look["id"],
+                        "title": look.get("title") or look["id"],
+                        "blurb": look.get("blurb") or ""}
+        return {"kind": "unknown", "q": body}
+    text = body[best_len:].strip().strip("\"'")
+    return {"kind": "look", "engine": best_engine, "rec": best, "text": text}
+
+
+def _slash_co_editor_turn(prompt: str, timeline: dict, client_ctx: dict) -> dict | None:
+    """Apply a /look without asking Gemini — exact recipe, not a paraphrase."""
+    parsed = _parse_slash_look(prompt)
+    if parsed is None:
+        return None
+    if parsed["kind"] == "menu":
+        return {"ops": [], "message": (
+            "Type / then pick a subsection: talking-head, Hyperframes, Remotion. "
+            "Wired names land as that look. Unwired names I will say so."
+        )}
+    if parsed["kind"] == "unwired":
+        return {"ops": [], "message": (
+            f"{parsed['title']} is in the look book but not wired yet. "
+            f"{parsed['blurb']} Try lean in, backdrop word, spotlight, "
+            f"reject stamp, comment box, todo list, huge strike or head orbit."
+        )}
+    if parsed["kind"] == "unknown":
+        return {"ops": [], "message": (
+            f"No look named {parsed['q']!r}. Type / to browse the library."
+        )}
+    if not timeline:
+        return {"error": "Timeline is required"}
+    rec, engine = parsed["rec"], parsed["engine"]
+    try:
+        start = max(0.0, float((client_ctx or {}).get("playhead_s") or 0))
+    except (TypeError, ValueError):
+        start = 0.0
+    phrase = rec["words"][0]
+    desc = f'{phrase} "{parsed["text"]}"' if parsed["text"] else phrase
+    if engine == "effects" and rec.get("engine") == "effect":
+        op, note = _resolve_add_effect({
+            "type": rec.get("type") or "punch_zoom", "start": start,
+            "duration": rec.get("dur") or 1.2, "intensity": "high"})
+    else:
+        anim = {"description": desc, "start": start, "duration": rec.get("dur")}
+        if rec.get("behind"):
+            anim["behind"] = True
+        op, note = _resolve_add_animation(anim, timeline)
+    if op is None:
+        return {"ops": [], "message": note or f"could not place {phrase}"}
+    msg = f"Placed {phrase}" + (f' "{parsed["text"]}"' if parsed["text"] else "") + "."
+    if note:
+        msg += " " + note
+    return {"ops": [op], "message": msg}
+
+
+@app.route("/co-editor/looks")
+def co_editor_looks():
+    """Slash-menu catalog. The picker browses this; Gemini does not."""
+    return jsonify(_co_editor_looks_catalog())
+
+
 @app.route("/co-editor/result/<token>")
 def co_editor_result(token):
     with _CO_EDITOR_RESULTS_LOCK:
@@ -24011,6 +24169,11 @@ def co_editor():
     client_ctx = data.get("context") or {}
     if _co_editor_capability_question(prompt):
         return jsonify({"ops": [], "message": _co_editor_capability_message()})
+    slash = _slash_co_editor_turn(prompt, timeline, client_ctx)
+    if slash is not None:
+        if slash.get("error"):
+            return jsonify(slash), 400
+        return jsonify(slash)
     if data.get("async") and prompt and timeline:
         return jsonify({"pending": _co_editor_start_async(data)})
     if not prompt:

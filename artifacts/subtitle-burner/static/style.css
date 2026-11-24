@@ -909,6 +909,69 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   color: #fff;
   background: rgba(108, 92, 255, 0.18);
 }
+.co-editor-looks {
+  border-top: 1px solid #2a2f3a;
+  background: #141824;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px 10px;
+}
+.co-editor-looks-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.co-editor-looks-tab {
+  appearance: none;
+  border: 1px solid #3b4252;
+  background: #1a1e2a;
+  color: #c8cdd8;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: .7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.co-editor-looks-tab.on {
+  border-color: #6c5cff;
+  background: rgba(108, 92, 255, 0.2);
+  color: #fff;
+}
+.co-editor-looks-hint {
+  color: #8b93a7;
+  font-size: .7rem;
+  margin: 0 0 8px;
+  line-height: 1.35;
+}
+.co-editor-looks-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #e8eaee;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: .8rem;
+}
+.co-editor-looks-item:hover,
+.co-editor-looks-item.on {
+  background: rgba(108, 92, 255, 0.16);
+}
+.co-editor-looks-item .slash {
+  color: #9785ff;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.co-editor-looks-item .muted {
+  display: block;
+  color: #8b93a7;
+  font-size: .68rem;
+  margin-top: 2px;
+}
 
 /* ---- Compilation queue ---- */
 .compile-item {

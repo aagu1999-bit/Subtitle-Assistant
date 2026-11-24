@@ -504,6 +504,37 @@ def test_effects_lookbook_wires_a_shortlist(app_mod):
     assert len(app_mod._effects_lookbook()) == 51
 
 
+def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
+    monkeypatch.setattr(
+        app_mod, "_gemini_generate_clip_suggestions",
+        lambda p: pytest.fail("slash looks must not ask Gemini"))
+    monkeypatch.setattr(
+        app_mod, "_make_animation",
+        lambda desc, tl, dur: {
+            "asset_id": "e1", "duration": 2.5,
+            "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+            "behind": True, "device": {"kind": "animation"},
+        })
+    tl = {"canvas": "9x16", "tracks": {
+        "main": [{"id": "m1", "in": 0, "out": 8}],
+        "overlay": [], "text": [], "music": [], "effects": []}}
+    c = app_mod.app.test_client()
+    cat = c.get("/co-editor/looks").get_json()
+    ids = {g["id"] for g in cat["groups"]}
+    assert ids == {"effects", "hyperframes", "remotion", "effects-ref"}
+    assert any(it["slash"] == "lean-in" for it in cat["groups"][0]["items"])
+    lean = c.post("/co-editor", json={"prompt": "/lean-in", "timeline": tl}).get_json()
+    assert lean["ops"][0]["op"] == "add_effect" and lean["ops"][0]["type"] == "punch_zoom"
+    word = c.post("/co-editor", json={
+        "prompt": "/backdrop-word GO", "timeline": tl}).get_json()
+    assert word["ops"][0]["op"] == "add_animation"
+    orbit = app_mod._parse_slash_look("/effects orbit")
+    assert orbit["kind"] == "look" and orbit["rec"]["id"] == "orbit"
+    miss = c.post("/co-editor", json={
+        "prompt": "/glass-widgets", "timeline": tl}).get_json()
+    assert miss["ops"] == [] and "not wired" in miss["message"].lower()
+
+
 def test_make_animation_uses_hyperframes_for_slam_captions(app_mod, monkeypatch):
     seen = {}
 

@@ -9825,6 +9825,7 @@
       renderCoEditorChips();
     }
     try { if ($("coEditorInput")) $("coEditorInput").focus(); } catch (e) {}
+    loadCoEditorLooks();
     try {
       if (document.body.classList.contains("is-phone")) {
         document.body.classList.add("tl-coeditor-open");
@@ -9837,6 +9838,7 @@
     drawer.classList.add("hidden");
     drawer.style.display = "";
     drawer.setAttribute("aria-hidden", "true");
+    hideCoEditorLooks();
     const btn = $("tlCoEditorBtn");
     if (btn) btn.classList.remove("active-co");
     try {
@@ -9880,6 +9882,98 @@
       if (input) input.value = btn.dataset.coPrompt || "";
       sendCoEditorPrompt();
     });
+  }
+
+  let coEditorLooks = null;
+  let coEditorLookTab = "effects";
+  let coEditorLookHi = 0;
+
+  async function loadCoEditorLooks() {
+    if (coEditorLooks) return coEditorLooks;
+    try {
+      const res = await fetch("/co-editor/looks");
+      coEditorLooks = await res.json();
+    } catch (e) {
+      coEditorLooks = { groups: [] };
+    }
+    return coEditorLooks;
+  }
+
+  function hideCoEditorLooks() {
+    const menu = $("coEditorLookMenu");
+    if (!menu) return;
+    menu.hidden = true;
+    menu.classList.add("hidden");
+    menu.innerHTML = "";
+  }
+
+  function slashQuery(value) {
+    const v = String(value || "");
+    if (!v.startsWith("/")) return null;
+    return v.slice(1).replace(/^effects\s+/i, "");
+  }
+
+  function looksInTab(groups, tabId, q) {
+    const g = (groups || []).find((x) => x.id === tabId) || { items: [] };
+    const needle = String(q || "").trim().toLowerCase();
+    const items = g.items || [];
+    if (!needle) return items;
+    return items.filter((it) => {
+      const blob = `${it.slash || ""} ${it.phrase || ""} ${it.blurb || ""}`.toLowerCase();
+      return blob.indexOf(needle) >= 0;
+    });
+  }
+
+  function renderCoEditorLooks() {
+    const input = $("coEditorInput");
+    const menu = $("coEditorLookMenu");
+    if (!input || !menu) return;
+    const q = slashQuery(input.value);
+    if (q == null) {
+      hideCoEditorLooks();
+      return;
+    }
+    const groups = (coEditorLooks && coEditorLooks.groups) || [];
+    if (!groups.some((g) => g.id === coEditorLookTab)) coEditorLookTab = "effects";
+    const group = groups.find((g) => g.id === coEditorLookTab) || groups[0] || { items: [], hint: "" };
+    const items = looksInTab(groups, group.id, q);
+    if (coEditorLookHi >= items.length) coEditorLookHi = 0;
+    menu.hidden = false;
+    menu.classList.remove("hidden");
+    menu.innerHTML =
+      `<div class="co-editor-looks-tabs">` +
+      groups.map((g) =>
+        `<button type="button" class="co-editor-looks-tab${g.id === group.id ? " on" : ""}" data-look-tab="${g.id}">${g.label}</button>`
+      ).join("") +
+      `</div>` +
+      (group.hint ? `<p class="co-editor-looks-hint">${group.hint}</p>` : "") +
+      (items.length
+        ? items.slice(0, 40).map((it, i) =>
+            `<button type="button" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
+            `<span class="slash">/${it.slash}</span>${it.phrase}` +
+            (it.blurb ? `<span class="muted">${it.blurb}</span>` : "") +
+            `</button>`
+          ).join("")
+        : `<p class="co-editor-looks-hint">No looks in this section match.</p>`);
+    menu._items = items;
+  }
+
+  function fillSlashLook(item) {
+    const input = $("coEditorInput");
+    if (!input || !item) return;
+    input.value = "/" + item.slash + (item.needs_text ? " " : "");
+    hideCoEditorLooks();
+    try { input.focus(); } catch (e) {}
+  }
+
+  async function onCoEditorSlashInput() {
+    const input = $("coEditorInput");
+    if (!input || slashQuery(input.value) == null) {
+      hideCoEditorLooks();
+      return;
+    }
+    await loadCoEditorLooks();
+    renderCoEditorLooks();
   }
 
   function transcriptNearPlayhead() {
@@ -10555,6 +10649,8 @@
     const input = $("coEditorInput");
     const prompt = (input && input.value || "").trim();
     if (!prompt) return;
+    if (prompt === "/") return;
+    hideCoEditorLooks();
     if (input) input.value = "";
     // Put the keyboard away on a phone once the prompt is sent. It covers
     // most of the screen, and the answer -- which is the point -- appears
@@ -10661,8 +10757,46 @@
     }
     if ($("coEditorInput") && !$("coEditorInput")._wired) {
       $("coEditorInput")._wired = true;
+      $("coEditorInput").addEventListener("input", () => onCoEditorSlashInput());
       $("coEditorInput").addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); sendCoEditorPrompt(); }
+        const menu = $("coEditorLookMenu");
+        const open = menu && !menu.hidden;
+        const items = (menu && menu._items) || [];
+        if (open && e.key === "Escape") {
+          e.preventDefault();
+          hideCoEditorLooks();
+          return;
+        }
+        if (open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+          e.preventDefault();
+          if (!items.length) return;
+          coEditorLookHi = (coEditorLookHi + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+          renderCoEditorLooks();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const v = ($("coEditorInput") && $("coEditorInput").value || "").trim();
+          if (v === "/") return;
+          sendCoEditorPrompt();
+        }
+      });
+    }
+    const lookMenu = $("coEditorLookMenu");
+    if (lookMenu && !lookMenu._wired) {
+      lookMenu._wired = true;
+      lookMenu.addEventListener("click", (e) => {
+        const tab = e.target && e.target.closest && e.target.closest("[data-look-tab]");
+        if (tab) {
+          coEditorLookTab = tab.getAttribute("data-look-tab");
+          coEditorLookHi = 0;
+          renderCoEditorLooks();
+          return;
+        }
+        const row = e.target && e.target.closest && e.target.closest("[data-look-i]");
+        if (!row) return;
+        const items = lookMenu._items || [];
+        fillSlashLook(items[Number(row.getAttribute("data-look-i"))]);
       });
     }
   }
