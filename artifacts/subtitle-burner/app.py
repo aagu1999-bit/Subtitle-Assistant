@@ -19307,6 +19307,12 @@ def _make_animation(description: str, timeline: dict | None,
             return _make_remotion_look(rec, description, timeline, duration)
         except Exception as e:
             ai_logger.info(f"[remotion] {rec['id']} failed, falling back: {e}")
+    rec = _match_hyperframes_recipe(description)
+    if rec:
+        try:
+            return _make_hyperframes_look(rec, description, timeline, duration)
+        except Exception as e:
+            ai_logger.info(f"[hyperframes] {rec['id']} failed, falling back: {e}")
     if _wants_remotion_orbit(description):
         try:
             return _make_remotion_orbit(description, timeline, duration)
@@ -19322,6 +19328,7 @@ def _make_animation(description: str, timeline: dict | None,
 
 
 REMOTION_DIR = Path(__file__).resolve().parent.parent / "remotion-overlays"
+HYPERFRAMES_DIR = Path(__file__).resolve().parent.parent / "hyperframes-overlays"
 _ORBIT_WORDS = ("orbit", "rotat", "carousel", "turntable", "trade places",
                 "circular permutation", "into the next")
 
@@ -19466,6 +19473,34 @@ def _match_remotion_recipe(description: str) -> dict | None:
 
 def _remotion_recipe_prompt() -> str:
     return ", ".join(rec["words"][0] for rec in REMOTION_RECIPES)
+
+
+HYPERFRAMES_RECIPES = (
+    {"id": "HyperTitle", "file": "index.html",
+     "words": ("hyper title", "hyperframes title"),
+     "dur": 3.0, "place": "full", "props": "text"},
+    {"id": "KineticSlam", "file": "compositions/components/caption-kinetic-slam.html",
+     "words": ("kinetic slam", "slam captions", "slam caption"),
+     "dur": 8.0, "place": "wide"},
+    {"id": "GlitchRgbCaption", "file": "compositions/components/caption-glitch-rgb.html",
+     "words": ("glitch rgb caption", "glitch rgb captions"),
+     "dur": 6.0, "place": "wide"},
+    {"id": "PillKaraoke", "file": "compositions/components/caption-pill-karaoke.html",
+     "words": ("pill karaoke", "karaoke pills"),
+     "dur": 6.0, "place": "lower"},
+)
+
+
+def _match_hyperframes_recipe(description: str) -> dict | None:
+    d = (description or "").lower()
+    for rec in HYPERFRAMES_RECIPES:
+        if any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", d) for w in rec["words"]):
+            return rec
+    return None
+
+
+def _hyperframes_recipe_prompt() -> str:
+    return ", ".join(rec["words"][0] for rec in HYPERFRAMES_RECIPES)
 
 
 def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
@@ -19620,6 +19655,9 @@ def _remotion_overlay_box(canvas: str, place: str = "top") -> dict:
     if place == "full":
         return {"x": 0, "y": 0, "w": 1, "h": 1,
                 "px_w": W // 2 * 2, "px_h": H // 2 * 2}
+    if place == "wide":
+        return {"x": 0, "y": 0.34, "w": 1, "h": 0.32,
+                "px_w": W // 2 * 2, "px_h": max(48, int(H * 0.32) // 2 * 2)}
     bw = 0.92
     if place == "bottom":
         bh, y = 0.18, 0.74
@@ -19632,6 +19670,64 @@ def _remotion_overlay_box(canvas: str, place: str = "top") -> dict:
         y = 0.06
     return {"x": round((1 - bw) / 2, 4), "y": round(y, 4), "w": round(bw, 4), "h": round(bh, 4),
             "px_w": int(W * bw) // 2 * 2, "px_h": max(48, int(H * bh) // 2 * 2)}
+
+
+def _hyperframes_ready() -> bool:
+    return (HYPERFRAMES_DIR / "index.html").is_file() and shutil.which("npx") is not None
+
+
+def _render_hyperframes_webm(composition_file: str, props: dict, out_path: Path) -> None:
+    if not _hyperframes_ready():
+        raise RuntimeError("Hyperframes is not installed in this workspace")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    npx = shutil.which("npx")
+    if not npx:
+        raise RuntimeError("npx is not on PATH")
+    cmd = [
+        npx, "--yes", "hyperframes@0.9.88", "render",
+        "-c", composition_file, "-o", str(out_path),
+        "--format", "webm", "--workers", "1", "--low-memory-mode",
+        "--quiet",
+    ]
+    if props:
+        props_file = CACHE_DIR / (
+            "hf_vars_" + hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16] + ".json"
+        )
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        props_file.write_text(json.dumps(props), encoding="utf-8")
+        cmd += [f"--variables-file={props_file}"]
+    r = subprocess.run(cmd, cwd=str(HYPERFRAMES_DIR), capture_output=True, text=True, timeout=420)
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
+        err = (r.stderr or r.stdout or "hyperframes render failed")[-500:]
+        raise RuntimeError(err)
+
+
+def _make_hyperframes_look(rec: dict, description: str, timeline: dict | None,
+                           duration: float | None) -> dict:
+    """Render a Hyperframes HTML composition onto the overlay track."""
+    dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
+    props = _remotion_look_props(rec, description) if rec.get("props") else {}
+    key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
+    src = CACHE_DIR / f"hyperframes_{rec['id']}_{key}.webm"
+    if not (src.exists() and src.stat().st_size > 200):
+        _render_hyperframes_webm(rec["file"], props, src)
+    asset_id = hashlib.md5(src.name.encode()).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.webm"
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copyfile(src, dest)
+    _write_asset_meta(asset_id, filename=f"Animation: {description[:48]}",
+                      source="device", device_kind="animation", alpha=True)
+    tl = timeline or {}
+    box = _remotion_overlay_box(tl.get("canvas") or "9x16", rec["place"])
+    return {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
+            "box": box,
+            "device": {"kind": "animation", "engine": "hyperframes",
+                       "composition": rec["id"], "description": description,
+                       "spec": {"props": props, "file": rec["file"]}}}
 
 
 def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None:
@@ -23424,7 +23520,8 @@ def _co_editor_capability_message() -> str:
         "• Any other animation described in words, including pictures\n"
         "• Named looks: subscribe nudge, number counter, charts, captions, polaroid, "
         "split/blur/glitch titles, cards, aurora and other backgrounds, "
-        "looks like this, screenshot tour, rotating carousel\n"
+        "looks like this, screenshot tour, rotating carousel, "
+        "kinetic slam, glitch RGB captions, pill karaoke\n"
         "• Sounds (pop, click, whoosh) on graphics; photos stay silent unless you add one\n\n"
         "Pictures\n"
         "• Generate images, stock or your photos as backgrounds or carousels\n"
@@ -23834,6 +23931,8 @@ Rules:
   light rays, plasma) sit BEHIND the speaker -- set "behind": true.
   Exact chat wording the user dictates is still add_text_message; "on-screen messages"
   is the Remotion iMessage look when they want that graphic, not a dictated thread.
+- HYPERFRAMES LOOKS (HTML captions, transparent WebM): {_hyperframes_recipe_prompt()}.
+  These are not Remotion and not freehand motion.py. Use add_animation with those phrases.
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their

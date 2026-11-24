@@ -398,6 +398,10 @@ def test_wired_remotion_looks_match_their_phrases(app_mod):
         "looks like this": "LooksLikeThis",
         "screenshot tour": "ScreenshotTour",
     }
+    assert app_mod._match_hyperframes_recipe("kinetic slam captions")["id"] == "KineticSlam"
+    assert app_mod._match_hyperframes_recipe("pill karaoke")["id"] == "PillKaraoke"
+    assert app_mod._match_hyperframes_recipe("glitch rgb caption")["id"] == "GlitchRgbCaption"
+    assert app_mod._match_hyperframes_recipe("glitch text") is None
     for desc, cid in cases.items():
         rec = app_mod._match_remotion_recipe(desc)
         assert rec and rec["id"] == cid, desc
@@ -462,6 +466,21 @@ def test_the_prompt_names_wired_remotion_looks(app_mod, temp_db, monkeypatch):
     assert "blur text" in p and "aurora background" in p
     assert "looks like this" in p and "screenshot tour" in p
     assert "WIRED REMOTION LOOKS" in p
+    assert "kinetic slam" in p and "HYPERFRAMES LOOKS" in p
+
+
+def test_make_animation_uses_hyperframes_for_slam_captions(app_mod, monkeypatch):
+    seen = {}
+
+    def fake(rec, desc, tl, dur):
+        seen["id"] = rec["id"]
+        return {"asset_id": "h1", "duration": 8, "box": {"x": 0, "y": 0.34, "w": 1, "h": 0.32},
+                "device": {"kind": "animation", "engine": "hyperframes", "composition": rec["id"]}}
+
+    monkeypatch.setattr(app_mod, "_make_hyperframes_look", fake)
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py should not run"))
+    out = app_mod._make_animation("kinetic slam over the talking head", {"canvas": "9x16"}, 8)
+    assert seen["id"] == "KineticSlam" and out["device"]["engine"] == "hyperframes"
 
 
 def test_screenshot_tours_do_not_require_photos(app_mod):

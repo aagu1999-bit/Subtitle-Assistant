@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-resolution="portrait">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+    <style>
+      :root {
+        --ground: transparent;
+        --ink: #ffd60a;
+        --font-display: Anton, Inter, sans-serif;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: var(--ground);
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--font-display);
+        background: transparent;
+      }
+      #title {
+        color: var(--ink);
+        font-size: 88px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        text-align: center;
+        max-width: 920px;
+        line-height: 1.05;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="HyperTitle"
+      data-start="0"
+      data-duration="3"
+      data-width="1080"
+      data-height="1920"
+      data-composition-variables='{"text":{"type":"string","default":"WATCH THIS"}}'
+    >
+      <h1 id="title" class="clip" data-start="0" data-duration="3" data-track-index="0">WATCH THIS</h1>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const vars = (window.__hyperframes && typeof window.__hyperframes.getVariables === "function")
+        ? window.__hyperframes.getVariables() : {};
+      const title = String(vars.text || "WATCH THIS").slice(0, 48);
+      document.getElementById("title").textContent = title;
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo("#title", { opacity: 0, filter: "blur(10px)", y: 28 },
+        { opacity: 1, filter: "blur(0px)", y: 0, duration: 0.45, ease: "power4.out" }, 0);
+      window.__timelines["HyperTitle"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

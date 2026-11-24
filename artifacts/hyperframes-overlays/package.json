@@ -1,0 +1,11 @@
+{
+  "name": "hyperframes-overlays",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.9.88 preview --no-open --port 8001",
+    "check": "npx --yes hyperframes@0.9.88 check",
+    "render": "npx --yes hyperframes@0.9.88 render --format webm --workers 1 --low-memory-mode",
+    "publish": "npx --yes hyperframes@0.9.88 publish"
+  }
+}

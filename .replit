@@ -88,6 +88,18 @@ args = "cd /home/runner/workspace/artifacts/remotion-overlays && pnpm remotion s
 waitForPort = 8000
 
 [[workflows.workflow]]
+name = "Hyperframes Studio"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd /home/runner/workspace/artifacts/hyperframes-overlays && npx --yes hyperframes@0.9.88 preview --no-open --port 8001 --foreground"
+waitForPort = 8001
+
+[[workflows.workflow]]
 name = "Project"
 mode = "parallel"
 author = "agent"
@@ -115,6 +127,10 @@ externalPort = 5000
 [[ports]]
 localPort = 8000
 externalPort = 8000
+
+[[ports]]
+localPort = 8001
+externalPort = 8001
 
 [[ports]]
 localPort = 8080

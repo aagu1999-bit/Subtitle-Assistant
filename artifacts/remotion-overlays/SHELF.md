@@ -27,6 +27,18 @@ photos if they name them.
 
 Ask in the co-editor by those names. Backgrounds sit behind the speaker.
 
+## Hyperframes (wired now)
+
+Sidecar: `artifacts/hyperframes-overlays`. HTML + GSAP → transparent WebM.
+Preview on port 8001. Catalog is huge; we only wired a talking-head starter:
+
+- hyper title (9:16 gold title card)
+- kinetic slam captions
+- glitch RGB captions
+- pill karaoke
+
+Source: https://hyperframes.heygen.com/catalog — star the next block, then we wire it.
+
 ## Remotion official Elements
 
 Source: https://www.remotion.dev/elements  
