@@ -1,0 +1,21 @@
+{
+  "name": "remotion-overlays",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Sidecar Remotion renderer for Studio overlays. Does not replace motion.py.",
+  "scripts": {
+    "dev": "remotion studio",
+    "render": "remotion render OrbitCarousel out/orbit.webm --codec=vp8 --image-format=png",
+    "still": "remotion still OrbitCarousel out/orbit.png"
+  },
+  "dependencies": {
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "remotion": "^4.0.355"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.355",
+    "@types/react": "catalog:",
+    "typescript": "~5.9.2"
+  }
+}
