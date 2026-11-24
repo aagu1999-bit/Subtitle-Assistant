@@ -1,6 +1,6 @@
 import React from "react";
 import { Composition } from "remotion";
-import { OrbitCarousel } from "./OrbitCarousel";
+import { DEFAULT_ORBIT_PROPS, OrbitCarousel, type OrbitProps } from "./OrbitCarousel";
 
 export const RemotionRoot: React.FC = () => (
   <Composition
@@ -10,5 +10,9 @@ export const RemotionRoot: React.FC = () => (
     fps={30}
     width={1080}
     height={420}
+    defaultProps={DEFAULT_ORBIT_PROPS}
+    calculateMetadata={({ props }: { props: OrbitProps }) => ({
+      durationInFrames: Math.max(24, Math.round((props.duration || 5) * 30)),
+    })}
   />
 );

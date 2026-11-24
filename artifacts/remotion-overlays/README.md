@@ -1,7 +1,8 @@
 # remotion-overlays
 
-Sidecar Remotion project. Studio still renders overlays with `motion.py`
-(Pillow + ffmpeg). This folder is the trial renderer.
+Sidecar Remotion project. `motion.py` still draws most co-editor animations.
+Rotating / orbiting / carousel requests render through OrbitCarousel and land
+on the timeline as a normal overlay (`_make_remotion_orbit`).
 
 On Replit, port 3000 is already the canvas preview. Use **8000**.
 

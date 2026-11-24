@@ -19235,10 +19235,140 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 def _make_animation(description: str, timeline: dict | None,
                     duration: float | None = None) -> dict:
+    if _wants_remotion_orbit(description):
+        try:
+            return _make_remotion_orbit(description, timeline, duration)
+        except Exception as e:
+            ai_logger.info(f"[remotion] falling back to motion.py: {e}")
     spec = _design_animation(description, timeline, duration)
     tl = timeline or {}
     return _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
                                 int(tl.get("fps") or 30))
+
+
+REMOTION_DIR = Path(__file__).resolve().parent.parent / "remotion-overlays"
+_ORBIT_WORDS = ("orbit", "rotat", "carousel", "turntable", "trade places",
+                "circular permutation", "into the next")
+
+
+def _wants_remotion_orbit(description: str) -> bool:
+    d = (description or "").lower()
+    return any(w in d for w in _ORBIT_WORDS)
+
+
+def _remotion_ready() -> bool:
+    return (REMOTION_DIR / "src" / "index.ts").is_file() and shutil.which("pnpm") is not None
+
+
+def _orbit_hold(description: str) -> float:
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|seconds?)?\s*(?:rest|hold|pause|front)",
+                  description or "", re.I)
+    if not m:
+        m = re.search(r"(?:rest|hold|pause)\s*(?:for\s*)?(\d+(?:\.\d+)?)", description or "", re.I)
+    if m:
+        return max(0.0, min(2.0, float(m.group(1))))
+    return 0.3
+
+
+def _orbit_photo_queries(description: str) -> list[str]:
+    if not re.search(r"\b(photos?|images?|pictures?|pics?)\b", description or "", re.I):
+        return []
+    subject = re.sub(
+        r"\b(a|an|the|mini|rotating|orbiting|carousel|photos?|images?|pictures?|"
+        r"of|above|speakers?|heads?|seconds?|for|and|with|three|3)\b",
+        " ", description or "", flags=re.I)
+    subject = " ".join(subject.split())[:80] or "photo"
+    return [subject, f"{subject} sunset", f"{subject} wide"]
+
+
+def _remotion_stage_photos(queries: list[str]) -> list[dict]:
+    """Copy resolved pictures into Remotion's public/ so Img can load them."""
+    pub = REMOTION_DIR / "public"
+    pub.mkdir(parents=True, exist_ok=True)
+    items = []
+    seen = set()
+    for i, q in enumerate(queries[:6]):
+        aid, _why = _resolve_photo_source(q)
+        src = _find_asset_path(aid) if aid else None
+        if src is None or str(src) in seen:
+            continue
+        seen.add(str(src))
+        name = f"orbit_{hashlib.md5(str(src).encode()).hexdigest()[:12]}{src.suffix.lower() or '.jpg'}"
+        dest = pub / name
+        if not dest.exists():
+            shutil.copyfile(src, dest)
+        items.append({"id": f"p{i}", "phase": round(360 * len(items) / max(1, len(queries)), 1),
+                      "kind": "image", "src": name})
+    n = len(items)
+    for i, it in enumerate(items):
+        it["phase"] = round(360 * i / n, 1) if n else 0
+    return items
+
+
+def _remotion_overlay_box(canvas: str) -> dict:
+    W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
+    bw = 0.92
+    bh = bw * (420 / 1080) * (W / H)
+    bh = min(bh, 0.28)
+    return {"x": round((1 - bw) / 2, 4), "y": 0.06, "w": round(bw, 4), "h": round(bh, 4),
+            "px_w": int(W * bw) // 2 * 2, "px_h": max(48, int(H * bh) // 2 * 2)}
+
+
+def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None:
+    if not _remotion_ready():
+        raise RuntimeError("Remotion is not installed in this workspace")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    props_file = CACHE_DIR / f"remotion_props_{hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]}.json"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    props_file.write_text(json.dumps(props), encoding="utf-8")
+    cmd = [
+        shutil.which("pnpm"), "exec", "remotion", "render",
+        "src/index.ts", composition, str(out_path),
+        f"--props={props_file}",
+        "--codec=vp8", "--image-format=png", "--concurrency=1", "--gl=swangle",
+        "--timeout=180000",
+    ]
+    r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True, timeout=240)
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
+        err = (r.stderr or r.stdout or "remotion render failed")[-500:]
+        raise RuntimeError(err)
+
+
+def _make_remotion_orbit(description: str, timeline: dict | None,
+                         duration: float | None) -> dict:
+    """Orbiting carousel via Remotion. Shapes by default; photos when asked."""
+    dur = max(0.8, min(12.0, float(duration))) if duration else 5.0
+    hold = _orbit_hold(description)
+    queries = _orbit_photo_queries(description)
+    items = _remotion_stage_photos(queries) if queries else []
+    if len(items) < 2:
+        items = [
+            {"id": "sq", "phase": 0, "kind": "shape", "shape": "square", "bg": "#FFD60A"},
+            {"id": "tri", "phase": 120, "kind": "shape", "shape": "triangle", "bg": "#00E5FF"},
+            {"id": "ci", "phase": 240, "kind": "shape", "shape": "circle", "bg": "#FF3B6B"},
+        ]
+    props = {"duration": dur, "hold": hold, "move": 1.0, "items": items}
+    key = hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]
+    src = CACHE_DIR / f"remotion_orbit_{key}.webm"
+    if not (src.exists() and src.stat().st_size > 200):
+        _render_remotion_webm("OrbitCarousel", props, src)
+    asset_id = hashlib.md5(src.name.encode()).hexdigest()
+    dest = ASSET_DIR / f"{asset_id}.webm"
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copyfile(src, dest)
+    _write_asset_meta(asset_id, filename=f"Animation: {description[:48]}",
+                      source="device", device_kind="animation", alpha=True)
+    tl = timeline or {}
+    box = _remotion_overlay_box(tl.get("canvas") or "9x16")
+    return {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
+            "box": box,
+            "device": {"kind": "animation", "engine": "remotion",
+                       "composition": "OrbitCarousel", "description": description,
+                       "spec": {"props": props}}}
 
 
 @app.route("/sfx/library", methods=["GET"])
@@ -19255,6 +19385,27 @@ def sfx_sound(name):
     if not path:
         return jsonify({"error": "Sound unavailable"}), 500
     return send_from_directory(str(path.parent), path.name, mimetype="audio/wav", max_age=86400)
+
+
+@app.route("/remotion/render", methods=["POST"])
+def remotion_render():
+    """Orbiting carousel via Remotion, as a transparent overlay clip."""
+    data = request.get_json(force=True) or {}
+    desc = str(data.get("description") or "rotating carousel").strip()[:600]
+    tl = dict((jobs.get(data.get("job_id") or "") or {}).get("timeline") or {})
+    if data.get("canvas"):
+        tl["canvas"] = data["canvas"]
+    try:
+        dur = data.get("duration")
+        dur = max(0.8, min(12.0, float(dur))) if dur else 5.0
+        start = float(data.get("start") or 0)
+    except (TypeError, ValueError):
+        dur, start = 5.0, 0.0
+    try:
+        info = _make_remotion_orbit(desc, tl, dur)
+    except (RuntimeError, OSError, ValueError) as e:
+        return jsonify({"error": str(e)[:300]}), 500
+    return jsonify({**info, "clip": _device_overlay_clip(info, start)})
 
 
 @app.route("/motion/render", methods=["POST"])
@@ -23269,7 +23420,8 @@ Rules:
   one photo at a time, flat. When things should ROTATE, orbit, spin round, sit in a
   ring or trade places with each other -- photos or shapes -- use add_animation and
   say so in the description ("rotating carousel: the three items travel round an oval,
-  each moving into the next one's place, the front one resting 0.3s").
+  each moving into the next one's place, the front one resting 0.3s"). Those requests
+  render through Remotion (orbiting clip above the speakers).
 - For plain B-roll prefer the existing suggest_broll / accept_all_broll flow,
   which lets the user review before anything lands.
 - set_background puts a picture BEHIND the person, cutting them out of their

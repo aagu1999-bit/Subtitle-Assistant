@@ -302,3 +302,38 @@ def test_slow_coeditor_turns_run_in_the_background(app_mod, temp_db, monkeypatch
         _t.sleep(0.05)
     assert out["message"] == "Done thinking."
     assert c.get(f"/co-editor/result/{token}").status_code == 404
+
+
+def test_rotating_carousel_requests_are_sent_to_remotion(app_mod):
+    assert app_mod._wants_remotion_orbit(
+        "a mini carousel of a square a triangle and a circle rotating above the speakers")
+    assert app_mod._wants_remotion_orbit("trade places around an oval")
+    assert not app_mod._wants_remotion_orbit("a YouTube subscribe button")
+    assert app_mod._orbit_hold("the front one rests 0.3 seconds") == 0.3
+    assert app_mod._orbit_photo_queries("rotating carousel of three photos of bali beaches")
+    assert not app_mod._orbit_photo_queries("rotating square triangle circle")
+
+
+def test_make_animation_uses_remotion_for_an_orbit(app_mod, monkeypatch):
+    seen = {}
+
+    def fake(desc, tl, dur):
+        seen["desc"] = desc
+        return {"asset_id": "r1", "duration": 5, "box": {"x": 0, "y": 0.06, "w": 0.9, "h": 0.2},
+                "device": {"kind": "animation", "engine": "remotion"}}
+
+    monkeypatch.setattr(app_mod, "_make_remotion_orbit", fake)
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a: pytest.fail("motion.py should not run"))
+    out = app_mod._make_animation("rotating carousel of shapes above the heads", {"canvas": "9x16"}, 5)
+    assert out["device"]["engine"] == "remotion" and seen["desc"].startswith("rotating")
+
+
+def test_remotion_render_route_places_an_overlay(app_mod, temp_db, monkeypatch):
+    monkeypatch.setattr(app_mod, "_make_remotion_orbit", lambda desc, tl, dur: {
+        "asset_id": "r1", "kind": "video", "duration": 5.0,
+        "box": {"x": 0.04, "y": 0.06, "w": 0.92, "h": 0.2, "px_w": 100, "px_h": 40},
+        "device": {"kind": "animation", "engine": "remotion", "description": desc},
+    })
+    d = app_mod.app.test_client().post("/remotion/render", json={
+        "description": "rotating carousel", "start": 5, "duration": 5}).get_json()
+    assert d["clip"]["start"] == 5 and d["clip"]["device"]["engine"] == "remotion"
