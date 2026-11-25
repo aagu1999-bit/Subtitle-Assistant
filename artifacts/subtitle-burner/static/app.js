@@ -948,7 +948,8 @@ function _divertToRecapImport(all) {
   if (empty) empty.classList.add("hidden");
   if (shell) shell.classList.remove("hidden");
   if (header) header.classList.remove("hidden");
-  setActiveTab("compilation");
+  if (typeof showStudioPiece === "function") showStudioPiece("recap");
+  else setActiveTab("compilation");
   const panel = document.getElementById("recapReelPanel");
   if (panel && panel.scrollIntoView) panel.scrollIntoView({ block: "start" });
   const dt = new DataTransfer();
@@ -981,7 +982,7 @@ function handleFiles(files) {
     const names = all.map(f => f.name).join(", ");
     alert(all.length
       ? `Can't use ${names}.\n\nSupported formats: ${ACCEPTED_VIDEO_EXT.join(", ")}.` +
-        "\n\nBuilding an event recap? Photos and clips go in via Compilation → Recap Reel."
+        "\n\nBuilding an event recap? Open the Recap card and drop the photos there."
       : "Please select video files.");
     return;
   }
@@ -5074,15 +5075,11 @@ function renderCompileQueue() {
   compilePanel.classList.remove("hidden");
   const q = loadCompileQueue();
   // Update the tab nav badge in lockstep.
-  const badge = document.getElementById("compileBadge");
-  if (badge) {
-    if (q.length > 0) {
-      badge.textContent = String(q.length);
-      badge.classList.remove("hidden");
-    } else {
-      badge.classList.add("hidden");
-    }
-  }
+  document.querySelectorAll('.tpl-card[data-tpl="compilation"] .tpl-cap').forEach((el) => {
+    el.textContent = q.length
+      ? (q.length + " clip" + (q.length === 1 ? "" : "s") + " waiting")
+      : "Stitch clips you already picked";
+  });
   const totalDur = q.reduce((s, c) => s + (c.end_time - c.start_time), 0);
   compileCountEl.textContent = q.length
     ? `${q.length} clip${q.length === 1 ? "" : "s"} · ~${Math.round(totalDur)}s total`
@@ -5366,7 +5363,7 @@ async function previewCompileAll() {
     alert("Queue is empty (or all clips have missing sources).");
     return;
   }
-  setActiveTab("compilation");
+  showStudioPiece("compilation");
   await new Promise(r => requestAnimationFrame(r));
   _compileSequenceActive = true;
   const btn = $("compilePreviewAllBtn");
@@ -6850,7 +6847,25 @@ async function loadCompilationIntoQueue(jobId) {
 refreshPastCompiles();
 
 // =====================================================================
-// Layout shell: empty state, tab switching, compilation badge
+// One window per card. Recap, Interviews, and Compilation used to be
+// stacked on a Projects tab. The tab is gone; each card opens only itself.
+function showStudioPiece(piece) {
+  const host = document.querySelector('[data-tab-group="compilation"]');
+  if (host) host.dataset.piece = piece || "compilation";
+  setActiveTab("compilation");
+  const panelId = {
+    recap: "recapReelPanel",
+    interviews: "multiInterviewPanel",
+    compilation: "compilePanel",
+  }[piece];
+  const panel = panelId && document.getElementById(panelId);
+  if (panel && panel.scrollIntoView) {
+    setTimeout(() => panel.scrollIntoView({ block: "start" }), 0);
+  }
+}
+window.showStudioPiece = showStudioPiece;
+
+// Layout shell: empty state, tab switching
 // =====================================================================
 
 const emptyState = $("emptyState");
@@ -9348,17 +9363,20 @@ function _tplHandOff(key, cfg) {
       .then(() => switchToJob(jobId, { force: true, tab: route.tab || "editor" }))
       .then(() => {
         // switchToJob only honours transcript/branding/highlights/editor as a
-        // landing tab and silently falls back to Ingest for anything else —
-        // "compilation" included. Set it explicitly once the words are loaded
-        // and the gates will pass.
-        if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
+        // landing tab and silently falls back to Ingest for anything else.
+        // A piece (Recap, Interviews, Compilation) opens that window alone.
+        if (route.piece && typeof showStudioPiece === "function") showStudioPiece(route.piece);
+        else if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
         if (route.tab === "editor" && typeof window.openTimelineEditor === "function") {
           return window.openTimelineEditor(jobId);
         }
       })
       .catch(() => {
-        if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
+        if (route.piece && typeof showStudioPiece === "function") showStudioPiece(route.piece);
+        else if (typeof setActiveTab === "function") setActiveTab(route.tab || "editor");
       });
+  } else if (route.piece && typeof showStudioPiece === "function") {
+    showStudioPiece(route.piece);
   } else if (typeof setActiveTab === "function") {
     setActiveTab(route.tab || "editor");
   }
