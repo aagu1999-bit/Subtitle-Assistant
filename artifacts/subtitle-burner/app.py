@@ -5259,7 +5259,7 @@ def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Pat
 
 # ---- AI clip suggestions (Gemini) ----
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 # Native image model for optional Suggest B-roll AI photos (opt-in).
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -7466,9 +7466,9 @@ def _describe_face_appearance(face_jpg: Path) -> str | None:
         if len(blob) < 400:
             return None
         b64 = base64.b64encode(blob).decode("ascii")
-        model = (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL or "gemini-2.0-flash").strip()
-        # Prefer a cheap text model for description.
-        for cand in (model, "gemini-2.0-flash", "gemini-2.5-flash"):
+        model = (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL or "gemini-3.5-flash").strip()
+        # Prefer the configured text model, then an older flash if it refuses.
+        for cand in (model, "gemini-3.5-flash", "gemini-2.5-flash"):
             if not cand:
                 continue
             url = f"{_GEMINI_BASE_URL}/{cand}:generateContent?key={api_key}"
@@ -22525,7 +22525,7 @@ def _ref_vision(sheet: Path) -> dict | None:
             "a device you can actually see. Do not invent kinds."
         )
         model = (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL
-                 or "gemini-2.5-flash").strip()
+                 or "gemini-3.5-flash").strip()
         url = f"{_GEMINI_BASE_URL}/{model}:generateContent?key={api_key}"
         body = {
             "contents": [{"role": "user", "parts": [
