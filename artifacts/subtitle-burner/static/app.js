@@ -4473,9 +4473,74 @@ function shortsMotionFormat() {
   return MOTION_FORMAT_LABEL[v] ? v : "";
 }
 
+let _aiEditRetelling = null;
+
+function renderRetellingChoices(candidates) {
+  const host = $("aiEditOutline");
+  if (!host) return;
+  host.innerHTML = "";
+  (candidates || []).forEach((c) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tl-chip-btn";
+    btn.style.display = "block";
+    btn.style.width = "100%";
+    btn.style.textAlign = "left";
+    btn.style.whiteSpace = "normal";
+    btn.style.margin = "6px 0";
+    btn.textContent = (c.audience || "Someone") + " — " + (c.retelling || "");
+    btn.onclick = () => {
+      _aiEditRetelling = c;
+      host.querySelectorAll("button").forEach((b) => { b.style.borderColor = ""; });
+      btn.style.borderColor = "#FFD60A";
+      const gen = $("aiEditGenerate");
+      if (gen) gen.textContent = "Cut to this story";
+      const status = $("aiEditStatus");
+      if (status) {
+        status.textContent = "This cut keeps the situation, the turn, and the consequence. Everything else stays out.";
+      }
+    };
+    host.appendChild(btn);
+  });
+}
+
+async function findAiEditRetelling() {
+  if (!_aiEditCtx) return;
+  const btn = $("aiEditRetell");
+  const status = $("aiEditStatus");
+  _aiEditRetelling = null;
+  const gen = $("aiEditGenerate");
+  if (gen) gen.textContent = "Create project";
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Reading the transcript for the story…";
+  try {
+    const full = _aiEditIsFullScope();
+    const res = await fetch("/retellings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: _aiEditCtx.source_job_id,
+        start_time: full ? 0 : _aiEditCtx.start_time,
+        end_time: full ? undefined : _aiEditCtx.end_time,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    renderRetellingChoices(data.candidates || []);
+    if (status) status.textContent = "Pick the retelling a stranger would actually repeat.";
+  } catch (e) {
+    if (status) status.textContent = "Could not find a story: " + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function openAiEditPlan(ctx) {
   _aiEditCtx = ctx || null;
   _aiEditRecCuts = [];
+  _aiEditRetelling = null;
+  const gen = $("aiEditGenerate");
+  if (gen) gen.textContent = "Create project";
   const modal = $("aiEditModal");
   if (!modal || !_aiEditCtx) return;
   if (!_aiEditCtx.format) {
@@ -4722,8 +4787,37 @@ async function runAiEditGenerate() {
   const btn = $("aiEditGenerate");
   const status = $("aiEditStatus");
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
-  if (status) status.textContent = "Building AI Edit project…";
+  if (status) status.textContent = _aiEditRetelling
+    ? "Cutting to that story…"
+    : "Building AI Edit project…";
   try {
+    if (_aiEditRetelling) {
+      const fullStory = _aiEditIsFullScope();
+      const storyRes = await fetch("/retelling/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: _aiEditCtx.source_job_id,
+          start_time: fullStory ? 0 : _aiEditCtx.start_time,
+          end_time: fullStory ? undefined : _aiEditCtx.end_time,
+          candidate: _aiEditRetelling,
+        }),
+      });
+      const story = await storyRes.json();
+      if (!storyRes.ok || story.error) throw new Error(story.error || storyRes.statusText);
+      closeAiEditPlan();
+      if (typeof window.openTimelineEditor === "function") {
+        await window.openTimelineEditor(story.job_id, {
+          newProject: true,
+          replace: true,
+          seedTimeline: story.timeline,
+          label: story.label || "Retelling",
+        });
+      } else {
+        alert("Timeline Editor is not available.");
+      }
+      return;
+    }
     const intensity = ($("aiEditIntensity") && $("aiEditIntensity").value) || "med";
     const applyCuts = !($("aiEditApplyCuts") && !$("aiEditApplyCuts").checked);
     const full = _aiEditIsFullScope();
@@ -4779,7 +4873,10 @@ async function runAiEditGenerate() {
     if (status) status.textContent = "Error: " + e.message;
     alert("AI Edit failed: " + e.message);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "Create project"; }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = _aiEditRetelling ? "Cut to this story" : "Create project";
+    }
   }
 }
 
@@ -4788,6 +4885,7 @@ async function runAiEditGenerate() {
   if ($("aiEditClose")) $("aiEditClose").onclick = close;
   if ($("aiEditCancel")) $("aiEditCancel").onclick = close;
   if ($("aiEditGenerate")) $("aiEditGenerate").onclick = () => runAiEditGenerate();
+  if ($("aiEditRetell")) $("aiEditRetell").onclick = () => findAiEditRetelling();
   const modal = $("aiEditModal");
   if (modal) {
     modal.addEventListener("click", (e) => {
