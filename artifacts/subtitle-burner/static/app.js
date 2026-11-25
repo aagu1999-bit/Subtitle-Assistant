@@ -4453,8 +4453,8 @@ function _syncAiEditScopeUi() {
   }
   if (scopeLabel) {
     scopeLabel.textContent = useFull
-      ? "Full video → cuts, zooms, captions → Timeline (no Shorts chop required)"
-      : "Highlight window → cuts, zooms, captions → Timeline";
+      ? "Find the story a stranger would repeat, then cut the whole video"
+      : "Find the story in this window, then cut to it";
   }
 }
 

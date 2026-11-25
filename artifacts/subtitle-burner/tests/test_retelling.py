@@ -430,6 +430,23 @@ def test_prompts_do_not_ask_for_a_pack_or_a_timer():
     assert "1.5" in spine
 
 
+def test_a_picked_story_still_cuts_when_its_lines_are_not_in_the_tape():
+    got = rt.spine_from_candidate({
+        "audience": "an event organizer",
+        "retelling": "Rain did not stop the meetup. The crowd still showed up.",
+        "lead_with_turn": False,
+        "spine_dynamic": "story_arc",
+        "beats": {
+            "situation": "An organizer feared the weather would cancel everything.",
+            "turn": "A huge crowd showed up anyway.",
+            "consequence": "The meetup still worked.",
+        },
+    }, TAPE)
+    assert [b["role"] for b in got["beats"]] == ["situation", "turn", "consequence"]
+    assert all(b["start_word_id"] and b["end_word_id"] for b in got["beats"])
+    assert got["graphics"] == []
+
+
 def test_a_prose_beat_map_is_cut_back_to_the_words():
     # The model often returns the picker's shape: a sentence per beat, no word ids.
     got = rt.normalize_spine({

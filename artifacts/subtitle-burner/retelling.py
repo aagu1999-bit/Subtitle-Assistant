@@ -832,6 +832,20 @@ def _line_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", _norm(text).lower())
 
 
+def _stem_token(token: str) -> str:
+    """Enough stemming that 'brings' still finds 'bring'."""
+    t = token
+    if len(t) > 5 and t.endswith("ing"):
+        t = t[:-3]
+    elif len(t) > 4 and t.endswith("ed"):
+        t = t[:-2]
+    elif len(t) > 4 and t.endswith("es"):
+        t = t[:-2]
+    elif len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
+        t = t[:-1]
+    return t
+
+
 def _range_blocked(start: int, end: int, avoid: list) -> bool:
     mid = (start + end) / 2
     return any(a <= mid <= b for a, b in avoid)
@@ -839,10 +853,10 @@ def _range_blocked(start: int, end: int, avoid: list) -> bool:
 
 def _best_span(words: list, line: str, avoid: list) -> tuple[int, int] | None:
     """Word indexes of the transcript span a prose line is talking about."""
-    full = _line_tokens(line)
+    full = [_stem_token(t) for t in _line_tokens(line)]
     if not full:
         return None
-    toks = [_word_token(w.get("word")) for w in words]
+    toks = [_stem_token(_word_token(w.get("word"))) for w in words]
     n = len(full)
     if n <= 40:
         for i in range(0, len(toks) - n + 1):
@@ -884,9 +898,17 @@ def _beat_spec_list(raw_beats, words: list) -> list:
         return raw_beats
     specs = []
     if isinstance(raw_beats, dict):
+        lowered = {}
+        for key, val in raw_beats.items():
+            role = str(key).strip().lower().replace(" ", "_")
+            if role in BEATS:
+                lowered[role] = val
         for role in ("turn", "situation", "consequence"):
-            if role in raw_beats:
-                specs.append((role, raw_beats[role]))
+            if role in lowered:
+                specs.append((role, lowered[role]))
+    elif isinstance(raw_beats, list) and raw_beats and all(isinstance(x, str) for x in raw_beats):
+        for role, line in zip(("situation", "turn", "consequence"), raw_beats):
+            specs.append((role, line))
     elif isinstance(raw_beats, list):
         ordered = []
         for item in raw_beats:
@@ -923,6 +945,160 @@ def _beat_spec_list(raw_beats, words: list) -> list:
                     beat[key] = spec[key]
         out.append(beat)
     return out
+
+
+def _sentence_spans(words: list) -> list[tuple[int, int]]:
+    spans = []
+    start = 0
+    for i, word in enumerate(words):
+        token = str(word.get("word") or "")
+        boundary = token.endswith((".", "?", "!"))
+        if i + 1 < len(words):
+            try:
+                gap = float(words[i + 1]["start"]) - float(word["end"])
+            except (TypeError, ValueError, KeyError):
+                gap = 0.0
+            if gap >= 0.8:
+                boundary = True
+        else:
+            boundary = True
+        if boundary and i >= start:
+            spans.append((start, i))
+            start = i + 1
+    if start < len(words):
+        spans.append((start, len(words) - 1))
+    return spans or [(0, len(words) - 1)]
+
+
+def _content_stems(text: str) -> set[str]:
+    stems = {
+        _stem_token(t) for t in _line_tokens(text)
+        if t not in _STOP and len(t) > 2
+    }
+    return stems or {_stem_token(t) for t in _line_tokens(text)}
+
+
+def _span_score(words: list, start: int, end: int, needles: set[str]) -> int:
+    if not needles:
+        return 0
+    seen = set()
+    for word in words[start:end + 1]:
+        stem = _stem_token(_word_token(word.get("word")))
+        if stem in needles:
+            seen.add(stem)
+    return len(seen)
+
+
+def _line_from_spec(spec) -> str:
+    if isinstance(spec, str):
+        return _norm(spec)
+    if isinstance(spec, dict):
+        return _norm(spec.get("text") or spec.get("line"))
+    return ""
+
+
+def _beats_from_lines(words: list, lines: dict) -> list:
+    """Three word spans for the lines the person already picked.
+
+    A line that is not in the transcript still gets a span. The cut is the
+    story they chose, not a second guess that can come back empty.
+    """
+    sentences = _sentence_spans(words)
+    avoid = []
+    chosen = {}
+    for role in ("turn", "situation", "consequence"):
+        line = lines.get(role) or ""
+        needles = _content_stems(line)
+        span = _best_span(words, line, avoid) if line else None
+        if span is not None:
+            length = span[1] - span[0]
+            cap = max(18, len(needles) * 8)
+            if length > cap or _span_score(words, span[0], span[1], needles) < 1:
+                span = None
+        if span is None and needles:
+            best = None
+            for i, (a, _b) in enumerate(sentences):
+                for j in range(i, min(len(sentences), i + 3)):
+                    aa, bb = a, sentences[j][1]
+                    if _range_blocked(aa, bb, avoid):
+                        continue
+                    score = _span_score(words, aa, bb, needles)
+                    cand = (score, -(bb - aa), -aa, aa, bb)
+                    if score > 0 and (best is None or cand > best):
+                        best = cand
+            if best is not None:
+                span = (best[3], best[4])
+        if span is not None:
+            avoid.append(span)
+            chosen[role] = span
+    missing = [role for role in BEATS if role not in chosen]
+    if missing:
+        unused = [(a, b) for a, b in sentences if not _range_blocked(a, b, avoid)]
+        if not unused:
+            n = len(words)
+            cuts = [0, max(1, n // 3), max(2, (2 * n) // 3), n]
+            unused = []
+            for i in range(3):
+                a, b = cuts[i], cuts[i + 1] - 1
+                if b >= a:
+                    unused.append((a, min(b, n - 1)))
+        for role in missing:
+            if role == "situation":
+                span = unused.pop(0) if unused else (0, 0)
+            elif role == "consequence":
+                span = unused.pop(-1) if unused else (len(words) - 1, len(words) - 1)
+            else:
+                span = unused.pop(len(unused) // 2) if unused else (0, len(words) - 1)
+            avoid.append(span)
+            chosen[role] = span
+    beats = []
+    for role in BEATS:
+        a, b = chosen[role]
+        a = max(0, min(a, len(words) - 1))
+        b = max(a, min(b, len(words) - 1))
+        beats.append({
+            "role": role,
+            "start_word_id": words[a]["id"],
+            "end_word_id": words[b]["id"],
+            "punch_in": role == "turn",
+        })
+    return beats
+
+
+def spine_from_candidate(candidate: dict, words: list) -> dict:
+    """Cut the timeline from the retelling the person already picked.
+
+    Does not call a model. The three beat lines are matched onto the
+    transcript, and a line that is not in the tape still keeps a span.
+    """
+    if not isinstance(candidate, dict):
+        raise ValueError("Send a candidate or a spine")
+    if not words:
+        raise ValueError("no words")
+    words = assign_word_ids(words) if "id" not in (words[0] or {}) else list(words)
+    raw_beats = candidate.get("beats") if isinstance(candidate.get("beats"), dict) else {}
+    lines = {}
+    for role in BEATS:
+        spec = raw_beats.get(role)
+        if spec is None:
+            spec = raw_beats.get(role.capitalize())
+        lines[role] = _line_from_spec(spec)
+    dynamic = candidate.get("spine_dynamic")
+    if dynamic not in SPINE_DYNAMICS:
+        dynamic = "claim_proof"
+    lead = candidate.get("lead_with_turn")
+    if not isinstance(lead, bool):
+        lead = False
+    audience = _norm(candidate.get("audience")) or "a viewer"
+    told = _norm(candidate.get("retelling")) or "The kept story."
+    return normalize_spine({
+        "audience": audience,
+        "retelling": told,
+        "lead_with_turn": lead,
+        "spine_dynamic": dynamic,
+        "beats": _beats_from_lines(words, lines),
+        "graphics": [],
+    }, words)
 
 
 def normalize_spine(payload: dict, words: list) -> dict:

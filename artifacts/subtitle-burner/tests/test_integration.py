@@ -363,3 +363,103 @@ def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypa
     ]
     assert body["timeline"]["tracks"]["text"] == []
     assert body["spine"]["lead_with_turn"] is True
+
+
+def test_apply_still_cuts_when_the_model_omits_word_spans(app_mod, talk_job, monkeypatch):
+    """The button was 400ing on 'beats must list the kept spans'."""
+    def fake(prompt):
+        if "Propose two or three" in prompt:
+            return {"candidates": [
+                {
+                    "audience": "a founder",
+                    "retelling": "Revenue grew forty percent.",
+                    "lead_with_turn": False,
+                    "spine_dynamic": "claim_proof",
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                },
+                {
+                    "audience": "a skeptic",
+                    "retelling": "They said stop, then showed the number.",
+                    "lead_with_turn": False,
+                    "spine_dynamic": "claim_proof",
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                },
+            ]}
+        # The shape Gemini actually sent back: sentences, no word ids.
+        return {
+            "audience": "a founder",
+            "retelling": "Revenue grew forty percent.",
+            "lead_with_turn": False,
+            "spine_dynamic": "claim_proof",
+            "beats": {
+                "situation": "Stop scrolling right now.",
+                "turn": "Revenue grew last year.",
+                "consequence": "Consistency wins.",
+            },
+        }
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    c = app_mod.app.test_client()
+    listed = c.post("/retellings", json={"job_id": talk_job}).get_json()
+    applied = c.post("/retelling/apply", json={
+        "job_id": talk_job,
+        "candidate": listed["candidates"][0],
+    })
+    assert applied.status_code == 200, applied.get_json()
+    body = applied.get_json()
+    roles = [clip["retelling_role"] for clip in body["timeline"]["tracks"]["main"]]
+    assert roles == ["situation", "turn", "consequence"]
+    joined = " ".join(clip.get("retelling_role", "") for clip in body["timeline"]["tracks"]["main"])
+    assert "situation" in joined
+    text = " ".join(b["text"].lower() for b in body["spine"]["beats"])
+    assert "revenue" in text or "scrolling" in text
+
+
+def test_apply_cuts_from_the_picked_story_when_the_model_beats_are_empty(app_mod, talk_job, monkeypatch):
+    def fake(prompt):
+        if "Propose two or three" in prompt:
+            return {"candidates": [
+                {
+                    "audience": "a founder",
+                    "retelling": "Revenue grew forty percent.",
+                    "lead_with_turn": False,
+                    "spine_dynamic": "claim_proof",
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                },
+                {
+                    "audience": "a skeptic",
+                    "retelling": "They said stop, then showed the number.",
+                    "lead_with_turn": False,
+                    "spine_dynamic": "claim_proof",
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                },
+            ]}
+        return {"beats": {"summary": "not three spans"}}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    c = app_mod.app.test_client()
+    listed = c.post("/retellings", json={"job_id": talk_job}).get_json()
+    applied = c.post("/retelling/apply", json={
+        "job_id": talk_job,
+        "candidate": listed["candidates"][0],
+    })
+    assert applied.status_code == 200, applied.get_json()
+    body = applied.get_json()
+    assert [b["role"] for b in body["spine"]["beats"]] == ["situation", "turn", "consequence"]
+    assert "beats must list" not in (body.get("error") or "")

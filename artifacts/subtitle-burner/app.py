@@ -23520,31 +23520,33 @@ def retelling_apply():
             cand = data.get("candidate")
             if not isinstance(cand, dict):
                 return jsonify({"error": "Send a candidate or a spine"}), 400
-            lead = cand.get("lead_with_turn")
-            if not isinstance(lead, bool):
-                return jsonify({"error": "lead_with_turn must be true or false"}), 400
-            audience = str(cand.get("audience") or "")
-            told = str(cand.get("retelling") or "")
-            dynamic = cand.get("spine_dynamic")
-            if dynamic not in retelling.SPINE_DYNAMICS:
-                dynamic = "claim_proof"
-            raw = _gemini_generate_clip_suggestions(
-                retelling.spine_prompt(window, audience, told, lead, dynamic))
-            if not isinstance(raw, dict):
-                raise ValueError("the spine was not an object")
-            raw.setdefault("audience", audience)
-            raw.setdefault("retelling", told)
-            raw.setdefault("lead_with_turn", lead)
-            raw.setdefault("spine_dynamic", dynamic)
+            # The story they picked is already enough to cut. A second model
+            # reply may tighten the spans, but the reply that omitted the
+            # word spans is what was failing this button.
+            spine = retelling.spine_from_candidate(cand, window)
+            lead = spine["lead_with_turn"]
+            audience = spine["audience"]
+            told = spine["retelling"]
+            dynamic = spine["spine_dynamic"]
             try:
-                spine = retelling.normalize_spine(raw, window)
-            except ValueError:
-                # A bad card should not throw away the cut the person just picked.
-                if not raw.get("graphics"):
-                    raise
-                slim = dict(raw)
-                slim["graphics"] = []
-                spine = retelling.normalize_spine(slim, window)
+                raw = _gemini_generate_clip_suggestions(
+                    retelling.spine_prompt(window, audience, told, lead, dynamic))
+                if isinstance(raw, dict):
+                    raw.setdefault("audience", audience)
+                    raw.setdefault("retelling", told)
+                    raw.setdefault("lead_with_turn", lead)
+                    raw.setdefault("spine_dynamic", dynamic)
+                    try:
+                        modeled = retelling.normalize_spine(raw, window)
+                    except ValueError:
+                        if not raw.get("graphics"):
+                            raise
+                        slim = dict(raw)
+                        slim["graphics"] = []
+                        modeled = retelling.normalize_spine(slim, window)
+                    spine = modeled
+            except (ValueError, RuntimeError):
+                pass
         timeline, checks = _timeline_from_spine(job_id, window, spine)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
