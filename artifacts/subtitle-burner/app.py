@@ -23328,14 +23328,31 @@ def _director_spans(words: list, spine: dict) -> list:
             start, end = _span_src(words, beat["start_word_id"], beat["end_word_id"])
         except (ValueError, TypeError, KeyError):
             start, end = 0.0, 0.0
-        why = "The face carries this line."
+        tool = beat.get("tool") or "none"
+        names = {
+            "card": "Card",
+            "broll": "B-roll",
+            "sequence": "Sequence",
+            "split": "Split",
+            "none": "Talking head",
+        }
+        why = names.get(tool, "Talking head") + ". The face carries this line."
         treatment = "none"
         visual = "none"
-        if card:
+        if card and tool == "card":
             treatment = labels.get(card.get("template"), "none")
             just = card.get("justification") or {}
-            why = just.get("why") or why
+            why = names["card"] + ". " + (just.get("why") or "The line has to be seen.")
             visual = just.get("function") or just.get("fact") or "none"
+        elif tool == "broll":
+            treatment = "B-roll"
+            why = "B-roll. The line has to be seen. If no picture comes back, the speaker stays."
+        elif tool == "sequence":
+            treatment = "Sequence"
+            why = "Sequence. Remotion or Hyperframes, in the same look. Otherwise the speaker stays."
+        elif tool == "split":
+            treatment = "Split"
+            why = "Split. Both people have to be in frame."
         spans.append({
             "index": i,
             "role": beat.get("role"),
@@ -23466,6 +23483,14 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
         if not span:
             continue
         out_start, out_end, _mid = span
+        beat_tool = next(
+            (b.get("tool") for b in spine.get("beats") or [] if b.get("role") == g.get("beat_role")),
+            "card",
+        )
+        if beat_tool in ("broll", "sequence", "split"):
+            # The picture, the sequence, or the split is the visual.
+            # A missing picture leaves the speaker. It does not leave a second card.
+            continue
         counted = g["template"] == "counter"
         motion = retelling.MOTION_FOR.get(g["template"] or "media_card", "rise")
         anim = {"hold": "none", "rise": "slideup", "count": "fade", "snap": "fade"}.get(motion, "slideup")
@@ -23495,6 +23520,57 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
             "retelling": True,
         })
 
+    overlays = []
+    look_tl = {"canvas": "9x16", "fps": 30, "tracks": {"main": pieces}}
+    for beat in spine.get("beats") or []:
+        tool = beat.get("tool")
+        span = beat_out.get(beat.get("role"))
+        if not span or tool not in ("split", "broll", "sequence"):
+            continue
+        out_start, out_end, _mid = span
+        dur = max(0.8, out_end - out_start)
+        if tool == "split":
+            effects.append({
+                "id": uuid.uuid4().hex[:8],
+                "type": "split_screen",
+                "start": round(out_start, 3),
+                "out": round(out_end, 3),
+                "mode": "speakers",
+                "intensity": "med",
+                "retelling_role": beat.get("role"),
+                "reason": "Both people have to be seen.",
+            })
+            continue
+        if tool == "broll":
+            try:
+                _ladder, clip = _smart_broll_for(
+                    look_tl, beat.get("text") or "", out_start, dur,
+                    allow_stock=False, allow_generate=False, color_match=False,
+                )
+            except Exception:
+                clip = None
+            if clip:
+                clip["retelling_role"] = beat.get("role")
+                overlays.append(clip)
+            continue
+        try:
+            asset = _make_animation(
+                beat.get("text") or "", look_tl, dur, freehand=False,
+            )
+        except Exception:
+            asset = None
+        if isinstance(asset, dict) and asset.get("asset_id"):
+            overlays.append({
+                "id": uuid.uuid4().hex[:8],
+                "asset_id": asset["asset_id"],
+                "start": round(out_start, 3),
+                "in": 0.0,
+                "out": round(dur, 3),
+                "x": 0.08, "y": 0.12, "w": 0.84, "h": 0.46,
+                "retelling_role": beat.get("role"),
+                "sequence": True,
+            })
+
     pack = _resolve_style_pack("default")
     timeline = _normalize_timeline({
         "canvas": pack.get("canvas") or "9x16",
@@ -23518,7 +23594,7 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
         },
         "tracks": {
             "main": pieces,
-            "overlay": [],
+            "overlay": overlays,
             "effects": effects,
             "text": texts,
             "music": [],
@@ -23604,6 +23680,7 @@ def retelling_apply():
             except (ValueError, RuntimeError):
                 pass
         spine = retelling.direct_visuals(window, spine)
+        spine = retelling.assign_tools(window, spine)
         timeline, checks = _timeline_from_spine(job_id, window, spine)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

@@ -4511,6 +4511,48 @@ function renderRetellingChoices(candidates) {
   });
 }
 
+async function seeWhoIsSpeaking(jobId, status) {
+  if (status) status.textContent = "Seeing who is speaking…";
+  try {
+    const cur = await fetch("/reframe-status/" + jobId);
+    const have = await cur.json();
+    if (have && have.ready) {
+      await fetch("/stamp-speakers/" + jobId, { method: "POST" });
+      const n = (have.stats && have.stats.speaker_count) || 0;
+      return n ? (n + " people.") : "Speakers are labeled.";
+    }
+  } catch { /* fall through and start */ }
+  let started = null;
+  try {
+    const res = await fetch("/analyze-reframe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId }),
+    });
+    started = await res.json();
+    if (!res.ok) {
+      return "Couldn't read speakers (" + (started.error || "unavailable") + "). Using the words.";
+    }
+  } catch (e) {
+    return "Couldn't read speakers. Using the words.";
+  }
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const res = await fetch("/reframe-status/" + jobId);
+      const body = await res.json();
+      if (body && body.ready) {
+        await fetch("/stamp-speakers/" + jobId, { method: "POST" });
+        const n = (body.stats && body.stats.speaker_count) || 0;
+        return n ? (n + " people.") : "Speakers are labeled.";
+      }
+      if (body && body.error) return "Speakers didn't finish. Using the words.";
+    } catch { /* keep polling */ }
+  }
+  return "Still reading speakers. Using the words for now.";
+}
+
 async function findAiEditRetelling() {
   if (!_aiEditCtx) return;
   const btn = $("aiEditRetell");
@@ -4522,8 +4564,11 @@ async function findAiEditRetelling() {
     if (_aiEditCtx && _aiEditCtx.find_story) gen.disabled = true;
   }
   if (btn) btn.disabled = true;
-  if (status) status.textContent = "Reading the transcript for the story…";
+  if (status) status.textContent = "Seeing who is speaking…";
+  let peopleNote = "";
   try {
+    peopleNote = await seeWhoIsSpeaking(_aiEditCtx.source_job_id, status);
+    if (status) status.textContent = (peopleNote ? peopleNote + " " : "") + "Finding the story…";
     const full = _aiEditIsFullScope();
     const res = await fetch("/retellings", {
       method: "POST",
@@ -4537,7 +4582,7 @@ async function findAiEditRetelling() {
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || res.statusText);
     renderRetellingChoices(data.candidates || []);
-    if (status) status.textContent = "Pick the retelling a stranger would actually repeat.";
+    if (status) status.textContent = (peopleNote ? peopleNote + " " : "") + "Pick the story. Each beat will name its own tool.";
   } catch (e) {
     if (status) status.textContent = "Could not find a story: " + e.message;
   } finally {

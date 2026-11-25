@@ -503,6 +503,51 @@ def test_the_director_frames_a_figure_a_question_and_a_mechanism():
     assert all(g["presentation_mode"] == "framed_card" for g in directed["graphics"])
 
 
+def test_each_beat_names_one_tool():
+    spine = rt.direct_visuals(TAPE, rt.normalize_spine(_spine(), TAPE))
+    named = rt.assign_tools(TAPE, spine)
+    by = {b["role"]: b["tool"] for b in named["beats"]}
+    assert by["situation"] == "card"  # forty
+    assert by["turn"] == "card"       # two
+    assert by["consequence"] == "none"
+    both = words(
+        ("HOST", "I started the stall."),
+        ("GUEST", "And I kept it open."),
+        ("HOST", "First we set up. Second we sell. Third we close."),
+        ("GUEST", "That is the day."),
+    )
+    def ids(phrase):
+        text = " ".join(w["word"] for w in both)
+        start = text.index(phrase)
+        cursor = 0
+        first = last = None
+        for w in both:
+            if cursor >= start and first is None:
+                first = w["id"]
+            cursor += len(w["word"]) + 1
+            if first and cursor >= start + len(phrase):
+                last = w["id"]
+                break
+        return first, last
+    a0, a1 = ids("I started the stall. And I kept it open.")
+    b0, b1 = ids("First we set up. Second we sell. Third we close.")
+    c0, c1 = ids("That is the day.")
+    plan = rt.normalize_spine({
+        "audience": "a new vendor",
+        "retelling": "They set up, sell, and close.",
+        "lead_with_turn": False,
+        "spine_dynamic": "story_arc",
+        "beats": [
+            {"role": "situation", "start_word_id": a0, "end_word_id": a1},
+            {"role": "turn", "start_word_id": b0, "end_word_id": b1},
+            {"role": "consequence", "start_word_id": c0, "end_word_id": c1},
+        ],
+    }, both)
+    tools = {b["role"]: b["tool"] for b in rt.assign_tools(both, plan)["beats"]}
+    assert tools["situation"] == "split"
+    assert tools["turn"] == "sequence"
+
+
 def test_a_prose_beat_map_is_cut_back_to_the_words():
     # The model often returns the picker's shape: a sentence per beat, no word ids.
     got = rt.normalize_spine({
