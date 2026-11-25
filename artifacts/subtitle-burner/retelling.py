@@ -1246,6 +1246,63 @@ def _one_graphic(words: list, beat: dict, index: int) -> dict | None:
     return None
 
 
+def _beat_speakers(words: list, beat: dict) -> list[str]:
+    try:
+        a, b = word_index(beat["start_word_id"]), word_index(beat["end_word_id"])
+    except ValueError:
+        return []
+    found = []
+    for word in words[a:b + 1]:
+        sp = str(word.get("speaker") or "").strip()
+        if sp and sp not in found:
+            found.append(sp)
+    return found
+
+
+def _is_sequence(text: str) -> bool:
+    low = _norm(text).lower()
+    if re.search(r"\b(first|second|third)\b", low) and re.search(r"\b(second|third)\b", low):
+        return True
+    nums = re.findall(r"\b[1-3]\b", low)
+    return len(set(nums)) >= 2
+
+
+def assign_tools(words: list, spine: dict) -> dict:
+    """Name the one tool each kept beat needs.
+
+    A card, a B-roll fetch, a sequence, a split, or nothing. The screen
+    does not choose. Two voices in the beat become a split. A mechanism
+    asks for a picture. A list asks for a sequence. A figure, a question,
+    or a punchline stays a card.
+    """
+    if not isinstance(spine, dict):
+        raise ValueError("spine plan must be an object")
+    if words and "id" not in (words[0] or {}):
+        words = assign_word_ids(words)
+    graphics = list(spine.get("graphics") or [])
+    beats = []
+    for beat in spine.get("beats") or []:
+        row = dict(beat)
+        cards = [g for g in graphics if g.get("beat_role") == beat.get("role")]
+        if len(_beat_speakers(words, beat)) >= 2:
+            row["tool"] = "split"
+        elif _is_sequence(beat.get("text") or ""):
+            row["tool"] = "sequence"
+        elif cards:
+            fact = str((cards[0].get("justification") or {}).get("fact") or "")
+            template = cards[0].get("template")
+            if fact in VISUAL_PROOF or template in ("media_card", None):
+                row["tool"] = "broll"
+            else:
+                row["tool"] = "card"
+        else:
+            row["tool"] = "none"
+        beats.append(row)
+    out = dict(spine)
+    out["beats"] = beats
+    return out
+
+
 def direct_visuals(words: list, spine: dict) -> dict:
     """Plan the visual beats for a cut that already has its spans.
 
