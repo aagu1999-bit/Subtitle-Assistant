@@ -1889,10 +1889,14 @@
     return Number(w.start || 0).toFixed(3);
   }
 
-  function displayWordText(clip, w) {
+    function displayWordText(clip, w) {
     const ov = clip && clip.word_overrides;
     const key = wordOverrideKey(w);
-    if (ov && ov[key] != null && String(ov[key]).length) return String(ov[key]);
+    if (ov && ov[key] != null) {
+      const s = String(ov[key]).replace(/\u200b/g, "");
+      if (!s.trim()) return "";
+      return s;
+    }
     return String(w.word || "");
   }
 
@@ -9818,8 +9822,8 @@
       log.dataset.booted = "1";
       appendCoMsg("bot",
         "I'm your Timeline remote — describe the edit you want on this project. " +
-        "I apply structured ops now (captions, shots, overlays, music, styles). " +
-        "I can't invent new features, rewrite transcript words, or finish the export — you still ▶ Render. " +
+        "I apply structured ops now (captions, shots, the script, overlays, music, styles). " +
+        "I can't invent new features or finish the export — you still ▶ Render. " +
         "Select a clip and say “this” to target it."
       );
       renderCoEditorChips();
@@ -9913,6 +9917,12 @@
     return v.slice(1).replace(/^effects\s+/i, "");
   }
 
+  function lookPosterSrc(it) {
+    if (!it || !it.engine || !it.id) return "";
+    return "/co-editor/looks/preview.png?engine=" +
+      encodeURIComponent(it.engine) + "&id=" + encodeURIComponent(it.id);
+  }
+
   function looksInTab(groups, tabId, q) {
     const needle = String(q || "").trim().toLowerCase();
     let items = [];
@@ -9953,17 +9963,28 @@
     if (coEditorLookHi >= items.length) coEditorLookHi = 0;
     menu.hidden = false;
     menu.classList.remove("hidden");
+    const featured = items[coEditorLookHi] || null;
+    const stage = featured
+      ? `<div class="co-editor-looks-stage">` +
+        `<img alt="" src="${lookPosterSrc(featured)}">` +
+        `<div class="co-editor-looks-stage-copy"><strong>/${featured.slash || ""}</strong>` +
+        `<p>${featured.phrase || ""}</p>` +
+        (featured.blurb ? `<p class="muted">${featured.blurb}</p>` : `<p class="muted"></p>`) +
+        `</div></div>`
+      : "";
     menu.innerHTML =
       `<div class="co-editor-looks-tabs">` +
       tabs.map((g) =>
         `<button type="button" class="co-editor-looks-tab${g.id === tab.id ? " on" : ""}" data-look-tab="${g.id}">${g.label} ${g.count}</button>`
       ).join("") +
       `</div>` +
-      (tab.hint ? `<p class="co-editor-looks-hint">${tab.hint}</p>` : "") +
+      (tab.hint && !q ? `<p class="co-editor-looks-hint">${tab.hint}</p>` : "") +
+      stage +
+      `<div class="co-editor-looks-list">` +
       (items.length
         ? items.map((it, i) => {
-            const thumb = it.engine && it.id
-              ? `<img class="co-editor-looks-thumb" alt="" src="/co-editor/looks/preview.png?engine=${encodeURIComponent(it.engine)}&id=${encodeURIComponent(it.id)}">`
+            const thumb = lookPosterSrc(it)
+              ? `<img class="co-editor-looks-thumb" alt="" src="${lookPosterSrc(it)}">`
               : "";
             const where = tab.id === "all" && it.group ? `<span class="co-editor-looks-where">${it.group}</span>` : "";
             return `<button type="button" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
@@ -9973,7 +9994,8 @@
               (it.blurb ? `<span class="muted">${it.blurb}</span>` : "") +
               `</span></button>`;
           }).join("")
-        : `<p class="co-editor-looks-hint">No looks in this section match.</p>`);
+        : `<p class="co-editor-looks-hint">No looks in this section match.</p>`) +
+      `</div>`;
     menu._items = items;
     const on = menu.querySelector(".co-editor-looks-item.on");
     if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });
@@ -10097,6 +10119,52 @@
     return fallback;
   }
 
+  const clipWordCache = {};
+  async function wordsForClip(clip) {
+    if (!clip || !clip.source_job_id) return [];
+    if (transcriptClipId === clip.id && transcriptWords && transcriptWords.length) return transcriptWords;
+    if (!clipWordCache[clip.source_job_id]) {
+      try {
+        const s = await api("/status/" + clip.source_job_id);
+        clipWordCache[clip.source_job_id] = s.words || [];
+      } catch (e) {
+        clipWordCache[clip.source_job_id] = [];
+      }
+    }
+    return clipWordCache[clip.source_job_id];
+  }
+
+  function replaceWordsOnClip(clip, find, repl, sourceWords) {
+    const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9']/g, "");
+    const findParts = String(find || "").trim().split(/\s+/).filter(Boolean);
+    const replParts = String(repl || "").trim().split(/\s+/).filter(Boolean);
+    if (!clip || !findParts.length || !replParts.length) return 0;
+    const words = (sourceWords || transcriptWords || []).filter((w) => {
+      const s = Number(w.start) || 0;
+      const e = Number(w.end) || s;
+      return e > (clip.in || 0) - 0.02 && s < (clip.out == null ? 1e9 : clip.out) + 0.02;
+    });
+    const shown = words.map((w) => displayWordText(clip, w));
+    let n = 0;
+    for (let i = 0; i <= shown.length - findParts.length; i++) {
+      const got = shown.slice(i, i + findParts.length).map(norm).join(" ");
+      if (got !== findParts.map(norm).join(" ")) continue;
+      const span = words.slice(i, i + findParts.length);
+      clip.word_overrides = Object.assign({}, clip.word_overrides || {});
+      span.forEach((w, k) => {
+        clip.word_overrides[wordOverrideKey(w)] =
+          k < replParts.length ? replParts[k] : "\u200b";
+      });
+      if (replParts.length > span.length) {
+        clip.word_overrides[wordOverrideKey(span[span.length - 1])] =
+          replParts.slice(span.length - 1).join(" ");
+      }
+      n += span.length;
+      i += Math.max(0, findParts.length - 1);
+    }
+    return n;
+  }
+
   async function applyCoEditorOps(ops) {
     if (!tl || !Array.isArray(ops) || !ops.length) return { applied: 0, notes: [] };
     pushHistory();
@@ -10108,7 +10176,29 @@
       const name = op && op.op;
       if (!name) continue;
       try {
-        if (name === "set_caption_style") {
+        if (name === "replace_words") {
+          const find = String(op.find || op.from || "").trim();
+          const repl = String(op.replace || op.to || op.text || "").trim();
+          let clips = tl.tracks.main || [];
+          if (op.target === "selected" && selected && selected.track === "main") {
+            clips = clips.filter((c) => c.id === selected.id);
+          } else if (op.index != null && clips[Number(op.index)]) {
+            clips = [clips[Number(op.index)]];
+          }
+          let n = 0;
+          for (const c of clips) {
+            n += replaceWordsOnClip(c, find, repl, await wordsForClip(c));
+          }
+          if (n) {
+            notes.push(`rewrote “${find}”`);
+            applied++;
+            const open = selected && selected.track === "main"
+              ? clips.find((c) => c.id === selected.id) : clips[0];
+            if (open) renderTranscript(open);
+          } else {
+            notes.push(`could not find “${find}” in the script`);
+          }
+        } else if (name === "set_caption_style") {
           const prev = tl.style || {};
           const patch = {
             font: op.font || op.font_name || prev.font || prev.font_name,
@@ -10818,6 +10908,25 @@
         if (!row) return;
         const items = lookMenu._items || [];
         fillSlashLook(items[Number(row.getAttribute("data-look-i"))]);
+      });
+      lookMenu.addEventListener("mouseover", (e) => {
+        const row = e.target && e.target.closest && e.target.closest("[data-look-i]");
+        if (!row || row.classList.contains("on")) return;
+        const i = Number(row.getAttribute("data-look-i"));
+        const it = (lookMenu._items || [])[i];
+        if (!it) return;
+        coEditorLookHi = i;
+        lookMenu.querySelectorAll(".co-editor-looks-item.on").forEach((el) => el.classList.remove("on"));
+        row.classList.add("on");
+        const stage = lookMenu.querySelector(".co-editor-looks-stage");
+        if (!stage) return;
+        const img = stage.querySelector("img");
+        if (img) img.src = lookPosterSrc(it);
+        const name = stage.querySelector("strong");
+        if (name) name.textContent = "/" + (it.slash || "");
+        const lines = stage.querySelectorAll("p");
+        if (lines[0]) lines[0].textContent = it.phrase || "";
+        if (lines[1]) lines[1].textContent = it.blurb || "";
       });
     }
   }

@@ -489,6 +489,8 @@ def test_capability_lists_hyperframes_overlays(app_mod):
     assert "hyperframes" in msg
     assert "kinetic slam" in msg and "instagram follow" in msg
     assert "backdrop word" in msg and "lean in" in msg
+    assert "rewrite transcript words" in msg
+    assert "replace_words" in "\n".join(app_mod.CO_EDITOR_OP_EXAMPLES)
 
 
 def test_effects_lookbook_wires_a_shortlist(app_mod):

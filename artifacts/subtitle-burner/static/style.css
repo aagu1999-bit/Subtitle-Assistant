@@ -912,9 +912,50 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
 .co-editor-looks {
   border-top: 1px solid #2a2f3a;
   background: #141824;
-  max-height: min(68vh, 560px);
-  overflow: auto;
+  max-height: min(72vh, 640px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   padding: 8px 10px 10px;
+}
+.co-editor-looks-stage {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  background: #0e1118;
+  flex: none;
+}
+.co-editor-looks-stage img {
+  width: 108px;
+  height: 192px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #141824;
+  flex: none;
+}
+.co-editor-looks-stage-copy { min-width: 0; }
+.co-editor-looks-stage-copy strong {
+  color: #9785ff;
+  font-size: .85rem;
+}
+.co-editor-looks-stage-copy p {
+  margin: 4px 0 0;
+  color: #e8eaee;
+  font-size: .8rem;
+  line-height: 1.35;
+}
+.co-editor-looks-stage-copy .muted {
+  color: #8b93a7;
+  font-size: .72rem;
+}
+.co-editor-looks-list {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
 }
 .co-editor-looks-tabs {
   display: flex;

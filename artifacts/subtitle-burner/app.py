@@ -17769,9 +17769,13 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                 local_e = max(local_s, (min(meta["src_out"], we) - meta["src_in"]) / sp)
                 text = w.get("word", "")
                 # Clip-local caption renames (Phase 4) keyed by source start time.
+                # A zero-width override means the word was absorbed into a rewrite.
                 key = f"{ws:.3f}"
-                if key in overrides and str(overrides[key]).strip():
-                    text = str(overrides[key]).strip()
+                if key in overrides:
+                    raw = str(overrides[key]).replace("\u200b", "")
+                    if not raw.strip():
+                        continue
+                    text = raw.strip()
                 caption_words.append({
                     "word": text,
                     "start": seg_start + local_s,
@@ -23482,6 +23486,7 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "set_color_grade", "index": 0, "preset": "warm"}',
     '{"op": "add_title", "text": "Hello", "start": 0, "duration": 3}',
     '{"op": "set_text", "index": 0, "text": "New lower third"}',
+    '{"op": "replace_words", "find": "pacing", "replace": "pasting", "target": "selected"}',
     '{"op": "apply_recommended_cuts", "index": 0}',
     '{"op": "merge_shots", "index": 0}',
     '{"op": "reorder_shot", "from": 2, "to": 0}',
@@ -23906,7 +23911,8 @@ def _co_editor_capability_message() -> str:
     return (
         "I can change this timeline. You still click Render to bake the MP4.\n\n"
         "Captions\n"
-        "• Font, size, colours, highlight, position, words per line, speaker colours\n\n"
+        "• Font, size, colours, highlight, position, words per line, speaker colours\n"
+        "• Rewrite transcript words (the captions change; the audio stays)\n\n"
         "Shots\n"
         "• Cut, trim, split, merge, reorder, swap\n"
         "• Silence cuts, transitions, colour grade\n\n"
@@ -23934,7 +23940,6 @@ def _co_editor_capability_message() -> str:
         "• Titles, overlay layout, music ducking, canvas, clip styles, polish cut\n"
         "• Story shape (hook, body, closer) as concrete timeline edits\n\n"
         "I cannot\n"
-        "• Rewrite individual transcript words\n"
         "• Accept B-roll one clip at a time (accept all, or skip all)\n"
         "• Download files, change API keys, or run code\n"
         "• Invent a new kind of edit that is not on this list\n"
@@ -24557,7 +24562,8 @@ PURPOSE
   whole recipe list. Keep the message under 1200 characters.
 
 WHAT YOU CAN DO (every item is an op below)
-- Captions: font, size, colours, highlight, position, words per line, speaker colours.
+- Captions: font, size, colours, highlight, position, words per line, speaker colours,
+  and the words themselves (replace_words: captions change, audio does not).
 - Shots: cut, trim, split, merge, reorder, swap, recommended silence cuts, transitions, colour grade.
 - Camera moves at any moment: punch zoom (aimed at the speaker), zooms, Ken Burns, split screen,
   speed ramps (speed up / slow down a stretch).
@@ -24583,11 +24589,12 @@ WHAT YOU CAN DO (every item is an op below)
 - STORY / FEEL requests (hook → body → conclusion, "make Main feel punchy", "tighten the open"):
   brainstorm in message (ask 1–2 clarifying questions if needed), then emit concrete ops you CAN apply
   now (reorder_shot, apply_recommended_cuts, enable_punch_zoom, set_color_grade, suggest_broll,
-  run_polish, set_caption_style, set_music). Do not pretend you rewrote the transcript.
+  run_polish, set_caption_style, set_music, replace_words). Caption wording is replace_words; do not claim you changed the spoken audio.
 
 HARD LIMITS (say no in message, ops: [])
 - Cannot invent ops outside the allowlist.
-- Cannot rewrite individual transcript words, approve pending B-roll one-by-one, or download files.
+- Cannot approve pending B-roll one-by-one, or download files.
+- CAN rewrite caption words with replace_words. find is the words as they appear in the transcript, replace is what they should say. Captions only — the audio is unchanged. One phrase per op. target:"selected" when they mean this clip. Say so in message, and mention Render so the burned captions update.
 - Cannot change secrets/API keys or run arbitrary code.
 - suggest_broll queues suggestions for review. Only use accept_all_broll when pending_broll_count > 0 and the user explicitly asks to accept/place them.
 - run_polish starts an async FFmpeg polish job on the Main source (not Timeline Render). Say so in message; do not claim captions were burned.
@@ -24620,6 +24627,7 @@ Rules:
 - Colors #RRGGBB. Canvas: 9x16, 16x9, 1x1, 4x5. Fit: cover|contain. Color presets: none,neutral,warm,cool,vivid,bw.
 - Multi-interview / multiple Main shots: prefer ONE shared grade (neutral or warm) on every Main index. Do not mix warm/cool/vivid across interviews for comedy. Only use bw when the user explicitly asks for black-and-white / stylized B&W.
 - Caption color requests → set_caption_style. Host/Guest → set_speaker_colors.
+- Wrong or misheard caption words ("change pacing to pasting", "fix the script") → replace_words. Do not refuse. Do not use set_text for spoken words; set_text edits a title or lower third.
 - Overlay motion → enable_ken_burns track:"overlay". PiP / full-bleed → set_overlay_layout.
 - Music volume/duck → set_music. CapCut clip looks → apply_clip_style.
 - "find B-roll / suggest photos" → suggest_broll (review queue; do not claim clips were placed).
