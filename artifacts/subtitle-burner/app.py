@@ -23525,14 +23525,26 @@ def retelling_apply():
                 return jsonify({"error": "lead_with_turn must be true or false"}), 400
             audience = str(cand.get("audience") or "")
             told = str(cand.get("retelling") or "")
+            dynamic = cand.get("spine_dynamic")
+            if dynamic not in retelling.SPINE_DYNAMICS:
+                dynamic = "claim_proof"
             raw = _gemini_generate_clip_suggestions(
-                retelling.spine_prompt(window, audience, told, lead))
+                retelling.spine_prompt(window, audience, told, lead, dynamic))
             if not isinstance(raw, dict):
                 raise ValueError("the spine was not an object")
             raw.setdefault("audience", audience)
             raw.setdefault("retelling", told)
             raw.setdefault("lead_with_turn", lead)
-            spine = retelling.normalize_spine(raw, window)
+            raw.setdefault("spine_dynamic", dynamic)
+            try:
+                spine = retelling.normalize_spine(raw, window)
+            except ValueError:
+                # A bad card should not throw away the cut the person just picked.
+                if not raw.get("graphics"):
+                    raise
+                slim = dict(raw)
+                slim["graphics"] = []
+                spine = retelling.normalize_spine(slim, window)
         timeline, checks = _timeline_from_spine(job_id, window, spine)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
