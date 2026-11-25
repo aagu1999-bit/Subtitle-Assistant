@@ -3502,20 +3502,30 @@
 
   const BEAT_NAME = { situation: "Situation", turn: "Turn", consequence: "Consequence" };
 
-  function beatTitle(c) {
-    const role = c && (c.retelling_role || "");
+  function beatTitle(c, idx) {
+    let role = c && (c.retelling_role || "");
+    if (!role && idx != null) {
+      const spans = (tl && tl.structure && tl.structure.spans) || [];
+      const mains = (tl && tl.tracks && tl.tracks.main) || [];
+      if (spans.length && spans.length === mains.length && spans[idx] && spans[idx].role) {
+        role = spans[idx].role;
+      }
+    }
     if (!role) return "";
     return BEAT_NAME[role] || String(role).replace(/_/g, " ");
   }
 
-  function beatSpan(role) {
+  function beatSpan(role, idx) {
     const spans = (tl && tl.structure && tl.structure.spans) || [];
-    return spans.find((s) => s && s.role === role) || null;
+    const found = role ? spans.find((s) => s && s.role === role) : null;
+    if (found) return found;
+    if (idx != null && spans[idx] && (!role || spans[idx].role === role)) return spans[idx];
+    return null;
   }
 
   function clipLabel(track, c, idx) {
     if (track === "main") {
-      const beat = beatTitle(c);
+      const beat = beatTitle(c, idx);
       if (beat) return `${idx + 1}. ${beat}`;
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const rawName = c.source_label || (s ? (s.filename || "clip") : "clip");
@@ -3655,9 +3665,9 @@
       const s = sources.find((x) => x.job_id === c.source_job_id);
       lines.push(`Main clip ${idx + 1}: ${s && s.filename ? s.filename : (c.source_job_id ? "clip" : "no source")}`);
       if (c.source_label) lines.push(`Source label: ${c.source_label}`);
-      if (c.retelling_role) {
-        const span = beatSpan(c.retelling_role);
-        lines.push(`Beat: ${beatTitle(c)}. The story cut kept this on purpose.`);
+      if (c.retelling_role || beatTitle(c, idx)) {
+        const span = beatSpan(c.retelling_role, idx);
+        lines.push(`Beat: ${beatTitle(c, idx)}. The story cut kept this on purpose.`);
         if (span && span.reason) lines.push(span.reason);
         if (span && span.text) lines.push(span.text);
       } else if (!c.arc_role) {
