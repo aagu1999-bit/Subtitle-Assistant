@@ -909,6 +909,25 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   color: #fff;
   background: rgba(108, 92, 255, 0.18);
 }
+.co-editor-drawer.is-picking {
+  overflow: hidden;
+}
+.co-editor-drawer.is-picking .co-editor-log,
+.co-editor-drawer.is-picking .co-editor-chips {
+  display: none;
+}
+.co-editor-drawer.is-picking .co-editor-looks {
+  display: block;
+  flex: 1 1 0%;
+  height: 0;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
 .co-editor-looks {
   border-top: 1px solid #2a2f3a;
   background: #141824;
@@ -918,50 +937,20 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   flex-direction: column;
   padding: 8px 10px 10px;
 }
-.co-editor-looks-stage {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 8px;
-  margin-bottom: 8px;
-  border: 1px solid #2a2f3a;
-  border-radius: 10px;
-  background: #0e1118;
-  flex: none;
-}
-.co-editor-looks-stage img {
-  width: 108px;
-  height: 192px;
-  object-fit: cover;
-  border-radius: 8px;
-  background: #141824;
-  flex: none;
-}
-.co-editor-looks-stage-copy { min-width: 0; }
-.co-editor-looks-stage-copy strong {
-  color: #9785ff;
-  font-size: .85rem;
-}
-.co-editor-looks-stage-copy p {
-  margin: 4px 0 0;
-  color: #e8eaee;
-  font-size: .8rem;
-  line-height: 1.35;
-}
-.co-editor-looks-stage-copy .muted {
-  color: #8b93a7;
-  font-size: .72rem;
-}
 .co-editor-looks-list {
-  overflow: auto;
-  min-height: 0;
-  flex: 1;
+  overflow: visible;
+  flex: none;
 }
 .co-editor-looks-tabs {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   margin-bottom: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #141824;
+  padding-bottom: 6px;
 }
 .co-editor-looks-tab {
   appearance: none;
@@ -988,25 +977,33 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
 .co-editor-looks-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   text-align: left;
   appearance: none;
   border: 0;
   background: transparent;
   color: #e8eaee;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border-radius: 8px;
   cursor: pointer;
-  font-size: .8rem;
+  font-size: .78rem;
+  touch-action: pan-y;
 }
 .co-editor-looks-thumb {
-  width: 42px;
-  height: 74px;
-  object-fit: cover;
-  border-radius: 6px;
+  width: 28px;
+  height: 48px;
+  border-radius: 5px;
   background: #0e1118;
   flex: none;
+  overflow: hidden;
+  display: block;
+}
+.co-editor-looks-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .co-editor-looks-copy { min-width: 0; }
 .co-editor-looks-where {

@@ -24237,22 +24237,10 @@ def _find_look_rec(engine: str, look_id: str) -> dict | None:
 
 
 def _look_poster_image(engine: str, rec: dict):
-    """A small still for the slash row. Motion looks use a real frame."""
+    """A small drawn still. Kept cheap so a phone can load a row of them at once."""
     import math
     from PIL import Image, ImageDraw
     kind = _poster_kind(engine, rec)
-    if kind in ("backdrop-word", "spotlight", "todo", "comment-box", "reject-stamp", "huge-strike"):
-        try:
-            spec = motion.normalize(_effects_motion_spec(rec, rec["words"][0], rec.get("dur")))
-            spec = motion.fit_to_content(spec)
-            t = float(spec["duration"]) * 0.72
-            shot = motion.frame_at(spec, t, tuple(spec["size"]))
-            canvas = Image.new("RGBA", (168, 300), (15, 18, 28, 255))
-            shot.thumbnail((168, 300))
-            canvas.paste(shot, ((168 - shot.width) // 2, (300 - shot.height) // 2), shot)
-            return canvas
-        except Exception:
-            pass
     W, H = 168, 300
     im = Image.new("RGBA", (W, H), (15, 18, 28, 255))
     d = ImageDraw.Draw(im)
@@ -24267,7 +24255,7 @@ def _look_poster_image(engine: str, rec: dict):
     def text(xy, msg, fill=white, f=None):
         d.text(xy, msg, fill=fill, font=f or font, anchor="mm")
 
-    if kind == "punch":
+    if kind in ("punch", "lean-in"):
         d.ellipse([54, 70, 114, 150], outline=white, width=3)
         d.rectangle([36, 48, 132, 176], outline=gold, width=3)
     elif kind == "orbit":
@@ -24324,14 +24312,26 @@ def _look_poster_image(engine: str, rec: dict):
 
 
 def _look_poster_png(engine: str, rec: dict) -> bytes:
+    import io
     cache = Path(__file__).resolve().parent / ".look-posters"
-    cache.mkdir(exist_ok=True)
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", f"{engine}-{rec.get('id')}")[:80] or "look"
     path = cache / f"{safe}.png"
-    if not path.exists():
-        im = _look_poster_image(engine, rec)
-        im.convert("RGB").save(path, "PNG")
-    return path.read_bytes()
+    try:
+        if path.exists() and path.stat().st_size > 32:
+            return path.read_bytes()
+    except OSError:
+        path = None
+    im = _look_poster_image(engine, rec).convert("RGB")
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    data = buf.getvalue()
+    if path is not None:
+        try:
+            cache.mkdir(exist_ok=True)
+            path.write_bytes(data)
+        except OSError:
+            pass
+    return data
 
 
 @app.route("/co-editor/looks/preview.png")

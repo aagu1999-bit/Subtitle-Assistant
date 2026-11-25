@@ -9905,6 +9905,8 @@
 
   function hideCoEditorLooks() {
     const menu = $("coEditorLookMenu");
+    const drawer = $("coEditorDrawer");
+    if (drawer) drawer.classList.remove("is-picking");
     if (!menu) return;
     menu.hidden = true;
     menu.classList.add("hidden");
@@ -9919,8 +9921,8 @@
 
   function lookPosterSrc(it) {
     if (!it || !it.engine || !it.id) return "";
-    return "/co-editor/looks/preview.png?engine=" +
-      encodeURIComponent(it.engine) + "&id=" + encodeURIComponent(it.id);
+    return "/co-editor/looks/preview.png?v=2&amp;engine=" +
+      encodeURIComponent(it.engine) + "&amp;id=" + encodeURIComponent(it.id);
   }
 
   function looksInTab(groups, tabId, q) {
@@ -9961,17 +9963,10 @@
     const tab = tabs.find((g) => g.id === coEditorLookTab) || tabs[0];
     const items = looksInTab(groups, tab.id, q);
     if (coEditorLookHi >= items.length) coEditorLookHi = 0;
+    const drawer = $("coEditorDrawer");
+    if (drawer) drawer.classList.add("is-picking");
     menu.hidden = false;
     menu.classList.remove("hidden");
-    const featured = items[coEditorLookHi] || null;
-    const stage = featured
-      ? `<div class="co-editor-looks-stage">` +
-        `<img alt="" src="${lookPosterSrc(featured)}">` +
-        `<div class="co-editor-looks-stage-copy"><strong>/${featured.slash || ""}</strong>` +
-        `<p>${featured.phrase || ""}</p>` +
-        (featured.blurb ? `<p class="muted">${featured.blurb}</p>` : `<p class="muted"></p>`) +
-        `</div></div>`
-      : "";
     menu.innerHTML =
       `<div class="co-editor-looks-tabs">` +
       tabs.map((g) =>
@@ -9979,20 +9974,20 @@
       ).join("") +
       `</div>` +
       (tab.hint && !q ? `<p class="co-editor-looks-hint">${tab.hint}</p>` : "") +
-      stage +
       `<div class="co-editor-looks-list">` +
       (items.length
         ? items.map((it, i) => {
-            const thumb = lookPosterSrc(it)
-              ? `<img class="co-editor-looks-thumb" alt="" src="${lookPosterSrc(it)}">`
-              : "";
+            const src = lookPosterSrc(it);
+            const thumb = src
+              ? `<span class="co-editor-looks-thumb"><img alt="" loading="lazy" decoding="async" src="${src}" onerror="this.remove()"></span>`
+              : `<span class="co-editor-looks-thumb"></span>`;
             const where = tab.id === "all" && it.group ? `<span class="co-editor-looks-where">${it.group}</span>` : "";
-            return `<button type="button" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
+            return `<div role="button" tabindex="0" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
               thumb +
               `<span class="co-editor-looks-copy"><span class="slash">/${it.slash}</span>${it.phrase}` +
               where +
               (it.blurb ? `<span class="muted">${it.blurb}</span>` : "") +
-              `</span></button>`;
+              `</span></div>`;
           }).join("")
         : `<p class="co-editor-looks-hint">No looks in this section match.</p>`) +
       `</div>`;
@@ -10918,15 +10913,6 @@
         coEditorLookHi = i;
         lookMenu.querySelectorAll(".co-editor-looks-item.on").forEach((el) => el.classList.remove("on"));
         row.classList.add("on");
-        const stage = lookMenu.querySelector(".co-editor-looks-stage");
-        if (!stage) return;
-        const img = stage.querySelector("img");
-        if (img) img.src = lookPosterSrc(it);
-        const name = stage.querySelector("strong");
-        if (name) name.textContent = "/" + (it.slash || "");
-        const lines = stage.querySelectorAll("p");
-        if (lines[0]) lines[0].textContent = it.phrase || "";
-        if (lines[1]) lines[1].textContent = it.blurb || "";
       });
     }
   }
