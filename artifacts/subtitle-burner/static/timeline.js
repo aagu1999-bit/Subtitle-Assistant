@@ -2814,6 +2814,16 @@
               tl.speaker_colors[spk.id] = _spkColor({}, spk.id) || palette[i % palette.length];
             }
           });
+          // A confident asker is the interviewer, even if pyannote numbered
+          // them second. A name already typed on the timeline stays.
+          const roles = data.stats.speaker_roles || {};
+          tl.speaker_names = tl.speaker_names || {};
+          Object.keys(roles).forEach((id) => {
+            const info = roles[id];
+            if (info && info.confident && info.role && !tl.speaker_names[id]) {
+              tl.speaker_names[id] = info.role;
+            }
+          });
           // Keep Caption Look Host/Guest pickers in sync when present.
           try {
             const hostEl = document.getElementById("hostColor");

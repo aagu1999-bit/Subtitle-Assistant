@@ -12849,11 +12849,100 @@ def _speaker_sort_key(spk: str) -> tuple:
     return (1, str(spk or ""))
 
 
-def _speaker_breakdown(diar: list) -> list:
+_QUESTION_TURN = re.compile(
+    r"^(?:so|and|but|okay|ok|well|yeah|right|now|then|alright|um|uh)?\s*"
+    r"(?:what|why|how|when|where|who|which|whose|"
+    r"did|do|does|is|are|was|were|can|could|would|will|"
+    r"have you|did you|do you|tell me|walk me)\b",
+    re.I,
+)
+
+
+def _turn_is_question(text: str) -> bool:
+    """A short prompt or anything with a question mark. A long 'what I mean' is not."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    return len(t.split()) <= 14 and bool(_QUESTION_TURN.search(t))
+
+
+def infer_speaker_roles(words: list) -> dict:
+    """Guess Interviewer vs Guest from who asks, once voices are already split.
+
+    Whisper and WhisperX do not know the job. Pyannote only hears two
+    voices and numbers them. The asker is the interviewer when they ask
+    clearly more often than the other person. Otherwise nobody is renamed.
+    """
+    turns: list[dict] = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        spk = str(w.get("speaker") or "").strip()
+        tok = str(w.get("word") or "").strip()
+        if not spk or not tok:
+            continue
+        try:
+            start = float(w.get("start", 0))
+        except (TypeError, ValueError):
+            start = 0.0
+        gap = start - float(turns[-1]["end"]) if turns else 0.0
+        if turns and turns[-1]["speaker"] == spk and gap < 1.2:
+            turns[-1]["text"] += " " + tok
+            turns[-1]["end"] = float(w.get("end", start) or start)
+            turns[-1]["words"] += 1
+        else:
+            turns.append({
+                "speaker": spk, "text": tok, "end": float(w.get("end", start) or start),
+                "words": 1,
+            })
+    by_spk: dict[str, list] = {}
+    for turn in turns:
+        by_spk.setdefault(turn["speaker"], []).append(turn)
+    if len(by_spk) < 2:
+        return {}
+    scored = []
+    for spk, spk_turns in by_spk.items():
+        questions = sum(1 for t in spk_turns if _turn_is_question(t["text"]))
+        word_n = sum(t["words"] for t in spk_turns) or 1
+        scored.append({
+            "id": spk,
+            "questions": questions,
+            "turns": len(spk_turns),
+            "words": word_n,
+            "q_rate": questions / len(spk_turns),
+        })
+    scored.sort(key=lambda s: (s["q_rate"], s["questions"]), reverse=True)
+    asker, other = scored[0], scored[1]
+    confident = (
+        asker["questions"] >= 2
+        and asker["q_rate"] >= 0.4
+        and asker["q_rate"] >= other["q_rate"] + 0.2
+    )
+    guest = max(scored[1:], key=lambda s: s["words"])
+    out = {}
+    for row in scored:
+        role = None
+        if confident and row["id"] == asker["id"]:
+            role = "Interviewer"
+        elif confident and row["id"] == guest["id"]:
+            role = "Guest"
+        out[row["id"]] = {
+            "role": role,
+            "confident": bool(confident and role),
+            "questions": row["questions"],
+            "turns": row["turns"],
+        }
+    return out
+
+
+def _speaker_breakdown(diar: list, roles: dict | None = None) -> list:
     """Per-speaker speech seconds + % for Ingest / Timeline cards.
 
     Labels are tied to SPEAKER_00 → Host, SPEAKER_01 → Guest, etc., so caption
-    colors stay consistent across multi-interview Main clips.
+    colors stay consistent across multi-interview Main clips. A confident
+    question-asker replaces that guess with Interviewer / Guest.
     """
     totals: dict[str, float] = {}
     for seg in diar or []:
@@ -12867,9 +12956,11 @@ def _speaker_breakdown(diar: list) -> list:
     out = []
     for i, spk in enumerate(sorted(totals.keys(), key=_speaker_sort_key)):
         sec = totals[spk]
+        role = (roles or {}).get(spk) or {}
+        label = role.get("role") if role.get("confident") and role.get("role") else _speaker_label_for_id(spk, i)
         out.append({
             "id": spk,
-            "label": _speaker_label_for_id(spk, i),
+            "label": label,
             "speech_sec": round(sec, 1),
             "speech_pct": round(100.0 * sec / total),
         })
@@ -13129,7 +13220,10 @@ def reframe_status(job_id: str):
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
                 stats = dict(data.get("stats") or {})
                 diar = data.get("diarization") or []
-                breakdown = _speaker_breakdown(diar)
+                spoken = assign_speakers_to_words(list(job.get("words") or []), diar)
+                roles = infer_speaker_roles(spoken)
+                stats["speaker_roles"] = roles
+                breakdown = _speaker_breakdown(diar, roles)
                 if breakdown:
                     stats["speaker_breakdown"] = breakdown
                     stats["speakers"] = [s["id"] for s in breakdown]

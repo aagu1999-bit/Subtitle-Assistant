@@ -2955,6 +2955,39 @@ def _spoken_colours(ass):
     return sorted(set(re.findall(r"\\c(&H[0-9A-Fa-f]{6}&)", ass)))
 
 
+def test_the_asker_is_the_interviewer_even_when_numbered_second(app_mod):
+    """SPEAKER_00 is not the host. The person asking is."""
+    words = []
+    t = 0.0
+
+    def add(spk, text):
+        nonlocal t
+        for tok in text.split():
+            words.append({"word": tok, "start": round(t, 3), "end": round(t + 0.25, 3), "speaker": spk})
+            t += 0.3
+        t += 0.9
+
+    add("SPEAKER_00", "I built this over three years and it changed how we sell")
+    add("SPEAKER_01", "What made you start")
+    add("SPEAKER_00", "I was drowning in spreadsheets and needed one place for it")
+    add("SPEAKER_01", "How did the first month go")
+    add("SPEAKER_00", "Revenue jumped once people could see the calendar")
+    add("SPEAKER_01", "Why does that matter to you")
+    roles = app_mod.infer_speaker_roles(words)
+    assert roles["SPEAKER_01"]["role"] == "Interviewer"
+    assert roles["SPEAKER_01"]["confident"] is True
+    assert roles["SPEAKER_00"]["role"] == "Guest"
+    assert roles["SPEAKER_00"]["confident"] is True
+
+
+def test_one_voice_is_not_labelled_an_interview(app_mod):
+    words = [
+        {"word": "just", "start": 0.0, "end": 0.2, "speaker": "SPEAKER_00"},
+        {"word": "me", "start": 0.3, "end": 0.5, "speaker": "SPEAKER_00"},
+    ]
+    assert app_mod.infer_speaker_roles(words) == {}
+
+
 def test_two_speakers_get_two_caption_colours(app_mod):
     """Words already carrying a speaker: the preferred path."""
     words = [
