@@ -169,9 +169,9 @@
   var TEMPLATE_ROUTES = {
     recap:       { needsMedia: false, tab: "compilation", panel: "recapReelPanel", piece: "recap", recapMode: true },
     tocamera:    { needsMedia: true,  tab: "editor",      panel: null },
-    interviews:  { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", piece: "interviews", multi: true },
+    interviews:  { needsMedia: false, tab: "compilation", panel: "multiInterviewPanel", piece: "interviews" },
     compilation: { needsMedia: false, tab: "compilation", panel: "compilePanel", piece: "compilation" },
-    session:     { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", piece: "interviews", multi: true, distinct: true },
+    session:     { needsMedia: true,  tab: "editor",      panel: null, multi: true, distinct: true },
     shorts:      { needsMedia: true,  tab: "highlights",  panel: null }
   };
 
@@ -351,7 +351,7 @@
               <button type="button" class="mobile-home-chip" data-filter="minimal">Minimal</button>
             </div>
             <div id="mobileHomeGallery"></div>
-            <p class="mobile-home-foot muted">Recap and Compilation open on their own. The others ask for your footage first, then open only that tool.</p>
+            <p class="mobile-home-foot muted">Recap, Interviews, and Compilation open on their own. To camera, Session, and Shorts ask for footage first.</p>
           </div>
 
           <section id="jobsPanel" class="panel hidden" style="margin-top:14px;padding:14px">

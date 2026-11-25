@@ -996,6 +996,7 @@
           theme: c.theme || null,
           arc_role: c.arc_role || null,
           retelling_role: c.retelling_role || null,
+          display_name: c.display_name || null,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         effects: (tl.tracks.effects || []).map((c) => ({ ...c })),
@@ -3502,6 +3503,15 @@
 
   const BEAT_NAME = { situation: "Situation", turn: "Turn", consequence: "Consequence" };
 
+  function pieceLine(c, idx) {
+    const named = c && String(c.display_name || "").trim();
+    if (named) return named;
+    const span = beatSpan(c && c.retelling_role, idx);
+    const text = span && span.text ? String(span.text).replace(/\s+/g, " ").trim() : "";
+    if (!text) return "";
+    return text.length > 36 ? text.slice(0, 34) + "…" : text;
+  }
+
   function beatTitle(c, idx) {
     let role = c && (c.retelling_role || "");
     if (!role && idx != null) {
@@ -3525,8 +3535,8 @@
 
   function clipLabel(track, c, idx) {
     if (track === "main") {
-      const beat = beatTitle(c, idx);
-      if (beat) return `${idx + 1}. ${beat}`;
+      const line = pieceLine(c, idx);
+      if (line) return `${idx + 1}. ${line}`;
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const rawName = c.source_label || (s ? (s.filename || "clip") : "clip");
       const name = String(rawName).replace(/\.[^.]+$/, "");
@@ -3547,8 +3557,6 @@
       // Zoom holds: lead with the multiplier so it reads at a glance even on
       // a narrow clip — "1.5×" / "2×" matters more here than the full label.
       let name = meta ? meta.label : (c.type || "Effect");
-      const beat = beatTitle(c);
-      if (beat) name = beat;
       if (c.type === "zoom_1_5") name = "1.5× hold";
       else if (c.type === "zoom_2x") name = "2× hold";
       if (c.type === "speed") return `${icon} ${Number(c.speed || 1).toFixed(2).replace(/\.?0+$/, "")}x ${fmtTime(clipDuration(c))}`;
@@ -3665,13 +3673,11 @@
       const s = sources.find((x) => x.job_id === c.source_job_id);
       lines.push(`Main clip ${idx + 1}: ${s && s.filename ? s.filename : (c.source_job_id ? "clip" : "no source")}`);
       if (c.source_label) lines.push(`Source label: ${c.source_label}`);
-      if (c.retelling_role || beatTitle(c, idx)) {
-        const span = beatSpan(c.retelling_role, idx);
-        lines.push(`Beat: ${beatTitle(c, idx)}. The story cut kept this on purpose.`);
-        if (span && span.reason) lines.push(span.reason);
-        if (span && span.text) lines.push(span.text);
-      } else if (!c.arc_role) {
-        lines.push("In order. Nothing named this a beat.");
+      const span = beatSpan(c.retelling_role, idx);
+      if (span && span.text) lines.push(span.text);
+      if (span && span.reason) lines.push(span.reason);
+      if (!span && !c.arc_role && !c.display_name) {
+        lines.push("In order. This piece was not given its own line.");
       }
       if (c.arc_role) lines.push(`Arc role: ${c.arc_role}`);
       if (c.theme) lines.push(`Theme: ${c.theme}`);
@@ -5731,6 +5737,7 @@
       const fontSize = st.font_size != null ? st.font_size : (st.size != null ? st.size : 64);
 
       let trimBody = "";
+      trimBody += `<div class="tl-prop-row"><label>Name on the timeline</label><input type="text" data-key="display_name" value="${esc(c.display_name || "")}" placeholder="Leave blank to show the spoken line" maxlength="80"></div>`;
       trimBody += `<div class="tl-prop-grid">${propNum("in", "Trim in (s)", c.in, 0, c._max || 99999, 0.1)}${propNum("out", "Trim out (s)", c.out, 0.1, c._max || 99999, 0.1)}</div>`;
       trimBody += `<div class="tl-prop-inline" style="gap:6px;margin-bottom:10px"><button class="btn btn-secondary" data-act="setin" style="flex:1;font-size:.78rem">⤓ Set IN here</button><button class="btn btn-secondary" data-act="setout" style="flex:1;font-size:.78rem">Set OUT here ⤓</button></div>`;
       const trType = (c.transition && c.transition.type) || "";
@@ -7064,11 +7071,79 @@
   // ---- Drag (move + resize) on the timeline ----
   let drag = null;
 
+  let _lastClipDown = { id: "", t: 0 };
+
+  function hideClipMenu() {
+    const menu = $("tlClipMenu");
+    if (menu) menu.classList.add("hidden");
+  }
+
+  function openClipMenu(x, y, track, id) {
+    let menu = $("tlClipMenu");
+    if (!menu) {
+      menu = document.createElement("div");
+      menu.id = "tlClipMenu";
+      menu.className = "tl-clip-menu hidden";
+      document.body.appendChild(menu);
+      document.addEventListener("pointerdown", (ev) => {
+        if (!menu.contains(ev.target)) hideClipMenu();
+      });
+      window.addEventListener("scroll", hideClipMenu, true);
+    }
+    const c = findClip(track, id);
+    if (!c) return;
+    const items = [
+      ["Properties", () => openWorkspacePanel("Clip", { mode: "props" })],
+      ["Rename", () => {
+        const next = prompt("Name on the timeline", c.display_name || pieceLine(c) || "");
+        if (next === null) return;
+        pushHistory();
+        c.display_name = next.trim();
+        renderTimeline();
+        scheduleSave();
+      }],
+    ];
+    if (track === "main") items.push(["Split at playhead", () => splitAtPlayhead()]);
+    items.push(["Duplicate", () => duplicateSelectedClip()]);
+    items.push(["Delete", () => deleteClip(track, id)]);
+    menu.innerHTML = "";
+    items.forEach(([label, fn]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        hideClipMenu();
+        fn();
+      };
+      menu.appendChild(b);
+    });
+    menu.classList.remove("hidden");
+    const pad = 8;
+    const w = 200;
+    const h = items.length * 38 + 12;
+    menu.style.left = Math.max(pad, Math.min(x, window.innerWidth - w - pad)) + "px";
+    menu.style.top = Math.max(pad, Math.min(y, window.innerHeight - h - pad)) + "px";
+  }
+
   function onTimelineMouseDown(e) {
     const clipEl = e.target.closest(".tl-clip");
     if (!clipEl || clipEl.classList.contains("tl-clip-pending")) return;
+    if (e.button != null && e.button !== 0) return;
     const track = clipEl.dataset.track;
     const id = clipEl.dataset.id;
+    const now = Date.now();
+    if (_lastClipDown.id === id && now - _lastClipDown.t < 450) {
+      _lastClipDown.t = 0;
+      drag = null;
+      selectClip(track, id, { preserveSeek: true });
+      openWorkspacePanel("Clip", { mode: "props" });
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    _lastClipDown = { id, t: now };
     selectClip(track, id, { preserveSeek: true });
     // Jump playhead to the clicked time on the clip (not always clip.in).
     seekToOutputTime(outputTimeFromClientX(e.clientX), { quietProps: true, keepSelection: true });
@@ -8385,7 +8460,18 @@
         on("tlProjectBtn", "onclick", () => openLogoProjectPanel());
 
         const timeline = $("tlTimeline");
-        if (timeline) timeline.addEventListener("pointerdown", onTimelineMouseDown);
+        if (timeline) {
+          timeline.addEventListener("pointerdown", onTimelineMouseDown);
+          timeline.addEventListener("contextmenu", (e) => {
+            const clipEl = e.target.closest && e.target.closest(".tl-clip");
+            if (!clipEl || clipEl.classList.contains("tl-clip-pending")) return;
+            e.preventDefault();
+            const track = clipEl.dataset.track;
+            const id = clipEl.dataset.id;
+            selectClip(track, id, { preserveSeek: true });
+            openClipMenu(e.clientX, e.clientY, track, id);
+          });
+        }
         document.addEventListener("pointermove", onMouseMove);
         document.addEventListener("pointerup", onMouseUp);
         document.addEventListener("pointermove", onBoxMove);
