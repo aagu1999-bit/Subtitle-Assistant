@@ -134,6 +134,18 @@ header.app-header .logo {
   border-color: var(--studio-muted) !important;
 }
 
+/* One card, one window. The old Projects tab stacked all four. */
+[data-tab-group="compilation"][data-piece="recap"] #multiInterviewPanel,
+[data-tab-group="compilation"][data-piece="recap"] #compilePanel,
+[data-tab-group="compilation"][data-piece="recap"] #pastCompilesPanel,
+[data-tab-group="compilation"][data-piece="interviews"] #recapReelPanel,
+[data-tab-group="compilation"][data-piece="interviews"] #compilePanel,
+[data-tab-group="compilation"][data-piece="interviews"] #pastCompilesPanel,
+[data-tab-group="compilation"][data-piece="compilation"] #recapReelPanel,
+[data-tab-group="compilation"][data-piece="compilation"] #multiInterviewPanel {
+  display: none !important;
+}
+
 /* Primary ready path */
 #readyActions .ready-primary-row {
   display: flex;

@@ -995,6 +995,7 @@
           source_label: c.source_label || null,
           theme: c.theme || null,
           arc_role: c.arc_role || null,
+          retelling_role: c.retelling_role || null,
         })),
         overlay: tl.tracks.overlay.map((c) => ({ ...c })),
         effects: (tl.tracks.effects || []).map((c) => ({ ...c })),
@@ -3499,8 +3500,23 @@
     }
   }
 
+  const BEAT_NAME = { situation: "Situation", turn: "Turn", consequence: "Consequence" };
+
+  function beatTitle(c) {
+    const role = c && (c.retelling_role || "");
+    if (!role) return "";
+    return BEAT_NAME[role] || String(role).replace(/_/g, " ");
+  }
+
+  function beatSpan(role) {
+    const spans = (tl && tl.structure && tl.structure.spans) || [];
+    return spans.find((s) => s && s.role === role) || null;
+  }
+
   function clipLabel(track, c, idx) {
     if (track === "main") {
+      const beat = beatTitle(c);
+      if (beat) return `${idx + 1}. ${beat}`;
       const s = sources.find((x) => x.job_id === c.source_job_id);
       const rawName = c.source_label || (s ? (s.filename || "clip") : "clip");
       const name = String(rawName).replace(/\.[^.]+$/, "");
@@ -3521,6 +3537,8 @@
       // Zoom holds: lead with the multiplier so it reads at a glance even on
       // a narrow clip — "1.5×" / "2×" matters more here than the full label.
       let name = meta ? meta.label : (c.type || "Effect");
+      const beat = beatTitle(c);
+      if (beat) name = beat;
       if (c.type === "zoom_1_5") name = "1.5× hold";
       else if (c.type === "zoom_2x") name = "2× hold";
       if (c.type === "speed") return `${icon} ${Number(c.speed || 1).toFixed(2).replace(/\.?0+$/, "")}x ${fmtTime(clipDuration(c))}`;
@@ -3637,6 +3655,14 @@
       const s = sources.find((x) => x.job_id === c.source_job_id);
       lines.push(`Main clip ${idx + 1}: ${s && s.filename ? s.filename : (c.source_job_id ? "clip" : "no source")}`);
       if (c.source_label) lines.push(`Source label: ${c.source_label}`);
+      if (c.retelling_role) {
+        const span = beatSpan(c.retelling_role);
+        lines.push(`Beat: ${beatTitle(c)}. The story cut kept this on purpose.`);
+        if (span && span.reason) lines.push(span.reason);
+        if (span && span.text) lines.push(span.text);
+      } else if (!c.arc_role) {
+        lines.push("In order. Nothing named this a beat.");
+      }
       if (c.arc_role) lines.push(`Arc role: ${c.arc_role}`);
       if (c.theme) lines.push(`Theme: ${c.theme}`);
       const cin = c.in || 0, cout = c.out != null ? c.out : cin;
@@ -3666,6 +3692,11 @@
       lines.push(`Start ${fmtTime(c.start || 0)} · Duration ${fmtTime(clipDuration(c))}`);
       if (c.quote) lines.push(`“${c.quote}”`);
       if (c.reason) lines.push(c.reason);
+      if (c.retelling_role) {
+        const span = beatSpan(c.retelling_role);
+        lines.push(`On the ${beatTitle(c)} beat.`);
+        if (span && span.reason) lines.push(span.reason);
+      }
       return lines.join("\n");
     }
     if (track === "overlay") {

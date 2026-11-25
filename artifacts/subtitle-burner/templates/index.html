@@ -136,11 +136,12 @@
   // they did, and the phone spent a week showing caption packs that went
   // nowhere while the welcome screen showed real templates.
   var STUDIO_TEMPLATES = [
-    { key: "recap",      glyph: "🏙", name: "Recap",      cap: "Photos & clips into an event reel" },
-    { key: "tocamera",   glyph: "🎤", name: "To camera",  cap: "One take, cut down & captioned" },
-    { key: "interviews", glyph: "🎙", name: "Interviews", cap: "Several people, one reel" },
-    { key: "session",    glyph: "📹", name: "Session",    cap: "One sitting, several takes" },
-    { key: "shorts",     glyph: "⚡", name: "Shorts",     cap: "One video, many clips" }
+    { key: "recap",        glyph: "🏙", name: "Recap",        cap: "Photos & clips into an event reel" },
+    { key: "tocamera",     glyph: "🎤", name: "To camera",    cap: "One take, cut down & captioned" },
+    { key: "interviews",   glyph: "🎙", name: "Interviews",   cap: "Several people, one reel" },
+    { key: "compilation",  glyph: "🎞", name: "Compilation",  cap: "Stitch clips you already picked" },
+    { key: "session",      glyph: "📹", name: "Session",      cap: "One sitting, several takes" },
+    { key: "shorts",       glyph: "⚡", name: "Shorts",       cap: "One video, many clips" }
   ];
   window.STUDIO_TEMPLATES = STUDIO_TEMPLATES;
 
@@ -166,11 +167,12 @@
   window.renderTemplateGrid = renderTemplateGrid;
 
   var TEMPLATE_ROUTES = {
-    recap:      { needsMedia: false, tab: "compilation", panel: "recapReelPanel", recapMode: true },
-    tocamera:   { needsMedia: true,  tab: "editor",      panel: null },
-    interviews: { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true },
-    session:    { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", multi: true, distinct: true },
-    shorts:     { needsMedia: true,  tab: "highlights",  panel: null }
+    recap:       { needsMedia: false, tab: "compilation", panel: "recapReelPanel", piece: "recap", recapMode: true },
+    tocamera:    { needsMedia: true,  tab: "editor",      panel: null },
+    interviews:  { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", piece: "interviews", multi: true },
+    compilation: { needsMedia: false, tab: "compilation", panel: "compilePanel", piece: "compilation" },
+    session:     { needsMedia: true,  tab: "compilation", panel: "multiInterviewPanel", piece: "interviews", multi: true, distinct: true },
+    shorts:      { needsMedia: true,  tab: "highlights",  panel: null }
   };
 
   function revealShell() {
@@ -206,7 +208,9 @@
       return;
     }
     revealShell();
-    if (typeof window.setActiveTab === "function") {
+    if (route.piece && typeof window.showStudioPiece === "function") {
+      try { window.showStudioPiece(route.piece); } catch (e) { /* fall through */ }
+    } else if (typeof window.setActiveTab === "function") {
       try { window.setActiveTab(route.tab); } catch (e) { /* fall through */ }
     }
     if (route.panel) {
@@ -297,7 +301,6 @@
       <button class="main-tab" data-tab="export">Export</button>
       <span class="main-tabs-sep" aria-hidden="true"></span>
       <button class="main-tab" data-tab="highlights">Shorts</button>
-      <button class="main-tab" data-tab="compilation" title="Recap, interviews, compilation queue">Projects <span id="compileBadge" class="tab-badge hidden">0</span></button>
       <!-- Secondary panels — opened from ready CTAs, not primary nav -->
       <button class="main-tab main-tab-secondary hidden" data-tab="transcript" id="tabTranscriptNav" aria-hidden="true" tabindex="-1">Edit words</button>
       <button class="main-tab main-tab-secondary hidden" data-tab="branding" id="tabBrandingNav" aria-hidden="true" tabindex="-1">Caption look</button>
@@ -348,7 +351,7 @@
               <button type="button" class="mobile-home-chip" data-filter="minimal">Minimal</button>
             </div>
             <div id="mobileHomeGallery"></div>
-            <p class="mobile-home-foot muted">Recap needs no transcription. The others ask for your footage first, then take you to the right tool.</p>
+            <p class="mobile-home-foot muted">Recap and Compilation open on their own. The others ask for your footage first, then open only that tool.</p>
           </div>
 
           <section id="jobsPanel" class="panel hidden" style="margin-top:14px;padding:14px">
@@ -399,7 +402,7 @@
               <div style="margin-bottom:8px"><strong>Find the story</strong> — the cut a stranger would repeat. This is the front door.</div>
               <div style="margin-bottom:8px"><strong>Edit</strong> — timeline, captions, effects, then ▶ Render.</div>
               <div style="margin-bottom:8px"><strong>Shorts</strong> — optional clip suggestions (never auto-runs).</div>
-              <div><strong>Projects</strong> — Recap, interviews, compilation queue.</div>
+              <div><strong>Compilation</strong> — the stitch queue and past stitches. Recap and Interviews are their own cards.</div>
             </div>
             <details class="ux-advanced">
               <summary>Pipeline details</summary>
@@ -2289,9 +2292,6 @@
   </button>
   <button type="button" class="mobile-nav-btn" data-tab="editor">
     <span class="ico">🎬</span><span class="lbl">Edit</span>
-  </button>
-  <button type="button" class="mobile-nav-btn" data-tab="compilation">
-    <span class="ico">🎞</span><span class="lbl">Projects</span>
   </button>
   <button type="button" class="mobile-nav-btn" id="mobileExportBtn" data-action="export" title="Quick Export (prefer Edit → Render)">
     <span class="ico">⚡</span><span class="lbl">Export</span>
