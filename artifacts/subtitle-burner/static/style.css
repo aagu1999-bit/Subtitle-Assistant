@@ -912,7 +912,7 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
 .co-editor-looks {
   border-top: 1px solid #2a2f3a;
   background: #141824;
-  max-height: 240px;
+  max-height: min(68vh, 560px);
   overflow: auto;
   padding: 8px 10px 10px;
 }
@@ -945,7 +945,9 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   line-height: 1.35;
 }
 .co-editor-looks-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   text-align: left;
   appearance: none;
@@ -956,6 +958,24 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   border-radius: 8px;
   cursor: pointer;
   font-size: .8rem;
+}
+.co-editor-looks-thumb {
+  width: 42px;
+  height: 74px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0e1118;
+  flex: none;
+}
+.co-editor-looks-copy { min-width: 0; }
+.co-editor-looks-where {
+  display: inline-block;
+  margin-left: 6px;
+  color: #6f7890;
+  font-size: .62rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+  text-transform: uppercase;
 }
 .co-editor-looks-item:hover,
 .co-editor-looks-item.on {

@@ -79,3 +79,6 @@ attached_assets/*.mov
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Generated slash-menu stills
+artifacts/subtitle-burner/.look-posters/

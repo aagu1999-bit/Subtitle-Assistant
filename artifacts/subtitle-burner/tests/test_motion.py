@@ -529,7 +529,13 @@ def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
     ids = {g["id"] for g in cat["groups"]}
     assert ids == {"effects", "hyperframes", "remotion", "effects-ref"}
     lean_item = next(it for it in cat["groups"][0]["items"] if it["slash"] == "lean-in")
-    assert lean_item["blurb"]
+    assert lean_item["blurb"] and lean_item["engine"] == "effects"
+    wired = sum(len(g["items"]) for g in cat["groups"] if g["id"] != "effects-ref")
+    assert wired > 10
+    png = c.get("/co-editor/looks/preview.png?engine=remotion&id=NumberCounter")
+    assert png.status_code == 200 and png.data.startswith(b"\x89PNG")
+    still = c.get("/co-editor/looks/preview.png?engine=effects&id=backdrop-word")
+    assert still.status_code == 200 and still.data.startswith(b"\x89PNG")
     lean = c.post("/co-editor", json={"prompt": "/lean-in", "timeline": tl}).get_json()
     assert lean["ops"][0]["op"] == "add_effect" and lean["ops"][0]["type"] == "punch_zoom"
     word = c.post("/co-editor", json={

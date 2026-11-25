@@ -24077,7 +24077,8 @@ def _co_editor_looks_catalog() -> dict:
         gid = {"effects": "effects", "hyperframes": "hyperframes",
                "remotion": "remotion"}[entry["engine"]]
         phrase = rec["words"][0]
-        item = {"id": rec["id"], "slash": _look_slash_id(rec["id"]),
+        item = {"id": rec["id"], "engine": entry["engine"],
+                "slash": _look_slash_id(rec["id"]),
                 "phrase": phrase, "blurb": _look_menu_blurb(entry["engine"], rec),
                 "wired": True,
                 "needs_text": rec.get("props") in ("text", "words", "count")}
@@ -24090,7 +24091,8 @@ def _co_editor_looks_catalog() -> dict:
         if not lid or lid in wired_ids:
             continue
         by_id["effects-ref"]["items"].append({
-            "id": lid, "slash": lid, "phrase": lid.replace("-", " "),
+            "id": lid, "engine": "effects", "slash": lid,
+            "phrase": lid.replace("-", " "),
             "blurb": str(look.get("blurb") or look.get("title") or ""),
             "wired": False, "needs_text": False,
         })
@@ -24181,6 +24183,164 @@ def _slash_co_editor_turn(prompt: str, timeline: dict, client_ctx: dict) -> dict
     if note:
         msg += " " + note
     return {"ops": [op], "message": msg}
+
+
+def _poster_kind(engine: str, rec: dict) -> str:
+    rid = str(rec.get("id") or "").lower()
+    phrase = str((rec.get("words") or [""])[0]).lower()
+    group = str(rec.get("group") or "").lower()
+    if rid in ("lean-in", "backdrop-word", "huge-strike", "spotlight", "todo",
+               "comment-box", "reject-stamp", "orbit"):
+        return rid
+    if "lower" in phrase or "lower" in group:
+        return "lower"
+    if "caption" in group or "caption" in phrase:
+        return "caption"
+    if "chart" in phrase or "graph" in phrase:
+        return "chart"
+    if "count" in phrase or "counter" in phrase:
+        return "counter"
+    if any(k in phrase for k in ("screenshot", "looks like", "phone")):
+        return "phone"
+    if any(k in phrase for k in ("aurora", "silk", "beam", "particle", "lightning",
+                                 "galaxy", "plasma", "chrome", "ray")):
+        return "wash"
+    if any(k in phrase for k in ("card", "polaroid", "profile", "glass", "holo")):
+        return "card"
+    if any(k in phrase for k in ("message", "comment", "subscribe", "follow")):
+        return "social"
+    return "word"
+
+
+def _find_look_rec(engine: str, look_id: str) -> dict | None:
+    lid = str(look_id or "")
+    if not lid:
+        return None
+    pools = {
+        "effects": _effects_wired(),
+        "hyperframes": _hyperframes_recipes(),
+        "remotion": REMOTION_RECIPES,
+    }
+    for rec in pools.get(engine) or ():
+        if str(rec.get("id") or "") == lid:
+            return rec
+    for look in _effects_lookbook():
+        if isinstance(look, dict) and str(look.get("id") or "") == lid:
+            return {"id": lid, "words": (lid.replace("-", " "),), "group": "",
+                    "engine": look.get("engine") or "motion"}
+    return {"id": lid, "words": (lid.replace("-", " "),), "group": ""}
+
+
+def _look_poster_image(engine: str, rec: dict):
+    """A small still for the slash row. Motion looks use a real frame."""
+    import math
+    from PIL import Image, ImageDraw
+    kind = _poster_kind(engine, rec)
+    if kind in ("backdrop-word", "spotlight", "todo", "comment-box", "reject-stamp", "huge-strike"):
+        try:
+            spec = motion.normalize(_effects_motion_spec(rec, rec["words"][0], rec.get("dur")))
+            spec = motion.fit_to_content(spec)
+            t = float(spec["duration"]) * 0.72
+            shot = motion.frame_at(spec, t, tuple(spec["size"]))
+            canvas = Image.new("RGBA", (168, 300), (15, 18, 28, 255))
+            shot.thumbnail((168, 300))
+            canvas.paste(shot, ((168 - shot.width) // 2, (300 - shot.height) // 2), shot)
+            return canvas
+        except Exception:
+            pass
+    W, H = 168, 300
+    im = Image.new("RGBA", (W, H), (15, 18, 28, 255))
+    d = ImageDraw.Draw(im)
+    gold, ink, red, white = (255, 214, 10, 255), (15, 18, 32, 255), (225, 29, 46, 255), (248, 250, 252, 255)
+    try:
+        font = motion._font("Anton", 28)
+        small = motion._font("Anton", 16)
+    except Exception:
+        font = small = None
+    label = str((rec.get("words") or ["LOOK"])[0]).split()[0].upper()[:8]
+
+    def text(xy, msg, fill=white, f=None):
+        d.text(xy, msg, fill=fill, font=f or font, anchor="mm")
+
+    if kind == "punch":
+        d.ellipse([54, 70, 114, 150], outline=white, width=3)
+        d.rectangle([36, 48, 132, 176], outline=gold, width=3)
+    elif kind == "orbit":
+        for i, col in enumerate((gold, white, (0, 229, 255, 255))):
+            ang = i * 2.1
+            cx = 84 + int(46 * math.cos(ang))
+            cy = 140 + int(70 * math.sin(ang))
+            d.ellipse([cx - 16, cy - 16, cx + 16, cy + 16], fill=col)
+    elif kind == "reject-stamp":
+        d.rounded_rectangle([18, 110, 150, 180], radius=8, outline=red, width=6)
+        text((84, 145), "NO", red)
+    elif kind == "todo":
+        d.rounded_rectangle([24, 70, 144, 230], radius=12, fill=white)
+        for i, y in enumerate((100, 145, 190)):
+            d.rectangle([40, y, 58, y + 18], outline=ink, width=2)
+            if i < 2:
+                d.line([42, y + 10, 48, y + 16, 56, y + 4], fill=(0, 200, 83, 255), width=2)
+    elif kind == "comment-box":
+        d.rounded_rectangle([16, 120, 152, 180], radius=28, fill=(26, 26, 26, 242))
+        d.ellipse([28, 132, 56, 160], fill=gold)
+        text((100, 150), "nice", white, small)
+    elif kind == "lower":
+        d.rectangle([0, 230, 168, 300], fill=(12, 12, 16, 230))
+        d.rectangle([0, 230, 8, 300], fill=gold)
+        text((90, 258), label[:6], white, small)
+    elif kind == "caption":
+        text((84, 210), "SAY", white)
+        text((84, 246), "IT", gold)
+    elif kind == "chart":
+        for i, h in enumerate((70, 120, 90, 150)):
+            d.rectangle([28 + i * 32, 220 - h, 50 + i * 32, 220], fill=gold if i == 3 else white)
+    elif kind == "counter":
+        text((84, 150), "40%", gold)
+    elif kind == "phone":
+        d.rounded_rectangle([48, 40, 120, 250], radius=12, outline=white, width=3)
+        d.rectangle([58, 70, 110, 150], fill=gold)
+        d.rectangle([58, 160, 110, 200], fill=(40, 48, 70, 255))
+    elif kind == "card":
+        d.rounded_rectangle([28, 80, 140, 210], radius=16, fill=(28, 32, 48, 255), outline=white)
+        text((84, 145), label[:6], gold, small)
+    elif kind == "social":
+        d.rounded_rectangle([24, 130, 144, 176], radius=22, fill=(0, 122, 255, 255))
+        text((84, 153), "Follow", white, small)
+    elif kind == "wash":
+        d.rectangle([0, 0, 168, 120], fill=(88, 28, 135, 255))
+        d.rectangle([0, 120, 168, 210], fill=(30, 64, 175, 255))
+        d.rectangle([0, 210, 168, 300], fill=(14, 116, 144, 255))
+    elif kind == "huge-strike":
+        text((84, 140), label[:5], white)
+        d.rectangle([24, 148, 144, 158], fill=red)
+    else:
+        text((84, 140), label[:6], gold)
+    return im
+
+
+def _look_poster_png(engine: str, rec: dict) -> bytes:
+    cache = Path(__file__).resolve().parent / ".look-posters"
+    cache.mkdir(exist_ok=True)
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", f"{engine}-{rec.get('id')}")[:80] or "look"
+    path = cache / f"{safe}.png"
+    if not path.exists():
+        im = _look_poster_image(engine, rec)
+        im.convert("RGB").save(path, "PNG")
+    return path.read_bytes()
+
+
+@app.route("/co-editor/looks/preview.png")
+def co_editor_look_preview():
+    """Still for one slash-menu row. Cached after the first draw."""
+    engine = (request.args.get("engine") or "effects").strip().lower()
+    rec = _find_look_rec(engine, request.args.get("id") or "")
+    if rec is None:
+        return jsonify({"error": "Unknown look"}), 404
+    png = _look_poster_png(engine, rec)
+    resp = make_response(png)
+    resp.headers["Content-Type"] = "image/png"
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
 
 
 @app.route("/co-editor/looks")

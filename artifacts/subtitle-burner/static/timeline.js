@@ -9885,7 +9885,7 @@
   }
 
   let coEditorLooks = null;
-  let coEditorLookTab = "effects";
+  let coEditorLookTab = "all";
   let coEditorLookHi = 0;
 
   async function loadCoEditorLooks() {
@@ -9914,12 +9914,20 @@
   }
 
   function looksInTab(groups, tabId, q) {
-    const g = (groups || []).find((x) => x.id === tabId) || { items: [] };
     const needle = String(q || "").trim().toLowerCase();
-    const items = g.items || [];
+    let items = [];
+    if (tabId === "all") {
+      (groups || []).forEach((g) => {
+        if (g.id === "effects-ref") return;
+        (g.items || []).forEach((it) => items.push(Object.assign({ group: g.label }, it)));
+      });
+    } else {
+      const g = (groups || []).find((x) => x.id === tabId) || { items: [] };
+      items = (g.items || []).slice();
+    }
     if (!needle) return items;
     return items.filter((it) => {
-      const blob = `${it.slash || ""} ${it.phrase || ""} ${it.blurb || ""}`.toLowerCase();
+      const blob = `${it.slash || ""} ${it.phrase || ""} ${it.blurb || ""} ${it.group || ""}`.toLowerCase();
       return blob.indexOf(needle) >= 0;
     });
   }
@@ -9934,28 +9942,41 @@
       return;
     }
     const groups = (coEditorLooks && coEditorLooks.groups) || [];
-    if (!groups.some((g) => g.id === coEditorLookTab)) coEditorLookTab = "effects";
-    const group = groups.find((g) => g.id === coEditorLookTab) || groups[0] || { items: [], hint: "" };
-    const items = looksInTab(groups, group.id, q);
+    const wiredCount = groups.reduce((n, g) => n + (g.id === "effects-ref" ? 0 : (g.items || []).length), 0);
+    const tabs = [{ id: "all", label: "All", count: wiredCount, hint: "Every look you can place. Scroll for the rest." }]
+      .concat(groups.map((g) => ({
+        id: g.id, label: g.label, count: (g.items || []).length, hint: g.hint || "",
+      })));
+    if (!tabs.some((g) => g.id === coEditorLookTab)) coEditorLookTab = "all";
+    const tab = tabs.find((g) => g.id === coEditorLookTab) || tabs[0];
+    const items = looksInTab(groups, tab.id, q);
     if (coEditorLookHi >= items.length) coEditorLookHi = 0;
     menu.hidden = false;
     menu.classList.remove("hidden");
     menu.innerHTML =
       `<div class="co-editor-looks-tabs">` +
-      groups.map((g) =>
-        `<button type="button" class="co-editor-looks-tab${g.id === group.id ? " on" : ""}" data-look-tab="${g.id}">${g.label}</button>`
+      tabs.map((g) =>
+        `<button type="button" class="co-editor-looks-tab${g.id === tab.id ? " on" : ""}" data-look-tab="${g.id}">${g.label} ${g.count}</button>`
       ).join("") +
       `</div>` +
-      (group.hint ? `<p class="co-editor-looks-hint">${group.hint}</p>` : "") +
+      (tab.hint ? `<p class="co-editor-looks-hint">${tab.hint}</p>` : "") +
       (items.length
-        ? items.slice(0, 40).map((it, i) =>
-            `<button type="button" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
-            `<span class="slash">/${it.slash}</span>${it.phrase}` +
-            (it.blurb ? `<span class="muted">${it.blurb}</span>` : "") +
-            `</button>`
-          ).join("")
+        ? items.map((it, i) => {
+            const thumb = it.engine && it.id
+              ? `<img class="co-editor-looks-thumb" alt="" src="/co-editor/looks/preview.png?engine=${encodeURIComponent(it.engine)}&id=${encodeURIComponent(it.id)}">`
+              : "";
+            const where = tab.id === "all" && it.group ? `<span class="co-editor-looks-where">${it.group}</span>` : "";
+            return `<button type="button" class="co-editor-looks-item${i === coEditorLookHi ? " on" : ""}" data-look-i="${i}">` +
+              thumb +
+              `<span class="co-editor-looks-copy"><span class="slash">/${it.slash}</span>${it.phrase}` +
+              where +
+              (it.blurb ? `<span class="muted">${it.blurb}</span>` : "") +
+              `</span></button>`;
+          }).join("")
         : `<p class="co-editor-looks-hint">No looks in this section match.</p>`);
     menu._items = items;
+    const on = menu.querySelector(".co-editor-looks-item.on");
+    if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });
   }
 
   function fillSlashLook(item) {
