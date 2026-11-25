@@ -5261,7 +5261,7 @@ def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Pat
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 # Native image model for optional Suggest B-roll AI photos (opt-in).
-GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
@@ -7773,7 +7773,7 @@ def _generate_broll_gemini_image(
             " Use the attached reference face only for likeness of any people in the new photo. "
             "Create a NEW scene (not a copy of the reference frame)."
         )
-    model = (GEMINI_IMAGE_MODEL or "gemini-2.5-flash-image").strip()
+    model = (GEMINI_IMAGE_MODEL or "gemini-3.1-flash-image").strip()
     url = f"{_GEMINI_BASE_URL}/{model}:generateContent?key={api_key}"
     parts: list[dict] = []
     if reference_face and reference_face.exists():
