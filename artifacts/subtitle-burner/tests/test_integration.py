@@ -42,11 +42,12 @@ def talk_job(app_mod, clip, monkeypatch, tmp_path):
 
 def test_edit_plan_is_a_storyboard_without_media(app_mod, talk_job):
     c = app_mod.app.test_client()
-    r = c.post("/edit-plan", json={"job_id": talk_job, "style_pack": "velocity",
+    r = c.post("/edit-plan", json={"job_id": talk_job, "style_pack": "default",
                                    "intensity": "high"}).get_json()
     roles = [s["role"] for s in r["structure"]["spans"]]
     assert roles[0] == "hook" and roles[-1] == "thesis"
-    assert r["style"]["pack"] == "Velocity"
+    assert r["style"]["pack"] == "Default"
+    assert r["style_pack"] == "default"
     assert "spans" not in r["style"] and "caption" not in r["structure"]
 
 
@@ -76,7 +77,7 @@ def test_smart_seed_places_every_decision(app_mod, talk_job):
     assert r["smart"] and r["plan"]["structure"]["spans"]
     tl = r["timeline"]
     assert tl["structure"] == r["plan"]["structure"]
-    assert tl["style_doc"]["devices"]["per_minute"] == 8
+    assert tl["style_doc"]["devices"]["per_minute"] is None
     treatments = {s["treatment"] for s in tl["structure"]["spans"]}
     overlays = tl["tracks"]["overlay"]
     kinds = {o["device"]["kind"] for o in overlays if o.get("device")}
@@ -176,8 +177,11 @@ def test_style_toggles_reach_the_plan(app_mod, talk_job):
 def test_style_packs_describe_the_look(app_mod):
     packs = app_mod.app.test_client().get("/ai-edit/style-packs").get_json()["packs"]
     by = {p["id"]: p for p in packs}
-    assert by["film"]["graphics_budget"]["per_minute"] == 1
-    assert by["pulse"]["style"]["highlight"].startswith("#")
+    assert "default" in by
+    for gone in ("pulse", "clarity", "magazine", "film", "velocity", "always"):
+        assert gone not in by
+    assert by["default"]["style"]["highlight"].startswith("#")
+    assert not (by["default"].get("graphics_budget") or {}).get("per_minute")
 
 
 def test_page_ships_the_style_first_flow(app_mod):

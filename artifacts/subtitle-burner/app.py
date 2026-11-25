@@ -42,6 +42,7 @@ import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
 import motion  # noqa: E402
+import retelling  # noqa: E402
 import qa  # noqa: E402
 import taste  # noqa: E402
 
@@ -134,7 +135,7 @@ CAPCUT_TEMPLATES = {
     # Keys mirror the UI <select id="capcutTemplate"> values.
     "podcast_interview": {
         "label": "Podcast / Interview 9:16",
-        "ai_edit_pack": "clarity",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Montserrat Thin Black",
         "size": 64,
@@ -157,7 +158,7 @@ CAPCUT_TEMPLATES = {
     },
     "capcut_reels": {
         "label": "CapCut High-Energy Reel",
-        "ai_edit_pack": "pulse",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         # Integral CF is commercial and not bundled; Anton is the nearest
         # heavy condensed face that actually ships here.
@@ -181,7 +182,7 @@ CAPCUT_TEMPLATES = {
     },
     "product_spotlight": {
         "label": "Product Spotlight",
-        "ai_edit_pack": "velocity",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Anton",
         "size": 72,
@@ -203,7 +204,7 @@ CAPCUT_TEMPLATES = {
     },
     "cinematic_vlog": {
         "label": "Cinematic Festival Vlog",
-        "ai_edit_pack": "film",
+        "ai_edit_pack": "default",
         "canvas": "16x9",
         "font": "DM Sans",
         "size": 56,
@@ -226,7 +227,7 @@ CAPCUT_TEMPLATES = {
     # CapCut Always–style: match stills to spoken keywords (photos / AI photos).
     "capcut_always": {
         "label": "Always · Photo Match",
-        "ai_edit_pack": "always",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Montserrat Thin Black",
         "size": 62,
@@ -321,109 +322,38 @@ def _style_has_caption_fields(style) -> bool:
     )
 
 
-# Captions-style AI Edit recipes. Intensity scales cut/zoom/B-roll density.
-# These seed timeline JSON — they are not full generative Mirage styles.
-AI_EDIT_STYLE_PACKS = {
-    "pulse": {
-        "label": "Pulse",
-        "blurb": "Fast social pacing — punch zooms, hard cuts, bold captions",
+def _default_style_pack() -> dict:
+    """The one built-in look. Palette, type, and motion come from retelling tokens.
+
+    There is no per-minute graphics budget. A graphic is allowed when a kept
+    line fails by ear or fails the mute test, which is decided later, not here.
+    """
+    look = retelling.tokens()
+    colors = look["colors"]
+    return {
+        "label": "Default",
+        "blurb": "One look. A graphic only when the ear or the mute test needs it.",
         "canvas": "9x16",
         "transition": None,
-        "caption_preset": "mrbeast",
+        "caption_preset": "karaoke",
         "style": {
             # Above the bottom 20% where feed UI (username, caption) sits.
             "position_y": 72,
-            # Commercial, not bundled -- see above.
-            "font": "Anton", "size": 68, "primary": "#FFFFFF",
-            "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
-        },
-        "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
-        # Graphics devices per minute and which kinds suit the look.
-        "graphics_budget": {"per_minute": 6, "allow": ["ui", "stat", "text", "step_tracker"]},
-    },
-    "clarity": {
-        "label": "Clarity",
-        "blurb": "Clean talking-head — light trim, subtle zoom, readable captions",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "hormozi",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            # The family name inside Montserrat-Black.ttf, which is what
-            # libass matches on.
-            "font": "Montserrat Thin Black", "size": 64, "primary": "#FFFFFF",
-            "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
+            "font": look["font"]["ui"],
+            "size": 56,
+            "primary": colors["ink"],
+            "highlight": colors["accent"],
+            "accent": colors["stroke"],
+            "group": 3,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
-        "graphics_budget": {"per_minute": 3, "allow": ["mental", "stat"]},
-    },
-    "magazine": {
-        "label": "Magazine",
-        "blurb": "Editorial polish — soft Ken Burns, warm grade, lower-third titles",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "karaoke",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
-            "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
-        },
-        "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
-        # AI Edit no longer seeds text overlays (see _build_ai_edit_timeline) —
-        # kept False rather than removed in case older saved projects read it.
-        "add_title": False,
-        "graphics_budget": {"per_minute": 2, "allow": ["mental", "text"]},
-    },
-    "velocity": {
-        "label": "Velocity",
-        "blurb": "High intensity — dense zooms, silence cuts, energetic captions",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "neon",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
-            "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
-        },
-        "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
-        "graphics_budget": {"per_minute": 8, "allow": []},
-    },
-    "film": {
-        "label": "Film",
-        "blurb": "Cinematic slow push — muted grade, sparse cuts, elegant type",
-        "canvas": "16x9",
-        "transition": None,
-        "caption_preset": "karaoke",
-        "style": {
-            "font": "DM Sans", "size": 52, "primary": "#F5F0E8",
-            "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
-        },
-        "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
-        "graphics_budget": {"per_minute": 1, "allow": ["timeline_scrubber", "venn", "text"]},
-    },
-    "always": {
-        "label": "Always",
-        "blurb": "Photo-match B-roll — keyword stills (stock/AI) with soft Ken Burns",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "hormozi",
-        "photo_match": True,
-        "use_ai_photos": False,
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "Montserrat Thin Black", "size": 62, "primary": "#FFFFFF",
-            "highlight": "#FFE566", "accent": "#FF6B9A", "group": 2,
-        },
-        "color_grade": {"preset": "warm", "brightness": 0.03, "contrast": 0.06, "saturation": 0.1},
-        "ken_burns": {"enabled": True, "direction": "in", "intensity": "med"},
-        # Photos carry this look; graphics stay rare.
-        "graphics_budget": {"per_minute": 1, "allow": ["text", "stat"]},
-    },
-}
+        "tokens": look,
+    }
+
+
+# One built-in. Saved looks still live in SQLite under their own ids.
+# pulse, clarity, magazine, film, velocity, and always are gone.
+AI_EDIT_STYLE_PACKS = {"default": _default_style_pack()}
 
 _FILLER_SINGLE_WORDS = {
     "um", "uh", "uhh", "uhm", "umm", "er", "erm",
@@ -720,11 +650,14 @@ def _db_delete_job(job_id: str) -> None:
 # a style_pack id accepts a saved one with no further change.
 
 def _builtin_pack_ids() -> set:
-    """Ids a saved pack may not shadow, or picking "Clarity" would silently
-    stop meaning Clarity for everyone. Read live rather than cached: a cached
-    copy is exactly the kind of module state that leaks between tests.
+    """Ids a saved pack may not take.
+
+    `default` is the one real look. The deleted pacing names stay reserved
+    so a saved row cannot bring pulse or clarity back. Read live rather
+    than cached: a cached copy is exactly the kind of module state that
+    leaks between tests.
     """
-    return set(AI_EDIT_STYLE_PACKS.keys())
+    return set(AI_EDIT_STYLE_PACKS) | set(retelling.DELETED_STYLE_PACKS)
 
 
 def _slug_pack_id(label: str) -> str:
@@ -813,18 +746,18 @@ def _db_delete_style_pack(pack_id: str) -> bool:
 
 
 def _resolve_style_pack(pack_id: str) -> dict:
-    """Saved packs first, then the built-ins, then `pulse`.
+    """Saved packs first, then the one built-in, then `default`.
 
     The returned dict is a copy carrying `_id`, so no caller can mutate the
-    built-in table -- which `dict(AI_EDIT_STYLE_PACKS.get(...))` relied on
-    callers remembering.
+    built-in table. A deleted pacing pack (pulse, clarity, and the rest)
+    resolves here too, so an old project does not crash looking for one.
     """
     pid = str(pack_id or "").strip().lower()
     saved = _db_load_style_packs()
     pack = saved.get(pid) or AI_EDIT_STYLE_PACKS.get(pid)
-    if pack is None:
-        pack = AI_EDIT_STYLE_PACKS["pulse"]
-        pid = "pulse"
+    if pack is None or pid in retelling.DELETED_STYLE_PACKS:
+        pack = AI_EDIT_STYLE_PACKS["default"]
+        pid = "default"
     pack = dict(pack)
     pack["_id"] = pid
     return pack
@@ -20344,8 +20277,11 @@ def motion_render():
 
 @app.route("/devices/catalog", methods=["GET"])
 def devices_catalog():
-    packs = {k: (v.get("graphics_budget") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
-    return jsonify({"devices": devices.catalog_public(), "pack_budgets": packs})
+    return jsonify({
+        "devices": devices.catalog_public(),
+        "pack_budgets": {},
+        "tokens": retelling.tokens(),
+    })
 
 
 @app.route("/devices/preview.png", methods=["GET"])
@@ -23287,8 +23223,8 @@ def edit_plan():
     words = jobs[job_id].get("words") or []
     if not words:
         return jsonify({"error": "Transcript not available"}), 400
-    pack_id = (data.get("style_pack") or "pulse").lower()
-    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    pack = _resolve_style_pack(data.get("style_pack") or "default")
+    pack_id = pack["_id"]
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in edit_engine.DENSITY:
         intensity = "med"
@@ -23327,9 +23263,9 @@ def ai_edit_seed():
 
     # Saved packs resolve ahead of the built-ins, so a pack the user kept (or
     # one derived from a reference) drives this whole pipeline -- cuts, caption
-    # style, grade, photo-match -- exactly as a built-in does. An unknown id
-    # still falls back to `pulse`, and `_id` reflects what was really used.
-    pack = _resolve_style_pack(data.get("style_pack") or "pulse")
+    # style, grade, photo-match -- exactly as a built-in does. An unknown id,
+    # including a deleted pacing pack, falls back to `default`.
+    pack = _resolve_style_pack(data.get("style_pack") or "default")
     pack_id = pack["_id"]
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in ("low", "med", "high"):

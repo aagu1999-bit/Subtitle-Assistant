@@ -4427,7 +4427,7 @@ if (hlMidformVersionsBtn) hlMidformVersionsBtn.onclick = () => runMakeMidformVer
 // AI Edit plan modal — style + intensity → seeded timeline project
 // =====================================================================
 let _aiEditCtx = null;
-let _aiEditPackId = "pulse";
+let _aiEditPackId = "default";
 let _aiEditRecCuts = []; // full recommended cuts from preview
 
 function _syncAiEditScopeUi() {
@@ -8286,7 +8286,7 @@ const CAPCUT_TEMPLATES = (typeof window !== "undefined" && window.CAPCUT_TEMPLAT
       },
       capcut_always: {
         label: "Always · Photo Match",
-        ai_edit_pack: "always",
+        ai_edit_pack: "default",
         canvas: "9x16", font: "Montserrat Thin Black", size: 62,
         primary: "#FFFFFF", highlight: "#FFE566", accent: "#FF6B9A", group: 2,
         headline: "", viral_preset: "hormozi", speaker_colors: false,
@@ -8321,15 +8321,8 @@ function applyCapcutTemplateToUi(tKey, opts) {
   window._activeCapcutKey = tKey;
   window._pendingCapcutTemplate = t;
 
-  // Map CapCut-style edit pack → AI Edit recipe (storytelling lives there).
-  const packMap = {
-    podcast_interview: "clarity",
-    capcut_reels: "pulse",
-    product_spotlight: "velocity",
-    cinematic_vlog: "film",
-    capcut_always: "always",
-  };
-  const aiPack = t.ai_edit_pack || packMap[tKey] || "pulse";
+  // Caption recipes no longer select a pacing pack. There is one look.
+  const aiPack = "default";
   t.ai_edit_pack = aiPack;
   if (typeof _aiEditPackId !== "undefined") {
     try { _aiEditPackId = aiPack; } catch (e) { /* optional */ }
@@ -8433,7 +8426,7 @@ if (capcutTemplateEl) {
 // A saved look now goes to the SERVER as a style pack, not only to this
 // browser's localStorage. That matters for two reasons: localStorage dies with
 // the cache and is invisible to every other device, and a server-side pack
-// shows up in the AI Edit pack picker beside Pulse/Clarity/..., so a look you
+// shows up in the AI Edit pack picker beside Default, so a look you
 // kept can drive a whole edit instead of only the caption controls.
 // localStorage is still written, as a fallback for when the save fails.
 window.saveCustomBrandPreset = async function (name) {

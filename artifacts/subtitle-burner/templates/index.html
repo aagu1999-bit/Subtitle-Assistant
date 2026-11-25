@@ -1311,8 +1311,8 @@
       </div>
       {% endif %}
       <p class="muted panel-desc">
-        Pick a <strong>CapCut-style edit pack</strong> (pacing / zooms / captions recipe), then format + length.
-        Gemini finds hook-first moments — that is the storytelling step. On each card:
+        Pick a caption recipe, then format + length.
+        The edit is a retelling, not a pacing pack. On each card:
         <strong>Preview</strong> → <strong>Open in Timeline</strong> →
         <strong>AI Edit…</strong> (applies cuts + the pack) →
         <strong>Export clip</strong> →
@@ -1323,14 +1323,14 @@
       <div class="row" style="margin-bottom:14px;padding:12px;background:#181c28;border:1px solid #6c5cff;border-radius:10px;flex-wrap:wrap;gap:8px;align-items:center">
         <label style="min-width:130px;font-weight:700;color:#9785ff;font-size:.88rem" for="capcutTemplate">🎬 Edit pack</label>
         <select id="capcutTemplate" style="flex:1;min-width:220px;padding:6px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;font-weight:600;font-size:.86rem">
-          <option value="podcast_interview" selected>🎙️ Podcast / Interview — Clarity (talking-head)</option>
-          <option value="capcut_reels">⚡ High-Energy Reel — Pulse (fast cuts + punch)</option>
-          <option value="product_spotlight">🛍️ Product Spotlight — Velocity (dense zooms)</option>
-          <option value="cinematic_vlog">🎪 Cinematic Vlog — Film (16:9, sparse cuts)</option>
-          <option value="capcut_always">🖼️ Always · Photo Match — keyword stills + Ken Burns</option>
+          <option value="podcast_interview" selected>🎙️ Podcast / Interview</option>
+          <option value="capcut_reels">⚡ High-Energy Reel</option>
+          <option value="product_spotlight">🛍️ Product Spotlight</option>
+          <option value="cinematic_vlog">🎪 Cinematic Vlog (16:9)</option>
+          <option value="capcut_always">🖼️ Photo match — keyword stills</option>
         </select>
         <p id="capcutTemplateHint" class="muted" style="width:100%;margin:0;font-size:.74rem;line-height:1.4">
-          Packs set the <em>AI Edit</em> recipe (cuts/zooms/captions). They do <strong>not</strong> auto-rewrite the story —
+          These set caption and canvas defaults. They do <strong>not</strong> choose the story —
           run <strong>Find highlights</strong>, then <strong>AI Edit…</strong> on a short.
         </p>
       </div>

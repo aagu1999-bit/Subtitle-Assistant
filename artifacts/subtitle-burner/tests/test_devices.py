@@ -120,7 +120,11 @@ def test_device_routes(app_mod):
     c = app_mod.app.test_client()
     cat = c.get("/devices/catalog").get_json()
     assert {d["kind"] for d in cat["devices"]} == set(devices.CATALOG)
-    assert cat["pack_budgets"]["film"]["per_minute"] == 1
+    assert "film" not in (cat.get("pack_budgets") or {})
+    assert cat["tokens"]["id"] == "default"
+    assert cat["tokens"]["motion"] == ["hold", "rise", "count", "snap"]
+    assert "counter" in cat["tokens"]["templates"]
+    assert "media_card" in cat["tokens"]["templates"]
     s = c.post("/devices/suggest", json={"text": "she texted me at 2am"}).get_json()
     assert s["kind"] == "chat_bubbles"
     s = c.post("/devices/suggest", json={"text": "revenue grew 40% last year"}).get_json()
