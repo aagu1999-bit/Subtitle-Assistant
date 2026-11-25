@@ -276,7 +276,7 @@ def test_retelling_apply_keeps_the_spine_and_skips_the_old_planner(app_mod, talk
     assert len(texts) == 1 and texts[0]["template"] == "counter" and "40%" in texts[0]["text"]
     assert "asset_miss" in [f["reason"] for f in body["checks"]["fixes"] if f["id"] == "g-ui"]
     assert body["timeline"]["tracks"]["effects"][0]["type"] == "punch_zoom"
-    assert "structure" not in body["timeline"]
+    assert any(s["treatment"] == "Counter" for s in body["timeline"]["structure"]["spans"])
 
     refused = dict(spine)
     refused["graphics"] = [{
@@ -361,7 +361,14 @@ def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypa
     assert [clip["retelling_role"] for clip in body["timeline"]["tracks"]["main"]] == [
         "turn", "situation", "consequence",
     ]
-    assert body["timeline"]["tracks"]["text"] == []
+    cards = body["timeline"]["tracks"]["text"]
+    assert cards
+    assert {c["template"] for c in cards} <= {
+        "search_bar", "message_card", "counter", "quote_card", "name_card", "media_card",
+    }
+    assert all(c["color"] == "#F8FAFC" and c["bg_color"] == "#0F1220" for c in cards)
+    assert all(c["text"].lower() not in {"google", "texted", "subscribe"} for c in cards)
+    assert body["timeline"]["structure"]["spans"]
     assert body["spine"]["lead_with_turn"] is True
 
 
