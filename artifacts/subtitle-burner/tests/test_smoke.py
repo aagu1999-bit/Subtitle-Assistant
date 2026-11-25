@@ -562,10 +562,8 @@ def test_every_ai_edit_pack_font_resolves_both_ways(app_mod):
     """A pack font has to satisfy two different matchers or it half-works.
 
     The browser registers @font-face by matching the name against a FILENAME;
-    libass matches it against the family name recorded INSIDE the TTF. Pulse
-    named a commercial font nobody has, and Clarity named "Montserrat Black",
-    which matches the filename but not the family name inside it -- so that
-    pack previewed in Montserrat and rendered in a system font.
+    libass matches it against the family name recorded INSIDE the TTF. The
+    default look uses DM Sans, which has to satisfy both.
     """
     font_dir = BURNER / "fonts"
     files = [p.name for p in font_dir.glob("*")
@@ -6173,29 +6171,35 @@ def test_the_builtin_packs_resolve_exactly_as_before(app_mod, temp_db):
         expect["_id"] = key
         assert app_mod._resolve_style_pack(key) == expect, f"{key} after a save"
 
-    # And an unknown id still lands on pulse rather than raising.
-    assert app_mod._resolve_style_pack("no-such-pack")["_id"] == "pulse"
-    assert app_mod._resolve_style_pack("")["_id"] == "pulse"
+    # An unknown id, and every deleted pacing pack, lands on default.
+    assert app_mod._resolve_style_pack("no-such-pack")["_id"] == "default"
+    assert app_mod._resolve_style_pack("")["_id"] == "default"
+    for gone in ("pulse", "clarity", "magazine", "film", "velocity", "always"):
+        assert gone not in app_mod.AI_EDIT_STYLE_PACKS
+        assert app_mod._resolve_style_pack(gone)["_id"] == "default"
 
 
 def test_a_saved_pack_cannot_overwrite_a_builtin(app_mod, temp_db):
-    """Otherwise picking "Clarity" would stop meaning Clarity for everyone."""
+    """Otherwise picking Default would stop meaning the default look."""
     client = app_mod.app.test_client()
     res = client.post("/style-packs", json={
-        "label": "Hijack", "id": "clarity", "style": {"font_size": 9}})
+        "label": "Hijack", "id": "default", "style": {"font_size": 9}})
     assert res.status_code == 400
     assert "built-in" in (res.get_json() or {}).get("error", "")
-    assert app_mod._resolve_style_pack("clarity")["label"] == "Clarity"
-    assert app_mod._resolve_style_pack("clarity")["style"]["size"] == 64
+    assert app_mod._resolve_style_pack("default")["label"] == "Default"
+    assert app_mod._resolve_style_pack("default")["style"]["size"] == 56
 
     # The slug of a label that collides is pushed out of the way instead.
-    assert app_mod._slug_pack_id("Clarity") != "clarity"
+    assert app_mod._slug_pack_id("Default") != "default"
     assert client.post("/style-packs", json={
-        "label": "Clarity", "style": {"font_size": 9}}).status_code == 200
-    assert app_mod._resolve_style_pack("clarity")["style"]["size"] == 64
+        "label": "Default", "style": {"font_size": 9}}).status_code == 200
+    assert app_mod._resolve_style_pack("default")["style"]["size"] == 56
 
-    # Deleting one is refused too, so the table cannot be emptied of them.
-    assert client.delete("/style-packs/clarity").status_code == 400
+    # Deleting the built-in is refused, and so is reusing a deleted pacing name.
+    assert client.delete("/style-packs/default").status_code == 400
+    assert client.post("/style-packs", json={
+        "label": "Pulse", "id": "pulse", "style": {"font_size": 9}}).status_code == 400
+    assert app_mod._resolve_style_pack("pulse")["label"] == "Default"
 
 
 def test_a_saved_pack_reaches_the_renderer_as_the_style_used(app_mod, temp_db,
@@ -6238,10 +6242,12 @@ def test_a_saved_pack_reaches_the_renderer_as_the_style_used(app_mod, temp_db,
         assert tl["ai_edit"]["style_pack_id"] == "mine"
         assert tl["ai_edit"]["style_pack"] == "Mine"
 
-        # A built-in through the same path is untouched by any of this.
-        clarity = seed("clarity")["style"]
-        assert clarity.get("font_name") == "Montserrat Thin Black"
-        assert int(clarity.get("font_size")) == 64
+        # The one built-in through the same path is untouched by any of this.
+        built = seed("default")["style"]
+        assert built.get("font_name") == "DM Sans"
+        assert int(built.get("font_size")) == 56
+        # A deleted pacing pack does not come back as its old caption style.
+        assert seed("clarity")["ai_edit"]["style_pack_id"] == "default"
     finally:
         app_mod.jobs.pop("spk_src", None)
 
@@ -6317,7 +6323,7 @@ def test_a_saved_pack_can_be_deleted(app_mod, temp_db):
     # A second delete is a 404, not a silent success.
     assert client.delete("/style-packs/" + pid).status_code == 404
     # And the id now resolves to the fallback rather than a stale copy.
-    assert app_mod._resolve_style_pack(pid)["_id"] == "pulse"
+    assert app_mod._resolve_style_pack(pid)["_id"] == "default"
 
 
 def test_saving_a_look_refuses_to_store_nothing(app_mod, temp_db):
@@ -7709,7 +7715,7 @@ def test_a_bound_device_is_placed_and_an_unbound_one_says_why(
 def test_no_devices_changes_nothing_about_a_builtin_edit(app_mod, temp_db):
     """Every built-in pack has no devices, so this path must be provably the
     same as before the budget existed."""
-    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["default"])
     assert not pack.get("devices")
     before = app_mod._build_ai_edit_timeline(
         "j", 0.0, 30.0, pack, "med", [], [], label="t", words=[],
@@ -8101,7 +8107,7 @@ def test_a_protected_pause_gets_a_push_and_an_ordinary_gap_does_not(
     comedy or shock, and _recommended_cuts_for_words already keeps them out
     of the cut ranges. Nothing ever READ that decision, so the pause survived
     and then sat there static -- which reads as a stall, not as tension."""
-    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["default"])
     gaps = [
         {"start": 10.0, "end": 12.0, "duration": 2.0, "taste_protected": True,
          "taste_sentiment": "humor", "taste_reason": "punchline needs the hang"},
@@ -8153,7 +8159,7 @@ def test_the_push_lands_on_the_right_silence_after_cuts_compress(
     The naive `t - t_in` passes a test with no earlier cut, so the fixture
     has one.
     """
-    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["clarity"])
+    pack = dict(app_mod.AI_EDIT_STYLE_PACKS["default"])
     cuts = [[2.0, 5.0], [6.0, 7.0]]          # 4.0s removed before the gap
     gap = [{"start": 20.0, "end": 22.0, "duration": 2.0,
             "taste_protected": True, "taste_sentiment": "dramatic"}]
@@ -8208,7 +8214,7 @@ def test_the_seeder_hands_the_protected_pauses_over(app_mod, temp_db,
     }
     try:
         got = app_mod.app.test_client().post("/ai-edit-seed", json={
-            "source_job_id": "ps", "style_pack": "clarity",
+            "source_job_id": "ps", "style_pack": "default",
             "full_video": True, "insert_media": False}).get_json()
     finally:
         app_mod.jobs.pop("ps", None)

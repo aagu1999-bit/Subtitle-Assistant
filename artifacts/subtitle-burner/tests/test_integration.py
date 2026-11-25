@@ -42,11 +42,12 @@ def talk_job(app_mod, clip, monkeypatch, tmp_path):
 
 def test_edit_plan_is_a_storyboard_without_media(app_mod, talk_job):
     c = app_mod.app.test_client()
-    r = c.post("/edit-plan", json={"job_id": talk_job, "style_pack": "velocity",
+    r = c.post("/edit-plan", json={"job_id": talk_job, "style_pack": "default",
                                    "intensity": "high"}).get_json()
     roles = [s["role"] for s in r["structure"]["spans"]]
     assert roles[0] == "hook" and roles[-1] == "thesis"
-    assert r["style"]["pack"] == "Velocity"
+    assert r["style"]["pack"] == "Default"
+    assert r["style_pack"] == "default"
     assert "spans" not in r["style"] and "caption" not in r["structure"]
 
 
@@ -76,7 +77,7 @@ def test_smart_seed_places_every_decision(app_mod, talk_job):
     assert r["smart"] and r["plan"]["structure"]["spans"]
     tl = r["timeline"]
     assert tl["structure"] == r["plan"]["structure"]
-    assert tl["style_doc"]["devices"]["per_minute"] == 8
+    assert tl["style_doc"]["devices"]["per_minute"] is None
     treatments = {s["treatment"] for s in tl["structure"]["spans"]}
     overlays = tl["tracks"]["overlay"]
     kinds = {o["device"]["kind"] for o in overlays if o.get("device")}
@@ -176,8 +177,11 @@ def test_style_toggles_reach_the_plan(app_mod, talk_job):
 def test_style_packs_describe_the_look(app_mod):
     packs = app_mod.app.test_client().get("/ai-edit/style-packs").get_json()["packs"]
     by = {p["id"]: p for p in packs}
-    assert by["film"]["graphics_budget"]["per_minute"] == 1
-    assert by["pulse"]["style"]["highlight"].startswith("#")
+    assert "default" in by
+    for gone in ("pulse", "clarity", "magazine", "film", "velocity", "always"):
+        assert gone not in by
+    assert by["default"]["style"]["highlight"].startswith("#")
+    assert not (by["default"].get("graphics_budget") or {}).get("per_minute")
 
 
 def test_page_ships_the_style_first_flow(app_mod):
@@ -187,3 +191,168 @@ def test_page_ships_the_style_first_flow(app_mod):
                    'id="tasteModal"', 'data-ltab="structure"', 'id="captionLookToStyle"'):
         assert needle in html, needle
     assert "CapCut Template" not in html
+    assert 'id="aiEditRetell"' in html
+
+
+def _line_from(words, t):
+    picked = []
+    for w in words:
+        if w["start"] + 0.01 < t:
+            continue
+        if picked and w["start"] - picked[-1]["end"] > 1:
+            break
+        picked.append(w)
+    return picked
+
+
+def test_retelling_apply_keeps_the_spine_and_skips_the_old_planner(app_mod, talk_job, monkeypatch):
+    import retelling
+
+    def boom(*_a, **_k):
+        raise AssertionError("plan_edit should not run on the retelling path")
+
+    monkeypatch.setattr(app_mod.edit_engine, "plan_edit", boom)
+    words = retelling.assign_word_ids(app_mod.jobs[talk_job]["words"])
+    stop, revenue, aside, thing = (_line_from(words, t) for t in (0, 6, 10, 14))
+    forty = next(w for w in revenue if "40" in w["word"])
+    spine = {
+        "audience": "a founder who wants the number",
+        "retelling": "Revenue grew 40% last year because they stayed consistent.",
+        "lead_with_turn": False,
+        "beats": [
+            {"role": "situation", "start_word_id": stop[0]["id"], "end_word_id": stop[-1]["id"]},
+            {"role": "turn", "start_word_id": revenue[0]["id"], "end_word_id": revenue[-1]["id"],
+             "punch_in": True, "protect_pause_before_ms": 400},
+            {"role": "consequence", "start_word_id": thing[0]["id"], "end_word_id": thing[-1]["id"]},
+        ],
+        "graphics": [
+            {
+                "id": "g-num",
+                "beat_role": "turn",
+                "start_word_id": forty["id"],
+                "end_word_id": forty["id"],
+                "template": "counter",
+                "presentation_mode": "framed_card",
+                "justification": {
+                    "kind": "ear_blind", "fact": "number", "text": "40%",
+                    "why": "the ear misses the figure",
+                },
+                "source_word_ids": [forty["id"]],
+                "use_person_matte": False,
+                "on_asset_miss": "raw_speaker",
+            },
+            {
+                "id": "g-ui",
+                "beat_role": "turn",
+                "start_word_id": revenue[0]["id"],
+                "end_word_id": revenue[-1]["id"],
+                "template": "media_card",
+                "presentation_mode": "framed_card",
+                "justification": {
+                    "kind": "visual_proof", "fact": "ui", "text": "Revenue grew",
+                    "why": "the mute test needs the chart",
+                },
+                "source_word_ids": [revenue[0]["id"]],
+                "use_person_matte": False,
+                "on_asset_miss": "raw_speaker",
+            },
+        ],
+    }
+    c = app_mod.app.test_client()
+    res = c.post("/retelling/apply", json={"job_id": talk_job, "spine": spine})
+    assert res.status_code == 200, res.get_json()
+    body = res.get_json()
+    main = body["timeline"]["tracks"]["main"]
+    assert [clip["retelling_role"] for clip in main] == ["situation", "turn", "consequence"]
+    aside_at = aside[0]["start"]
+    assert all(not (clip["in"] <= aside_at < clip["out"]) for clip in main)
+    turn = main[1]
+    assert turn["in"] <= revenue[0]["start"] - 0.35
+    texts = body["timeline"]["tracks"]["text"]
+    assert len(texts) == 1 and texts[0]["template"] == "counter" and "40%" in texts[0]["text"]
+    assert "asset_miss" in [f["reason"] for f in body["checks"]["fixes"] if f["id"] == "g-ui"]
+    assert body["timeline"]["tracks"]["effects"][0]["type"] == "punch_zoom"
+    assert "structure" not in body["timeline"]
+
+    refused = dict(spine)
+    refused["graphics"] = [{
+        "id": "g-chat",
+        "beat_role": "consequence",
+        "start_word_id": thing[0]["id"],
+        "end_word_id": thing[-1]["id"],
+        "template": "quote_card",
+        "presentation_mode": "framed_card",
+        "justification": {
+            "kind": "ear_blind", "fact": "receipt", "text": "texted",
+            "why": "they mentioned a text",
+        },
+        "use_person_matte": False,
+        "on_asset_miss": "raw_speaker",
+    }]
+    bad = c.post("/retelling/apply", json={"job_id": talk_job, "spine": refused})
+    assert bad.status_code == 400
+    assert "fact_not_in_span" in bad.get_json()["error"]
+
+
+def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypatch):
+    import retelling
+
+    words = retelling.assign_word_ids(app_mod.jobs[talk_job]["words"])
+    stop, revenue, thing = (_line_from(words, t) for t in (0, 6, 14))
+
+    def fake(prompt):
+        assert "pulse" not in prompt and "every 7" not in prompt
+        if "Propose two or three" in prompt:
+            return {"candidates": [
+                {
+                    "audience": "a founder",
+                    "retelling": "Revenue grew forty percent.",
+                    "lead_with_turn": False,
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                    "style_pack": "pulse",
+                },
+                {
+                    "audience": "a skeptic",
+                    "retelling": "They said stop, then showed the number.",
+                    "lead_with_turn": True,
+                    "beats": {
+                        "situation": "Stop scrolling.",
+                        "turn": "Revenue grew.",
+                        "consequence": "Consistency wins.",
+                    },
+                },
+            ]}
+        return {
+            "lead_with_turn": True,
+            "beats": [
+                {"role": "situation", "start_word_id": stop[0]["id"], "end_word_id": stop[-1]["id"]},
+                {"role": "turn", "start_word_id": revenue[0]["id"], "end_word_id": revenue[-1]["id"],
+                 "punch_in": True},
+                {"role": "consequence", "start_word_id": thing[0]["id"], "end_word_id": thing[-1]["id"]},
+            ],
+            "graphics": [],
+        }
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    monkeypatch.setattr(app_mod.edit_engine, "plan_edit", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("plan_edit")))
+    c = app_mod.app.test_client()
+    listed = c.post("/retellings", json={"job_id": talk_job}).get_json()
+    assert [row["id"] for row in listed["candidates"]] == ["r1", "r2"]
+    assert "style_pack" not in listed["candidates"][0]
+    assert listed["candidates"][1]["lead_with_turn"] is True
+
+    applied = c.post("/retelling/apply", json={
+        "job_id": talk_job,
+        "candidate": listed["candidates"][1],
+    })
+    assert applied.status_code == 200, applied.get_json()
+    body = applied.get_json()
+    assert [clip["retelling_role"] for clip in body["timeline"]["tracks"]["main"]] == [
+        "turn", "situation", "consequence",
+    ]
+    assert body["timeline"]["tracks"]["text"] == []
+    assert body["spine"]["lead_with_turn"] is True

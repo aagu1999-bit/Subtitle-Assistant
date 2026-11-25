@@ -107,7 +107,7 @@
   // ------------------------------------------------------------------
   // Style tab
   // ------------------------------------------------------------------
-  const style = { pack: "pulse", intensity: "med", packs: [], plan: null, jobId: null, busy: false };
+  const style = { pack: "default", intensity: "med", packs: [], plan: null, jobId: null, busy: false };
 
   function currentJob() { return window.currentJobId || null; }
 

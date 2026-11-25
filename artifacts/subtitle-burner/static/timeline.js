@@ -699,8 +699,8 @@
 
     if (!tl.ai_edit) tl.ai_edit = {};
     tl.ai_edit = Object.assign({}, tl.ai_edit, {
-      style_pack: "Always",
-      style_pack_id: "always",
+      style_pack: "Default",
+      style_pack_id: "default",
       photo_match: true,
       // Stock first by default — user opts into Gemini via the checkbox.
       use_ai_photos: false,
@@ -5693,13 +5693,6 @@
       aiBody += `<div id="tlFxList" style="margin-top:8px"></div>`;
       aiBody += `<hr class="tl-sep">`;
       aiBody += `<div class="tl-prop-grid">
-        <label class="tl-prop">Style<select data-restyle-pack>
-          <option value="pulse">Pulse</option>
-          <option value="clarity">Clarity</option>
-          <option value="magazine">Magazine</option>
-          <option value="velocity">Velocity</option>
-          <option value="film">Film</option>
-        </select></label>
         <label class="tl-prop">Intensity<select data-restyle-intensity>
           <option value="low">Low</option>
           <option value="med" selected>Med</option>
@@ -6525,7 +6518,7 @@
     if (fxreset) fxreset.onclick = () => resetToSuggestion(c);
     const restyle = wrap.querySelector('[data-act="restyle"]');
     if (restyle) restyle.onclick = () => {
-      const pack = (wrap.querySelector("[data-restyle-pack]") || {}).value || "pulse";
+      const pack = "default";
       const intensity = (wrap.querySelector("[data-restyle-intensity]") || {}).value || "med";
       restyleSelectedShot(pack, intensity);
     };
@@ -9790,7 +9783,7 @@
           source_job_id: clip.source_job_id,
           start_time: clip.in || 0,
           end_time: clip.out,
-          style_pack: packId || "pulse",
+          style_pack: "default",
           intensity: intensity || "med",
           apply_cuts: false,
           create_clip: false,

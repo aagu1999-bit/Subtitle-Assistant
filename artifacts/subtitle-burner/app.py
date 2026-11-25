@@ -42,6 +42,7 @@ import broll_guard  # noqa: E402
 import devices  # noqa: E402
 import edit_engine  # noqa: E402
 import motion  # noqa: E402
+import retelling  # noqa: E402
 import qa  # noqa: E402
 import taste  # noqa: E402
 
@@ -134,7 +135,7 @@ CAPCUT_TEMPLATES = {
     # Keys mirror the UI <select id="capcutTemplate"> values.
     "podcast_interview": {
         "label": "Podcast / Interview 9:16",
-        "ai_edit_pack": "clarity",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Montserrat Thin Black",
         "size": 64,
@@ -157,7 +158,7 @@ CAPCUT_TEMPLATES = {
     },
     "capcut_reels": {
         "label": "CapCut High-Energy Reel",
-        "ai_edit_pack": "pulse",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         # Integral CF is commercial and not bundled; Anton is the nearest
         # heavy condensed face that actually ships here.
@@ -181,7 +182,7 @@ CAPCUT_TEMPLATES = {
     },
     "product_spotlight": {
         "label": "Product Spotlight",
-        "ai_edit_pack": "velocity",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Anton",
         "size": 72,
@@ -203,7 +204,7 @@ CAPCUT_TEMPLATES = {
     },
     "cinematic_vlog": {
         "label": "Cinematic Festival Vlog",
-        "ai_edit_pack": "film",
+        "ai_edit_pack": "default",
         "canvas": "16x9",
         "font": "DM Sans",
         "size": 56,
@@ -226,7 +227,7 @@ CAPCUT_TEMPLATES = {
     # CapCut Always–style: match stills to spoken keywords (photos / AI photos).
     "capcut_always": {
         "label": "Always · Photo Match",
-        "ai_edit_pack": "always",
+        "ai_edit_pack": "default",
         "canvas": "9x16",
         "font": "Montserrat Thin Black",
         "size": 62,
@@ -321,109 +322,38 @@ def _style_has_caption_fields(style) -> bool:
     )
 
 
-# Captions-style AI Edit recipes. Intensity scales cut/zoom/B-roll density.
-# These seed timeline JSON — they are not full generative Mirage styles.
-AI_EDIT_STYLE_PACKS = {
-    "pulse": {
-        "label": "Pulse",
-        "blurb": "Fast social pacing — punch zooms, hard cuts, bold captions",
+def _default_style_pack() -> dict:
+    """The one built-in look. Palette, type, and motion come from retelling tokens.
+
+    There is no per-minute graphics budget. A graphic is allowed when a kept
+    line fails by ear or fails the mute test, which is decided later, not here.
+    """
+    look = retelling.tokens()
+    colors = look["colors"]
+    return {
+        "label": "Default",
+        "blurb": "One look. A graphic only when the ear or the mute test needs it.",
         "canvas": "9x16",
         "transition": None,
-        "caption_preset": "mrbeast",
+        "caption_preset": "karaoke",
         "style": {
             # Above the bottom 20% where feed UI (username, caption) sits.
             "position_y": 72,
-            # Commercial, not bundled -- see above.
-            "font": "Anton", "size": 68, "primary": "#FFFFFF",
-            "highlight": "#00F2EA", "accent": "#FF0055", "group": 1,
-        },
-        "color_grade": {"preset": "vivid", "brightness": 0.05, "contrast": 0.1, "saturation": 0.15},
-        # Graphics devices per minute and which kinds suit the look.
-        "graphics_budget": {"per_minute": 6, "allow": ["ui", "stat", "text", "step_tracker"]},
-    },
-    "clarity": {
-        "label": "Clarity",
-        "blurb": "Clean talking-head — light trim, subtle zoom, readable captions",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "hormozi",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            # The family name inside Montserrat-Black.ttf, which is what
-            # libass matches on.
-            "font": "Montserrat Thin Black", "size": 64, "primary": "#FFFFFF",
-            "highlight": "#FFD60A", "accent": "#00FF88", "group": 2,
+            "font": look["font"]["ui"],
+            "size": 56,
+            "primary": colors["ink"],
+            "highlight": colors["accent"],
+            "accent": colors["stroke"],
+            "group": 3,
         },
         "color_grade": {"preset": "neutral", "brightness": 0.0, "contrast": 0.05, "saturation": 0.0},
-        "graphics_budget": {"per_minute": 3, "allow": ["mental", "stat"]},
-    },
-    "magazine": {
-        "label": "Magazine",
-        "blurb": "Editorial polish — soft Ken Burns, warm grade, lower-third titles",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "karaoke",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "DM Sans", "size": 56, "primary": "#F8FAFC",
-            "highlight": "#6366F1", "accent": "#EC4899", "group": 3,
-        },
-        "color_grade": {"preset": "warm", "brightness": 0.02, "contrast": 0.05, "saturation": 0.08},
-        # AI Edit no longer seeds text overlays (see _build_ai_edit_timeline) —
-        # kept False rather than removed in case older saved projects read it.
-        "add_title": False,
-        "graphics_budget": {"per_minute": 2, "allow": ["mental", "text"]},
-    },
-    "velocity": {
-        "label": "Velocity",
-        "blurb": "High intensity — dense zooms, silence cuts, energetic captions",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "neon",
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "Bebas Neue", "size": 72, "primary": "#00FF88",
-            "highlight": "#FF00FF", "accent": "#00CFFF", "group": 2,
-        },
-        "color_grade": {"preset": "vivid", "brightness": 0.08, "contrast": 0.15, "saturation": 0.2},
-        "graphics_budget": {"per_minute": 8, "allow": []},
-    },
-    "film": {
-        "label": "Film",
-        "blurb": "Cinematic slow push — muted grade, sparse cuts, elegant type",
-        "canvas": "16x9",
-        "transition": None,
-        "caption_preset": "karaoke",
-        "style": {
-            "font": "DM Sans", "size": 52, "primary": "#F5F0E8",
-            "highlight": "#E8C39E", "accent": "#8B7355", "group": 4,
-        },
-        "color_grade": {"preset": "cool", "brightness": -0.02, "contrast": 0.08, "saturation": -0.05},
-        "graphics_budget": {"per_minute": 1, "allow": ["timeline_scrubber", "venn", "text"]},
-    },
-    "always": {
-        "label": "Always",
-        "blurb": "Photo-match B-roll — keyword stills (stock/AI) with soft Ken Burns",
-        "canvas": "9x16",
-        "transition": None,
-        "caption_preset": "hormozi",
-        "photo_match": True,
-        "use_ai_photos": False,
-        "style": {
-            # Above the bottom 20% where feed UI (username, caption) sits.
-            "position_y": 72,
-            "font": "Montserrat Thin Black", "size": 62, "primary": "#FFFFFF",
-            "highlight": "#FFE566", "accent": "#FF6B9A", "group": 2,
-        },
-        "color_grade": {"preset": "warm", "brightness": 0.03, "contrast": 0.06, "saturation": 0.1},
-        "ken_burns": {"enabled": True, "direction": "in", "intensity": "med"},
-        # Photos carry this look; graphics stay rare.
-        "graphics_budget": {"per_minute": 1, "allow": ["text", "stat"]},
-    },
-}
+        "tokens": look,
+    }
+
+
+# One built-in. Saved looks still live in SQLite under their own ids.
+# pulse, clarity, magazine, film, velocity, and always are gone.
+AI_EDIT_STYLE_PACKS = {"default": _default_style_pack()}
 
 _FILLER_SINGLE_WORDS = {
     "um", "uh", "uhh", "uhm", "umm", "er", "erm",
@@ -720,11 +650,14 @@ def _db_delete_job(job_id: str) -> None:
 # a style_pack id accepts a saved one with no further change.
 
 def _builtin_pack_ids() -> set:
-    """Ids a saved pack may not shadow, or picking "Clarity" would silently
-    stop meaning Clarity for everyone. Read live rather than cached: a cached
-    copy is exactly the kind of module state that leaks between tests.
+    """Ids a saved pack may not take.
+
+    `default` is the one real look. The deleted pacing names stay reserved
+    so a saved row cannot bring pulse or clarity back. Read live rather
+    than cached: a cached copy is exactly the kind of module state that
+    leaks between tests.
     """
-    return set(AI_EDIT_STYLE_PACKS.keys())
+    return set(AI_EDIT_STYLE_PACKS) | set(retelling.DELETED_STYLE_PACKS)
 
 
 def _slug_pack_id(label: str) -> str:
@@ -813,18 +746,18 @@ def _db_delete_style_pack(pack_id: str) -> bool:
 
 
 def _resolve_style_pack(pack_id: str) -> dict:
-    """Saved packs first, then the built-ins, then `pulse`.
+    """Saved packs first, then the one built-in, then `default`.
 
     The returned dict is a copy carrying `_id`, so no caller can mutate the
-    built-in table -- which `dict(AI_EDIT_STYLE_PACKS.get(...))` relied on
-    callers remembering.
+    built-in table. A deleted pacing pack (pulse, clarity, and the rest)
+    resolves here too, so an old project does not crash looking for one.
     """
     pid = str(pack_id or "").strip().lower()
     saved = _db_load_style_packs()
     pack = saved.get(pid) or AI_EDIT_STYLE_PACKS.get(pid)
-    if pack is None:
-        pack = AI_EDIT_STYLE_PACKS["pulse"]
-        pid = "pulse"
+    if pack is None or pid in retelling.DELETED_STYLE_PACKS:
+        pack = AI_EDIT_STYLE_PACKS["default"]
+        pid = "default"
     pack = dict(pack)
     pack["_id"] = pid
     return pack
@@ -20344,8 +20277,11 @@ def motion_render():
 
 @app.route("/devices/catalog", methods=["GET"])
 def devices_catalog():
-    packs = {k: (v.get("graphics_budget") or {}) for k, v in AI_EDIT_STYLE_PACKS.items()}
-    return jsonify({"devices": devices.catalog_public(), "pack_budgets": packs})
+    return jsonify({
+        "devices": devices.catalog_public(),
+        "pack_budgets": {},
+        "tokens": retelling.tokens(),
+    })
 
 
 @app.route("/devices/preview.png", methods=["GET"])
@@ -23277,6 +23213,343 @@ def _apply_plan_toggles(plan: dict, toggles: dict) -> dict:
     return plan
 
 
+def _retelling_window(words: list, t_in: float, t_out: float) -> list[dict]:
+    """Words that overlap the window, with ids local to that window."""
+    window = []
+    for w in words or []:
+        try:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", ws))
+        except (TypeError, ValueError):
+            continue
+        if we <= t_in or ws >= t_out:
+            continue
+        window.append(dict(w))
+    return retelling.assign_word_ids(window)
+
+
+def _retelling_bounds(data: dict, words: list) -> tuple[float, float]:
+    try:
+        t_in = float(data.get("start_time", data.get("in", 0)) or 0)
+        default_out = float((words[-1] if words else {}).get("end", 0) or 0)
+        if data.get("end_time") is None and data.get("out") is None:
+            t_out = default_out
+        else:
+            t_out = float(data.get("end_time", data.get("out", default_out)) or default_out)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid start/end")
+    t_in = max(0.0, t_in)
+    if t_out <= t_in:
+        raise ValueError("Clip window too short")
+    return t_in, t_out
+
+
+def _span_src(words: list, start_id: str, end_id: str) -> tuple[float, float]:
+    a = retelling.word_index(start_id)
+    b = retelling.word_index(end_id)
+    return float(words[a]["start"]), float(words[b]["end"])
+
+
+def _snap_source_time(job_id: str, t: float, side: str, protect=None) -> float:
+    """Move an edge onto the waveform. A missing file leaves the word time."""
+    path = find_video_path(job_id)
+    if path is None or not path.exists():
+        return round(float(t), 3)
+    span = 0.5
+    ss = max(0.0, float(t) - span)
+    try:
+        import numpy as np
+        proc = subprocess.run(
+            [FFMPEG, "-v", "error", "-ss", f"{ss:.3f}", "-t", "1.0",
+             "-i", str(path), "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
+            capture_output=True, timeout=25, check=False,
+        )
+        samples = np.frombuffer(proc.stdout or b"", dtype="<f4")
+        if getattr(samples, "size", 0) < 8:
+            return round(float(t), 3)
+        prot = None
+        if protect:
+            prot = (float(protect[0]) - ss, float(protect[1]) - ss)
+        snapped = retelling.snap_boundary(samples, 8000, float(t) - ss, side, protect=prot)
+        return round(ss + float(snapped), 3)
+    except Exception:
+        return round(float(t), 3)
+
+
+def _face_boxes_at(job_id: str, t: float) -> list[dict]:
+    """Analyze-cache faces as top-left rects. Empty when the cache is missing."""
+    cache = _load_reframe_cache(job_id) or {}
+    raw = _face_samples_at(cache.get("faces") or [], t)
+    boxes = []
+    for face in raw:
+        if not isinstance(face, dict):
+            continue
+        try:
+            if "cx" in face:
+                w = float(face.get("w") or 0)
+                h = float(face.get("h") or 0)
+                boxes.append({
+                    "x": float(face["cx"]) - w / 2,
+                    "y": float(face["cy"]) - h / 2,
+                    "w": w, "h": h,
+                    "cx": float(face["cx"]), "cy": float(face["cy"]),
+                })
+            elif "x" in face and "y" in face:
+                boxes.append(face)
+        except (TypeError, ValueError):
+            continue
+    return boxes
+
+
+def _kept_duration(src_in: float, src_out: float, cuts: list) -> float:
+    removed = 0.0
+    for cut in cuts or []:
+        lo, hi = max(src_in, cut[0]), min(src_out, cut[1])
+        if hi > lo:
+            removed += hi - lo
+    return max(0.05, (src_out - src_in) - removed)
+
+
+def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, dict]:
+    """Pieces in spine order, filler trimmed inside them, graphics the gate kept.
+
+    Does not call the role tagger, the format packs, or the gradient fallback.
+    A media card with no asset is a miss: the speaker stays.
+    """
+    look = retelling.tokens()
+    colors = look["colors"]
+    pieces = []
+    effects = []
+    placed = []  # (graphic, output start, output end)
+    cursor = 0.0
+    beat_out = {}
+    for beat in spine["beats"]:
+        start, end = _span_src(words, beat["start_word_id"], beat["end_word_id"])
+        before = beat["protect_pause_before_ms"] / 1000.0
+        after = beat["protect_pause_after_ms"] / 1000.0
+        protect = (start - before, start) if before else None
+        src_in = _snap_source_time(job_id, start, "in", protect)
+        src_out = _snap_source_time(job_id, end, "out", None)
+        if before:
+            src_in = min(src_in, round(start - before, 3))
+        if after:
+            src_out = max(src_out, round(end + after, 3))
+        src_in = max(0.0, src_in)
+        if src_out <= src_in:
+            src_in, src_out = start, end
+        fillers = _filler_indices(words)
+        raw_cuts = []
+        for i in fillers:
+            w = words[i]
+            try:
+                a, b = float(w["start"]), float(w["end"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if b <= src_in or a >= src_out:
+                continue
+            # The pause in front of the turn is kept. Fillers live in the words.
+            if before and b <= start + 0.02:
+                continue
+            raw_cuts.append([max(a, src_in), min(b, src_out)])
+        cuts = _merge_cut_ranges(raw_cuts)
+        dur = _kept_duration(src_in, src_out, cuts)
+        pieces.append({
+            "id": uuid.uuid4().hex[:8],
+            "source_job_id": job_id,
+            "in": round(src_in, 3),
+            "out": round(src_out, 3),
+            "cuts": cuts,
+            "burn_captions": True,
+            "retelling_role": beat["role"],
+        })
+        beat_out[beat["role"]] = (cursor, cursor + dur, (start + end) / 2)
+        if beat.get("punch_in"):
+            faces = _face_boxes_at(job_id, (start + end) / 2)
+            biggest = max(faces, key=lambda f: float(f.get("w") or 0) * float(f.get("h") or 0), default=None)
+            fx = {
+                "id": uuid.uuid4().hex[:8],
+                "type": "punch_zoom",
+                "start": round(cursor, 3),
+                "out": 0.9,
+                "intensity": "med",
+                "retelling_role": beat["role"],
+            }
+            if biggest and "cx" in biggest:
+                fx["aim"] = {"x": biggest["cx"], "y": biggest["cy"]}
+            effects.append(fx)
+        cursor += dur
+
+    prepared = []
+    face_map = {}
+    card = {
+        "x": 0.08,
+        "y": 0.36,
+        "w": min(0.84, float(look["card"]["max_w"])),
+        "h": 0.14,
+        "placement_zone": "above_captions_band",
+    }
+    for g in spine["graphics"]:
+        row = dict(g)
+        if row["template"] == "media_card" and not row.get("asset_id"):
+            # No library hit and no stock search on this path. Miss stays raw.
+            row["asset_missing"] = True
+        else:
+            row["rect"] = dict(card)
+            a, b = _span_src(words, row["start_word_id"], row["end_word_id"])
+            face_map[row["id"]] = _face_boxes_at(job_id, (a + b) / 2)
+        prepared.append(row)
+    band = {"y": 0.68, "h": 0.28}
+    checks = retelling.check_graphics(
+        prepared, words, face_boxes=face_map, caption_band=band,
+    )
+    by_fix = {}
+    for fix in checks["fixes"]:
+        by_fix.setdefault(fix.get("id"), []).append(fix)
+
+    texts = []
+    for g in prepared:
+        fixes = by_fix.get(g["id"]) or []
+        if any(f.get("action") == "drop" for f in fixes):
+            continue
+        rect = dict(g.get("rect") or card)
+        for fix in fixes:
+            if fix.get("action") == "move" and isinstance(fix.get("rect"), dict):
+                rect = fix["rect"]
+        span = beat_out.get(g["beat_role"])
+        if not span:
+            continue
+        out_start, out_end, _mid = span
+        counted = g["template"] == "counter"
+        texts.append({
+            "id": g["id"],
+            "text": g["justification"]["text"],
+            "start": round(out_start, 3),
+            "out": round(out_end, 3),
+            "x": round(rect["x"] + rect["w"] / 2, 4),
+            "y": round(rect["y"] + rect["h"] / 2, 4),
+            "font": look["font"]["display"] if counted else look["font"]["ui"],
+            "size": 84 if counted else 40,
+            "color": colors["card_ink"],
+            "outline_color": colors["stroke"],
+            "bg_enabled": True,
+            "bg_color": colors["card"],
+            "bg_opacity": 0.92,
+            "bold": True,
+            "align": 5,
+            "anim": "fade" if counted else "slideup",
+            "motion": "count" if counted else "rise",
+            "template": g["template"],
+            "justification": g["justification"],
+            "source_word_ids": list(g["source_word_ids"]),
+            "retelling": True,
+        })
+
+    pack = _resolve_style_pack("default")
+    timeline = _normalize_timeline({
+        "canvas": pack.get("canvas") or "9x16",
+        "fps": 30,
+        "fit": "cover",
+        "bg": "#000000",
+        "style": pack.get("style") or {},
+        "color_grade": pack.get("color_grade"),
+        "tokens": look,
+        "source_job_id": job_id,
+        "retelling": {
+            "audience": spine["audience"],
+            "retelling": spine["retelling"],
+            "lead_with_turn": spine["lead_with_turn"],
+            "order": spine["order"],
+        },
+        "tracks": {
+            "main": pieces,
+            "overlay": [],
+            "effects": effects,
+            "text": texts,
+            "music": [],
+        },
+    })
+    return timeline, checks
+
+
+@app.route("/retellings", methods=["POST"])
+def retellings():
+    """Two or three retellings for this window. No graphics, no style pack."""
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id") or data.get("source_job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src_words = jobs[job_id].get("words") or []
+    if not src_words:
+        return jsonify({"error": "Transcript not available"}), 400
+    try:
+        t_in, t_out = _retelling_bounds(data, src_words)
+        window = _retelling_window(src_words, t_in, t_out)
+        if len(window) < 3:
+            return jsonify({"error": "Not enough words in that window"}), 400
+        raw = _gemini_generate_clip_suggestions(retelling.picker_prompt(window))
+        picked = retelling.normalize_picker(raw if isinstance(raw, dict) else {})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "job_id": job_id, "in": t_in, "out": t_out, **picked})
+
+
+@app.route("/retelling/apply", methods=["POST"])
+def retelling_apply():
+    """Cut the timeline to one spine. A passed spine skips the model.
+
+    This path does not call plan_edit. Graphics that fail the gate are not placed.
+    """
+    data = request.get_json(force=True) or {}
+    job_id = data.get("job_id") or data.get("source_job_id")
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Unknown job"}), 404
+    src_words = jobs[job_id].get("words") or []
+    if not src_words:
+        return jsonify({"error": "Transcript not available"}), 400
+    try:
+        t_in, t_out = _retelling_bounds(data, src_words)
+        window = _retelling_window(src_words, t_in, t_out)
+        if len(window) < 3:
+            return jsonify({"error": "Not enough words in that window"}), 400
+        spine_in = data.get("spine")
+        if isinstance(spine_in, dict):
+            spine = retelling.normalize_spine(spine_in, window)
+        else:
+            cand = data.get("candidate")
+            if not isinstance(cand, dict):
+                return jsonify({"error": "Send a candidate or a spine"}), 400
+            lead = cand.get("lead_with_turn")
+            if not isinstance(lead, bool):
+                return jsonify({"error": "lead_with_turn must be true or false"}), 400
+            audience = str(cand.get("audience") or "")
+            told = str(cand.get("retelling") or "")
+            raw = _gemini_generate_clip_suggestions(
+                retelling.spine_prompt(window, audience, told, lead))
+            if not isinstance(raw, dict):
+                raise ValueError("the spine was not an object")
+            raw.setdefault("audience", audience)
+            raw.setdefault("retelling", told)
+            raw.setdefault("lead_with_turn", lead)
+            spine = retelling.normalize_spine(raw, window)
+        timeline, checks = _timeline_from_spine(job_id, window, spine)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "in": t_in,
+        "out": t_out,
+        "spine": spine,
+        "checks": checks,
+        "timeline": timeline,
+        "label": spine["retelling"][:120],
+    })
+
+
 @app.route("/edit-plan", methods=["POST"])
 def edit_plan():
     """Structure + style for a window, without touching any media (storyboard)."""
@@ -23287,8 +23560,8 @@ def edit_plan():
     words = jobs[job_id].get("words") or []
     if not words:
         return jsonify({"error": "Transcript not available"}), 400
-    pack_id = (data.get("style_pack") or "pulse").lower()
-    pack = AI_EDIT_STYLE_PACKS.get(pack_id) or AI_EDIT_STYLE_PACKS["pulse"]
+    pack = _resolve_style_pack(data.get("style_pack") or "default")
+    pack_id = pack["_id"]
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in edit_engine.DENSITY:
         intensity = "med"
@@ -23327,9 +23600,9 @@ def ai_edit_seed():
 
     # Saved packs resolve ahead of the built-ins, so a pack the user kept (or
     # one derived from a reference) drives this whole pipeline -- cuts, caption
-    # style, grade, photo-match -- exactly as a built-in does. An unknown id
-    # still falls back to `pulse`, and `_id` reflects what was really used.
-    pack = _resolve_style_pack(data.get("style_pack") or "pulse")
+    # style, grade, photo-match -- exactly as a built-in does. An unknown id,
+    # including a deleted pacing pack, falls back to `default`.
+    pack = _resolve_style_pack(data.get("style_pack") or "default")
     pack_id = pack["_id"]
     intensity = (data.get("intensity") or "med").lower()
     if intensity not in ("low", "med", "high"):
