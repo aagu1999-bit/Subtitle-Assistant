@@ -219,6 +219,7 @@ def test_retelling_apply_keeps_the_spine_and_skips_the_old_planner(app_mod, talk
         "audience": "a founder who wants the number",
         "retelling": "Revenue grew 40% last year because they stayed consistent.",
         "lead_with_turn": False,
+        "spine_dynamic": "claim_proof",
         "beats": [
             {"role": "situation", "start_word_id": stop[0]["id"], "end_word_id": stop[-1]["id"]},
             {"role": "turn", "start_word_id": revenue[0]["id"], "end_word_id": revenue[-1]["id"],
@@ -235,6 +236,7 @@ def test_retelling_apply_keeps_the_spine_and_skips_the_old_planner(app_mod, talk
                 "presentation_mode": "framed_card",
                 "justification": {
                     "kind": "ear_blind", "fact": "number", "text": "40%",
+                    "function": "scale",
                     "why": "the ear misses the figure",
                 },
                 "source_word_ids": [forty["id"]],
@@ -250,6 +252,7 @@ def test_retelling_apply_keeps_the_spine_and_skips_the_old_planner(app_mod, talk
                 "presentation_mode": "framed_card",
                 "justification": {
                     "kind": "visual_proof", "fact": "ui", "text": "Revenue grew",
+                    "function": "ui",
                     "why": "the mute test needs the chart",
                 },
                 "source_word_ids": [revenue[0]["id"]],
@@ -308,6 +311,7 @@ def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypa
                     "audience": "a founder",
                     "retelling": "Revenue grew forty percent.",
                     "lead_with_turn": False,
+                    "spine_dynamic": "claim_proof",
                     "beats": {
                         "situation": "Stop scrolling.",
                         "turn": "Revenue grew.",
@@ -319,6 +323,7 @@ def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypa
                     "audience": "a skeptic",
                     "retelling": "They said stop, then showed the number.",
                     "lead_with_turn": True,
+                    "spine_dynamic": "escalation",
                     "beats": {
                         "situation": "Stop scrolling.",
                         "turn": "Revenue grew.",
@@ -328,6 +333,7 @@ def test_retellings_route_and_apply_from_a_candidate(app_mod, talk_job, monkeypa
             ]}
         return {
             "lead_with_turn": True,
+            "spine_dynamic": "escalation",
             "beats": [
                 {"role": "situation", "start_word_id": stop[0]["id"], "end_word_id": stop[-1]["id"]},
                 {"role": "turn", "start_word_id": revenue[0]["id"], "end_word_id": revenue[-1]["id"],
