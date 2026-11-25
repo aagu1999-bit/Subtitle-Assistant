@@ -23310,6 +23310,45 @@ def _kept_duration(src_in: float, src_out: float, cuts: list) -> float:
     return max(0.05, (src_out - src_in) - removed)
 
 
+def _director_spans(words: list, spine: dict) -> list:
+    """What the structure panel shows: the beat, and the card on it if any."""
+    labels = {
+        "search_bar": "Search bar",
+        "message_card": "Message",
+        "counter": "Counter",
+        "quote_card": "Quote",
+        "name_card": "Name card",
+        "media_card": "Framed callout",
+    }
+    spans = []
+    for i, beat in enumerate(spine.get("beats") or []):
+        cards = [g for g in spine.get("graphics") or [] if g.get("beat_role") == beat.get("role")]
+        card = cards[0] if cards else None
+        try:
+            start, end = _span_src(words, beat["start_word_id"], beat["end_word_id"])
+        except (ValueError, TypeError, KeyError):
+            start, end = 0.0, 0.0
+        why = "The face carries this line."
+        treatment = "none"
+        visual = "none"
+        if card:
+            treatment = labels.get(card.get("template"), "none")
+            just = card.get("justification") or {}
+            why = just.get("why") or why
+            visual = just.get("function") or just.get("fact") or "none"
+        spans.append({
+            "index": i,
+            "role": beat.get("role"),
+            "start": start,
+            "end": end,
+            "text": beat.get("text") or "",
+            "treatment": treatment,
+            "reason": why,
+            "visual": visual,
+        })
+    return spans
+
+
 def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, dict]:
     """Pieces in spine order, filler trimmed inside them, graphics the gate kept.
 
@@ -23390,8 +23429,16 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
     }
     for g in spine["graphics"]:
         row = dict(g)
-        if row["template"] == "media_card" and not row.get("asset_id"):
-            # No library hit and no stock search on this path. Miss stays raw.
+        fact = (row.get("justification") or {}).get("fact")
+        word_callout = (
+            row.get("template") == "media_card"
+            and row.get("presentation_mode") == "framed_card"
+            and fact == "mechanism"
+            and not row.get("asset_id")
+        )
+        if row.get("template") == "media_card" and not row.get("asset_id") and not word_callout:
+            # A picture beat with no asset stays on the speaker.
+            # A mechanism callout has no asset and still draws the words.
             row["asset_missing"] = True
         else:
             row["rect"] = dict(card)
@@ -23420,6 +23467,8 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
             continue
         out_start, out_end, _mid = span
         counted = g["template"] == "counter"
+        motion = retelling.MOTION_FOR.get(g["template"] or "media_card", "rise")
+        anim = {"hold": "none", "rise": "slideup", "count": "fade", "snap": "fade"}.get(motion, "slideup")
         texts.append({
             "id": g["id"],
             "text": g["justification"]["text"],
@@ -23436,9 +23485,11 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
             "bg_opacity": 0.92,
             "bold": True,
             "align": 5,
-            "anim": "fade" if counted else "slideup",
-            "motion": "count" if counted else "rise",
+            "anim": anim,
+            "motion": motion,
+            "radius": look["radius"],
             "template": g["template"],
+            "icon": g.get("icon"),
             "justification": g["justification"],
             "source_word_ids": list(g["source_word_ids"]),
             "retelling": True,
@@ -23459,6 +23510,11 @@ def _timeline_from_spine(job_id: str, words: list, spine: dict) -> tuple[dict, d
             "retelling": spine["retelling"],
             "lead_with_turn": spine["lead_with_turn"],
             "order": spine["order"],
+            "spine_dynamic": spine.get("spine_dynamic"),
+        },
+        "structure": {
+            "in": pieces[0]["in"] if pieces else 0,
+            "spans": _director_spans(words, spine),
         },
         "tracks": {
             "main": pieces,
@@ -23547,6 +23603,7 @@ def retelling_apply():
                     spine = modeled
             except (ValueError, RuntimeError):
                 pass
+        spine = retelling.direct_visuals(window, spine)
         timeline, checks = _timeline_from_spine(job_id, window, spine)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

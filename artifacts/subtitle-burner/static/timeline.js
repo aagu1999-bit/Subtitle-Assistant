@@ -1900,9 +1900,32 @@
     return String(w.word || "");
   }
 
+  function redrawDirectorCards(oldWord, newWord) {
+    const oldTok = _tlStripWord(oldWord);
+    const neu = String(newWord || "").trim();
+    if (!oldTok || !neu || !tl || !tl.tracks) return;
+    (tl.tracks.text || []).forEach((item) => {
+      if (!item || !item.retelling) return;
+      const parts = String(item.text || "").split(/(\s+)/);
+      let changed = false;
+      const next = parts.map((part) => {
+        if (_tlStripWord(part) !== oldTok) return part;
+        changed = true;
+        return neu;
+      });
+      if (!changed) return;
+      item.text = next.join("");
+      item.dirty = true;
+    });
+  }
+
   function setWordOverride(clip, w, text) {
     const key = wordOverrideKey(w);
     const cleaned = String(text || "").trim();
+    const previous = displayWordText(clip, w);
+    if (cleaned && cleaned !== String(previous || "").trim()) {
+      redrawDirectorCards(previous, cleaned);
+    }
     if (!cleaned || cleaned === String(w.word || "").trim()) {
       if (clip.word_overrides) {
         delete clip.word_overrides[key];

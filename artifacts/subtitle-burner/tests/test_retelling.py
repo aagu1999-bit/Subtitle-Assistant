@@ -447,6 +447,62 @@ def test_a_picked_story_still_cuts_when_its_lines_are_not_in_the_tape():
     assert got["graphics"] == []
 
 
+def test_the_director_frames_a_figure_a_question_and_a_mechanism():
+    spine = rt.normalize_spine(_spine(), TAPE)
+    directed = rt.direct_visuals(TAPE, spine)
+    cards = {g["justification"]["text"]: g["template"] for g in directed["graphics"]}
+    assert cards.get("forty") == "counter"
+    assert cards.get("two") == "counter"
+    assert "google" not in cards
+    assert "texted" not in cards
+    assert all(g["on_asset_miss"] == "raw_speaker" for g in directed["graphics"])
+
+    asked = words(
+        ("HOST", "So tell me about the stall."),
+        ("GUEST", "Why do the jars sell out?"),
+        ("GUEST", "That is how it works on a small table."),
+        ("GUEST", "Consistency wins."),
+    )
+
+    def span_ids(phrase):
+        text = " ".join(w["word"] for w in asked)
+        start = text.index(phrase)
+        cursor = 0
+        first = last = None
+        for w in asked:
+            word = w["word"]
+            if cursor >= start and first is None:
+                first = w["id"]
+            cursor += len(word) + 1
+            if first and cursor >= start + len(phrase):
+                last = w["id"]
+                break
+        return first, last
+
+    q0, q1 = span_ids("Why do the jars sell out?")
+    m0, m1 = span_ids("That is how it works on a small table.")
+    c0, c1 = span_ids("Consistency wins.")
+    question = rt.normalize_spine({
+        "audience": "other vendors",
+        "retelling": "The jars sell out because of how the table works.",
+        "lead_with_turn": False,
+        "spine_dynamic": "story_arc",
+        "beats": [
+            {"role": "situation", "start_word_id": m0, "end_word_id": m1},
+            {"role": "turn", "start_word_id": q0, "end_word_id": q1},
+            {"role": "consequence", "start_word_id": c0, "end_word_id": c1},
+        ],
+    }, asked)
+    directed = rt.direct_visuals(asked, {**question, "graphics": []})
+    by_role = {g["beat_role"]: g for g in directed["graphics"]}
+    assert by_role["situation"]["template"] == "media_card"
+    assert by_role["situation"]["justification"]["fact"] == "mechanism"
+    assert by_role["turn"]["template"] == "search_bar"
+    assert by_role["turn"]["justification"]["function"] == "question"
+    assert by_role["consequence"]["template"] == "quote_card"
+    assert all(g["presentation_mode"] == "framed_card" for g in directed["graphics"])
+
+
 def test_a_prose_beat_map_is_cut_back_to_the_words():
     # The model often returns the picker's shape: a sentence per beat, no word ids.
     got = rt.normalize_spine({

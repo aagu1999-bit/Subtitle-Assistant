@@ -17,6 +17,14 @@ import re
 DELETED_STYLE_PACKS = ("pulse", "clarity", "magazine", "film", "velocity", "always")
 
 MOTIONS = ("hold", "rise", "count", "snap")
+MOTION_FOR = {
+    "search_bar": "snap",
+    "message_card": "rise",
+    "counter": "count",
+    "quote_card": "hold",
+    "name_card": "rise",
+    "media_card": "rise",
+}
 TEMPLATES = (
     "search_bar", "message_card", "counter", "quote_card", "name_card", "media_card",
 )
@@ -412,6 +420,29 @@ def _anchors_claim(justification: dict) -> bool:
     return kind in ("ear_blind", "visual_proof") and fact in _CLAIM_FACTS
 
 
+def _claim_blocks(justification: dict) -> bool:
+    """A tight cut still refuses a stock shot that is not proof.
+
+    A question, a punchline, or a framed mechanism is allowed. An action
+    clip with no fact behind it is not.
+    """
+    if not isinstance(justification, dict):
+        return True
+    kind = str(justification.get("kind") or "")
+    fact = str(justification.get("fact") or "")
+    function = str(justification.get("function") or "")
+    if kind in ("ear_blind", "visual_proof"):
+        return fact not in _CLAIM_FACTS
+    allowed = {
+        "question", "curiosity", "cultural_reference",
+        "objection", "monologue", "callback", "contradiction",
+        "thesis", "mic_drop", "deadpan_echo",
+        "listing", "stakes", "scale", "delta",
+        "proper_noun", "price", "tool", "venue",
+    }
+    return function not in allowed
+
+
 # ---- face collision ------------------------------------------------------
 
 def _rect(box: dict) -> tuple[float, float, float, float]:
@@ -746,7 +777,7 @@ def _graphic(raw: dict, words: list, beats: dict, dynamic: str) -> dict:
     why = gate_justification(span, raw.get("justification"), template)
     if why:
         raise ValueError(why)
-    if dynamic == "claim_proof" and not _anchors_claim(raw.get("justification") or {}):
+    if dynamic == "claim_proof" and _claim_blocks(raw.get("justification") or {}):
         raise ValueError("claim_proof graphics anchor a fact, a metric, or a receipt")
     mode = raw.get("presentation_mode") or "framed_card"
     bad = _presentation(template, mode)
@@ -1101,6 +1132,152 @@ def spine_from_candidate(candidate: dict, words: list) -> dict:
     }, words)
 
 
+_MECH_RE = re.compile(
+    r"\b(how (?:it|this|that|to)|the way|works by|the reason|that(?:'s| is) why)\b",
+    re.I,
+)
+_QUESTION_RE = re.compile(
+    r"^(?:who|what|why|how|when|where|which|whose)\b",
+    re.I,
+)
+
+
+def _sentences_of(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", _norm(text))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _number_phrase(span: str) -> str | None:
+    for rx in (_PRICE_RE, _NUMBER_RE):
+        for match in rx.finditer(span):
+            phrase = _norm(match.group(0))
+            if phrase.lower() in {"a", "an", "one"}:
+                continue
+            if fact_in_span(span, phrase):
+                return phrase
+    return None
+
+
+def _one_graphic(words: list, beat: dict, index: int) -> dict | None:
+    """One purposeful card for a kept beat, or nothing.
+
+    The card's text is copied from the line, so it still reads with the
+    sound off. A bare verb never qualifies. One card per beat.
+    """
+    span = span_text(words, beat["start_word_id"], beat["end_word_id"])
+    host = _span_is_host(words, beat["start_word_id"], beat["end_word_id"])
+    if _cross_talk(words, beat["start_word_id"], beat["end_word_id"]):
+        return None
+    base = {
+        "id": f"d{index + 1}",
+        "beat_role": beat["role"],
+        "start_word_id": beat["start_word_id"],
+        "end_word_id": beat["end_word_id"],
+        "source_word_ids": [beat["start_word_id"], beat["end_word_id"]],
+        "presentation_mode": "framed_card",
+    }
+    price = None
+    for match in _PRICE_RE.finditer(span):
+        phrase = _norm(match.group(0))
+        if fact_in_span(span, phrase):
+            price = phrase
+            break
+    if price and not _bare(price):
+        return {
+            **base,
+            "template": "name_card",
+            "icon": "tag",
+            "justification": {
+                "kind": "ear_blind", "fact": "price", "function": "price",
+                "text": price,
+                "why": "The price is ear-blind. It has to be seen.",
+            },
+        }
+    figure = _number_phrase(span)
+    if figure and not host and not _bare(figure):
+        return {
+            **base,
+            "template": "counter",
+            "justification": {
+                "kind": "ear_blind", "fact": "number", "function": "scale",
+                "text": figure,
+                "why": "The figure is ear-blind. It has to be seen.",
+            },
+        }
+    for sentence in _sentences_of(span):
+        if sentence.endswith("?") or _QUESTION_RE.match(sentence):
+            if _bare(sentence):
+                continue
+            return {
+                **base,
+                "template": "search_bar",
+                "justification": {
+                    "function": "question",
+                    "text": sentence,
+                    "why": "The question still reads with the sound off.",
+                },
+            }
+    if not host:
+        for sentence in _sentences_of(span):
+            if not _MECH_RE.search(sentence) or _bare(sentence):
+                continue
+            return {
+                **base,
+                "template": "media_card",
+                "justification": {
+                    "kind": "visual_proof", "fact": "mechanism", "function": "mechanism",
+                    "text": sentence,
+                    "why": "How it works fails the mute test, so the line is framed.",
+                },
+            }
+    words_n = len(span.split())
+    bare_hit = any(_bare(tok) for tok in re.findall(r"[A-Za-z']+", span))
+    if (beat.get("role") == "consequence" and 2 <= words_n <= 8
+            and not host and not _bare(span) and not bare_hit):
+        return {
+            **base,
+            "template": "quote_card",
+            "justification": {
+                "function": "thesis",
+                "text": span,
+                "why": "The punchline is the line that should stand alone.",
+            },
+        }
+    return None
+
+
+def direct_visuals(words: list, spine: dict) -> dict:
+    """Plan the visual beats for a cut that already has its spans.
+
+    Cards the model already justified are kept. An empty plan gets one
+    card per kept beat that passes the mute test, drawn later in the
+    shared look. Keyword triggers are not consulted.
+    """
+    if not isinstance(spine, dict):
+        raise ValueError("spine plan must be an object")
+    if spine.get("graphics"):
+        return spine
+    if words and "id" not in (words[0] or {}):
+        words = assign_word_ids(words)
+    proposed = []
+    for beat in spine.get("beats") or []:
+        raw = _one_graphic(words, beat, len(proposed))
+        if raw is None:
+            continue
+        trial = dict(spine)
+        trial["graphics"] = proposed + [raw]
+        try:
+            normalize_spine(trial, words)
+        except ValueError:
+            continue
+        proposed.append(raw)
+    if not proposed:
+        return spine
+    trial = dict(spine)
+    trial["graphics"] = proposed
+    return normalize_spine(trial, words)
+
+
 def normalize_spine(payload: dict, words: list) -> dict:
     """A spine plan. `style_pack` is dropped. Word text is taken from `words`."""
     if not isinstance(payload, dict):
@@ -1163,7 +1340,8 @@ def _dynamic_rules(dynamic: str) -> str:
         )
     return (
         "This cut is a claim_proof. Keep the spans tight. Do not add a detour. "
-        "A graphic has to anchor a fact, a metric, or a receipt."
+        "A graphic still has to pass the mute test: a mechanism, a UI callout, "
+        "framed proof, a question, or a punchline. A bare verb is not a beat."
     )
 
 
@@ -1350,7 +1528,7 @@ def check_graphics(graphics: list, words: list, *,
             if _presentation(template, mode):
                 fixes.append({"id": gid, "action": "drop", "reason": "template_forbidden"})
                 continue
-            if g.get("spine_dynamic") == "claim_proof" and not _anchors_claim(g.get("justification") or {}):
+            if g.get("spine_dynamic") == "claim_proof" and _claim_blocks(g.get("justification") or {}):
                 fixes.append({
                     "id": gid, "action": "drop",
                     "reason": "claim_proof graphics anchor a fact, a metric, or a receipt",

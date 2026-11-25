@@ -4489,7 +4489,10 @@ function renderRetellingChoices(candidates) {
     btn.style.textAlign = "left";
     btn.style.whiteSpace = "normal";
     btn.style.margin = "6px 0";
-    btn.textContent = (c.audience || "Someone") + " — " + (c.retelling || "");
+    const beats = c.beats || {};
+    const lines = ["situation", "turn", "consequence"].map((role) => beats[role]).filter(Boolean);
+    btn.textContent = (c.audience || "Someone") + " — " + (c.retelling || "")
+      + (lines.length ? "\n" + lines.join(" · ") : "");
     btn.onclick = () => {
       _aiEditRetelling = c;
       host.querySelectorAll("button").forEach((b) => { b.style.borderColor = ""; });
