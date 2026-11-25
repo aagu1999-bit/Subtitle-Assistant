@@ -58,7 +58,7 @@ def test_one_default_look_and_every_template_is_available():
     assert look["id"] == "default"
     assert look["motion"] == ["hold", "rise", "count", "snap"]
     assert look["templates"] == [
-        "counter", "name_card", "quote_card", "message_card", "media_card",
+        "search_bar", "message_card", "counter", "quote_card", "name_card", "media_card",
     ]
     assert "per_minute" not in look
     assert "drawers" not in look
@@ -88,6 +88,7 @@ def test_picker_drops_style_pack_and_refuses_a_third_sentence():
                 "audience": "other market vendors",
                 "retelling": "She sells out by two because she only brings forty jars.",
                 "lead_with_turn": False,
+                "spine_dynamic": "claim_proof",
                 "beats": {
                     "situation": "She brings a small batch.",
                     "turn": "She only brings forty jars.",
@@ -98,6 +99,7 @@ def test_picker_drops_style_pack_and_refuses_a_third_sentence():
                 "audience": "shoppers at the stall",
                 "retelling": "The hot sauce is gone by two.",
                 "lead_with_turn": True,
+                "spine_dynamic": "story_arc",
                 "beats": {
                     "situation": "She makes hot sauce.",
                     "turn": "It is gone by two.",
@@ -111,6 +113,14 @@ def test_picker_drops_style_pack_and_refuses_a_third_sentence():
     assert "style_pack" not in got["candidates"][0]
     assert got["candidates"][1]["id"] == "r2"
     assert got["candidates"][1]["lead_with_turn"] is True
+    assert got["candidates"][0]["spine_dynamic"] == "claim_proof"
+    assert got["candidates"][1]["spine_dynamic"] == "story_arc"
+    missing = {
+        "candidates": [{k: v for k, v in raw["candidates"][0].items() if k != "spine_dynamic"},
+                       raw["candidates"][1]],
+    }
+    with pytest.raises(ValueError, match="spine_dynamic"):
+        rt.normalize_picker(missing)
     raw["candidates"][0]["retelling"] = "One. Two. Three."
     with pytest.raises(ValueError, match="one or two"):
         rt.normalize_picker(raw)
@@ -119,7 +129,7 @@ def test_picker_drops_style_pack_and_refuses_a_third_sentence():
         rt.normalize_picker(raw)
 
 
-def _spine(lead=False, graphic=None):
+def _spine(lead=False, graphic=None, dynamic="claim_proof", detours=None):
     sit = _ids("I only bring forty jars to the market.".split())
     turn = _ids("That is why I sell out by two.".split())
     con = _ids("She texted me google it sometime.".split())
@@ -141,7 +151,9 @@ def _spine(lead=False, graphic=None):
         "audience": "other market vendors",
         "retelling": "She sells out by two because she only brings forty jars.",
         "lead_with_turn": lead,
+        "spine_dynamic": dynamic,
         "beats": beats,
+        "detours": detours or [],
         "graphics": [graphic] if graphic else [],
     }
     return body
@@ -208,6 +220,7 @@ def test_a_number_may_be_a_counter_and_a_verb_may_not():
         "source_word_ids": [turn["end_word_id"]],
         "justification": {
             "kind": "ear_blind", "fact": "number", "text": "two",
+            "function": "scale",
             "why": "The retelling is the hour she sells out.",
         },
     }
@@ -227,7 +240,7 @@ def test_a_number_may_be_a_counter_and_a_verb_may_not():
         rt.normalize_spine(_spine(graphic=graphic), TAPE)
 
 
-def test_visual_proof_is_a_media_card_and_a_message_must_be_read_aloud():
+def test_visual_proof_is_a_media_card_and_a_callback_is_not_a_bare_verb():
     turn = _spine()["beats"][1]
     proof = {
         "id": "g1", "beat_role": "turn",
@@ -236,11 +249,14 @@ def test_visual_proof_is_a_media_card_and_a_message_must_be_read_aloud():
         "presentation_mode": "fullscreen_replace",
         "justification": {
             "kind": "visual_proof", "fact": "ui", "text": "sell out",
+            "function": "ui",
             "why": "The stall emptying is the thing the viewer has to see.",
         },
     }
     got = rt.normalize_spine(_spine(graphic=proof), TAPE)
     assert got["graphics"][0]["presentation_mode"] == "fullscreen_replace"
+    # Mid-turn, the guest is already on screen, so nothing waits.
+    assert got["graphics"][0]["reaction_delay_s"] == 0
 
     proof["template"] = "counter"
     proof["presentation_mode"] = "framed_card"
@@ -248,20 +264,35 @@ def test_visual_proof_is_a_media_card_and_a_message_must_be_read_aloud():
         rt.normalize_spine(_spine(graphic=proof), TAPE)
 
     con = _spine()["beats"][2]
-    msg = {
+    bare = {
         "id": "g2", "beat_role": "consequence",
         "start_word_id": con["start_word_id"], "end_word_id": con["end_word_id"],
         "template": "message_card",
         "justification": {
-            "kind": "ear_blind", "fact": "receipt", "text": "texted me google it",
-            "why": "The viewer will not remember the wording.",
+            "kind": "ear_blind", "fact": "receipt", "text": "texted",
+            "function": "contradiction",
+            "why": "Someone said the word.",
         },
     }
     with pytest.raises(ValueError, match="template_forbidden"):
-        rt.normalize_spine(_spine(graphic=msg), TAPE)
-    msg["justification"]["reading_aloud"] = True
+        rt.normalize_spine(_spine(graphic=bare), TAPE)
+    msg = {
+        "id": "g2", "beat_role": "consequence",
+        "start_word_id": con["start_word_id"], "end_word_id": con["end_word_id"],
+        "template": "message_card",
+        "presentation_mode": "split_screen",
+        "justification": {
+            "kind": "ear_blind", "fact": "receipt", "text": "texted me google it",
+            "function": "contradiction",
+            "why": "The wording is the contradiction.",
+        },
+    }
     got = rt.normalize_spine(_spine(graphic=msg), TAPE)
     assert got["graphics"][0]["template"] == "message_card"
+    assert got["graphics"][0]["presentation_mode"] == "split_screen"
+    assert "reading_aloud" not in got["graphics"][0]["justification"]
+    msg["justification"]["reading_aloud"] = True
+    got = rt.normalize_spine(_spine(graphic=msg), TAPE)
     assert got["graphics"][0]["justification"]["reading_aloud"] is True
 
 
@@ -272,9 +303,17 @@ def test_a_graphic_moves_above_the_face_and_drops_when_nothing_is_clear():
     moved = rt.place_off_face(card, [face], band)
     assert moved["dropped"] is False
     assert moved["face_collision"] is True
-    assert moved["placement_zone"] == "above_captions_band"
+    assert moved["placement_zone"] == "top_band"
     assert moved["use_person_matte"] is False
     assert moved["rect"]["y"] + moved["rect"]["h"] <= face["y"]
+
+    # The forehead is against the top of the frame, so the card sits under the chin.
+    high = {"x": 0.2, "y": 0.02, "w": 0.6, "h": 0.20}
+    covering = {"x": 0.10, "y": 0.04, "w": 0.80, "h": 0.18}
+    under = rt.place_off_face(covering, [high], band)
+    assert under["dropped"] is False
+    assert under["placement_zone"] == "above_captions_band"
+    assert under["rect"]["y"] >= high["y"] + high["h"]
 
     wall = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 0.70}
     dropped = rt.place_off_face(card, [wall], {"top": 0.72})
@@ -308,6 +347,10 @@ def test_snap_finds_the_speech_edge_and_does_not_cross_a_pause():
     stopped = rt.snap_boundary(long, sr, 1.95, "out", cap_s=0.9, protect=(2.02, 2.50))
     assert stopped == pytest.approx(2.50, abs=0.02)
     assert rt.snap_boundary([], sr, 1.5, "in") == 1.5
+    # Whisper was early: the onset is later, still inside ±200ms.
+    assert rt.snap_boundary(samples, sr, 0.88, "in") == pytest.approx(1.0, abs=0.02)
+    # The onset is outside the ±250ms window, so the boundary stays.
+    assert rt.snap_boundary(samples, sr, 0.60, "in") == pytest.approx(0.60, abs=0.02)
 
 
 def test_the_checker_drops_a_bad_graphic_and_redraws_a_fixed_word():
@@ -320,6 +363,7 @@ def test_the_checker_drops_a_bad_graphic_and_redraws_a_fixed_word():
         "source_word_ids": [turn["end_word_id"]],
         "justification": {
             "kind": "ear_blind", "fact": "number", "text": "two",
+            "function": "scale",
             "why": "The hour is the retelling.",
         },
     }
@@ -375,3 +419,286 @@ def test_prompts_do_not_ask_for_a_pack_or_a_timer():
     assert "w0000" in picker
     assert "mute test" in spine
     assert "raw_speaker" in spine
+    for name in ("claim_proof", "story_arc", "escalation"):
+        assert name in picker and name in spine
+    assert "format rubric" in picker
+    assert "corner_note" in spine and "split_screen" in spine
+    assert "search_bar" in spine
+    assert "lucide" in spine.lower()
+    assert "typing" in spine
+    assert "gradient" in spine and "blur" in spine
+    assert "1.5" in spine
+
+
+def test_story_arc_keeps_a_detour_that_pays_off_and_claim_proof_does_not():
+    tape = words(
+        ("GUEST", "I started with a small stall."),
+        ("GUEST", "The secret recipe took years."),
+        ("GUEST", "Then the line went around the block."),
+        ("GUEST", "That secret recipe is why we sell out."),
+    )
+    # I started with a small stall. / The secret recipe took years. /
+    # Then the line went around the block. / That secret recipe is why we sell out.
+    sit = (tape[0]["id"], tape[5]["id"])
+    detour = (tape[6]["id"], tape[10]["id"])
+    turn = (tape[11]["id"], tape[17]["id"])
+    con = (tape[18]["id"], tape[-1]["id"])
+
+    def body(dynamic, with_detour=True):
+        return {
+            "audience": "home cooks",
+            "retelling": "The secret recipe is why the stall sells out.",
+            "lead_with_turn": False,
+            "spine_dynamic": dynamic,
+            "beats": [
+                {"role": "situation", "start_word_id": sit[0], "end_word_id": sit[1]},
+                {"role": "turn", "start_word_id": turn[0], "end_word_id": turn[1]},
+                {"role": "consequence", "start_word_id": con[0], "end_word_id": con[1]},
+            ],
+            "detours": [{
+                "start_word_id": detour[0], "end_word_id": detour[1],
+            }] if with_detour else [],
+        }
+
+    kept = rt.normalize_spine(body("story_arc"), tape)
+    assert kept["detours"][0]["pays_off"] is True
+    assert "recipe" in kept["detours"][0]["text"]
+    with pytest.raises(ValueError, match="story arc"):
+        rt.normalize_spine(body("claim_proof"), tape)
+    orphan = body("story_arc")
+    # The block-line tangent never comes back in the callback.
+    orphan["beats"][1] = {
+        "role": "turn", "start_word_id": detour[0], "end_word_id": detour[1],
+    }
+    orphan["detours"] = [{
+        "start_word_id": turn[0], "end_word_id": turn[1],
+    }]
+    with pytest.raises(ValueError, match="pay off"):
+        rt.normalize_spine(orphan, tape)
+
+
+def test_escalation_protects_a_deadpan_drop_inside_a_kept_beat():
+    body = _spine(dynamic="escalation")
+    body["beats"][2]["deadpan"] = True
+    body["beats"][2]["protect_pause_after_ms"] = 350
+    kept = rt.normalize_spine(body, TAPE)
+    assert kept["spine_dynamic"] == "escalation"
+    assert kept["beats"][-1]["protect_pause_after_ms"] == 350
+    tight = rt.normalize_spine(_spine(dynamic="claim_proof"), TAPE)
+    assert tight["beats"][-1]["protect_pause_after_ms"] == 0
+
+    sr = 100
+    samples = _tone(sr, [(0.0, 0.40)], total=1.2)
+    drops = rt.find_deadpan_drops(samples, sr, 0.0, 1.0)
+    assert drops
+    assert drops[0]["start"] == pytest.approx(0.40, abs=0.03)
+    assert drops[0]["end"] > drops[0]["start"] + 0.18
+    assert rt.find_deadpan_drops(_tone(sr, [(0.0, 1.0)], total=1.2), sr, 0.0, 1.0) == []
+
+    loud = _tone(sr, [(0.0, 3.0)], total=3.0)
+    plan = rt.apply_prosody(TAPE, kept, loud, sr)
+    consequence = plan["beats"][-1]
+    assert consequence["deadpan_pauses"] == []
+    assert consequence["protect_pause_after_ms"] == 0
+    assert "snap_in" in plan["beats"][0]
+
+
+def test_guest_reaction_host_bias_and_cross_talk():
+    sit = _ids("I only bring forty jars to the market.".split())
+    opening = {
+        "id": "g-open", "beat_role": "situation",
+        "start_word_id": sit[0], "end_word_id": sit[1],
+        "template": "media_card",
+        "presentation_mode": "fullscreen_replace",
+        "justification": {
+            "kind": "visual_proof", "fact": "ui", "text": "forty jars",
+            "function": "ui",
+            "why": "The batch is the thing you have to see.",
+        },
+    }
+    got = rt.normalize_spine(_spine(graphic=opening), TAPE)
+    assert got["graphics"][0]["reaction_delay_s"] == 1.5
+    opening["presentation_mode"] = "corner_note"
+    with pytest.raises(ValueError, match="template_forbidden"):
+        rt.normalize_spine(_spine(graphic=opening), TAPE)
+    opening["presentation_mode"] = "split_screen"
+    held = rt.normalize_spine(_spine(graphic=opening), TAPE)
+    assert held["graphics"][0]["reaction_delay_s"] == 0
+
+    raw = dict(got["graphics"][0])
+    raw["reaction_delay_s"] = 0
+    raw["rect"] = None
+    report = rt.check_graphics([raw], TAPE)
+    assert report["fixes"][0]["action"] == "delay"
+    assert report["fixes"][0]["delay_s"] == 1.5
+
+    host = words(
+        ("HOST", "Maya brought forty jars."),
+        ("GUEST", "That is the whole batch."),
+        ("GUEST", "We sell out by two."),
+    )
+    name = {
+        "id": "g-name", "beat_role": "situation",
+        "start_word_id": host[0]["id"], "end_word_id": host[3]["id"],
+        "template": "name_card",
+        "icon": "store",
+        "justification": {
+            "kind": "ear_blind", "fact": "name", "text": "Maya",
+            "function": "proper_noun",
+            "why": "The ear will not keep the name.",
+        },
+    }
+    spine = {
+        "audience": "shoppers",
+        "retelling": "Maya sells out by two.",
+        "lead_with_turn": False,
+        "spine_dynamic": "claim_proof",
+        "beats": [
+            {"role": "situation", "start_word_id": host[0]["id"], "end_word_id": host[3]["id"]},
+            {"role": "turn", "start_word_id": host[4]["id"], "end_word_id": host[8]["id"]},
+            {"role": "consequence", "start_word_id": host[9]["id"], "end_word_id": host[-1]["id"]},
+        ],
+        "graphics": [name],
+    }
+    named = rt.normalize_spine(spine, host)
+    assert named["graphics"][0]["icon"] == "store"
+    heavy = dict(name)
+    heavy["template"] = "counter"
+    heavy["justification"] = {
+        "kind": "ear_blind", "fact": "number", "text": "forty",
+        "function": "scale",
+        "why": "The count is the premise.",
+    }
+    spine["graphics"] = [heavy]
+    with pytest.raises(ValueError, match="host_setup"):
+        rt.normalize_spine(spine, host)
+
+    overlap = rt.assign_word_ids([
+        {"word": "Hold", "start": 0.0, "end": 0.5, "speaker": "HOST"},
+        {"word": "No", "start": 0.2, "end": 0.7, "speaker": "GUEST"},
+        {"word": "way", "start": 0.7, "end": 1.0, "speaker": "GUEST"},
+        {"word": "The", "start": 1.4, "end": 1.6, "speaker": "GUEST"},
+        {"word": "batch", "start": 1.6, "end": 1.9, "speaker": "GUEST"},
+        {"word": "sells", "start": 2.2, "end": 2.5, "speaker": "GUEST"},
+        {"word": "out", "start": 2.5, "end": 2.8, "speaker": "GUEST"},
+    ])
+    crossed = {
+        "audience": "listeners",
+        "retelling": "The batch sells out.",
+        "lead_with_turn": False,
+        "spine_dynamic": "story_arc",
+        "beats": [
+            {"role": "situation", "start_word_id": "w0001", "end_word_id": "w0002",
+             "punch_in": True},
+            {"role": "turn", "start_word_id": "w0003", "end_word_id": "w0004", "punch_in": True},
+            {"role": "consequence", "start_word_id": "w0005", "end_word_id": "w0006"},
+        ],
+        "graphics": [{
+            "id": "g-over", "beat_role": "situation",
+            "start_word_id": "w0001", "end_word_id": "w0002",
+            "template": "search_bar",
+            "justification": {
+                "function": "question", "text": "No way",
+                "why": "An overlay would cover the overlap.",
+            },
+        }],
+    }
+    with pytest.raises(ValueError, match="cross_talk"):
+        rt.normalize_spine(crossed, overlap)
+    crossed["graphics"] = []
+    held_wide = rt.normalize_spine(crossed, overlap)
+    situation = next(b for b in held_wide["beats"] if b["role"] == "situation")
+    turn_beat = next(b for b in held_wide["beats"] if b["role"] == "turn")
+    assert situation["punch_in"] is False
+    assert turn_beat["punch_in"] is True
+
+
+def test_manual_overlays_are_not_dropped_for_a_missing_reason():
+    face = {"x": 0.28, "y": 0.32, "w": 0.44, "h": 0.40}
+    hand = {
+        "id": "hand",
+        "origin": "co_editor",
+        "template": "quote_card",
+        "rect": {"x": 0.1, "y": 0.36, "w": 0.8, "h": 0.18},
+        "use_person_matte": True,
+    }
+    report = rt.check_graphics([hand], TAPE, face_boxes={"hand": [face]}, caption_band={"top": 0.80})
+    assert {f["action"] for f in report["fixes"]} == {"move"}
+    assert all(f.get("reason") != "no_justification" for f in report["fixes"])
+
+    gone = dict(hand)
+    gone["rect"] = None
+    gone["asset_id"] = "missing-still"
+    report = rt.check_graphics([gone], TAPE, missing_asset_ids=["missing-still"])
+    assert report["fixes"] == [{"id": "hand", "action": "drop", "reason": "asset_miss"}]
+
+
+def test_a_timestamp_override_dirties_the_graphic():
+    turn = _spine()["beats"][1]
+    graphic = {
+        "id": "g1", "beat_role": "turn",
+        "start_word_id": turn["start_word_id"], "end_word_id": turn["end_word_id"],
+        "template": "counter",
+        "source_word_ids": [turn["end_word_id"]],
+        "justification": {
+            "kind": "ear_blind", "fact": "number", "text": "two",
+            "function": "scale",
+            "why": "The hour is the retelling.",
+        },
+    }
+    plan = rt.normalize_spine(_spine(graphic=graphic), TAPE)
+    g = plan["graphics"][0]
+    word = next(w for w in TAPE if w["id"] == g["source_word_ids"][0])
+    stamp = f"{word['start']:.3f}"
+    report = rt.check_graphics([g], TAPE, overrides={stamp: "2"})
+    assert any(f["action"] == "redraw" and f["reason"] == "word_override" for f in report["fixes"])
+    same = rt.check_graphics([g], TAPE, overrides={stamp: word["word"]})
+    assert not any(f["action"] == "redraw" for f in same["fixes"])
+
+
+def test_action_stock_is_allowed_on_a_story_and_refused_on_a_proof():
+    turn = _spine()["beats"][1]
+    action = {
+        "id": "g-act", "beat_role": "turn",
+        "start_word_id": turn["start_word_id"], "end_word_id": turn["end_word_id"],
+        "template": None,
+        "presentation_mode": "fullscreen_replace",
+        "justification": {
+            "kind": "visual_proof", "fact": "action", "text": "sell out",
+            "function": "action",
+            "why": "Setting the stall up is the visual the line earns.",
+        },
+    }
+    with pytest.raises(ValueError, match="fact, a metric, or a receipt"):
+        rt.normalize_spine(_spine(graphic=action), TAPE)
+    got = rt.normalize_spine(_spine(graphic=action, dynamic="story_arc"), TAPE)
+    assert got["graphics"][0]["template"] is None
+    assert got["graphics"][0]["on_asset_miss"] == "raw_speaker"
+
+
+def test_snap_lands_on_the_kept_word_and_records_a_real_drop():
+    sr = 100
+    samples = _tone(sr, [(1.0, 1.95), (2.2, 2.8), (3.2, 3.9)], total=4.2)
+    tape = rt.assign_word_ids([
+        {"word": "Go", "start": 1.08, "end": 1.30, "speaker": "GUEST"},
+        {"word": "now", "start": 1.40, "end": 1.90, "speaker": "GUEST"},
+        {"word": "Hold", "start": 2.25, "end": 2.50, "speaker": "GUEST"},
+        {"word": "there", "start": 2.55, "end": 2.75, "speaker": "GUEST"},
+        {"word": "Done", "start": 3.25, "end": 3.50, "speaker": "GUEST"},
+        {"word": "today", "start": 3.55, "end": 3.85, "speaker": "GUEST"},
+    ])
+    spine = {
+        "audience": "someone walking past",
+        "retelling": "Go now and it is done today.",
+        "lead_with_turn": False,
+        "spine_dynamic": "escalation",
+        "beats": [
+            {"role": "situation", "start_word_id": "w0000", "end_word_id": "w0001"},
+            {"role": "turn", "start_word_id": "w0002", "end_word_id": "w0003", "punch_in": True},
+            {"role": "consequence", "start_word_id": "w0004", "end_word_id": "w0005"},
+        ],
+    }
+    plan = rt.normalize_spine(spine, tape)
+    snapped = rt.apply_prosody(tape, plan, samples, sr)
+    assert snapped["beats"][0]["snap_in"] == pytest.approx(1.0, abs=0.02)
+    assert snapped["beats"][0]["snap_out"] == pytest.approx(1.95, abs=0.03)
