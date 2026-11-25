@@ -192,6 +192,7 @@ def test_page_ships_the_style_first_flow(app_mod):
         assert needle in html, needle
     assert "CapCut Template" not in html
     assert 'id="aiEditRetell"' in html
+    assert 'id="readyFindStoryBtn"' in html
 
 
 def _line_from(words, t):

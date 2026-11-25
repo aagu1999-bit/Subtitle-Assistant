@@ -430,6 +430,26 @@ def test_prompts_do_not_ask_for_a_pack_or_a_timer():
     assert "1.5" in spine
 
 
+def test_a_prose_beat_map_is_cut_back_to_the_words():
+    # The model often returns the picker's shape: a sentence per beat, no word ids.
+    got = rt.normalize_spine({
+        "audience": "other market vendors",
+        "retelling": "She sells out by two because she only brings forty jars.",
+        "lead_with_turn": False,
+        "spine_dynamic": "claim_proof",
+        "beats": {
+            "situation": "She only brings forty jars to the market.",
+            "turn": "That is why she sells out by two.",
+            "consequence": "She texted me to google it sometime.",
+        },
+    }, TAPE)
+    assert [b["role"] for b in got["beats"]] == ["situation", "turn", "consequence"]
+    assert "forty" in got["beats"][0]["text"]
+    assert "two" in got["beats"][1]["text"]
+    assert "texted" in got["beats"][2]["text"]
+    assert "style_pack" not in got
+
+
 def test_story_arc_keeps_a_detour_that_pays_off_and_claim_proof_does_not():
     tape = words(
         ("GUEST", "I started with a small stall."),

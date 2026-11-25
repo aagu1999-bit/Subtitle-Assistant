@@ -801,6 +801,130 @@ def _graphic(raw: dict, words: list, beats: dict, dynamic: str) -> dict:
     return out
 
 
+def _unwrap_spine(payload: dict) -> dict:
+    """A model sometimes nests the cut, or sends the picker object back."""
+    beats = payload.get("beats")
+    if isinstance(beats, (list, dict)) and beats:
+        return payload
+    for key in ("spine", "plan", "cut"):
+        inner = payload.get(key)
+        if isinstance(inner, dict) and inner.get("beats"):
+            merged = dict(inner)
+            for field in ("audience", "retelling", "lead_with_turn", "spine_dynamic"):
+                if field not in merged and field in payload:
+                    merged[field] = payload[field]
+            return merged
+    cands = payload.get("candidates")
+    if isinstance(cands, list) and cands and isinstance(cands[0], dict) and cands[0].get("beats"):
+        merged = dict(cands[0])
+        for field in ("audience", "retelling", "lead_with_turn", "spine_dynamic"):
+            if field not in merged and field in payload:
+                merged[field] = payload[field]
+        return merged
+    return payload
+
+
+def _word_token(word) -> str:
+    return re.sub(r"[^a-z0-9']", "", str(word or "").lower())
+
+
+def _line_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", _norm(text).lower())
+
+
+def _range_blocked(start: int, end: int, avoid: list) -> bool:
+    mid = (start + end) / 2
+    return any(a <= mid <= b for a, b in avoid)
+
+
+def _best_span(words: list, line: str, avoid: list) -> tuple[int, int] | None:
+    """Word indexes of the transcript span a prose line is talking about."""
+    full = _line_tokens(line)
+    if not full:
+        return None
+    toks = [_word_token(w.get("word")) for w in words]
+    n = len(full)
+    if n <= 40:
+        for i in range(0, len(toks) - n + 1):
+            if toks[i:i + n] == full and not _range_blocked(i, i + n - 1, avoid):
+                return i, i + n - 1
+    needles = {t for t in full if len(t) > 2 and t not in _STOP} or set(full)
+    if not needles:
+        return None
+    need = min(len(needles), max(2, (len(needles) + 1) // 2)) if len(needles) > 1 else 1
+    max_w = min(len(words), max(8, len(needles) * 6))
+    best = None
+    for i in range(len(words)):
+        seen = set()
+        limit = min(len(words), i + max_w)
+        for j in range(i, limit):
+            if toks[j] in needles:
+                seen.add(toks[j])
+            if len(seen) < need or _range_blocked(i, j, avoid):
+                continue
+            cand = (len(seen), -(j - i), -i, i, j)
+            if best is None or cand > best:
+                best = cand
+    if best is None:
+        return None
+    return best[3], best[4]
+
+
+def _beat_spec_list(raw_beats, words: list) -> list:
+    """Accept word-id spans, or the prose map the picker already uses.
+
+    Models often send ``{"situation": "...", "turn": "...", "consequence": "..."}``
+    instead of an array of word ids. Those sentences are matched back onto
+    the transcript. The paraphrase itself is not stored as the beat text.
+    """
+    if isinstance(raw_beats, list) and raw_beats and all(
+        isinstance(b, dict) and b.get("start_word_id") and b.get("end_word_id")
+        for b in raw_beats
+    ):
+        return raw_beats
+    specs = []
+    if isinstance(raw_beats, dict):
+        for role in ("turn", "situation", "consequence"):
+            if role in raw_beats:
+                specs.append((role, raw_beats[role]))
+    elif isinstance(raw_beats, list):
+        ordered = []
+        for item in raw_beats:
+            if isinstance(item, dict):
+                ordered.append((str(item.get("role") or ""), item))
+        # The turn is matched first so a later summary cannot sit on its words.
+        specs = sorted(ordered, key=lambda pair: {"turn": 0, "situation": 1, "consequence": 2}.get(pair[0], 9))
+    else:
+        return []
+    avoid = []
+    out = []
+    for role, spec in specs:
+        if role not in BEATS:
+            continue
+        if isinstance(spec, dict) and spec.get("start_word_id") and spec.get("end_word_id"):
+            a, b = word_index(spec["start_word_id"]), word_index(spec["end_word_id"])
+            avoid.append((a, b))
+            out.append(spec)
+            continue
+        text = spec if isinstance(spec, str) else _norm((spec or {}).get("text") or (spec or {}).get("line"))
+        span = _best_span(words, text, avoid)
+        if span is None:
+            raise ValueError(f"could not find the {role} in the transcript")
+        a, b = span
+        avoid.append((a, b))
+        beat = {
+            "role": role,
+            "start_word_id": words[a]["id"],
+            "end_word_id": words[b]["id"],
+        }
+        if isinstance(spec, dict):
+            for key in ("punch_in", "protect_pause_before_ms", "protect_pause_after_ms", "deadpan"):
+                if key in spec:
+                    beat[key] = spec[key]
+        out.append(beat)
+    return out
+
+
 def normalize_spine(payload: dict, words: list) -> dict:
     """A spine plan. `style_pack` is dropped. Word text is taken from `words`."""
     if not isinstance(payload, dict):
@@ -808,6 +932,7 @@ def normalize_spine(payload: dict, words: list) -> dict:
     if not words:
         raise ValueError("no words")
     words = assign_word_ids(words) if "id" not in (words[0] or {}) else list(words)
+    payload = _unwrap_spine(payload)
     audience = _norm(payload.get("audience"))
     retelling = _norm(payload.get("retelling"))
     if not audience or not retelling:
@@ -817,8 +942,8 @@ def normalize_spine(payload: dict, words: list) -> dict:
     dynamic = payload.get("spine_dynamic")
     if dynamic not in SPINE_DYNAMICS:
         raise ValueError("spine_dynamic must be claim_proof, story_arc, or escalation")
-    raw_beats = payload.get("beats")
-    if not isinstance(raw_beats, list) or not raw_beats:
+    raw_beats = _beat_spec_list(payload.get("beats"), words)
+    if not raw_beats:
         raise ValueError("beats must list the kept spans")
     beats = [_beat(b, words, dynamic) for b in raw_beats]
     by = {b["role"]: b for b in beats}
@@ -913,6 +1038,16 @@ def spine_prompt(words: list, audience: str, retelling: str, lead_with_turn: boo
         "use_person_matte is false. on_asset_miss is raw_speaker. "
         "Do not invent a gradient or a blur fill when an asset is missing.\n"
         "Do not return a style pack.\n\n"
+        "Return JSON. beats is an array of word-id spans copied from the transcript, "
+        "not a summary object:\n"
+        '{"audience":"...","retelling":"...","lead_with_turn":false,'
+        '"spine_dynamic":"' + dynamic + '",'
+        '"beats":['
+        '{"role":"situation","start_word_id":"w0000","end_word_id":"w0004"},'
+        '{"role":"turn","start_word_id":"w0008","end_word_id":"w0012","punch_in":true},'
+        '{"role":"consequence","start_word_id":"w0016","end_word_id":"w0020"}'
+        '],"graphics":[]}\n'
+        "Use ids that appear in the transcript.\n\n"
         "Transcript:\n" + body
     )
 

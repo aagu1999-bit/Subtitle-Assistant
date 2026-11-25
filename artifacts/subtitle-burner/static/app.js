@@ -4004,12 +4004,13 @@ function renderHighlights(clips, format) {
         alert("End time must be greater than start time.");
         return;
       }
-      openAiEditPlan({
-        source_job_id: currentJobId,
-        start_time: editedStart,
-        end_time: editedEnd,
-        label: editedTitle || "highlight",
-      });
+    openAiEditPlan({
+      source_job_id: currentJobId,
+      start_time: editedStart,
+      end_time: editedEnd,
+      label: editedTitle || "highlight",
+      find_story: true,
+    });
     };
     actions.appendChild(aiEditBtn);
 
@@ -4494,7 +4495,10 @@ function renderRetellingChoices(candidates) {
       host.querySelectorAll("button").forEach((b) => { b.style.borderColor = ""; });
       btn.style.borderColor = "#FFD60A";
       const gen = $("aiEditGenerate");
-      if (gen) gen.textContent = "Cut to this story";
+      if (gen) {
+        gen.disabled = false;
+        gen.textContent = "Cut to this story";
+      }
       const status = $("aiEditStatus");
       if (status) {
         status.textContent = "This cut keeps the situation, the turn, and the consequence. Everything else stays out.";
@@ -4510,7 +4514,10 @@ async function findAiEditRetelling() {
   const status = $("aiEditStatus");
   _aiEditRetelling = null;
   const gen = $("aiEditGenerate");
-  if (gen) gen.textContent = "Create project";
+  if (gen) {
+    gen.textContent = (_aiEditCtx && _aiEditCtx.find_story) ? "Cut to this story" : "Create project";
+    if (_aiEditCtx && _aiEditCtx.find_story) gen.disabled = true;
+  }
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Reading the transcript for the story…";
   try {
@@ -4540,15 +4547,23 @@ async function openAiEditPlan(ctx) {
   _aiEditRecCuts = [];
   _aiEditRetelling = null;
   const gen = $("aiEditGenerate");
-  if (gen) gen.textContent = "Create project";
+  const storyDoor = !!(_aiEditCtx && _aiEditCtx.find_story);
+  if (gen) {
+    gen.disabled = storyDoor;
+    gen.textContent = storyDoor ? "Cut to this story" : "Create project";
+  }
   const modal = $("aiEditModal");
   if (!modal || !_aiEditCtx) return;
+  modal.classList.toggle("is-story-door", storyDoor);
   if (!_aiEditCtx.format) {
     const lane = shortsMotionFormat();
     if (lane) _aiEditCtx.format = lane;
   }
   const laneEl = $("aiEditLane");
-  if (laneEl) {
+  if (laneEl && storyDoor) {
+    laneEl.hidden = true;
+    laneEl.textContent = "";
+  } else if (laneEl) {
     const label = MOTION_FORMAT_LABEL[_aiEditCtx.format];
     const isAuto = _aiEditCtx.format === "auto";
     laneEl.hidden = !label && !isAuto;
@@ -4587,7 +4602,7 @@ async function openAiEditPlan(ctx) {
   _syncAiEditScopeUi();
 
   const status = $("aiEditCutsPreview");
-  if (status) status.textContent = "Loading style packs…";
+  if (status) status.textContent = storyDoor ? "" : "Loading style packs…";
   const outline = $("aiEditOutline");
   if (outline) {
     outline.innerHTML = "";
@@ -4600,6 +4615,7 @@ async function openAiEditPlan(ctx) {
   if (fromCapcut) _aiEditPackId = fromCapcut;
 
   await renderAiEditPacks();
+  if (storyDoor) findAiEditRetelling();
 }
 
 
@@ -4916,6 +4932,7 @@ async function runAiEditGenerate() {
       purpose: opts.purpose || "",
       create_clip: opts.create_clip === true ? true : false,
       allow_clip_scope: !!opts.allow_clip_scope,
+      find_story: opts.find_story === true,
     });
   };
 
@@ -4929,14 +4946,15 @@ async function runAiEditGenerate() {
   if (scopeClip) scopeClip.addEventListener("change", onScopeChange);
 })();
 
-function openAiEditFullFromReady() {
-  if (!requireReadyTranscript("AI Edit full video")) return;
+function openAiEditFullFromReady(findStory) {
+  if (!requireReadyTranscript(findStory ? "Find the story" : "AI Edit")) return;
   if (typeof window.openAiEditPlanForJob !== "function") {
     alert("AI Edit is still loading — try again in a second.");
     return;
   }
   window.openAiEditPlanForJob(currentJobId, {
     full_video: true,
+    find_story: findStory === true,
     label: (jobsById[currentJobId] && jobsById[currentJobId].filename) || "Full-video AI Edit",
   });
 }
@@ -7011,8 +7029,8 @@ function updateReadyActions() {
   if (hint && ready) {
     const name = (jobsById[currentJobId] && jobsById[currentJobId].filename) || "This video";
     hint.textContent = isLong
-      ? `${name} looks long-form (${Math.round(dur / 60)} min). Prefer Edit as Long-form (16:9), or open Timeline / Find Shorts.`
-      : `${name} is transcribed. Edit phrases in Timeline, set caption look, or find shorts.`;
+      ? `${name} is transcribed (${Math.round(dur / 60)} min). Find the story, or open it as a long-form edit.`
+      : `${name} is transcribed. Find the story a stranger would repeat.`;
   }
 }
 
@@ -7083,8 +7101,9 @@ window.openStyle = openStyle;
   ["readyFindShortsBtn", openFindShorts],
   ["readyOpenTimelineBtn", openTimelineFromReady],
   ["readyOpenLongFormBtn", openLongFormFromReady],
-  ["readyAiEditFullBtn", openAiEditFullFromReady],
-  ["hlAiEditFullBtn", openAiEditFullFromReady],
+  ["readyFindStoryBtn", () => openAiEditFullFromReady(true)],
+  ["readyAiEditFullBtn", () => openAiEditFullFromReady(false)],
+  ["hlAiEditFullBtn", () => openAiEditFullFromReady(true)],
   ["transcriptBackIngestBtn", () => setActiveTab("ingest")],
   ["transcriptCaptionLookBtn", openCaptionLook],
   ["brandingBackIngestBtn", () => setActiveTab("ingest")],
@@ -7369,6 +7388,7 @@ if (_peAiEdit) {
       start_time: t.s,
       end_time: t.e,
       label: (_activePreview && _activePreview.title) || "highlight",
+      find_story: true,
     });
   };
 }

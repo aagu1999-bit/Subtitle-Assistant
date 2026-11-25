@@ -373,10 +373,10 @@
           <section id="readyActions" class="panel hidden" style="margin-top:14px;padding:14px">
             <div class="section-title" style="margin-bottom:6px">Ready</div>
             <p id="readyActionsHint" class="muted" style="font-size:.78rem;line-height:1.45;margin:0 0 10px">
-              Open <strong>Edit</strong> to cut, caption, and Render. Everything else is optional.
+              Once this video is transcribed, <strong>Find the story</strong> a stranger would repeat.
             </p>
             <div class="ready-primary-row">
-              <button type="button" id="readyStyleBtn" class="btn btn-primary btn-sm">Pick a style →</button>
+              <button type="button" id="readyFindStoryBtn" class="btn btn-primary btn-sm" title="{% if gemini_enabled %}Read the transcript and propose the retellings{% else %}Set GEMINI_API_KEY to enable{% endif %}"{% if not gemini_enabled %} disabled{% endif %}>Find the story</button>
               <button type="button" id="readyOpenTimelineBtn" class="btn btn-secondary btn-sm">Open Edit →</button>
               <button type="button" id="readyOpenLongFormBtn" class="btn btn-secondary btn-sm hidden" title="Open a 16:9 Timeline for the full upload">Long-form 16:9</button>
               <button type="button" id="readyFindShortsBtn" class="btn btn-secondary btn-sm">Find Shorts</button>
@@ -384,7 +384,8 @@
             <details class="ready-more">
               <summary>More options</summary>
               <div class="ready-more-actions">
-                <button type="button" id="readyAiEditFullBtn" class="btn btn-secondary btn-sm" title="Run AI Edit on the entire transcript">AI Edit full video</button>
+                <button type="button" id="readyStyleBtn" class="btn btn-secondary btn-sm">Pick a style →</button>
+                <button type="button" id="readyAiEditFullBtn" class="btn btn-secondary btn-sm" title="Open the older AI Edit controls">AI Edit options</button>
                 <button type="button" id="readyInstantExportBtn" class="btn btn-secondary btn-sm" title="Quick caption burn — prefer Edit → Render for full projects">Quick Export</button>
                 <button type="button" id="readyCaptionLookBtn" class="btn btn-secondary btn-sm">Caption &amp; audio</button>
               </div>
@@ -395,6 +396,7 @@
           <section class="panel">
             <div class="section-title">Next</div>
             <div class="ingest-guide">
+              <div style="margin-bottom:8px"><strong>Find the story</strong> — the cut a stranger would repeat. This is the front door.</div>
               <div style="margin-bottom:8px"><strong>Edit</strong> — timeline, captions, effects, then ▶ Render.</div>
               <div style="margin-bottom:8px"><strong>Shorts</strong> — optional clip suggestions (never auto-runs).</div>
               <div><strong>Projects</strong> — Recap, interviews, compilation queue.</div>
@@ -1312,10 +1314,9 @@
       {% endif %}
       <p class="muted panel-desc">
         Pick a caption recipe, then format + length.
-        The edit is a retelling, not a pacing pack. On each card:
-        <strong>Preview</strong> → <strong>Open in Timeline</strong> →
-        <strong>AI Edit…</strong> (applies cuts + the pack) →
-        <strong>Export clip</strong> →
+        The edit is a retelling, not a pacing pack. <strong>Find the story</strong> cuts the whole video.
+        On each card: <strong>Preview</strong> → <strong>Open in Timeline</strong> →
+        <strong>AI Edit…</strong> → <strong>Export clip</strong> →
         <strong>Add to compilation</strong>.
         Or click <strong>Make mid-form</strong> for one mini-episode, or <strong>Make 2–3 versions</strong> for Punchy / Story / Deep A/B cuts of the same story.
       </p>
@@ -1386,7 +1387,7 @@
         <button id="hlFindBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff"{% if not gemini_enabled %} disabled title="Set GEMINI_API_KEY to enable"{% endif %}>Find highlights</button>
         <button id="hlMidformBtn" class="btn btn-secondary" type="button" title="Hook (shock/emotion ≤35s) → grand intro? → body → closer. Click again to regenerate with new beats."{% if not gemini_enabled %} disabled{% endif %}>🎞 Make mid-form</button>
         <button id="hlMidformVersionsBtn" class="btn btn-secondary" type="button" title="Build Punchy / Story / Deep alternate cuts of the same story for A/B posting"{% if not gemini_enabled %} disabled{% endif %}>🧪 Make 2–3 versions</button>
-        <button id="hlAiEditFullBtn" class="btn btn-secondary" type="button" title="Edit the entire uploaded video (not a Shorts chop) — optional purpose + style pack"{% if not gemini_enabled %} disabled{% endif %}>✨ AI Edit full video</button>
+        <button id="hlAiEditFullBtn" class="btn btn-primary" type="button" title="Read the whole transcript and propose the retellings"{% if not gemini_enabled %} disabled{% endif %}>Find the story</button>
         <button id="batchExportBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;margin-left:auto">🚀 Batch Export All Shorts (ZIP / MP4)</button>
         <button id="hlMoreBtn" class="btn" style="display:none">↻ More options</button>
       </div>
@@ -2089,18 +2090,18 @@
             </label>
           </div>
         </div>
-        <div class="row" style="align-items:flex-start">
+        <div class="row ai-edit-advanced" style="align-items:flex-start">
           <label style="min-width:100px;padding-top:6px" for="aiEditPurpose">Purpose <span class="muted">(optional)</span></label>
           <div style="flex:1;min-width:200px">
             <textarea id="aiEditPurpose" rows="2" maxlength="500" placeholder="e.g. Keep it cinematic for YouTube · Tighten for a podcast reel · Emphasize product demo moments" style="width:100%;padding:8px 10px;background:#10131d;border:1px solid #3b4252;color:#fff;border-radius:8px;resize:vertical;font:inherit"></textarea>
             <p class="muted" style="font-size:.72rem;margin:4px 0 0;line-height:1.35">Steers zooms/pacing when Gemini is available. Leave blank to use the style pack defaults.</p>
           </div>
         </div>
-        <div class="row" style="align-items:flex-start">
+        <div class="row ai-edit-advanced" style="align-items:flex-start">
           <label style="min-width:100px;padding-top:6px">Style</label>
           <div id="aiEditPacks" class="ai-edit-packs"></div>
         </div>
-        <div class="row">
+        <div class="row ai-edit-advanced">
           <label style="min-width:100px">Intensity</label>
           <select id="aiEditIntensity">
             <option value="low">Low — light trim &amp; sparse zooms</option>
@@ -2108,21 +2109,21 @@
             <option value="high">High — dense cuts &amp; zooms</option>
           </select>
         </div>
-        <div class="row">
+        <div class="row ai-edit-advanced">
           <label style="min-width:100px">AI Trim</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
             <input type="checkbox" id="aiEditApplyCuts" checked>
             Apply recommended filler + silence cuts
           </label>
         </div>
-        <div class="row">
+        <div class="row ai-edit-advanced">
           <label style="min-width:100px">Clip job</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
             <input type="checkbox" id="aiEditCreateClip">
             Chop into a standalone clip job first <span class="muted">(off for full-video edits)</span>
           </label>
         </div>
-        <div class="row">
+        <div class="row ai-edit-advanced">
           <label style="min-width:100px">Media</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:.86rem">
             <input type="checkbox" id="aiEditInsertMedia" checked>
