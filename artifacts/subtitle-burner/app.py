@@ -3816,10 +3816,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 base_col = speaker_color if speaker_color else primary
                 word_prefix = f"{{\\c{speaker_color}}}" if speaker_color else ""
                 word_suffix = f"{{\\c{primary}}}" if speaker_color else ""
-                
-                if j == idx:
+
+                # A known speaker keeps their color on every word, including
+                # the one being said. The yellow highlight is only for a
+                # word with no person, otherwise it paints over the speaker
+                # and the burn no longer matches the transcript.
+                if j == idx and speaker_color:
+                    pieces.append(
+                        f"{{\\fscx108\\fscy108\\c{speaker_color}}}{word_text}"
+                        f"{{\\fscx100\\fscy100\\c{base_col}}}"
+                    )
+                elif j == idx:
                     pieces.append(f"{{\\c{highlight}}}{word_text}{{\\c{base_col}}}")
-                elif j in punch_idxs:
+                elif j in punch_idxs and not speaker_color:
                     pieces.append(f"{{\\c{accent}}}{word_text}{{\\c{base_col}}}")
                 else:
                     pieces.append(f"{word_prefix}{word_text}{word_suffix}")
