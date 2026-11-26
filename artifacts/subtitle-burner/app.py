@@ -17755,7 +17755,11 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         seg_meta = []        # per-segment caption source info, aligned to segments
         time_map = _TimeMap()
         cache_stats = {"hits": 0, "misses": 0, "split": 0}
+        nplan = max(1, len(plan))
         for seg_counter, spec in enumerate(plan):
+            jobs[job_id]["status"] = f"building main track ({seg_counter + 1}/{nplan})"
+            jobs[job_id]["progress"] = 10 + int(25 * seg_counter / nplan)
+            _db_save_job(job_id)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
             sub_dur = spec["sub_ke"] - spec["sub_ks"]
             if spec["kind"] == "speakers":
@@ -17785,7 +17789,8 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             # kept piece (not the very first segment overall).
             if len(segments) > 1:
                 transitions.append(spec["transition"])
-            jobs[job_id]["progress"] = 10 + int(25 * (spec["clip_index"] + 1) / len(main_clips))
+            jobs[job_id]["progress"] = 10 + int(25 * (seg_counter + 1) / nplan)
+            jobs[job_id]["status"] = f"building main track ({seg_counter + 1}/{nplan})"
         jobs[job_id]["render_stats"] = cache_stats
         _db_save_job(job_id)
 
@@ -17794,6 +17799,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
 
         base = UPLOAD_DIR / f"{job_id}_tlbase.mp4"
         work.append(base)
+        _stage("stitching main track", 36)
         _total_dur, seg_starts = _tl_build_main_track(segments, transitions, base, job_id)
         _assert_mp4_has_video(base, "Main track bake")
 
