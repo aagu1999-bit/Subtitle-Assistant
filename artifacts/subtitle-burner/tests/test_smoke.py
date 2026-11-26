@@ -1517,11 +1517,16 @@ def test_the_time_base_is_local_seconds_whatever_the_filter_counts():
 
 
 def test_the_keyframe_module_reaches_the_browser():
-    """A module the page never loads is not an engine, it is a file."""
-    html = (BURNER / "templates" / "index.html").read_text(encoding="utf-8")
-    assert "filename='keyframes.js'" in html, "keyframes.js is not on the page"
-    # It has to come first, or timeline.js reads window.Keyframes as undefined.
-    assert html.index("filename='keyframes.js'") < html.index("filename='timeline.js'"), \
+    """A module the page never loads is not an engine, it is a file.
+
+    The editor scripts are not on the first screen. app.js pulls them in
+    when Edit opens, and keyframes.js still has to arrive before timeline.js
+    or the preview reads window.Keyframes as undefined.
+    """
+    app = (BURNER / "static" / "app.js").read_text(encoding="utf-8")
+    assert "keyframes.js" in app, "keyframes.js is not loaded for the editor"
+    assert "timeline.js" in app, "timeline.js is not loaded for the editor"
+    assert app.index("keyframes.js") < app.index("timeline.js"), \
         "keyframes.js must load before timeline.js"
 
 
