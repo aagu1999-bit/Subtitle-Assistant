@@ -4529,16 +4529,28 @@
     const v = $("tlPreviewVideo");
     if (!el || !v) return;
     const bg = tl && tl.background;
-    if (!bg || !bg.asset_id) {
+    let otNow = playheadOutputTime();
+    if (otNow == null) otNow = v.currentTime || 0;
+    const overlayBehind = (tl.tracks.overlay || []).some((item) => {
+      if (!item || !item.behind) return false;
+      const start = item.start || 0;
+      return otNow >= start && otNow <= start + clipDuration(item);
+    });
+    if ((!bg || !bg.asset_id) && !overlayBehind) {
       el.style.display = "none";
       v.style.webkitMaskImage = "";
       v.style.maskImage = "";
       _bgMatteAt = null;
       return;
     }
-    el.style.display = "block";
-    el.style.backgroundImage = `url(/asset/${bg.asset_id})`;
-    el.style.backgroundSize = (bg.fit === "contain") ? "contain" : "cover";
+    if (bg && bg.asset_id) {
+      el.style.display = "block";
+      el.style.backgroundImage = `url(/asset/${bg.asset_id})`;
+      el.style.backgroundSize = (bg.fit === "contain") ? "contain" : "cover";
+    } else {
+      el.style.display = "none";
+      el.style.backgroundImage = "";
+    }
 
     // The matte is what makes it read as "behind" rather than "instead of".
     const job = tl.tracks.main.find((c) => c.source_job_id);
@@ -5096,6 +5108,7 @@
           isVideo: media.tagName === "VIDEO",
         };
         ovEntries.push(entry);
+        if (item.behind) refreshBackgroundPreview();
         // Apply this frame immediately so a rebuild doesn't flash at rest.
         applyOverlayFrame(entry, ot);
       }
@@ -6140,6 +6153,10 @@
           const cl = findClip(selected.track, selected.id);
           if (cl) cl[key] = (inp.type === "checkbox") ? !!inp.checked : inp.value;
           renderProps();
+          if (key === "behind") {
+            updateStageCompositor();
+            refreshBackgroundPreview();
+          }
           scheduleSave();
         } else if (key === "__sfx_overlays") {
           tl.sfx_overlays = !!inp.checked;

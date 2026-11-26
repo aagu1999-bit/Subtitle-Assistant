@@ -655,6 +655,7 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
   object-fit: cover;
   transform-origin: center center;
   will-change: transform, opacity, filter;
+  z-index: 1;
 }
 .tl-stage.fit-contain video { object-fit: contain; }
 .tl-overlay-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
