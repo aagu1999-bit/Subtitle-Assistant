@@ -2556,12 +2556,14 @@
     let ok = 0;
     for (let i = 0; i < ids.length; i++) {
       const jobId = ids[i];
+      const srcName = ((sources.find((s) => s.job_id === jobId) || {}).filename)
+        || jobId.slice(0, 8);
       const prefix = ids.length > 1 ? `(${i + 1}/${ids.length}) ` : "";
       try {
         await window.startReframeAnalyze(triggerBtn, {
           jobId,
           quietAlert: ids.length > 1,
-          onStatus: (msg) => setAnalyzeProgressUI(null, prefix + (msg || "")),
+          onStatus: (msg) => setAnalyzeProgressUI(null, prefix + (msg || "") + " · " + srcName),
           onProgress: (pct) => {
             // Map per-job progress into overall bar when analyzing many sources.
             const base = (i / ids.length) * 100;
@@ -5274,14 +5276,12 @@
       `text-shadow:0 2px 8px rgba(0,0,0,.8);width:92%;display:block`;
     liveCaptionEl.innerHTML = group.map((w, j) => {
       const idx = g0 + j;
-      let col = idx === wi ? highlight : primary;
-      if (idx !== wi && w.speaker) {
-        const scCol = _spkColor(sc, w.speaker);
-        if (scCol) col = scCol;
-      }
+      const scCol = w.speaker ? _spkColor(sc, w.speaker) : null;
+      let col = scCol || (idx === wi ? highlight : primary);
       let t = String(w.word || "").replace(/[<>&]/g, "");
       if (style.all_caps) t = t.toUpperCase();
-      return `<span style="color:${col};margin:0 .12em">${t}</span>`;
+      const em = idx === wi ? "font-size:1.08em;" : "";
+      return `<span style="color:${col};${em}margin:0 .12em">${t}</span>`;
     }).join("");
   }
 
@@ -5784,13 +5784,22 @@
       trimBody += `<p class="muted" style="font-size:.72rem">Crossfade from the previous clip. The first clip ignores this. Edit words in the left <strong>Transcript</strong> panel.</p>`;
       html += propSection("✂ Trim", trimBody, true);
 
+      const scPreview = tl.speaker_colors || {};
+      const people = _spkPresent(transcriptWords).slice(0, 2);
       let capBody = propCheck("burn_captions", "Burn word-by-word captions (from transcript)", c.burn_captions !== false);
-      capBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:6px 0 8px">Caption words come from this clip’s Whisper transcript. Look / branding below is what they render as.</p>`;
+      capBody += `<p class="muted" style="font-size:.72rem;line-height:1.4;margin:6px 0 8px">When a word has a person, it keeps that person’s color, including the word being said. White and the karaoke yellow are only for words with no person.</p>`;
       capBody += `<div class="tl-cap-preview">
-        <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.1rem;letter-spacing:.02em">
-          <span style="color:${esc(primary)}">here with.</span>
-          <span style="color:${esc(highlight)}"> Vanessa,</span>
-        </span>
+        <span style="font-family:${esc(fontName)},sans-serif;font-weight:900;font-size:1.1rem;letter-spacing:.02em">`;
+      if (people.length) {
+        people.forEach((spk, i) => {
+          const col = _spkColor(scPreview, spk) || primary;
+          const sample = i === 0 ? "here with" : "Vanessa";
+          capBody += `<span style="color:${esc(col)};margin-right:.25em">${sample}</span>`;
+        });
+      } else {
+        capBody += `<span style="color:${esc(primary)}">here with.</span><span style="color:${esc(highlight)}"> Vanessa,</span>`;
+      }
+      capBody += `</span>
         <span class="muted" style="font-size:.7rem;display:block;margin-top:4px">${esc(fontName)} · ${fontSize}px</span>
       </div>`;
       capBody += `<div class="tl-prop-grid">${propSelect("__style_font", "Font", fontName, FONT_OPTS)}${propNum("__style_size", "Size", fontSize, 24, 140, 2)}</div>`;
