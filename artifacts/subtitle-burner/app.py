@@ -2786,12 +2786,17 @@ def analyze_reframe(
     errors: list[BaseException] = []
     # Heartbeat so the UI progress bar moves during long pyannote loads.
     stop_hb = threading.Event()
-    hb_pct = {"n": 15}
+    hb_tick = {"n": 0}
+    hb_started = time.time()
 
     def _heartbeat() -> None:
         while not stop_hb.wait(7.0):
-            hb_pct["n"] = min(52, hb_pct["n"] + 2)
-            _progress(hb_pct["n"], "analysing speakers (diarization running…)")
+            hb_tick["n"] += 1
+            # The percent used to freeze at 52, and the page treated a
+            # frozen number as a dead worker. This pass is just slow.
+            pct = 40 + (hb_tick["n"] % 8) * 2
+            waited = int(time.time() - hb_started)
+            _progress(pct, f"analysing speakers (still listening, {waited}s)")
 
     hb_thread = threading.Thread(target=_heartbeat, name="reframe-hb", daemon=True)
     hb_thread.start()
@@ -19033,14 +19038,35 @@ def _asset_rows() -> list[dict]:
     return rows
 
 
-def _broll_color_params(tl: dict, asset_id: str, start: float) -> dict | None:
-    look = _aroll_look(tl, start)
-    path = _find_asset_path(asset_id)
-    if not look or not path:
+def _overlay_media_path(asset_id: str = "", source_job_id: str = "") -> Path | None:
+    """The file behind an overlay, whether it is a library asset or a video already in the app."""
+    raw = (asset_id or source_job_id or "").strip()
+    if not raw:
         return None
+    path = _find_asset_path(raw) or _find_asset_path(raw.replace("-", ""))
+    if path:
+        return path
+    return find_video_path(raw) or find_video_path(raw.replace("-", ""))
+
+
+def _broll_color_params(tl: dict, asset_id: str, start: float,
+                        source_job_id: str = "") -> tuple[dict | None, str]:
+    look = _aroll_look(tl, start)
+    if look is None and start:
+        look = _aroll_look(tl, 0.0)
+    path = _overlay_media_path(asset_id, source_job_id)
+    if not look and not path:
+        return None, "No talking shot at that time, and the overlay file was not found."
+    if not look:
+        return None, "Could not read a frame of the talking shot."
+    if not path:
+        return None, "Could not find the overlay file."
     b_img = broll_guard.frame_image(path, 0.5, FFMPEG)
     b_stats = broll_guard.image_stats(b_img) if b_img is not None else None
-    return broll_guard.color_match_params(look["stats"], b_stats)
+    params = broll_guard.color_match_params(look["stats"], b_stats)
+    if not params:
+        return None, "Could not read a frame of the overlay."
+    return params, ""
 
 
 def _smart_broll_for(tl: dict, text: str, start: float, dur: float, *,
@@ -19084,7 +19110,7 @@ def _smart_broll_for(tl: dict, text: str, start: float, dur: float, *,
             "broll": {"source": res["source"], "query": res["query"],
                       "concepts": res["concepts"], "ladder": res["ladder"]}}
     if color_match:
-        params = _broll_color_params(tl, asset["asset_id"], start)
+        params, _why = _broll_color_params(tl, asset["asset_id"], start)
         if params:
             clip["color_match"] = params
     return res, clip
@@ -19125,9 +19151,12 @@ def broll_color_match():
         start = float(data.get("start") or 0)
     except (TypeError, ValueError):
         start = 0.0
-    params = _broll_color_params(_normalize_timeline(tl), str(data.get("asset_id") or ""), start)
+    params, why = _broll_color_params(
+        _normalize_timeline(tl), str(data.get("asset_id") or ""), start,
+        str(data.get("source_job_id") or ""),
+    )
     if not params:
-        return jsonify({"error": "Could not read the A-roll or the asset"}), 400
+        return jsonify({"error": why or "Could not read the talking shot or the overlay"}), 400
     return jsonify({"color_match": params, "filter": broll_guard.color_match_filter(params)})
 
 

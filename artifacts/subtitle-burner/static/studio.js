@@ -640,7 +640,10 @@
         cm.disabled = true;
         try {
           const d = await post("/broll/color-match", {
-            timeline: api_.serialize(), asset_id: c.asset_id, start: c.start || 0,
+            timeline: api_.serialize(),
+            asset_id: c.asset_id || "",
+            source_job_id: c.source_job_id || "",
+            start: c.start || 0,
           });
           c.color_match = d.color_match;
           toast("Graded toward the A-roll. Visible after Render.");
