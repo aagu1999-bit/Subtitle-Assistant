@@ -7946,7 +7946,7 @@
           failStreak = 0;
           const sig = (s.status || "") + ":" + (s.progress || 0);
           if (sig !== lastSig) { lastSig = sig; lastMark = Date.now(); }
-          else if (Date.now() - lastMark > 8 * 60 * 1000) {
+          else if (Date.now() - lastMark > ((/main track/i.test(s.status || "")) ? 20 : 8) * 60 * 1000) {
             clearInterval(pollTimer);
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
             const msg = "Render stopped moving at " + (s.progress || 0) + "%. The button is free again. Try Render once more.";
