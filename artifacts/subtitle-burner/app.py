@@ -20199,8 +20199,10 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None
     ]
     r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True, timeout=240)
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
-        err = (r.stderr or r.stdout or "remotion render failed")[-500:]
-        raise RuntimeError(err)
+        raw = (r.stderr or r.stdout or "remotion render failed")
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith("at ")]
+        err = (lines[-1] if lines else raw.strip())[-240:]
+        raise RuntimeError(err or "remotion render failed")
 
 
 def _make_remotion_look(rec: dict, description: str, timeline: dict | None,

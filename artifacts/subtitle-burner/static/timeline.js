@@ -2171,7 +2171,14 @@
 
     const menu = document.createElement("div");
     menu.className = "tl-spk-menu";
-    const present = _spkPresent(allWords);
+    const present = [];
+    const addId = (id) => { if (id && !present.includes(id)) present.push(id); };
+    _spkPresent(allWords).forEach(addId);
+    Object.keys((tl && tl.speaker_names) || {}).forEach(addId);
+    // Host and Guest stay choosable even when this phrase has no label,
+    // and even when every word was stamped as only one of them.
+    addId("SPEAKER_00");
+    addId("SPEAKER_01");
 
     const add = (label, onPick, cls) => {
       const b = document.createElement("button");
@@ -7931,10 +7938,22 @@
     return new Promise((resolve, reject) => {
       clearInterval(pollTimer);
       let failStreak = 0;
+      let lastMark = Date.now();
+      let lastSig = "";
       pollTimer = setInterval(async () => {
         try {
           const s = await api("/status/" + tl.job_id);
           failStreak = 0;
+          const sig = (s.status || "") + ":" + (s.progress || 0);
+          if (sig !== lastSig) { lastSig = sig; lastMark = Date.now(); }
+          else if (Date.now() - lastMark > 8 * 60 * 1000) {
+            clearInterval(pollTimer);
+            if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            const msg = "Render stopped moving at " + (s.progress || 0) + "%. The button is free again. Try Render once more.";
+            setRenderStatus(msg);
+            reject(new Error(msg));
+            return;
+          }
           if (typeof window.showExportProgressUpdate === "function") {
             window.showExportProgressUpdate(s);
           }
