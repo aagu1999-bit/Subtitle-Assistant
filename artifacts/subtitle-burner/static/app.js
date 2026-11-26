@@ -1,3 +1,54 @@
+// The editor is the heavy part of the page. The cards do not need it.
+// These three files stay off the first load and arrive, in this order,
+// the first time something actually opens Edit.
+const EDITOR_SCRIPTS = ["keyframes.js", "keyframes-motion.js", "timeline.js"];
+let _editorLoader = null;
+
+function _staticSrc(file) {
+  const sample = document.querySelector('script[src*="app.js"]');
+  if (!sample) return "/static/" + file;
+  return sample.src.replace(/app\.js(\?.*)?$/, file + "$1");
+}
+
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Could not load " + src));
+    document.body.appendChild(s);
+  });
+}
+
+function loadEditor() {
+  if (window.__openTimelineEditorImpl) return Promise.resolve();
+  if (_editorLoader) return _editorLoader;
+  _editorLoader = (async () => {
+    for (const file of EDITOR_SCRIPTS) await _loadScript(_staticSrc(file));
+    if (!window.__openTimelineEditorImpl) {
+      throw new Error("timeline.js loaded without the editor");
+    }
+  })().catch((err) => {
+    _editorLoader = null;
+    throw err;
+  });
+  return _editorLoader;
+}
+window.loadEditor = loadEditor;
+
+window.openTimelineEditor = function (seed, opts) {
+  return loadEditor()
+    .then(() => window.__openTimelineEditorImpl(seed, opts))
+    .catch((err) => {
+      alert("The editor didn't load. Refresh and try again.\n\n" + ((err && err.message) || err));
+      throw err;
+    });
+};
+
+window.ensureTimelineInit = function (opts) {
+  return loadEditor().then(() => window.__ensureTimelineInitImpl(opts));
+};
+
 // ---- Filler-word detection ----
 // Single-word fillers + the start tokens of two-word fillers ("you" needs a
 // trailing "know", "i" needs a trailing "mean"). The detector handles the

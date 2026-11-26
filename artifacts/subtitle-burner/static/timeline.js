@@ -8570,7 +8570,7 @@
   }
 
   // Expose for setActiveTab("editor") — both header + main nav entry points.
-  window.ensureTimelineInit = ensureInit;
+  window.__ensureTimelineInitImpl = ensureInit;
   // Narrow surface for studio.js (phrase toolbar, export/QA, structure).
   window.tlAPI = {
     get tl() { return tl; },
@@ -9372,15 +9372,17 @@
   };
 
   // Hook every Editor tab button (header workflow + mainTabs) so either works.
-  document.addEventListener("DOMContentLoaded", () => {
+  function hookEditorTabs() {
     document.querySelectorAll('.main-tab[data-tab="editor"]').forEach((tabBtn) => {
       tabBtn.addEventListener("click", ensureInit);
     });
-  });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", hookEditorTabs);
+  else hookEditorTabs();
 
   // Expose an entry point so Shorts / Assembly / Compilation can open the
   // editor seeded from one job or a multi-clip queue.
-  window.openTimelineEditor = async function (seedJobId, opts) {
+  window.__openTimelineEditorImpl = async function (seedJobId, opts) {
     opts = opts || {};
     const seeding = !!(opts.newProject || (opts.clips && opts.clips.length) || seedJobId || opts.seedTimeline);
     if (seeding) {
