@@ -10042,7 +10042,15 @@
       }
     } catch (e) {}
   }
+  function setCoEditorFull(on) {
+    const drawer = $("coEditorDrawer");
+    if (!drawer) return;
+    drawer.classList.toggle("is-fullscreen", !!on);
+    const btn = $("coEditorFull");
+    if (btn) btn.textContent = on ? "Shrink" : "Full screen";
+  }
   function closeCoEditor() {
+    setCoEditorFull(false);
     const drawer = $("coEditorDrawer");
     if (!drawer) return;
     drawer.classList.add("hidden");
@@ -11062,6 +11070,13 @@
     if ($("coEditorClose") && !$("coEditorClose")._wired) {
       $("coEditorClose")._wired = true;
       $("coEditorClose").onclick = () => closeCoEditor();
+    }
+    if ($("coEditorFull") && !$("coEditorFull")._wired) {
+      $("coEditorFull")._wired = true;
+      $("coEditorFull").onclick = () => {
+        const drawer = $("coEditorDrawer");
+        setCoEditorFull(!(drawer && drawer.classList.contains("is-fullscreen")));
+      };
     }
     if ($("coEditorSend") && !$("coEditorSend")._wired) {
       $("coEditorSend")._wired = true;

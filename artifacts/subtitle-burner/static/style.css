@@ -834,6 +834,17 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   box-shadow: 0 16px 48px rgba(0,0,0,.4);
 }
 .co-editor-drawer.hidden { display: none !important; }
+.co-editor-drawer.is-fullscreen {
+  inset: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  z-index: 13000;
+}
 .co-editor-head {
   display: flex;
   align-items: center;
