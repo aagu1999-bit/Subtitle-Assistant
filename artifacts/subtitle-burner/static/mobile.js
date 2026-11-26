@@ -396,8 +396,7 @@
   function effectsPickerSheetHtml() {
     const types = Array.isArray(window.EFFECT_TYPES) ? window.EFFECT_TYPES : [
       { id: "punch_zoom", label: "Punch zoom", icon: "⚡" },
-      { id: "zoom_1_5", label: "1.5× Zoom hold", icon: "🔎" },
-      { id: "zoom_2x", label: "2× Zoom hold", icon: "🔍" },
+      { id: "zoom", label: "Zoom", icon: "🔍" },
       { id: "ken_burns", label: "Ken Burns", icon: "🎞" },
       { id: "color", label: "Color grade", icon: "🎨" },
       { id: "split_screen", label: "Split-screen", icon: "⬓" },

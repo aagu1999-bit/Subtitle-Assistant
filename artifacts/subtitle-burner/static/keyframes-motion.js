@@ -98,11 +98,19 @@
   function punchZoomTracks(cfg, dur) {
     if (!cfg || !cfg.enabled) return null;
     var intensity = cfg.intensity || "med";
-    var peak = PUNCH_PEAK[intensity] || 1.25;
+    var namedHold = PUNCH_HOLD_INTENSITIES.indexOf(intensity) !== -1;
+    var peak;
+    if (intensity === "hold" || (cfg.scale != null && cfg.scale !== "" && (intensity === "hold" || namedHold))) {
+      peak = Math.min(2.5, Math.max(1, Number(cfg.scale) || PUNCH_PEAK[intensity] || 1.5));
+    } else if (namedHold) {
+      peak = PUNCH_PEAK[intensity] || 1.5;
+    } else {
+      peak = PUNCH_PEAK[intensity] || 1.25;
+    }
     if (peak - 1 <= 0) return null;
     var hit = Math.max(0, Number(cfg.hit) || 0);
 
-    if (PUNCH_HOLD_INTENSITIES.indexOf(intensity) !== -1) {
+    if (namedHold || intensity === "hold") {
       if (hit <= 0) return { track: [[0, peak]], ease: "hold" };
       return { track: [[0, 1], [hit, peak]], ease: "hold" };
     }

@@ -99,8 +99,7 @@
   const TRACK_KEYS = ["main", "overlay", "effects", "text", "music"];
   const EFFECT_TYPES = [
     { id: "punch_zoom", label: "Punch zoom", icon: "⚡" },
-    { id: "zoom_1_5", label: "1.5× Zoom hold", icon: "🔎" },
-    { id: "zoom_2x", label: "2× Zoom hold", icon: "🔍" },
+    { id: "zoom", label: "Zoom", icon: "🔍" },
     { id: "ken_burns", label: "Ken Burns", icon: "🎞" },
     { id: "color", label: "Color grade", icon: "🎨" },
     { id: "split_screen", label: "Split-screen", icon: "⬓" },
@@ -3119,7 +3118,7 @@
     const start = opts.start != null ? Number(opts.start) : (playheadOutputTime() ?? (v ? (v.currentTime || 0) : 0));
     const dur = opts.out != null ? Number(opts.out) : (
       ftype === "punch_zoom" ? 1.2 :
-      (ftype === "zoom_1_5" || ftype === "zoom_2x") ? 2.5 :
+      (ftype === "zoom" || ftype === "zoom_1_5" || ftype === "zoom_2x") ? 2.5 :
       ftype === "ken_burns" ? 4 : ftype === "split_screen" ? 4 : ftype === "speed" ? 2 : 3
     );
     const ec = {
@@ -3143,6 +3142,7 @@
       // reanchor() overwrites it with a Main clip id on every reflow, which
       // silently un-aimed every AI-placed push.
       aim: opts.aim || opts.anchor || null,
+      scale: opts.scale != null ? Number(opts.scale) : (ftype === "zoom" ? 1.5 : null),
       placement: opts.placement || (ftype === "split_screen" ? "second_bottom" : null),
     };
     // Built from a fixed field list, so anything not named here is dropped
@@ -3557,8 +3557,10 @@
       // Zoom holds: lead with the multiplier so it reads at a glance even on
       // a narrow clip — "1.5×" / "2×" matters more here than the full label.
       let name = meta ? meta.label : (c.type || "Effect");
-      if (c.type === "zoom_1_5") name = "1.5× hold";
-      else if (c.type === "zoom_2x") name = "2× hold";
+      if (c.type === "zoom" || c.type === "zoom_1_5" || c.type === "zoom_2x") {
+        const z = c.type === "zoom_2x" ? 2 : c.type === "zoom_1_5" ? 1.5 : Number(c.scale || 1.5);
+        name = z.toFixed(2).replace(/\.?0+$/, "") + "× zoom";
+      }
       if (c.type === "speed") return `${icon} ${Number(c.speed || 1).toFixed(2).replace(/\.?0+$/, "")}x ${fmtTime(clipDuration(c))}`;
       return `${icon} ${name} ${fmtTime(clipDuration(c))}`;
     }
@@ -3699,8 +3701,10 @@
       const meta = EFFECT_TYPES.find((t) => t.id === c.type);
       lines.push(meta ? meta.label : (c.type || "Effect"));
       const bits = [];
-      if (c.type === "zoom_1_5") bits.push("constant 1.5× hold");
-      else if (c.type === "zoom_2x") bits.push("constant 2× hold");
+      if (c.type === "zoom" || c.type === "zoom_1_5" || c.type === "zoom_2x") {
+        const z = c.type === "zoom_2x" ? 2 : c.type === "zoom_1_5" ? 1.5 : Number(c.scale || 1.5);
+        bits.push(z.toFixed(2).replace(/\.?0+$/, "") + "× held on the spot you click");
+      }
       else if (c.intensity) bits.push(`intensity: ${c.intensity}`);
       if (c.type === "ken_burns" && c.direction) bits.push(`direction: ${c.direction}`);
       if (c.type === "split_screen" && c.layout) bits.push(`layout: ${c.layout}`);
@@ -4648,6 +4652,12 @@
     for (let i = list.length - 1; i >= 0; i--) {
       const fx = list[i];
       if (fx.type === "punch_zoom") return fx;
+      if (fx.type === "zoom" || fx.type === "zoom_1_5" || fx.type === "zoom_2x") {
+        const scale = fx.type === "zoom_2x" ? Number(fx.scale || 2)
+          : fx.type === "zoom_1_5" ? Number(fx.scale || 1.5)
+          : Number(fx.scale || 1.5);
+        return Object.assign({}, fx, { intensity: "hold", scale: scale });
+      }
       const heldIntensity = ZOOM_HOLD_LANE_TYPES[fx.type];
       if (heldIntensity) return Object.assign({}, fx, { intensity: heldIntensity });
     }
@@ -5143,7 +5153,7 @@
         if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
         else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
         else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c.split);
-        else if (selected.track === "effects" && c.type === "punch_zoom") addAimDot(c);
+        else if (selected.track === "effects" && (c.type === "punch_zoom" || c.type === "zoom" || c.type === "zoom_1_5" || c.type === "zoom_2x")) addAimDot(c);
         else if (selected.track === "effects" && c.type === "split_screen") {
           // ONLY where the effect actually runs. Selecting the clip used to
           // draw the divider and the "2nd" badge at every playhead
@@ -5520,18 +5530,24 @@
     if (t === "effects") {
       if (c.fx_origin) html += fxOriginBadge(c);
       const typeOpts = EFFECT_TYPES.map((x) => [x.id, `${x.icon} ${x.label}`]);
-      html += propSelect("type", "Effect", c.type || "punch_zoom", typeOpts);
-      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", c.start || 0, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", clipDuration(c), 0.2, 120, 0.1)}</div>`;
+      const typeShown = (c.type === "zoom_1_5" || c.type === "zoom_2x") ? "zoom" : (c.type || "punch_zoom");
+      html += propSelect("type", "Effect", typeShown, typeOpts);
+      html += `<div class="tl-prop-grid">${propNum("start", "Start (s)", Math.round((c.start || 0) * 100) / 100, 0, 99999, 0.1)}${propNum("dur", "Duration (s)", Math.round(clipDuration(c) * 100) / 100, 0.2, 120, 0.1)}</div>`;
       html += `<p class="muted" style="font-size:.72rem">Drag the clip on the Effects lane to change when it runs. Main-clip effects still work; lane effects win while they overlap.</p>`;
       if (c.type === "punch_zoom") {
-        html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["1.5x", "1.5× hold"], ["2x", "2× hold"], ["low", "Low punch"], ["med", "Medium punch"], ["high", "Strong punch"], ["strong", "Strong punch"]])}</div>`;
+        html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Low punch"], ["med", "Medium punch"], ["high", "Strong punch"], ["strong", "Strong punch"]])}</div>`;
         const decay = c.decay != null ? Number(c.decay) : 0.45;
         const ease = decay <= 0.2 ? "0.12" : decay >= 0.75 ? "1" : "0.45";
         html += propSelect("decay", "Ease", ease, [["0.12", "Snap"], ["0.45", "Medium"], ["1", "Soft"]]);
         html += `<button class="btn btn-secondary btn-block" data-act="reaim" style="font-size:.76rem">🎯 Click the picture to aim</button>`;
         html += `<p class="muted" style="font-size:.72rem">The window gets out of the way. Click the face. Snap, medium, and soft are how the push settles.</p>`;
-      } else if (c.type === "zoom_1_5" || c.type === "zoom_2x") {
-        html += `<p class="muted" style="font-size:.72rem">Constant ${c.type === "zoom_1_5" ? "1.5×" : "2×"} zoom held for the whole effect window — no ease-out.</p>`;
+      } else if (c.type === "zoom" || c.type === "zoom_1_5" || c.type === "zoom_2x") {
+        const z = c.type === "zoom_2x" ? Number(c.scale || 2)
+          : c.type === "zoom_1_5" ? Number(c.scale || 1.5)
+          : Number(c.scale || 1.5);
+        html += propRange("scale", "Zoom", Math.min(2.5, Math.max(1, z)), 1, 2.5, 0.05);
+        html += `<button class="btn btn-secondary btn-block" data-act="reaim" style="font-size:.76rem">🎯 Click the picture to aim</button>`;
+        html += `<p class="muted" style="font-size:.72rem">The window gets out of the way. Click the face. 1× is no zoom. 2.5× is the closest.</p>`;
       } else if (c.type === "ken_burns") {
         html += `<div class="tl-prop-grid">${propSelect("direction", "Direction", c.direction || "in", [["in", "Zoom in"], ["out", "Zoom out"]])}${propSelect("intensity", "Strength", c.intensity || "med", [["low", "Subtle"], ["med", "Medium"], ["high", "Strong"]])}</div>`;
       } else if (c.type === "split_screen") {
@@ -6681,8 +6697,9 @@
   // ---- AI camera moves -------------------------------------------------
   const FX_LABEL = {
     punch_zoom: "⚡ Punch zoom",
-    zoom_1_5: "🔎 1.5× zoom hold",
-    zoom_2x: "🔍 2× zoom hold",
+    zoom: "🔍 Zoom",
+    zoom_1_5: "🔍 Zoom",
+    zoom_2x: "🔍 Zoom",
     ken_burns: "🎞 Ken Burns",
     split_screen: "⬓ Split screen",
   };
