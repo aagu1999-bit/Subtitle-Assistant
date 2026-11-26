@@ -118,6 +118,10 @@
   const srcDur = {};       // job_id -> duration cache
   let saveTimer = null;
   let pollTimer = null;
+  let openGen = 0;
+  // A render or Polish still running after the user opened a different project.
+  // The poll must not paint that result onto the project now on screen.
+  let backgroundJob = null;
   let initialized = false;
   let leftTab = "media";   // "media" | "transcript"
   let previewingOutput = false;  // true while the rendered result is in preview
@@ -7395,8 +7399,102 @@
     }
   }
 
+  function previewStillOn(jobId) {
+    return !!(jobId && tl && tl.job_id === jobId);
+  }
+
+  // The preview element is one <video>. Opening another project used to
+  // redraw the lanes and leave that element on the previous file, so Play
+  // and the spacebar kept running the last project.
+  function holdPreviewForSwitch() {
+    if (seqPreview && seqPreview.cancel) {
+      try { seqPreview.cancel(); } catch (e) { /* ignore */ }
+    }
+    seqPreview = null;
+    previewingOutput = false;
+    clipAdvanceLock = false;
+    stopPreviewLoop();
+    stopMusicPreview();
+    const v = $("tlPreviewVideo");
+    if (v) {
+      try { v.pause(); } catch (e) { /* ignore */ }
+      v.playbackRate = 1;
+      v.style.opacity = "1";
+      v.style.webkitMaskImage = "";
+      v.style.maskImage = "";
+      try { v.removeAttribute("src"); v.load(); } catch (e) { /* ignore */ }
+    }
+    _bgMatteAt = null;
+    if (_bgMatteUrl) {
+      try { URL.revokeObjectURL(_bgMatteUrl); } catch (e) { /* ignore */ }
+      _bgMatteUrl = null;
+    }
+    const note = $("tlBackgroundNote");
+    if (note) note.remove();
+    const behind = $("tlBehindLayer");
+    if (behind) behind.innerHTML = "";
+    const bgLayer = $("tlBackgroundLayer");
+    if (bgLayer) {
+      bgLayer.style.display = "none";
+      bgLayer.style.backgroundImage = "";
+    }
+    if (liveCaptionEl) {
+      try { liveCaptionEl.remove(); } catch (e) { /* ignore */ }
+      liveCaptionEl = null;
+    }
+    transcriptWords = null;
+    transcriptClipId = null;
+    tlClipboard = null;
+    try { renderTranscript(null); } catch (e) { /* ignore */ }
+  }
+
+  function parkPreviewOnThisProject() {
+    if (!tl) return;
+    previewingOutput = false;
+    const main = tl.tracks.main || [];
+    const sel = $("tlProjectSelect");
+    if (sel && tl.job_id && sel.value !== tl.job_id) sel.value = tl.job_id;
+    if (!main.length) {
+      updatePlayhead();
+      updateStageCompositor();
+      setSaveState("Opened · no Main clip yet");
+      return;
+    }
+    // Output time 0 is the start of this project, not wherever the last
+    // file's playhead was sitting.
+    seekToOutputTime(0);
+    setSaveState("Opened · play starts on this project");
+  }
+
   async function openProject(jobId) {
-    const data = await api("/timeline/" + jobId);
+    if (!jobId) return;
+    if (tl && tl.job_id === jobId) return;
+    const gen = ++openGen;
+    const leaving = tl;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    // Drop the old file immediately. Play and the spacebar were still
+    // running it while the next project loaded.
+    holdPreviewForSwitch();
+    // Flush the project being left. The save timer writes whatever `tl` is
+    // when it fires, so a switch inside that window used to drop the edit
+    // or write it onto the next project.
+    if (leaving && leaving.job_id) {
+      try { await saveNow(); } catch (e) { /* keep going; the lanes still have to change */ }
+    }
+    if (gen !== openGen) return;
+    let data;
+    try {
+      data = await api("/timeline/" + jobId);
+    } catch (e) {
+      if (gen !== openGen) return;
+      setSaveState("Could not open that project");
+      if (tl) parkPreviewOnThisProject();
+      return;
+    }
+    if (gen !== openGen) return;
     const d = data.timeline || {};
     tl = {
       job_id: jobId,
@@ -7423,6 +7521,8 @@
           ...sc,
         };
       })(),
+      speaker_names: d.speaker_names || null,
+      background: d.background || null,
       headline_banner: d.headline_banner || null,
       track_states: d.track_states || {
         main: { mute: false, solo: false, lock: false },
@@ -7448,11 +7548,24 @@
     setSaveState("Saved ✓");
     applyStage();
     renderTimeline();
+    parkPreviewOnThisProject();
+    const other = backgroundJob && backgroundJob.jobId !== jobId ? backgroundJob : null;
+    if (other) {
+      const what = other.kind === "polish" ? "Polish" : "A render";
+      setRenderStatus(what + " is still running on " + other.label
+        + ". This project is paused at the start"
+        + (other.kind === "render" ? " — wait before rendering this one." : "."));
+      if (other.kind === "render" && $("tlRenderBtn")) $("tlRenderBtn").disabled = true;
+    } else if ($("tlRenderBtn")) {
+      $("tlRenderBtn").disabled = false;
+    }
     refreshMaxTrims();
     try { restorePolishDownloadUi(); } catch (e) { /* ignore */ }
   }
 
   async function refreshMaxTrims() {
+    const gen = openGen;
+    const project = tl;
     const jobs = new Set();
     tl.tracks.main.forEach((c) => c.source_job_id && jobs.add(c.source_job_id));
     tl.tracks.overlay.forEach((c) => c.source_job_id && jobs.add(c.source_job_id));
@@ -7469,6 +7582,7 @@
       const a = assets.find((x) => x.asset_id === c.asset_id);
       if (a && a.duration) c._max = a.duration;
     });
+    if (gen !== openGen || tl !== project) return;
     renderTimeline();
   }
 
@@ -7880,11 +7994,16 @@
   function pollPolish(polishId) {
     return new Promise((resolve, reject) => {
       clearInterval(pollTimer);
+      const watchId = tl && tl.job_id;
+      const watchLabel = (tl && tl.label) || "the last project";
+      backgroundJob = { kind: "polish", jobId: watchId, label: watchLabel };
       let failStreak = 0;
+      const here = () => previewStillOn(watchId);
       pollTimer = setInterval(async () => {
         try {
           const s = await api("/polish/status/" + polishId);
           failStreak = 0;
+          if (!here() && s.status !== "done" && s.status !== "error") return;
           if (s.status === "done" && s.output) {
             clearInterval(pollTimer);
             const stats = s.stats || {};
@@ -7893,6 +8012,14 @@
             const durNote = (srcDur != null && cutDur != null)
               ? ` · ${Number(srcDur).toFixed(1)}s → ${Number(cutDur).toFixed(1)}s`
               : "";
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
+            if (!here()) {
+              setSaveState("Polish finished on " + watchLabel + ". Open that project to preview it.");
+              if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
+              if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
+              resolve(s);
+              return;
+            }
             try {
               setEditReceipt(buildPolishReceipt(s));
             } catch (receiptErr) {
@@ -7929,19 +8056,23 @@
             resolve(s);
           } else if (s.status === "error") {
             clearInterval(pollTimer);
-            setRenderStatus("Polish error: " + (s.error || "failed"));
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
             if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
+            if (here()) setRenderStatus("Polish error: " + (s.error || "failed"));
+            else setSaveState("Polish failed on " + watchLabel);
             reject(new Error(s.error || "polish failed"));
-          } else {
+          } else if (here()) {
             setRenderStatus(`Polish ${s.status || "working"}… ${s.progress || 0}%`);
           }
         } catch (e) {
           failStreak += 1;
-          setRenderStatus("Polish reconnecting… (" + failStreak + ")");
+          if (here()) setRenderStatus("Polish reconnecting… (" + failStreak + ")");
           if (failStreak >= 12) {
             clearInterval(pollTimer);
-            setRenderStatus("Polish error: " + e.message);
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
+            if (here()) setRenderStatus("Polish error: " + e.message);
+            else setSaveState("Polish failed on " + watchLabel);
             if ($("tlPolishBtn")) $("tlPolishBtn").disabled = false;
             if ($("tlPolishRun")) $("tlPolishRun").disabled = false;
             reject(e);
@@ -7954,12 +8085,16 @@
   function pollRender() {
     return new Promise((resolve, reject) => {
       clearInterval(pollTimer);
+      const watchId = tl && tl.job_id;
+      const watchLabel = (tl && tl.label) || "the last project";
+      backgroundJob = { kind: "render", jobId: watchId, label: watchLabel };
       let failStreak = 0;
       let lastMark = Date.now();
       let lastSig = "";
+      const here = () => previewStillOn(watchId);
       pollTimer = setInterval(async () => {
         try {
-          const s = await api("/status/" + tl.job_id);
+          const s = await api("/status/" + watchId);
           failStreak = 0;
           const sig = (s.status || "") + ":" + (s.progress || 0);
           if (sig !== lastSig) { lastSig = sig; lastMark = Date.now(); }
@@ -7976,9 +8111,15 @@
           }
           if (s.status === "done" && s.output) {
             clearInterval(pollTimer);
-            setRenderStatus("Done ✓ — use ⬇ Download when you want the file");
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
-            if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(tl.job_id, s);
+            if (!here()) {
+              setSaveState("Render finished on " + watchLabel + ". Open that project to preview it.");
+              resolve(s);
+              return;
+            }
+            setRenderStatus("Done ✓ — use ⬇ Download when you want the file");
+            if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(watchId, s);
             const v = $("tlPreviewVideo");
             if (v) {
               v.src = "/preview/" + s.output + "?t=" + Date.now();
@@ -8000,21 +8141,28 @@
             resolve(s);
           } else if (s.status === "error") {
             clearInterval(pollTimer);
-            setRenderStatus("Error: " + (s.error || "render failed"));
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
-            if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(tl.job_id, s);
+            if (here()) {
+              setRenderStatus("Error: " + (s.error || "render failed"));
+              if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(watchId, s);
+            } else {
+              setSaveState("Render failed on " + watchLabel);
+            }
             reject(new Error(s.error || "render failed"));
-          } else {
+          } else if (here()) {
             setRenderStatus(`${s.status || "working"}… ${s.progress || 0}%`);
           }
         } catch (e) {
           failStreak += 1;
-          setRenderStatus("Reconnecting… (" + failStreak + ")");
+          if (here()) setRenderStatus("Reconnecting… (" + failStreak + ")");
           // Long encodes often hitch the proxy briefly — retry before giving up.
           if (failStreak >= 12) {
             clearInterval(pollTimer);
-            setRenderStatus("Error: " + e.message);
+            if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            if (here()) setRenderStatus("Error: " + e.message);
+            else setSaveState("Render failed on " + watchLabel);
             reject(e);
           }
         }
