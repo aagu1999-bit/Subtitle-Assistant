@@ -4694,6 +4694,9 @@ _VIDEO_ENC_ARGS, VIDEO_ENC_NAME = _detect_video_encoder()
 # still uses _VIDEO_ENC_ARGS. A review export uses the fast settings for
 # every pass, at a smaller frame.
 _tl_enc_local = threading.local()
+# (job_id, progress_lo, progress_hi, duration_s, status_note) for the piece
+# currently being encoded. Unset for every other ffmpeg call.
+_tl_progress_local = threading.local()
 _SEGMENT_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "18"]
 _REVIEW_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "22"]
 
@@ -5133,6 +5136,11 @@ def _run_ffmpeg_encode(
                     if pct > last_pct and job_id in jobs:
                         last_pct = pct
                         jobs[job_id]["progress"] = pct
+                        note = getattr(_tl_progress_local, "note", None)
+                        if note and duration_hint:
+                            jobs[job_id]["status"] = (
+                                f"{note} · {ms / 1000.0:.0f}s / {duration_hint:.0f}s"
+                            )
                         # Throttle SQLite writes during long encodes.
                         now = time.time()
                         if now - last_db >= 2.5:
@@ -14520,7 +14528,22 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
 def _tl_run(cmd: list, what: str, job_id: str | None = None,
             progress_lo: int | None = None, progress_hi: int | None = None,
             duration_hint: float | None = None) -> None:
-    """Run an ffmpeg command, raising a trimmed error on failure."""
+    """Run an ffmpeg command, raising a trimmed error on failure.
+
+    The main-track loop sets `_tl_progress_local.span` so a long piece
+    reports seconds as it encodes, instead of sitting on one percent
+    until the piece is done.
+    """
+    span = getattr(_tl_progress_local, "span", None)
+    if span:
+        job_id = job_id or span[0]
+        if progress_lo is None:
+            progress_lo = span[1]
+        if progress_hi is None:
+            progress_hi = span[2]
+        if duration_hint is None:
+            duration_hint = span[3]
+        _tl_progress_local.note = span[4]
     if not _run_ffmpeg_encode(
         cmd,
         what=what,
@@ -17817,15 +17840,23 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         cache_stats = {"hits": 0, "misses": 0, "split": 0}
         nplan = max(1, len(plan))
         for seg_counter, spec in enumerate(plan):
-            zoom = ""
-            if any(isinstance(spec.get(k), dict) and spec[k].get("enabled") for k in ("punch", "ken")):
-                zoom = " · zoom"
-            label = f"building main track ({seg_counter + 1}/{nplan}){zoom}"
+            piece_s = max(0.1, float(spec["sub_ke"]) - float(spec["sub_ks"]))
+            if spec.get("kind") in ("speakers", "split"):
+                piece_kind = "split"
+            elif any(isinstance(spec.get(k), dict) and spec[k].get("enabled") for k in ("punch", "ken")):
+                piece_kind = "zoom"
+            else:
+                piece_kind = "interview"
+            label = (f"main picture {seg_counter + 1}/{nplan} · {piece_kind}"
+                     f" · overlays come after this")
             if review:
                 label = "review · " + label
+            lo = 10 + int(25 * seg_counter / nplan)
+            hi = 10 + int(25 * (seg_counter + 1) / nplan)
             jobs[job_id]["status"] = label
-            jobs[job_id]["progress"] = 10 + int(25 * seg_counter / nplan)
+            jobs[job_id]["progress"] = lo
             _db_save_job(job_id)
+            _tl_progress_local.span = (job_id, lo, max(lo + 1, hi), piece_s, label)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
             sub_dur = spec["sub_ke"] - spec["sub_ks"]
             if spec["kind"] == "speakers":
@@ -17855,8 +17886,10 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             # kept piece (not the very first segment overall).
             if len(segments) > 1:
                 transitions.append(spec["transition"])
-            jobs[job_id]["progress"] = 10 + int(25 * (seg_counter + 1) / nplan)
+            jobs[job_id]["progress"] = hi
             jobs[job_id]["status"] = label
+            _tl_progress_local.span = None
+        _tl_progress_local.span = None
         jobs[job_id]["render_stats"] = cache_stats
         _db_save_job(job_id)
 
@@ -18186,6 +18219,8 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         _db_save_job(job_id)
     finally:
         _tl_enc_local.args = None
+        _tl_progress_local.span = None
+        _tl_progress_local.note = None
         for p in work:
             _safe_unlink(p)
 
