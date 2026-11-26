@@ -134,6 +134,7 @@
   let magnetic = true;           // snap clip edges to nearby cuts / playhead
   let musicPlayers = [];         // music bed during Preview cut
   let clipAdvanceLock = false;   // guards against re-entrant clip-to-clip advance
+  let clipAdvanceToken = 0;
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -3897,7 +3898,7 @@
     ot = Math.max(0, Number(ot) || 0);
     const v = $("tlPreviewVideo");
     if (!v) return;
-    const stayPaused = v.paused;
+    const stayPaused = opts.forcePlay ? false : v.paused;
     const keepState = () => {
       if (stayPaused) {
         try { v.pause(); } catch (e) { /* a seek must not start playback */ }
@@ -3959,8 +3960,13 @@
       }
       updatePlayhead();
       updateStageCompositor();
-      renderTracks();
-      if (!opts.quietProps && !opts.keepSelection) renderProps();
+      // A clip-to-clip hop passes quietProps. Rebuilding the lanes and the
+      // property form on every attempt is what filled the console while
+      // playback never landed on the next clip.
+      if (!opts.quietProps) {
+        renderTracks();
+        if (!opts.keepSelection) renderProps();
+      }
     };
 
     if (c.source_job_id) {
@@ -4886,53 +4892,112 @@
    * frame while playing and, once we cross the current Main clip's out point,
    * hop to the next Main clip (or stop) instead of leaking into raw source.
    */
+  function previewMainIndex(v) {
+    const src = v.getAttribute("src") || "";
+    const t = v.currentTime || 0;
+    for (let i = 0; i < tl.tracks.main.length; i++) {
+      const c = tl.tracks.main[i];
+      const want = c.source_job_id
+        ? "/raw-upload/" + c.source_job_id
+        : (c.asset_id ? "/asset/" + c.asset_id : "");
+      if (!want || src !== want) continue;
+      const cin = c.in || 0;
+      const cout = c.out != null ? c.out : cin + 1e9;
+      if (t >= cin - 0.15 && t <= cout + 0.15) return i;
+    }
+    if (selected && selected.track === "main") {
+      return tl.tracks.main.findIndex((c) => c.id === selected.id);
+    }
+    return -1;
+  }
+
+  function previewInsideClip(v, c) {
+    if (!v || !c) return false;
+    const src = v.getAttribute("src") || "";
+    const want = c.source_job_id
+      ? "/raw-upload/" + c.source_job_id
+      : (c.asset_id ? "/asset/" + c.asset_id : "");
+    if (want && src !== want) return false;
+    const t = v.currentTime || 0;
+    const cin = c.in || 0;
+    const cout = c.out != null ? c.out : cin + 1e9;
+    return t >= cin - 0.05 && t < cout - 0.02;
+  }
+
+  // One hop at a time. The old path called selectClip on every frame the
+  // seek hadn't landed, and selectClip rebuilt the property form and
+  // re-requested the file. That is the thousands of errors, and why play
+  // never made it onto the next Main clip.
+  function hopToMainClip(idx, v) {
+    const c = tl.tracks.main[idx];
+    if (!c) return;
+    const token = ++clipAdvanceToken;
+    clipAdvanceLock = true;
+    selected = { track: "main", id: c.id };
+    logoSelected = false;
+    seekToOutputTime(mainStart(idx) + 0.01, {
+      keepSelection: true,
+      quietProps: true,
+      forcePlay: true,
+    });
+
+    const stopAtCut = (msg) => {
+      if (token !== clipAdvanceToken) return;
+      try { v.pause(); } catch (e) { /* ignore */ }
+      clipAdvanceLock = false;
+      setRenderStatus(msg);
+    };
+    const onErr = () => stopAtCut("Playback stopped — the next clip's file didn't load.");
+    v.addEventListener("error", onErr, { once: true });
+
+    const finishHop = () => {
+      if (token !== clipAdvanceToken) return;
+      v.removeEventListener("error", onErr);
+      clipAdvanceLock = false;
+      if (v.paused) {
+        v.play().catch(() => {});
+        startPreviewLoop();
+      }
+      renderTracks();
+    };
+    let tries = 0;
+    const tick = () => {
+      if (token !== clipAdvanceToken) return;
+      if (previewInsideClip(v, c)) {
+        finishHop();
+        return;
+      }
+      tries += 1;
+      if (tries > 24) {
+        v.removeEventListener("error", onErr);
+        stopAtCut("Playback stopped at the cut. Click the next clip, then press play.");
+        return;
+      }
+      setTimeout(tick, 40);
+    };
+    if (v.readyState >= 1) tick();
+    else v.addEventListener("loadedmetadata", () => tick(), { once: true });
+  }
+
   function maybeAdvancePastClipEnd() {
     if (!tl || previewingOutput || (seqPreview && seqPreview.running) || clipAdvanceLock) return;
     const v = $("tlPreviewVideo");
     if (!v || v.paused || v.ended) return;
 
-    const src = v.getAttribute("src") || "";
-    const t = v.currentTime || 0;
-    let idx = -1;
-    for (let i = 0; i < tl.tracks.main.length; i++) {
-      const c = tl.tracks.main[i];
-      if (!c.source_job_id) continue;
-      if (src !== "/raw-upload/" + c.source_job_id) continue;
-      const cin = c.in || 0;
-      const cout = c.out != null ? c.out : cin + 1e9;
-      if (t >= cin - 0.15 && t <= cout + 0.15) { idx = i; break; }
-    }
-    if (idx < 0 && selected && selected.track === "main") {
-      idx = tl.tracks.main.findIndex((c) => c.id === selected.id);
-    }
+    const idx = previewMainIndex(v);
     if (idx < 0) return;
-
     const c = tl.tracks.main[idx];
     if (!c || !c.source_job_id) return;
     const ranges = keepRangesForClip(c, { allowEmpty: true });
-    const end = ranges.length ? ranges[ranges.length - 1][1] : (c.out != null ? c.out : t);
-    if (t < end - 0.04) return;
+    const end = ranges.length ? ranges[ranges.length - 1][1] : (c.out != null ? c.out : v.currentTime);
+    if ((v.currentTime || 0) < end - 0.04) return;
 
-    const nextIdx = idx + 1;
-    const nextClip = tl.tracks.main[nextIdx];
-    if (nextClip) {
-      clipAdvanceLock = true;
+    const nextClip = tl.tracks.main[idx + 1];
+    if (!nextClip) {
       try { v.pause(); } catch (e) { /* ignore */ }
-      selectClip("main", nextClip.id);
-      seekToOutputTime(mainStart(nextIdx) + 0.01);
-      const resumePlay = () => {
-        v.play().catch(() => {});
-        startPreviewLoop();
-        clipAdvanceLock = false;
-      };
-      // Same-source clips seek synchronously (readyState unchanged); a
-      // different source just called v.load(), which resets readyState to 0
-      // — wait for it so play() doesn't briefly start from t=0.
-      if (v.readyState >= 1) requestAnimationFrame(resumePlay);
-      else v.addEventListener("loadedmetadata", resumePlay, { once: true });
-    } else {
-      try { v.pause(); } catch (e) { /* ignore */ }
+      return;
     }
+    hopToMainClip(idx + 1, v);
   }
 
   // Speed ramps preview as playbackRate. Timeline positions stay in
@@ -7412,6 +7477,7 @@
     }
     seqPreview = null;
     previewingOutput = false;
+    clipAdvanceToken += 1;
     clipAdvanceLock = false;
     stopPreviewLoop();
     stopMusicPreview();
