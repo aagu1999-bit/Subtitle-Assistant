@@ -58,8 +58,11 @@ def test_punch_zoom_animates(app_mod):
         {"enabled": True, "intensity": "med"}, 1080, 1920, fps=30, dur=1.2
     )
     assert f, "enabled punch produced no filter"
-    assert "zoompan" in f, "punch must use zoompan; crop cannot animate per frame"
-    assert "in" in f, "zoom expression does not reference the frame counter"
+    assert "eval=frame" in f, "a punch must be re-evaluated every frame"
+    expr = _zoom_z_expr(f)
+    assert re.search(r"\bt\b", expr), "zoom expression does not follow the clock"
+    vals = _eval_zoompan_z(expr, [0, 10, 30], fps=30)
+    assert len(set(vals)) > 1, f"punch sits still: {vals}"
 
 
 def test_punch_zoom_respects_the_peak_cap(app_mod):
@@ -1007,12 +1010,8 @@ def test_the_hold_intensities_survive_the_punch_retune(app_mod):
     def curve(intensity, dur=1.2):
         f = app_mod._tl_punch_zoom_filter(
             {"enabled": True, "intensity": intensity}, 1080, 1920, fps=30, dur=dur)
-        z = re.search(r"zoompan=z='([^']+)'", f).group(1)
-        py = z.replace("if(", "IF(").replace("lt(", "LT(").replace("gte(", "GTE(")
-        py = re.sub(r"\bin\b", "N", py)
-        env = {"IF": lambda c, a, b: a if c else b, "LT": lambda a, b: a < b,
-               "GTE": lambda a, b: a >= b, "pow": pow, "min": min, "max": max}
-        return [round(eval(py, {**env, "N": float(n)}), 4) for n in range(0, 40, 4)]
+        z = _zoom_z_expr(f)
+        return _eval_zoompan_z(z, list(range(0, 40, 4)), fps=30)
 
     for intensity, scale in (("1.5x", 1.5), ("2x", 2.0),
                              ("hold_1_5", 1.5), ("hold_2", 2.0)):
@@ -1124,7 +1123,14 @@ def test_the_backlog_filters_do_not_leak_other_rows(app_mod, temp_db, monkeypatc
 # diff is a rewrite, and Ken Burns in particular has had no test at all, so a
 # regression in it passes the whole suite today.
 
-def _eval_zoompan_z(expr: str, frames, recursive=False):
+def _zoom_z_expr(f: str) -> str:
+    """The scale factor inside the zoom filter, constant or animated."""
+    m = re.search(r"iw\*\((.*)\)/2\)\*2':h=", f)
+    assert m, f"zoom expression missing from {f[:240]}"
+    return m.group(1)
+
+
+def _eval_zoompan_z(expr: str, frames, recursive=False, fps=30):
     """Evaluate a zoompan z-expression the way ffmpeg would.
 
     `in` is the input frame index.
@@ -1138,13 +1144,14 @@ def _eval_zoompan_z(expr: str, frames, recursive=False):
     py = (expr.replace("if(", "IF(").replace("lte(", "LTE(")
               .replace("lt(", "LT(").replace("gte(", "GTE("))
     py = re.sub(r"\bin\b", "N", py)
+    py = re.sub(r"\bt\b", "T", py)
     py = re.sub(r"\bzoom\b", "Z", py)
     env = {"IF": lambda c, a, b: a if c else b,
            "LT": lambda a, b: a < b, "LTE": lambda a, b: a <= b,
            "GTE": lambda a, b: a >= b, "pow": pow, "min": min, "max": max}
     out, z = [], 1.0
     for n in range(max(frames) + 1):
-        val = eval(py, {**env, "N": float(n), "Z": z})
+        val = eval(py, {**env, "N": float(n), "T": float(n) / float(fps), "Z": z})
         if recursive:
             z = val
         if n in frames:
@@ -1177,12 +1184,12 @@ def test_ken_burns_follows_the_clock_now(app_mod):
     f = app_mod._tl_kenburns_filter(
         {"enabled": True, "intensity": "med", "direction": "in"},
         1080, 1920, fps=30, dur=4.0)
-    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    assert re.search(r"\bin\b", expr), "must consult the frame counter"
+    expr = _zoom_z_expr(f)
+    assert re.search(r"\bt\b", expr), "must follow the segment clock"
     assert not re.search(r"\bzoom\b", expr), (
         "must not read its own previous output -- that is the accumulator")
 
-    vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 120])
+    vals = _eval_zoompan_z(expr, [0, 30, 60, 90, 120], fps=30)
     assert vals[0] == pytest.approx(1.0, abs=1e-4), "starts at rest"
     assert vals[-1] == pytest.approx(1.22, abs=1e-4), "arrives at its target"
     gaps = [round(b - a, 4) for a, b in zip(vals, vals[1:])]
@@ -1201,8 +1208,8 @@ def test_ken_burns_pull_out_lands_and_stays(app_mod):
     f = app_mod._tl_kenburns_filter(
         {"enabled": True, "intensity": "med", "direction": "out"},
         1080, 1920, fps=30, dur=1.0)
-    expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-    vals = _eval_zoompan_z(expr, list(range(0, 60)))
+    expr = _zoom_z_expr(f)
+    vals = _eval_zoompan_z(expr, list(range(0, 60)), fps=30)
 
     assert vals[0] == pytest.approx(1.22, abs=1e-4), "starts zoomed in"
     assert vals[-1] == pytest.approx(1.0, abs=1e-4), "ends at rest"
@@ -1229,8 +1236,8 @@ def test_ken_burns_previews_the_way_it_renders(app_mod):
         for fps in (24, 30, 60):
             frames = [0, 5, int(fps), int(2 * fps), int(3.5 * fps), int(4 * fps)]
             f = app_mod._tl_kenburns_filter(kb, 1080, 1920, fps=fps, dur=4.0)
-            expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-            py_vals = _eval_zoompan_z(expr, frames)
+            expr = _zoom_z_expr(f)
+            py_vals = _eval_zoompan_z(expr, frames, fps=fps)
 
             script = (
                 "globalThis.window=globalThis;\n"
@@ -1286,8 +1293,8 @@ def test_the_punch_zoom_agrees_with_its_preview_at_any_fps(app_mod):
     for fps in (24, 30, 60):
         frames = [0, 1, 2, 4, 7, 12, int(0.6 * fps), int(1.0 * fps)]
         f = app_mod._tl_punch_zoom_filter(cfg, 1080, 1920, fps=fps, dur=dur)
-        expr = re.search(r"zoompan=z='([^']+)'", f).group(1)
-        py_vals = _eval_zoompan_z(expr, frames)
+        expr = _zoom_z_expr(f)
+        py_vals = _eval_zoompan_z(expr, frames, fps=fps)
         js_vals = preview_at([n / fps for n in frames])
         for n, a, b in zip(frames, js_vals, py_vals):
             assert abs(a - b) < 1e-4, (

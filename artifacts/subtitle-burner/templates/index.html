@@ -1657,6 +1657,18 @@
           </button>
           <a id="tlPolishDownloadBtn" class="btn btn-secondary hidden" href="#" download
             title="Download the last polished MP4 (hygiene cut — not Timeline Render)">⬇ Polished</a>
+          <button id="tlReviewBtn" class="btn btn-secondary tl-tipbtn" type="button"
+            aria-describedby="tlReviewTip">
+            Review
+            <span id="tlReviewTip" class="tl-tippanel tl-tippanel-right" role="tooltip">
+              <strong>Review</strong> — the same edit, sooner
+              <ul>
+                <li>Smaller picture (long side 1280) so you can watch the cut</li>
+                <li>Same clips, overlays, and captions</li>
+                <li>Not the file to post. Render is the full-size one</li>
+              </ul>
+            </span>
+          </button>
           <button id="tlRenderBtn" class="btn btn-primary tl-tipbtn" type="button"
             aria-describedby="tlRenderTip"
             style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">
@@ -2178,6 +2190,7 @@
           <p class="muted" style="margin:4px 0 0;font-size:.8rem" id="exportProjectName">No timeline project open.</p>
         </div>
         <div class="export-actions">
+          <button type="button" id="exportReviewBtn" class="btn btn-secondary" title="Same edit, smaller picture, so you can watch it and keep going. Render is the full-size file.">Review</button>
           <button type="button" id="exportRenderBtn" class="btn btn-primary" style="background:linear-gradient(135deg,#9785ff,#6c5cff);color:#fff">▶ Render</button>
           <a id="exportDownload" class="btn btn-secondary hidden" href="#" download>⬇ Download MP4</a>
         </div>

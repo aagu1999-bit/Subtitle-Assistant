@@ -807,6 +807,7 @@
     const name = $("exportProjectName");
     const has = !!(tl && tl.tracks && tl.tracks.main.length);
     $("exportRenderBtn").disabled = !has;
+    if ($("exportReviewBtn")) $("exportReviewBtn").disabled = !has;
     if (!tl) {
       name.textContent = "No timeline project open. Build one from Style, or open one in Edit.";
       return;
@@ -840,21 +841,25 @@
       · ${d.cached_seconds.toFixed(1)}s reused from cache. Render only encodes the amber spans.</span>`;
   }
 
-  async function exportRender() {
+  async function exportRender(review) {
     const api_ = T();
     if (!api_ || !api_.tl) return;
-    $("exportStatus").textContent = "Queued…";
+    const isReview = review === true;
+    $("exportStatus").textContent = isReview ? "Review queued…" : "Queued…";
     $("exportRenderBtn").disabled = true;
+    if ($("exportReviewBtn")) $("exportReviewBtn").disabled = true;
     setQa(null);
-    const result = await api_.render();
+    const result = await api_.render(isReview);
     if (!result && $("exportRenderBtn").disabled) {
       $("exportRenderBtn").disabled = false;
+      if ($("exportReviewBtn")) $("exportReviewBtn").disabled = false;
       $("exportStatus").textContent = "Render did not start — see the message above.";
     }
   }
 
   window.studioOnRenderDone = function (jobId, s) {
     $("exportRenderBtn").disabled = false;
+    if ($("exportReviewBtn")) $("exportReviewBtn").disabled = false;
     showRenderResult(s);
     refreshDirty();
     const stats = s.render_stats;
@@ -874,13 +879,16 @@
       if (s.status && s.status !== "timeline_edit") status.textContent = `${s.status}… ${s.progress || 0}%`;
       return;
     }
-    status.textContent = "Rendered ✓";
+    status.textContent = s.review
+      ? "Review ready — smaller copy so you can watch the cut. Render makes the full-size file."
+      : "Rendered ✓";
     const v = $("exportPlayer");
     v.classList.remove("hidden");
     const src = "/preview/" + s.output;
     if (!v.src.endsWith(src)) v.src = src + "?t=" + Date.now();
     const dl = $("exportDownload");
     dl.href = "/download/" + s.output;
+    dl.textContent = s.review ? "⬇ Download review" : "⬇ Download MP4";
     dl.classList.remove("hidden");
     const st = s.render_stats;
     const box = $("exportCache");
@@ -975,7 +983,8 @@
   }
 
   function wireExport() {
-    if ($("exportRenderBtn")) $("exportRenderBtn").onclick = exportRender;
+    if ($("exportRenderBtn")) $("exportRenderBtn").onclick = () => exportRender(false);
+    if ($("exportReviewBtn")) $("exportReviewBtn").onclick = () => exportRender(true);
     if ($("qaRerunBtn")) $("qaRerunBtn").onclick = () => qaRun(false);
     if ($("qaVisionBtn")) $("qaVisionBtn").onclick = () => qaRun(true);
     const f = $("exportImportFile");
