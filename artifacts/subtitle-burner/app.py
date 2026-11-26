@@ -5464,8 +5464,9 @@ def _snap_clip_to_target_durations(clips: list, words: list,
 _EFFECT_LIMITS = {
     # type: (min duration, max duration)
     "punch_zoom": (0.6, 3.0),    # fast push-in — structural beats only
-    "zoom_1_5": (1.2, 4.0),      # 1.5x hold — light mid-video emphasis
-    "zoom_2x": (1.0, 3.5),       # 2x hold — strong mid-video emphasis
+    "zoom": (1.0, 6.0),          # held zoom, scale chosen on the clip
+    "zoom_1_5": (1.2, 4.0),      # older hold — still accepted
+    "zoom_2x": (1.0, 3.5),       # older hold — still accepted
     "ken_burns": (3.0, 12.0),    # slow drift over a longer stretch
     "split_screen": (1.0, 15.0),  # both speakers framed together
 }
@@ -5475,7 +5476,7 @@ _EFFECT_LIMITS = {
 # hand the client a clip that vanishes on the next save -- the silent-sink
 # failure this codebase has hit twice. One definition, both readers.
 TL_EFFECT_TYPES = (
-    "punch_zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen", "speed",
+    "punch_zoom", "zoom", "zoom_1_5", "zoom_2x", "ken_burns", "color", "split_screen", "speed",
 )
 
 
@@ -16296,7 +16297,15 @@ def punch_zoom_tracks(cfg, dur: float | None = None) -> tuple[list, str] | None:
     if not cfg or not cfg.get("enabled"):
         return None
     intensity = cfg.get("intensity", "med")
-    peak = _PUNCH_PEAK.get(intensity, 1.25)
+    held = intensity in _PUNCH_HOLD_INTENSITIES or intensity == "hold" or cfg.get("scale") not in (None, "")
+    if intensity == "hold" or (held and cfg.get("scale") not in (None, "")):
+        try:
+            peak = float(cfg.get("scale") if cfg.get("scale") not in (None, "") else _PUNCH_PEAK.get(intensity, 1.5))
+        except (TypeError, ValueError):
+            peak = 1.5
+        peak = max(1.0, min(2.5, peak))
+    else:
+        peak = _PUNCH_PEAK.get(intensity, 1.25)
     if peak - 1.0 <= 0:
         return None
     try:
@@ -16304,7 +16313,7 @@ def punch_zoom_tracks(cfg, dur: float | None = None) -> tuple[list, str] | None:
     except (TypeError, ValueError):
         hit = 0.0
 
-    if intensity in _PUNCH_HOLD_INTENSITIES:
+    if intensity in _PUNCH_HOLD_INTENSITIES or intensity == "hold":
         # Snap at the hit and stay. A constant track when the hit is at zero,
         # so the very first frame is already at scale as it is today.
         if hit <= 0:
@@ -17412,21 +17421,31 @@ def _tl_props_from_lane_effects(lane_fxs: list) -> tuple:
                 "intensity": fx.get("intensity") or "med",
                 "direction": fx.get("direction") or "in",
             }
-        elif ftype in ("punch_zoom", "zoom_1_5", "zoom_2x"):
-            # zoom_1_5 / zoom_2x are "hold" punch zooms: constant scale for
-            # the whole effect window rather than the punch-and-decay curve.
-            if ftype == "zoom_1_5":
-                intensity = "1.5x"
+        elif ftype in ("punch_zoom", "zoom", "zoom_1_5", "zoom_2x"):
+            # zoom holds a chosen scale for the whole window. The older
+            # 1.5× and 2× types are that same zoom with the scale filled in.
+            if ftype == "zoom" or fx.get("scale") not in (None, ""):
+                try:
+                    scale = float(fx.get("scale") if fx.get("scale") not in (None, "")
+                                  else (2.0 if ftype == "zoom_2x" else 1.5))
+                except (TypeError, ValueError):
+                    scale = 1.5
+                intensity = "hold"
+                scale = max(1.0, min(2.5, scale))
+            elif ftype == "zoom_1_5":
+                intensity, scale = "1.5x", 1.5
             elif ftype == "zoom_2x":
-                intensity = "2x"
+                intensity, scale = "2x", 2.0
             else:
-                intensity = fx.get("intensity") or "med"
+                intensity, scale = fx.get("intensity") or "med", None
             punch = {
                 "enabled": True,
                 "intensity": intensity,
                 "hit": float(fx.get("hit") or 0),
                 "decay": float(fx.get("decay") or 0.45),
             }
+            if scale is not None:
+                punch["scale"] = scale
             # `aim` is the push's target point. It used to be read from
             # `anchor`, which on a lane clip means "which Main clip do I hang
             # off" and is rewritten to a clip id on every reflow -- so this
