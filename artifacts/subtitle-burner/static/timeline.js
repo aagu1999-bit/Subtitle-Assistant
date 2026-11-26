@@ -7555,9 +7555,13 @@
       setRenderStatus(what + " is still running on " + other.label
         + ". This project is paused at the start"
         + (other.kind === "render" ? " — wait before rendering this one." : "."));
-      if (other.kind === "render" && $("tlRenderBtn")) $("tlRenderBtn").disabled = true;
-    } else if ($("tlRenderBtn")) {
-      $("tlRenderBtn").disabled = false;
+      if (other.kind === "render") {
+        if ($("tlRenderBtn")) $("tlRenderBtn").disabled = true;
+        if ($("tlReviewBtn")) $("tlReviewBtn").disabled = true;
+      }
+    } else {
+      if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+      if ($("tlReviewBtn")) $("tlReviewBtn").disabled = false;
     }
     refreshMaxTrims();
     try { restorePolishDownloadUi(); } catch (e) { /* ignore */ }
@@ -7587,14 +7591,17 @@
   }
 
   // ---- Render ----
-  async function renderTimelineVideo() {
+  async function renderTimelineVideo(review) {
+    const isReview = review === true;
     if (!tl || !tl.tracks.main.length) {
       alert("Add at least one clip to the Main track first.");
       return null;
     }
     const btn = $("tlRenderBtn");
+    const reviewBtn = $("tlReviewBtn");
     if (btn) btn.disabled = true;
-    setRenderStatus("Queued…");
+    if (reviewBtn) reviewBtn.disabled = true;
+    setRenderStatus(isReview ? "Review queued…" : "Queued…");
     try {
       // Caption look wins: refresh Timeline style from it before baking ASS.
       pullCaptionLookOntoTimeline(null, { quiet: true });
@@ -7602,12 +7609,13 @@
       await api("/timeline/render", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: tl.job_id, timeline: serialize() }),
+        body: JSON.stringify({ job_id: tl.job_id, timeline: serialize(), review: isReview }),
       });
       return await pollRender();
     } catch (e) {
       setRenderStatus("Error: " + e.message);
       if (btn) btn.disabled = false;
+      if (reviewBtn) reviewBtn.disabled = false;
       alert("Render failed: " + (e.message || e));
       return null;
     }
@@ -8101,6 +8109,7 @@
           else if (Date.now() - lastMark > ((/main track/i.test(s.status || "")) ? 20 : 8) * 60 * 1000) {
             clearInterval(pollTimer);
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            if ($("tlReviewBtn")) $("tlReviewBtn").disabled = false;
             const msg = "Render stopped moving at " + (s.progress || 0) + "%. The button is free again. Try Render once more.";
             setRenderStatus(msg);
             reject(new Error(msg));
@@ -8113,12 +8122,15 @@
             clearInterval(pollTimer);
             if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            if ($("tlReviewBtn")) $("tlReviewBtn").disabled = false;
             if (!here()) {
-              setSaveState("Render finished on " + watchLabel + ". Open that project to preview it.");
+              setSaveState((s.review ? "Review" : "Render") + " finished on " + watchLabel + ". Open that project to preview it.");
               resolve(s);
               return;
             }
-            setRenderStatus("Done ✓ — use ⬇ Download when you want the file");
+            setRenderStatus(s.review
+              ? "Review ready — smaller copy for watching. Render is the full-size file."
+              : "Done ✓ — use ⬇ Download when you want the file");
             if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(watchId, s);
             const v = $("tlPreviewVideo");
             if (v) {
@@ -8143,6 +8155,7 @@
             clearInterval(pollTimer);
             if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            if ($("tlReviewBtn")) $("tlReviewBtn").disabled = false;
             if (here()) {
               setRenderStatus("Error: " + (s.error || "render failed"));
               if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(watchId, s);
@@ -8161,6 +8174,7 @@
             clearInterval(pollTimer);
             if (backgroundJob && backgroundJob.jobId === watchId) backgroundJob = null;
             if ($("tlRenderBtn")) $("tlRenderBtn").disabled = false;
+            if ($("tlReviewBtn")) $("tlReviewBtn").disabled = false;
             if (here()) setRenderStatus("Error: " + e.message);
             else setSaveState("Render failed on " + watchLabel);
             reject(e);
@@ -8629,7 +8643,8 @@
         });
         on("tlCanvas", "onchange", (e) => { if (tl) { pushHistory(); tl.canvas = e.target.value; applyStage(); updateStageCompositor(); scheduleSave(); } });
         on("tlFit", "onchange", (e) => { if (tl) { pushHistory(); tl.fit = e.target.value; applyStage(); scheduleSave(); } });
-        on("tlRenderBtn", "onclick", renderTimelineVideo);
+        on("tlReviewBtn", "onclick", () => renderTimelineVideo(true));
+        on("tlRenderBtn", "onclick", () => renderTimelineVideo(false));
         on("tlPolishBtn", "onclick", () => openPolishSheet());
         on("tlPolishChip", "onclick", () => openPolishSheet());
         on("tlPolishClose", "onclick", () => closePolishSheet());
@@ -8863,7 +8878,7 @@
     },
     get pps() { return PPS; },
     openProject: (id) => openProject(id),
-    render: () => renderTimelineVideo(),
+    render: (review) => renderTimelineVideo(review === true),
   };
   window.addOverlayClip = addOverlayClip;
   window.addEffectClip = addEffectClip;

@@ -3306,7 +3306,7 @@ def apply_reframe(video_path: Path, plan: list[dict], output_path: Path) -> None
                     "-t", f"{duration:.3f}",
                     "-vf", vf,
                     "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
-                    *_VIDEO_ENC_ARGS,
+                    *_active_video_enc(),
                     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                     "-avoid_negative_ts", "make_zero",
                     str(seg_path),
@@ -3332,7 +3332,7 @@ def apply_reframe(video_path: Path, plan: list[dict], output_path: Path) -> None
                     "-filter_complex", fc,
                     "-map", "[outv]", "-map", "0:a?",
                     "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
-                    *_VIDEO_ENC_ARGS,
+                    *_active_video_enc(),
                     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                     "-avoid_negative_ts", "make_zero",
                     str(seg_path),
@@ -4036,7 +4036,7 @@ def apply_silence_tightening(video_path: Path, ranges: list,
             "-i", str(video_path),
             "-t", f"{(b - a):.3f}",
             "-fflags", "+genpts",
-            *_VIDEO_ENC_ARGS,
+            *_active_video_enc(),
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-vsync", "cfr",
             "-avoid_negative_ts", "make_zero",
@@ -4085,7 +4085,7 @@ def apply_silence_tightening(video_path: Path, ranges: list,
                     "-t", f"{seg_dur:.3f}",
                     "-vf", "fps=30,format=yuv420p,setsar=1",
                     "-af", a_filter,
-                    *_VIDEO_ENC_ARGS,
+                    *_active_video_enc(),
                     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                     "-avoid_negative_ts", "make_zero",
                     str(seg_path),
@@ -4689,6 +4689,29 @@ def _detect_video_encoder() -> tuple[list[str], str]:
 
 _VIDEO_ENC_ARGS, VIDEO_ENC_NAME = _detect_video_encoder()
 
+# The main-track pieces are encoded again later (overlays, then captions), so
+# that first pass can be a fast, high-bitrate intermediate. The last pass
+# still uses _VIDEO_ENC_ARGS. A review export uses the fast settings for
+# every pass, at a smaller frame.
+_tl_enc_local = threading.local()
+_SEGMENT_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "18"]
+_REVIEW_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "22"]
+
+
+def _active_video_enc() -> list:
+    args = getattr(_tl_enc_local, "args", None)
+    return args if args else _VIDEO_ENC_ARGS
+
+
+def _review_canvas(W: int, H: int) -> tuple[int, int]:
+    """Long side 1280. 9:16 becomes 720×1280, which is the review picture."""
+    W, H = int(W), int(H)
+    long_side = max(W, H)
+    if long_side <= 1280:
+        return W, H
+    scale = 1280 / long_side
+    return max(2, int(W * scale) // 2 * 2), max(2, int(H * scale) // 2 * 2)
+
 # QuickTime / iOS / Safari-friendly H.264 MP4 trailer args. Append on *final*
 # outputs (not every intermediate). Non-yuv420p, missing faststart, or odd
 # profiles are the usual reason macOS QuickTime says "media isn't compatible".
@@ -4962,7 +4985,7 @@ def burn_subtitles(
 
     cmd: list[str] = [FFMPEG, "-y", "-i", str(video_path)]
     if silent:
-        cmd += ["-map", "0:v:0", "-vf", vf, *_VIDEO_ENC_ARGS, "-an"]
+        cmd += ["-map", "0:v:0", "-vf", vf, *_active_video_enc(), "-an"]
     else:
         if audio_path:
             cmd += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"]
@@ -4972,7 +4995,7 @@ def burn_subtitles(
         # Re-encode audio to AAC-LC (not stream-copy) so QuickTime / iOS
         # don't reject exotic source codecs after caption burn.
         cmd += [
-            "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-vf", vf, *_active_video_enc(),
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
         ]
         if audio_path:
@@ -14461,7 +14484,7 @@ def _tl_apply_project_audio(video: Path, audio: dict, out_path: Path, job_id: st
                  "-movflags", "+faststart", str(out_path)],
                 [FFMPEG, "-y", "-i", str(video), "-i", str(enhanced),
                  "-map", "0:v:0", "-map", "1:a:0?",
-                 *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+                 *_active_video_enc(), "-c:a", "aac", "-b:a", "192k",
                  *([ "-t", f"{vid_dur:.3f}" ] if vid_dur > 0.05 else []),
                  "-movflags", "+faststart", str(out_path)],
             ]
@@ -14562,15 +14585,12 @@ def _tl_kenburns_filter(ken: dict, W: int, H: int, fps: int, dur: float) -> str:
     track, ease = tracks
     # zoompan counts frames, so local seconds are in/fps -- the same shape the
     # browser evaluates directly.
-    zexpr = keyframes.to_ffmpeg_expr(track, f"(in/{max(1, int(fps))})", ease)
+    # `t` is this segment's own clock. scale evaluates it per frame, which is
+    # the same curve zoompan drew and much less CPU than zoompan's resampler.
+    zexpr = keyframes.to_ffmpeg_expr(track, "t", ease)
     if zexpr is None:
         return ""
-
-    return (
-        f"zoompan=z='{zexpr}':d=1:"
-        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"s={W}x{H}:fps={fps}"
-    )
+    return _tl_zoom_filter(zexpr, W, H, 0.5, 0.5)
 
 
 _PUNCH_PEAK = {
@@ -14632,17 +14652,49 @@ def _tl_punch_zoom_filter(punch_cfg: dict | None, W: int, H: int,
     except (TypeError, ValueError):
         ax = ay = 0.5
 
-    # zoompan only sees the frame counter, so local seconds are in/fps. The
-    # track above never learns that -- it is the same spec the browser reads.
-    z = keyframes.to_ffmpeg_expr(track, f"(in/{max(1, int(fps))})", ease)
+    # Same clock the preview uses. A still zoom is one scale; a moving one
+    # re-evaluates each frame. zoompan did this and was the multi-minute stall.
+    z = keyframes.to_ffmpeg_expr(track, "t", ease)
     if z is None:
         return ""
+    return _tl_zoom_filter(z, W, H, ax, ay)
 
+
+def _tl_zoom_filter(zexpr: str, W: int, H: int, ax: float, ay: float) -> str:
+    """Zoom by scaling up and cropping back. A constant does it once.
+
+    crop's window cannot change size per frame, which is why a punch used to
+    go through zoompan. scale's eval=frame can, and swscale is what actually
+    finishes on a small machine.
+    """
+    zexpr = (zexpr or "").strip()
+    if not zexpr:
+        return ""
+    try:
+        z = float(zexpr)
+    except ValueError:
+        z = None
+    if z is not None:
+        if z <= 1.001:
+            return ""
+        body = f"{z:.6f}".rstrip("0").rstrip(".")
+        mode = "init"
+    else:
+        body = f"max(1,{zexpr})"
+        mode = "frame"
+    ax = min(1.0, max(0.0, float(ax)))
+    ay = min(1.0, max(0.0, float(ay)))
+    # crop's in_w stays at the size it was configured with, so a growing
+    # scale would stay stuck on the top-left. The window is computed from
+    # the same zoom the scale uses.
+    zw = f"trunc({W}*({body})/2)*2"
+    zh = f"trunc({H}*({body})/2)*2"
     return (
-        f"zoompan=z='{z}':"
-        f"x='clip(iw*{ax:.4f}-(iw/zoom)/2,0,iw-iw/zoom)':"
-        f"y='clip(ih*{ay:.4f}-(ih/zoom)/2,0,ih-ih/zoom)':"
-        f"d=1:s={W}x{H}:fps={fps}"
+        f"scale=w='trunc(iw*({body})/2)*2':h='trunc(ih*({body})/2)*2':"
+        f"eval={mode}:flags=bicubic,"
+        f"crop={W}:{H}:"
+        f"'clip(({zw})*{ax:.4f}-{W}/2,0,({zw})-{W})':"
+        f"'clip(({zh})*{ay:.4f}-{H}/2,0,({zh})-{H})'"
     )
 
 
@@ -14757,7 +14809,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
             "-i", str(src),
             "-f", "lavfi", "-t", f"{dur:.6f}",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-t", f"{dur:.6f}", "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-t", f"{dur:.6f}", "-vf", vf, *_active_video_enc(),
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-map", "0:v:0", "-map", "1:a:0", "-shortest",
             str(out_path),
@@ -14770,7 +14822,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
             "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.6f}", "-i", str(src),
             "-f", "lavfi", "-t", f"{dur:.6f}",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-vf", vf, *_VIDEO_ENC_ARGS,
+            "-vf", vf, *_active_video_enc(),
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-map", "0:v:0", "-map", "1:a:0", "-shortest",
             "-t", f"{dur:.6f}", str(out_path),
@@ -14783,7 +14835,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
             cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                     "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
         cmd += ["-t", f"{dur:.6f}", "-vf", vf,
-                *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
+                *_active_video_enc(), "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
         if has_audio:
             af = _tl_declick_af(dur)
             if retimed:
@@ -15205,7 +15257,7 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
             cmd += ["-i", f]
     cmd += ["-t", f"{dur:.6f}", "-filter_complex", fc,
             "-map", "[v]", "-map", "0:a:0" if has_audio else "1:a:0",
-            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+            *_active_video_enc(), "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if has_audio:
         cmd += ["-af", _tl_declick_af(dur) + ",apad"]
@@ -15346,7 +15398,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
             cmd += ["-i", f]
     cmd += ["-t", f"{dur:.6f}", "-filter_complex", fc,
             "-map", "[v]", "-map", audio_idx,
-            *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k",
+            *_active_video_enc(), "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if hasA:
         cmd += ["-af", _tl_declick_af(dur) + ",apad"]
@@ -15551,7 +15603,7 @@ def _tl_composite_background(base: Path, bg: dict, W: int, H: int,
         _tl_run(
             [FFMPEG, "-y", *inputs, "-i", str(base), "-i", str(matte),
              "-filter_complex", filt, "-map", "[out]", "-map", "1:a?",
-             *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(out_path)],
+             *_active_video_enc(), "-c:a", "aac", "-b:a", "192k", str(out_path)],
             "Background composite",
         )
         return True
@@ -15617,7 +15669,7 @@ def _tl_apply_logo(base: Path, logo: dict, W: int, H: int, out_path: Path) -> No
     prep = f"[1:v:0]{scale},setsar=1,format=yuva420p,colorchannelmixer=aa={opacity:.3f}[lg]"
     fc = f"{prep};[0:v:0][lg]overlay=x={x}:y={y}:shortest=1[v]"
     cmd = [FFMPEG, "-y", *inputs, "-filter_complex", fc,
-           "-map", "[v]", "-map", "0:a?", *_VIDEO_ENC_ARGS, "-c:a", "copy"]
+           "-map", "[v]", "-map", "0:a?", *_active_video_enc(), "-c:a", "copy"]
     if base_dur > 0.05:
         # Belt and braces against an endlessly looping still.
         cmd += ["-t", f"{base_dur:.3f}"]
@@ -15732,7 +15784,7 @@ def _tl_build_main_track(segments: list, transitions: list,
                 _tl_run(
                     [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
                      "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-                     *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
+                     *_active_video_enc(), "-c:a", "aac", "-b:a", "192k", str(step_out)],
                     f"Transition {i}",
                 )
             except RuntimeError:
@@ -15745,7 +15797,7 @@ def _tl_build_main_track(segments: list, transitions: list,
                 _tl_run(
                     [FFMPEG, "-y", "-i", str(cur_path), "-i", str(nxt_path),
                      "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-                     *_VIDEO_ENC_ARGS, "-c:a", "aac", "-b:a", "192k", str(step_out)],
+                     *_active_video_enc(), "-c:a", "aac", "-b:a", "192k", str(step_out)],
                     f"Transition {i} (hard cut retry)",
                 )
             seg_starts.append(new_seg_start)
@@ -15906,7 +15958,7 @@ def _tl_mux_filtered_audio(
         FFMPEG, "-y", *inputs,
         "-filter_complex", filter_complex,
         "-map", "0:v:0", "-map", "[aout]",
-        *_VIDEO_ENC_ARGS,
+        *_active_video_enc(),
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
         *t_args,
         "-movflags", "+faststart",
@@ -16518,7 +16570,7 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         inputs, filt, cur = _build_graph(resolved)
         _tl_run(
             [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
-             "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
+             "-map", cur, "-map", "0:a?", *_active_video_enc(),
              "-c:a", "aac", "-b:a", "192k", str(out_path)],
             "Overlay composite",
         )
@@ -16539,7 +16591,7 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
             inputs, filt, cur = _build_graph(early)
             _tl_run(
                 [FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filt),
-                 "-map", cur, "-map", "0:a?", *_VIDEO_ENC_ARGS,
+                 "-map", cur, "-map", "0:a?", *_active_video_enc(),
                  "-c:a", "aac", "-b:a", "192k", str(out_path)],
                 "Overlay composite retry",
             )
@@ -17716,11 +17768,13 @@ def _tl_plan_segments(tl: dict, style: dict, build_reframe: bool = True) -> list
     return plan
 
 
-def render_timeline_job(job_id: str, timeline: dict) -> None:
+def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> None:
     """Background worker: composite a timeline into OUTPUT_DIR/{job_id}.mp4."""
     work: list[Path] = []
 
     def _stage(label: str, pct: int) -> None:
+        if review:
+            label = "review · " + label
         jobs[job_id]["status"] = label
         jobs[job_id]["progress"] = pct
         _db_save_job(job_id)
@@ -17728,6 +17782,12 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
     try:
         tl = _normalize_timeline(timeline)
         W, H = TIMELINE_CANVASES[tl["canvas"]]
+        if review:
+            W, H = _review_canvas(W, H)
+        # Pieces are an intermediate. The last pass (captions or finalize)
+        # switches back to the delivery encoder unless this is a review.
+        _tl_enc_local.args = list(_REVIEW_ENC if review else _SEGMENT_ENC)
+        jobs[job_id]["review"] = bool(review)
         fps = tl["fps"]
         fit = tl["fit"]
         bg = tl["bg"]
@@ -17757,7 +17817,13 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         cache_stats = {"hits": 0, "misses": 0, "split": 0}
         nplan = max(1, len(plan))
         for seg_counter, spec in enumerate(plan):
-            jobs[job_id]["status"] = f"building main track ({seg_counter + 1}/{nplan})"
+            zoom = ""
+            if any(isinstance(spec.get(k), dict) and spec[k].get("enabled") for k in ("punch", "ken")):
+                zoom = " · zoom"
+            label = f"building main track ({seg_counter + 1}/{nplan}){zoom}"
+            if review:
+                label = "review · " + label
+            jobs[job_id]["status"] = label
             jobs[job_id]["progress"] = 10 + int(25 * seg_counter / nplan)
             _db_save_job(job_id)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
@@ -17790,7 +17856,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             if len(segments) > 1:
                 transitions.append(spec["transition"])
             jobs[job_id]["progress"] = 10 + int(25 * (seg_counter + 1) / nplan)
-            jobs[job_id]["status"] = f"building main track ({seg_counter + 1}/{nplan})"
+            jobs[job_id]["status"] = label
         jobs[job_id]["render_stats"] = cache_stats
         _db_save_job(job_id)
 
@@ -17974,7 +18040,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
                 print(f"[timeline] overlay SFX skipped: {sfx_err}", flush=True)
 
         # ---- Pass 4: captions + titles / lower-thirds (single libass burn) ----
-        output_path = OUTPUT_DIR / f"{job_id}.mp4"
+        output_path = OUTPUT_DIR / (f"{job_id}_review.mp4" if review else f"{job_id}.mp4")
         caption_ass = None
         qa_ass = None
         if caption_words:
@@ -18048,6 +18114,9 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             )
         titles_ass = _tl_build_titles_ass(tracks["text"], W, H) if tracks["text"] else None
 
+        if not review:
+            # Last pass is the file they keep. Pieces above stayed fast.
+            _tl_enc_local.args = list(_VIDEO_ENC_ARGS)
         if caption_ass or titles_ass:
             _stage("adding captions & titles", 85)
             ass_text = _tl_compose_ass(W, H, caption_ass or "", titles_ass or "")
@@ -18062,7 +18131,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
             _stage("finalizing", 90)
             _tl_run([FFMPEG, "-y", "-i", str(base),
                      "-map", "0:v:0", "-map", "0:a:0?",
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                     *_active_video_enc(),
                      *_QT_SAFE_MP4_ARGS,
                      "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                      str(output_path)], "Finalize")
@@ -18075,7 +18144,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         audio = tl.get("audio") if isinstance(tl.get("audio"), dict) else None
         if not audio:
             audio = jobs[job_id].get("audio") if isinstance(jobs[job_id].get("audio"), dict) else None
-        if _tl_audio_wants_enhance(audio):
+        if _tl_audio_wants_enhance(audio) and not review:
             _stage("enhancing audio", 93)
             pre_audio = UPLOAD_DIR / f"{job_id}_tlpreaudio.mp4"
             if pre_audio.exists():
@@ -18104,9 +18173,10 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["output"] = output_path.name
+        jobs[job_id]["review"] = bool(review)
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
-        if AUTO_QA:
+        if AUTO_QA and not review:
             _run_job_qa(job_id, output_path, W=W, H=H, fps=fps, duration=_total_dur,
                         ass_text=qa_ass, overlays=tracks["overlay"])
     except Exception as e:
@@ -18115,6 +18185,7 @@ def render_timeline_job(job_id: str, timeline: dict) -> None:
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
     finally:
+        _tl_enc_local.args = None
         for p in work:
             _safe_unlink(p)
 
@@ -18691,6 +18762,13 @@ def timeline_render():
     timeline = _normalize_timeline(data.get("timeline") or jobs[job_id].get("timeline") or {})
     if not timeline["tracks"]["main"]:
         return jsonify({"error": "Add at least one clip to the main track first."}), 400
+    st = str(jobs[job_id].get("status") or "")
+    prog = int(jobs[job_id].get("progress") or 0)
+    if st not in ("", "timeline_edit", "done", "error") and prog < 100:
+        return jsonify({
+            "error": "A render is already running on this project. Let it finish before starting another — a second one keeps the machine busy and slows both.",
+        }), 409
+    review = bool(data.get("review"))
 
     style = data.get("style") or timeline.get("style") or jobs[job_id].get("style") or {}
     # Timeline project may have empty style — seed from first main source's Caption look.
@@ -18718,7 +18796,7 @@ def timeline_render():
     jobs[job_id]["error"] = None
     _db_save_job(job_id)
 
-    t = threading.Thread(target=render_timeline_job, args=(job_id, timeline))
+    t = threading.Thread(target=render_timeline_job, args=(job_id, timeline, review))
     t.daemon = True
     t.start()
     return jsonify({"job_id": job_id})
