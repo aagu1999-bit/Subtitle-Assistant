@@ -947,9 +947,10 @@ body.tl-workspace-focus #tlPropsBtn { display: inline-flex; }
 .tl-clip-handle {
   position: absolute;
   top: 0; bottom: 0;
-  width: 8px;
+  width: 14px;
   cursor: ew-resize;
-  background: rgba(255,255,255,.18);
+  background: rgba(255,255,255,.28);
+  z-index: 3;
 }
 .tl-clip-handle.left { left: 0; }
 .tl-clip-handle.right { right: 0; }
