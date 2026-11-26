@@ -3017,8 +3017,13 @@ async function startReframeAnalyze(triggerBtn, opts) {
           } else if (r.status) {
             const pct = r.progress != null ? Number(r.progress) : null;
             if (pct != null && onProgress) onProgress(pct);
+            const listening = /diariz|still listening|analysing speakers|how many people|pass \d/i.test(r.status || "");
             if (pct != null && pct !== lastProgress) {
               lastProgress = pct;
+              lastProgressAt = Date.now();
+            } else if (listening) {
+              // This pass sits on one number on purpose. A frozen percent
+              // is not a dead worker. The overall timer still applies.
               lastProgressAt = Date.now();
             } else if (Date.now() - lastProgressAt > STUCK_MS) {
               clearInterval(_reframePollTimer);

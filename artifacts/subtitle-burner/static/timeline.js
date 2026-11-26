@@ -5143,6 +5143,7 @@
         if (selected.track === "text") addPreviewBox("title", c, (c.text || "Title").split("\n")[0]);
         else if (selected.track === "overlay") addPreviewBox("overlay", c, "Overlay");
         else if (selected.track === "main" && c.split && c.split.enabled) addSplitGuide(c.split);
+        else if (selected.track === "effects" && c.type === "punch_zoom") addAimDot(c);
         else if (selected.track === "effects" && c.type === "split_screen") {
           // ONLY where the effect actually runs. Selecting the clip used to
           // draw the divider and the "2nd" badge at every playhead
@@ -5336,9 +5337,31 @@
     layer.appendChild(box);
   }
 
+  function addAimDot(fx) {
+    const layer = $("tlOverlayLayer");
+    if (!layer) return;
+    const aim = fx.aim || {};
+    const x = aim.x != null ? Number(aim.x) : 0.5;
+    const y = aim.y != null ? Number(aim.y) : 0.5;
+    const dot = document.createElement("div");
+    dot.style.cssText = "position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:99px;background:#C8F542;box-shadow:0 0 0 6px rgba(200,245,66,.35);pointer-events:none;z-index:4";
+    dot.style.left = (x * 100) + "%";
+    dot.style.top = (y * 100) + "%";
+    layer.appendChild(dot);
+  }
+
   function addSplitGuide(splitCfg) {
     const layer = $("tlOverlayLayer");
     if (!layer || !splitCfg) return;
+    const mode = String(splitCfg.mode || "media");
+    const hasSecond = !!(splitCfg.source_job_id || splitCfg.asset_id);
+    if (mode !== "speakers" && mode !== "wide_punch" && !hasSecond) {
+      const tag = document.createElement("div");
+      tag.textContent = "This split needs a second clip, or pick Wide + close-up";
+      tag.style.cssText = "position:absolute;left:8px;top:8px;padding:4px 8px;font-size:11px;font-weight:650;background:rgba(0,0,0,.7);color:#fff;border-radius:6px;pointer-events:none;";
+      layer.appendChild(tag);
+      return;
+    }
     let layout = splitCfg.layout || "auto";
     if (layout === "auto") layout = (tl.canvas === "16x9") ? "side" : "stack";
     const place = (splitCfg.placement || "").toLowerCase();
@@ -5502,11 +5525,11 @@
       html += `<p class="muted" style="font-size:.72rem">Drag the clip on the Effects lane to change when it runs. Main-clip effects still work; lane effects win while they overlap.</p>`;
       if (c.type === "punch_zoom") {
         html += `<div class="tl-prop-grid">${propSelect("intensity", "Strength", c.intensity || "med", [["1.5x", "1.5× hold"], ["2x", "2× hold"], ["low", "Low punch"], ["med", "Medium punch"], ["high", "Strong punch"], ["strong", "Strong punch"]])}</div>`;
-        const an = c.aim || {};
-        const ax = an.x != null ? an.x : 0.5, ay = an.y != null ? an.y : 0.5;
-        html += `<div class="tl-prop-grid">${propRange("aim.x", "Aim X", ax, 0, 1, 0.01)}${propRange("aim.y", "Aim Y", ay, 0, 1, 0.01)}</div>`;
-        html += `<button class="btn btn-secondary btn-block" data-act="reaim" style="font-size:.76rem">🎯 Re-aim on the preview</button>`;
-        html += `<p class="muted" style="font-size:.72rem">Where the push lands. AI placement aims at the speaker's eye line; re-aim if it picked the wrong person.</p>`;
+        const decay = c.decay != null ? Number(c.decay) : 0.45;
+        const ease = decay <= 0.2 ? "0.12" : decay >= 0.75 ? "1" : "0.45";
+        html += propSelect("decay", "Ease", ease, [["0.12", "Snap"], ["0.45", "Medium"], ["1", "Soft"]]);
+        html += `<button class="btn btn-secondary btn-block" data-act="reaim" style="font-size:.76rem">🎯 Click the picture to aim</button>`;
+        html += `<p class="muted" style="font-size:.72rem">The window gets out of the way. Click the face. Snap, medium, and soft are how the push settles.</p>`;
       } else if (c.type === "zoom_1_5" || c.type === "zoom_2x") {
         html += `<p class="muted" style="font-size:.72rem">Constant ${c.type === "zoom_1_5" ? "1.5×" : "2×"} zoom held for the whole effect window — no ease-out.</p>`;
       } else if (c.type === "ken_burns") {
@@ -6897,13 +6920,24 @@
   function startAnchorAim(c, btn) {
     const st = $("tlStage");
     if (!st) return;
-    const label = btn.textContent;
-    btn.textContent = "Click the preview…";
+    if (typeof closeWorkspacePanel === "function") closeWorkspacePanel();
+    const label = btn ? btn.textContent : "";
+    if (btn) btn.textContent = "Click the picture…";
     st.style.cursor = "crosshair";
+    let hint = document.getElementById("tlAimHint");
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.id = "tlAimHint";
+      hint.style.cssText = "position:absolute;left:12px;top:12px;z-index:5;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.72);color:#fff;font-size:12px;pointer-events:none";
+      st.appendChild(hint);
+    }
+    hint.textContent = "Click where the zoom should land";
+    hint.hidden = false;
     const stop = () => {
       st.style.cursor = "";
       st.removeEventListener("click", onPick, true);
-      btn.textContent = label;
+      if (btn) btn.textContent = label;
+      if (hint) hint.hidden = true;
     };
     const onPick = (ev) => {
       const r = st.getBoundingClientRect();
