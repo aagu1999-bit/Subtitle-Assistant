@@ -3886,6 +3886,15 @@
     ot = Math.max(0, Number(ot) || 0);
     const v = $("tlPreviewVideo");
     if (!v) return;
+    const stayPaused = v.paused;
+    const keepState = () => {
+      if (stayPaused) {
+        try { v.pause(); } catch (e) { /* a seek must not start playback */ }
+      } else if (v.paused) {
+        v.play().catch(() => {});
+        startPreviewLoop();
+      }
+    };
 
     let idx = -1;
     for (let i = 0; i < tl.tracks.main.length; i++) {
@@ -3901,6 +3910,7 @@
 
     if (previewingOutput && !opts.forceSource) {
       try { v.currentTime = ot; } catch (e) { /* ignore */ }
+      keepState();
       updatePlayhead();
       updateStageCompositor();
       if (idx >= 0 && leftTab === "transcript") {
@@ -3926,6 +3936,7 @@
 
     const finish = () => {
       try { v.currentTime = srcT; } catch (e) { /* ignore */ }
+      keepState();
       if (leftTab === "transcript") {
         const trClip = (opts.keepSelection && selected && selected.track === "main")
           ? findClip("main", selected.id)
@@ -7187,12 +7198,23 @@
     menu.style.top = Math.max(pad, Math.min(y, window.innerHeight - h - pad)) + "px";
   }
 
+  function clipGrabEdge(el, clientX) {
+    const r = el.getBoundingClientRect();
+    if (!r.width) return null;
+    const grab = Math.min(18, Math.max(10, r.width * 0.34));
+    if (clientX <= r.left + grab) return "left";
+    if (clientX >= r.right - grab) return "right";
+    return null;
+  }
+
   function onTimelineMouseDown(e) {
     const clipEl = e.target.closest(".tl-clip");
     if (!clipEl || clipEl.classList.contains("tl-clip-pending")) return;
     if (e.button != null && e.button !== 0) return;
     const track = clipEl.dataset.track;
     const id = clipEl.dataset.id;
+    const handle = e.target.closest && e.target.closest(".tl-clip-handle");
+    const edge = (handle && handle.dataset.side) || clipGrabEdge(clipEl, e.clientX);
     const now = Date.now();
     if (_lastClipDown.id === id && now - _lastClipDown.t < 450) {
       _lastClipDown.t = 0;
@@ -7207,7 +7229,6 @@
     selectClip(track, id, { preserveSeek: true });
     // Jump playhead to the clicked time on the clip (not always clip.in).
     seekToOutputTime(outputTimeFromClientX(e.clientX), { quietProps: true, keepSelection: true });
-    const handle = e.target.closest(".tl-clip-handle");
     const c = findClip(track, id);
     if (!c) return;
     pushHistory();
@@ -7215,7 +7236,7 @@
     drag = {
       track, id, c,
       startX: e.clientX,
-      mode: handle ? ("resize-" + handle.dataset.side) : "move",
+      mode: edge ? ("resize-" + edge) : "move",
       origIn: c.in || 0, origOut: c.out || 0, origStart: c.start || 0,
       origLeft: parseFloat(clipEl.style.left) || 0,
       mainIdx,
