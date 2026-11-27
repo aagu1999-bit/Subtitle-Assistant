@@ -5261,7 +5261,25 @@ def _burn_cache_key(style: dict, words: list, emoji_rules: dict, video_path: Pat
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-# ---- AI clip suggestions (Gemini) ----
+# ---- AI clip suggestions ----
+#
+# Every judgment this app makes -- where a camera move belongs, which
+# silence carries a punchline, which anchors answer the same question,
+# what a reference reel is doing -- goes through one function. Image
+# GENERATION is a separate path and stays on Gemini, because that is a
+# different job and Gemini is good at it.
+#
+# Claude is the default. The fallback below exists so pulling this change
+# before the key is set does not take AI Edit, the co-editor, the taste
+# pass, the arc and the relay down at once; it stops applying by itself
+# the moment ANTHROPIC_API_KEY is present.
+# The default lives here, on its own, so a test can assert it with the
+# env var unset instead of pinning the value it is meant to check.
+LLM_PROVIDER_DEFAULT = "claude"
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+# Opus 5.5 defaults to `medium`, not `high`. Set it per call rather than
+# inherit a default that differs from the one the prompts were tuned on.
+CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT", "medium")
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 # Native image model for optional Suggest B-roll AI photos (opt-in).
@@ -6197,7 +6215,155 @@ def _loads_model_json(text: str) -> dict:
     raise json.JSONDecodeError("not JSON", raw, 0)
 
 
+def _active_llm_provider() -> str:
+    """Which provider this call will use, and why.
+
+    Claude is the default. It steps aside only when there is no Anthropic
+    key and Gemini does have one -- so the app keeps working between
+    pulling this change and setting the key, and starts using Claude the
+    moment the key appears, with nothing to switch over by hand.
+    """
+    want = (os.environ.get("LLM_PROVIDER") or LLM_PROVIDER_DEFAULT).strip().lower()
+    if want not in ("claude", "gemini"):
+        want = LLM_PROVIDER_DEFAULT
+    if want == "claude" and not (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+        if (os.environ.get("GEMINI_API_KEY") or "").strip():
+            ai_logger.info(
+                "ANTHROPIC_API_KEY is not set -- falling back to Gemini. "
+                "Set the key and this message stops.")
+            return "gemini"
+    return want
+
+
+def _anthropic_client():
+    try:
+        import anthropic
+    except ImportError as exc:                        # noqa: BLE001
+        raise RuntimeError(
+            "The anthropic package is not installed. On Replit: "
+            "`pip install anthropic` -- not `uv sync`, which prunes to the "
+            f"lockfile and has taken this app down three times. ({exc})")
+    if not (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+        raise RuntimeError("Claude is not configured (ANTHROPIC_API_KEY not set).")
+    return anthropic.Anthropic()
+
+
+def _claude_text(blocks) -> str:
+    """The answer, skipping the reasoning.
+
+    Thinking blocks come first in the response. Reading content[0].text
+    would hand back an empty string -- the default display is `omitted`,
+    so a thinking block's text is "" rather than anything parseable.
+    """
+    out = []
+    for b in blocks or []:
+        if getattr(b, "type", None) == "text":
+            out.append(getattr(b, "text", "") or "")
+    return "\n".join(out).strip()
+
+
+def _claude_json(prompt: str, *, cached_context: str | None = None,
+                 effort: str | None = None, schema: dict | None = None,
+                 images: list | None = None) -> dict:
+    """Ask Claude for JSON. Same contract as the Gemini call it replaces.
+
+    `cached_context` is the big, stable, reused part -- the transcript.
+    Prompt caching is a PREFIX match, so it goes first, in a cached system
+    block; the per-call instruction follows. Several calls over one video
+    (effects, pauses, devices, relay, arc) then share that prefix instead
+    of paying for the transcript each time.
+    """
+    client = _anthropic_client()
+    out_cfg: dict = {"effort": (effort or CLAUDE_EFFORT)}
+    if schema:
+        # Structured outputs: the SHAPE is guaranteed, so the call sites
+        # stop hand-defending against kinds that do not exist. The
+        # semantic guards stay -- a well-formed time can still be wrong.
+        out_cfg["format"] = {"type": "json_schema", "schema": schema}
+
+    kwargs: dict = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 16000,
+        # Opus 5.5 thinks always; `disabled` and budget_tokens are both a
+        # 400. Depth is controlled by effort above.
+        "thinking": {"type": "adaptive"},
+        "output_config": out_cfg,
+        # A safety decline returns HTTP 200 with stop_reason "refusal" and
+        # no content. Without this the call simply stops; with it the same
+        # request is re-run on another model inside the one call.
+        "betas": ["server-side-fallback-2026-07-01"],
+        "fallbacks": "default",
+    }
+    if cached_context:
+        kwargs["system"] = [{
+            "type": "text", "text": cached_context,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    content: list = []
+    for item in (images or []):
+        label, data = item
+        if label:
+            content.append({"type": "text", "text": str(label)})
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg",
+                       "data": data},
+        })
+    content.append({"type": "text", "text": prompt})
+    kwargs["messages"] = [{"role": "user", "content": content}]
+
+    resp = client.beta.messages.create(**kwargs)
+
+    # Before content: a refusal carries no answer, and content[0] would
+    # raise an IndexError that says nothing about what happened.
+    if getattr(resp, "stop_reason", None) == "refusal":
+        det = getattr(resp, "stop_details", None)
+        cat = getattr(det, "category", None) or "unspecified"
+        raise RuntimeError(f"Claude declined this request ({cat}).")
+    text = _claude_text(getattr(resp, "content", None))
+    if not text:
+        raise RuntimeError(
+            f"Claude returned no text (stop_reason={getattr(resp, 'stop_reason', None)})")
+    try:
+        usage = getattr(resp, "usage", None)
+        ai_logger.info(
+            "Claude %s: prompt %d chars, reply %d chars, cache_read=%s",
+            CLAUDE_MODEL, len(prompt), len(text),
+            getattr(usage, "cache_read_input_tokens", None))
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
+        return _loads_model_json(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Claude returned non-JSON output: {e}; first 500 chars: {text[:500]}")
+
+
+def _llm_json(prompt: str, *, cached_context: str | None = None,
+              effort: str | None = None, schema: dict | None = None) -> dict:
+    """One judgment call, on whichever provider is configured."""
+    if _active_llm_provider() == "claude":
+        return _claude_json(prompt, cached_context=cached_context,
+                            effort=effort, schema=schema)
+    # Gemini takes one flat prompt; fold the cached part back in.
+    return _gemini_json_call(
+        f"{cached_context}\n\n{prompt}" if cached_context else prompt)
+
+
 def _gemini_generate_clip_suggestions(prompt: str) -> dict:
+    """A judgment call, returned as parsed JSON. Raises on failure.
+
+    Kept under this name on purpose. Fifteen call sites use it and
+    thirty-four tests monkeypatch it; renaming it in the same change that
+    swaps the provider would break every one of them at once and leave a
+    red suite that cannot say which half was at fault. The rename is its
+    own commit.
+    """
+    return _llm_json(prompt)
+
+
+def _gemini_json_call(prompt: str) -> dict:
     """Call Gemini and parse a JSON-mode response. Raises on failure."""
     import requests
 
@@ -6230,6 +6396,26 @@ def _gemini_generate_clip_suggestions(prompt: str) -> dict:
 
 
 def _gemini_vision_json(prompt: str, images: list) -> dict:
+    """Frames in, parsed JSON out, on whichever provider is configured.
+
+    Same name for the same reason as the text call: its callers and their
+    tests already use it.
+    """
+    if _active_llm_provider() == "claude":
+        # qa.image_part wraps bytes in Gemini's inline_data shape; Claude
+        # wants the base64 payload on its own image block, so the frames
+        # are converted here rather than at either call site.
+        shots = []
+        for t, data in images or []:
+            raw = data
+            if isinstance(raw, (bytes, bytearray)):
+                raw = base64.b64encode(bytes(raw)).decode("ascii")
+            shots.append((f"Frame at {float(t):.2f}s:", raw))
+        return _claude_json(prompt, images=shots, effort="low")
+    return _gemini_vision_call(prompt, images)
+
+
+def _gemini_vision_call(prompt: str, images: list) -> dict:
     """Gemini over (time, jpeg bytes) frames; parsed JSON. Raises on failure."""
     import requests
 

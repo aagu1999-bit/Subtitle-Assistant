@@ -79,3 +79,9 @@ yt-dlp
 # Deliberately NOT in pyproject.toml: it pulls torch (~2-3 GB), and a deploy
 # that builds from pyproject stays lean without it.
 whisperx>=3.1.0
+
+# The judgment layer: where a camera move belongs, which silence carries a
+# punchline, which anchors answer the same question. Claude is the default
+# provider; set LLM_PROVIDER=gemini to force the old path for an A/B.
+# Image GENERATION stays on Gemini and needs nothing from here.
+anthropic>=1.0.0

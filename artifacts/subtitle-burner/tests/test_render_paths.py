@@ -1,4 +1,5 @@
 """Speed ramps, behind-subject graphics and the segment cache, through real renders."""
+import base64
 import importlib.util
 import inspect
 import shutil
@@ -497,3 +498,219 @@ def test_a_killed_overlay_pass_still_produces_the_video(app_mod, source_job,
     assert _dur(out) == pytest.approx(2.0, abs=0.2)
     # And it says so rather than the overlays just quietly not being there.
     assert "overlay" in (job.get("overlay_note") or "").lower(), job.get("overlay_note")
+
+
+# --- the decision layer moves to Claude --------------------------------
+# Every judgment this app makes goes through one function. Image
+# GENERATION stays on Gemini -- a different job, and Gemini is good at it.
+
+class _FakeBlock:
+    def __init__(self, type_, text=""):
+        self.type = type_
+        self.text = text
+
+
+class _FakeResp:
+    def __init__(self, blocks, stop_reason="end_turn", stop_details=None):
+        self.content = blocks
+        self.stop_reason = stop_reason
+        self.stop_details = stop_details
+        self.usage = type("U", (), {"cache_read_input_tokens": 0})()
+
+
+def _fake_anthropic(monkeypatch, app_mod, resp, seen):
+    class _Msgs:
+        def create(self, **kw):
+            seen.update(kw)
+            if isinstance(resp, Exception):
+                raise resp
+            return resp
+
+    class _Client:
+        beta = type("B", (), {"messages": _Msgs()})()
+
+    monkeypatch.setattr(app_mod, "_anthropic_client", lambda: _Client())
+
+
+@pytest.fixture
+def claude_keys(monkeypatch):
+    """Both keys present and LLM_PROVIDER unset -- the shipping state once
+    the Anthropic key is in. Deliberately does NOT pin the provider: that
+    is what most of these tests are checking."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-test")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+
+def test_claude_is_the_default_provider(app_mod, monkeypatch, claude_keys):
+    """Asked for, and the thing most likely to regress quietly. With both
+    keys set and nothing configured, Claude gets the call."""
+    seen = {}
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([_FakeBlock("text", '{"ok": 1}')]), seen)
+
+    def no_gemini(_p):
+        raise AssertionError("Gemini was called while Claude was configured")
+
+    monkeypatch.setattr(app_mod, "_gemini_json_call", no_gemini)
+    assert app_mod._active_llm_provider() == "claude"
+    assert app_mod._gemini_generate_clip_suggestions("hello") == {"ok": 1}
+    assert seen["model"] == "claude-opus-5-5"
+
+
+def test_an_unknown_provider_name_does_not_disable_the_ai(app_mod, monkeypatch,
+                                                          claude_keys):
+    """A typo in the env var (LLM_PROVIDER=cluade) must land on the default
+    rather than on a third branch that calls nothing."""
+    monkeypatch.setenv("LLM_PROVIDER", "cluade")
+    assert app_mod._active_llm_provider() == "claude"
+
+
+def test_no_anthropic_key_falls_back_to_gemini(app_mod, monkeypatch):
+    """Pulling this before the key exists must not take every AI feature
+    down at once. The fallback stops applying on its own once the key is
+    set -- there is nothing to switch over by hand."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-test")
+    monkeypatch.setattr(app_mod, "_gemini_json_call", lambda p: {"via": "gemini"})
+    assert app_mod._active_llm_provider() == "gemini"
+    assert app_mod._gemini_generate_clip_suggestions("x") == {"via": "gemini"}
+
+
+def test_gemini_can_be_forced_for_an_ab(app_mod, monkeypatch, claude_keys):
+    """Effect placement and the taste pass are subjective; the only honest
+    test is the same project rendered both ways."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(app_mod, "_gemini_json_call", lambda p: {"via": "gemini"})
+    assert app_mod._active_llm_provider() == "gemini"
+    assert app_mod._gemini_generate_clip_suggestions("x") == {"via": "gemini"}
+
+
+def test_the_request_is_shaped_for_this_model(app_mod, monkeypatch, claude_keys):
+    """Opus 5.5 rejects a thinking budget outright, and defaults effort to
+    `medium` where the prompts were tuned on something else - so effort is
+    set at every call rather than inherited."""
+    seen = {}
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([_FakeBlock("text", "{}")]), seen)
+    app_mod._gemini_generate_clip_suggestions("x")
+    assert seen["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in str(seen.get("thinking")), "400s on this model"
+    assert seen["output_config"]["effort"], "effort left to the model's default"
+    # A safety decline otherwise just stops the call.
+    assert seen["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in seen["betas"]
+
+
+def test_a_refusal_is_reported_not_indexed(app_mod, monkeypatch, claude_keys):
+    """A refusal is HTTP 200 with no content. Reading content[0] raises an
+    IndexError that says nothing about what happened."""
+    det = type("D", (), {"category": "cyber"})()
+    _fake_anthropic(monkeypatch, app_mod,
+                    _FakeResp([], stop_reason="refusal", stop_details=det), {})
+    with pytest.raises(RuntimeError) as e:
+        app_mod._gemini_generate_clip_suggestions("x")
+    assert "declined" in str(e.value) and "cyber" in str(e.value)
+
+
+def test_thinking_blocks_do_not_become_the_answer(app_mod, monkeypatch, claude_keys):
+    """Thinking comes FIRST in the response, so content[0] is not the
+    answer. Reading it blindly gets either an empty string or, where a
+    summary is exposed, reasoning prose glued to the front of the JSON."""
+    reasoning = _FakeBlock("thinking", "The speaker lands the point here, so")
+    answer = _FakeBlock("text", '{"effects": [{"type": "punch_zoom"}]}')
+    # Asserted on the extractor directly: EXACTLY the answer, nothing else.
+    assert app_mod._claude_text([reasoning, answer]) == answer.text
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([reasoning, answer]), {})
+    got = app_mod._gemini_generate_clip_suggestions("x")
+    assert got["effects"][0]["type"] == "punch_zoom"
+
+
+def test_a_fenced_reply_still_parses(app_mod, monkeypatch, claude_keys):
+    """Both providers go through _loads_model_json, so a fenced or
+    slightly-malformed reply behaves the same on either."""
+    _fake_anthropic(monkeypatch, app_mod,
+                    _FakeResp([_FakeBlock("text", '```json\n{"a": 2}\n```')]), {})
+    assert app_mod._gemini_generate_clip_suggestions("x") == {"a": 2}
+
+
+def test_the_cached_context_leads_the_request(app_mod, monkeypatch, claude_keys):
+    """Caching is a PREFIX match. A cached block placed after the
+    instruction costs money silently instead of failing."""
+    seen = {}
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([_FakeBlock("text", "{}")]), seen)
+    app_mod._llm_json("the question", cached_context="THE TRANSCRIPT")
+    sys_blocks = seen["system"]
+    assert sys_blocks[0]["text"] == "THE TRANSCRIPT"
+    assert sys_blocks[0]["cache_control"] == {"type": "ephemeral"}
+    # The volatile part is the user turn, after the cached prefix.
+    assert seen["messages"][0]["content"][-1]["text"] == "the question"
+    # Gemini takes one flat prompt and has no such split, so it must still
+    # receive both halves or the transcript silently vanishes on that path.
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    got = {}
+
+    def _grab(p):
+        got["p"] = p
+        return {}
+
+    monkeypatch.setattr(app_mod, "_gemini_json_call", _grab)
+    app_mod._llm_json("the question", cached_context="THE TRANSCRIPT")
+    assert "THE TRANSCRIPT" in got["p"] and "the question" in got["p"]
+
+
+def test_a_schema_reaches_the_request(app_mod, monkeypatch, claude_keys):
+    """Structured outputs guarantee the SHAPE. Not wired at any call site
+    yet -- see the note in the PR -- but the capability is here and tested
+    so wiring it later is one argument, not a rewrite."""
+    seen = {}
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([_FakeBlock("text", "{}")]), seen)
+    schema = {"type": "object", "properties": {"effects": {"type": "array"}}}
+    app_mod._llm_json("x", schema=schema)
+    assert seen["output_config"]["format"]["schema"] == schema
+    # Without one, no format key at all rather than an empty one.
+    seen.clear()
+    app_mod._llm_json("x")
+    assert "format" not in seen["output_config"]
+
+
+def test_frames_become_claude_image_blocks(app_mod, monkeypatch, claude_keys):
+    """qa.image_part wraps bytes in Gemini's inline_data shape; Claude
+    wants base64 on its own image block."""
+    seen = {}
+    _fake_anthropic(monkeypatch, app_mod, _FakeResp([_FakeBlock("text", '{"v": 1}')]), seen)
+    assert app_mod._gemini_vision_json("look", [(1.5, b"\xff\xd8jpeg")]) == {"v": 1}
+    content = seen["messages"][0]["content"]
+    img = [c for c in content if c["type"] == "image"]
+    assert len(img) == 1
+    src = img[0]["source"]
+    assert src["type"] == "base64" and src["media_type"] == "image/jpeg"
+    # Actually base64 TEXT, not the raw bytes under a base64 label: the SDK
+    # serialises this to JSON, where bytes are not encodable at all.
+    assert isinstance(src["data"], str)
+    assert base64.b64decode(src["data"]) == b"\xff\xd8jpeg"
+    # The timestamp has to survive, or a verdict lands on the wrong frame.
+    assert any("1.50s" in c.get("text", "") for c in content if c["type"] == "text")
+
+
+def test_image_generation_did_not_move(app_mod):
+    """Keeping Gemini for image GENERATION was the explicit ask, and it
+    already sat on its own path -- so the swap must not have dragged it
+    along. Checked through the whole chain, not just the entry point."""
+    entry = inspect.getsource(app_mod.gemini_image)
+    assert "_generate_broll_gemini_image" in entry, "image entry point rerouted"
+    body = inspect.getsource(app_mod._generate_broll_gemini_image)
+    assert "GEMINI_API_KEY" in body, "the image path no longer needs a Gemini key"
+    assert "GEMINI_IMAGE_MODEL" in body and "_GEMINI_BASE_URL" in body, \
+        "the image call no longer goes to the Gemini image model"
+    for src in (entry, body):
+        assert "claude" not in src.lower() and "anthropic" not in src.lower()
+
+
+def test_the_anthropic_dependency_is_declared_in_both_files(app_mod):
+    """Three outages came from a package being in one list and not the
+    other; `uv sync` prunes to the lockfile."""
+    burner = Path(app_mod.__file__).resolve().parent
+    req = (burner / "requirements.txt").read_text(encoding="utf-8")
+    pyp = (burner.parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    assert "anthropic>=" in req, "requirements.txt does not declare anthropic"
+    assert "anthropic>=" in pyp, "pyproject.toml does not declare anthropic"
