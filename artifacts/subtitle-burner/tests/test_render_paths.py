@@ -408,3 +408,92 @@ def test_a_finished_render_is_not_reopened_by_the_heartbeat(app_mod):
     # And a tick already past that check must not reopen the job either.
     assert 'in ("done", "error")' in src, \
         "the heartbeat will still overwrite a terminal status"
+
+
+# --- a stalled overlay pass has to end ------------------------------------
+# Seen in the wild: "drawing overlays · no new frame for 191s" pinned at
+# exactly 70%, climbing, with nothing able to stop it. `clock["armed"]` was
+# set False immediately before the overlay call, so the 45s watchdog was
+# switched off for the one stage that hangs.
+
+def test_the_overlay_stage_is_watched(app_mod):
+    src = inspect.getsource(app_mod.render_timeline_job)
+    ovl = src[src.index('_stage("drawing overlays", 70)'):]
+    ovl = ovl[:ovl.index("# ---- Pass 3b")]
+    assert 'clock["armed"] = True' in ovl, \
+        "the stage that hangs still has its watchdog switched off"
+    # Armed before the call, disarmed after, or the next stage inherits it.
+    assert ovl.index('clock["armed"] = True') < ovl.index("_tl_composite_overlays("), \
+        "armed only after the call it is meant to watch"
+    assert 'clock["armed"] = False' in ovl, "the next stage inherits the watchdog"
+    # A fresh tick, or the time spent in the previous stage counts against
+    # this one and it is killed the moment it starts.
+    assert 'clock["tick"] = time.time()' in ovl
+
+
+def test_a_stalled_overlay_pass_does_not_take_the_export_with_it(app_mod):
+    """Everything that matters is already rendered by this point — the cuts,
+    the grade, the captions. Losing all of it to a B-roll graph is the wrong
+    trade, and waiting forever is worse."""
+    src = inspect.getsource(app_mod.render_timeline_job)
+    ovl = src[src.index('_stage("drawing overlays", 70)'):]
+    ovl = ovl[:ovl.index("# ---- Pass 3b")]
+    assert "except Exception as ovl_err:" in ovl, \
+        "a failing overlay pass still fails the whole render"
+    assert "_tl_overlay_skipped.append" in ovl
+    # And the finished job says which layer went missing, rather than the
+    # overlays just silently not being there.
+    assert "overlay_note" in src
+
+
+def test_the_cut_out_reports_its_own_frames(app_mod):
+    """The heartbeat only sees ffmpeg's out_time_ms, and the matte writes to
+    a pipe. Arming the watchdog without this would kill a cut-out that is
+    working perfectly."""
+    msrc = inspect.getsource(app_mod._tl_matte_video)
+    assert msrc.count("_matte_tick(span, written)") >= 2, \
+        "the matte goes silent on the path that skips the model, or on both"
+    tick = inspect.getsource(app_mod._matte_tick)
+    assert '"tick"' in tick and "render_beat" in tick
+
+
+def test_the_overlay_inputs_are_named_in_the_log(app_mod):
+    """"drawing overlays" covers fourteen inputs; when it stalls there was
+    nothing to say which one."""
+    src = inspect.getsource(app_mod._tl_composite_overlays)
+    assert "compositing %d overlay(s)" in src
+    assert "(behind)" in src, "a behind overlay is the expensive kind and is not marked"
+
+
+@needs_ffmpeg
+def test_a_killed_overlay_pass_still_produces_the_video(app_mod, source_job,
+                                                        monkeypatch, tmp_path):
+    """The end-to-end guarantee, driven through the real render.
+
+    When the watchdog kills a stalled overlay encode, _tl_run raises — which
+    is simulated here. The export must still land, with the overlays named
+    as the thing that was lost. Before this, the raise propagated and the
+    whole render failed; before the watchdog, it never raised at all and the
+    render simply never ended.
+    """
+    def boom(*_a, **_k):
+        raise RuntimeError("Overlay composite failed (see ffmpeg_render.log)")
+
+    monkeypatch.setattr(app_mod, "_tl_composite_overlays", boom)
+
+    pic = app_mod.ASSET_DIR / f"{uuid.uuid4().hex}.png"
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "color=red:s=120x120:d=1", "-frames:v", "1", str(pic)],
+                   check=True)
+    ov = {"asset_id": pic.stem, "start": 0.2, "in": 0, "out": 1.0,
+          "x": 0.1, "y": 0.1, "w": 0.4, "h": 0.2, "fit": "contain",
+          "opacity": 1.0}
+    try:
+        out, job = _render(app_mod, _timeline(source_job, overlays=[ov]))
+    finally:
+        pic.unlink(missing_ok=True)
+
+    assert out.exists() and out.stat().st_size > 0, "the export was lost"
+    assert _dur(out) == pytest.approx(2.0, abs=0.2)
+    # And it says so rather than the overlays just quietly not being there.
+    assert "overlay" in (job.get("overlay_note") or "").lower(), job.get("overlay_note")
