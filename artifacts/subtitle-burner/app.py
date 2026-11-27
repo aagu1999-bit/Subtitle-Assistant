@@ -15242,6 +15242,10 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
     wanted = {i: bg for i, bg in wanted.items() if bg}
     mattes: dict[int, Path] = {}
     if wanted:
+        span = getattr(_tl_progress_local, "span", None)
+        if span and span[0] in jobs:
+            jobs[span[0]]["status"] = span[4] + " · cutting the person out of the split"
+            jobs[span[0]]["render_beat"] = time.time()
         ok, why = _segment_deps_available()
         matte = _tl_matte_video(src, src_w, src_h, fps, dur, start=t_in) if ok else None
         if matte:
@@ -15512,6 +15516,16 @@ def _matte_refine(mask):
     return np.clip((mask - lo) / (hi - lo), 0.0, 1.0)
 
 
+def _matte_work_size(W: int, H: int) -> tuple[int, int]:
+    """Long side 640, even. The mask is scaled back to the real frame."""
+    W, H = max(2, int(W)), max(2, int(H))
+    long_side = max(W, H)
+    if long_side <= 640:
+        return W - W % 2, H - H % 2
+    scale = 640 / long_side
+    return max(2, int(W * scale) // 2 * 2), max(2, int(H * scale) // 2 * 2)
+
+
 def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                     dur: float | None = None,
                     start: float = 0.0) -> Path | None:
@@ -15556,23 +15570,41 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
     cap = cv2.VideoCapture(str(src))
     if not cap.isOpened():
         return None
+    for prop, ms in (("OPEN_TIMEOUT_MSEC", 8000), ("READ_TIMEOUT_MSEC", 8000)):
+        key = getattr(cv2, "CAP_PROP_" + prop, None)
+        if key is not None:
+            try:
+                cap.set(key, ms)
+            except Exception:
+                pass
     # A split at 0:20 for 5s needs frames 20-25. Without a start the whole
     # clip gets matted to use five seconds of it -- on a 90s source that is
     # ~19s of segmentation thrown away. Seek by milliseconds rather than by
     # frame index, which is what OpenCV is reliable about across containers.
-    if start and start > 0:
+    # On some phone files the seek reports success and stays at 0. Matting
+    # the opening and laying it over 0:23 is worse than skipping the photo.
+    if start and start > 0.5:
         try:
             cap.set(cv2.CAP_PROP_POS_MSEC, float(start) * 1000.0)
+            landed = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0) / 1000.0
         except Exception:                        # noqa: BLE001
-            pass
+            landed = 0.0
+        if landed + 0.75 < float(start):
+            print(f"[matte] seek landed at {landed:.2f}s, wanted {start:.2f}s"
+                  " — skipping the cut-out", flush=True)
+            cap.release()
+            return None
     limit = int(dur * fps) if dur and dur > 0 else 0
+    # The mask is scaled back up to the frame the crop expects. Running the
+    # model on a 4K phone frame is what made one 2s split hold the whole render.
+    work_w, work_h = _matte_work_size(W, H)
     proc = subprocess.Popen(
         [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{W}x{H}",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{work_w}x{work_h}",
          "-r", str(fps), "-i", "pipe:0",
-         # Near-lossless: a soft matte edge is the difference between hair and
-         # a cut-out, and compression artefacts there are visible.
-         "-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray", str(out)],
+         "-vf", f"scale={W}:{H}",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+         "-pix_fmt", "gray", str(out)],
         stdin=subprocess.PIPE)
     seg = None
     written = 0
@@ -15581,19 +15613,26 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
         # dropped the API blows up, and a matte that cannot be made must cost
         # the background, never the whole render.
         seg = mp.solutions.selfie_segmentation.SelfieSegmentation(
-            model_selection=1)
+            model_selection=0)
+        deadline = time.time() + 20
         while True:
+            if time.time() > deadline:
+                print(f"[matte] gave up after {written} frames — the cut-out"
+                      " was holding the render", flush=True)
+                break
             got, frame = cap.read()
             if not got:
                 break
             if limit and written >= limit:
                 break
-            frame = cv2.resize(frame, (W, H))
+            frame = cv2.resize(frame, (work_w, work_h))
             res = seg.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             if res is None or res.segmentation_mask is None:
-                mask = np.zeros((H, W), dtype="float32")
+                mask = np.zeros((work_h, work_w), dtype="float32")
             else:
                 mask = _matte_refine(np.clip(res.segmentation_mask, 0.0, 1.0))
+            if mask.shape[0] != work_h or mask.shape[1] != work_w:
+                mask = cv2.resize(mask, (work_w, work_h))
             proc.stdin.write((mask * 255).astype("uint8").tobytes())
             written += 1
     except Exception as exc:
@@ -15607,6 +15646,13 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
         except Exception:
             pass
         proc.wait()
+    # A short matte laid over the full split makes the next encode wait for
+    # frames that will never arrive — the render sits on that piece.
+    if limit and written < max(1, limit - 2):
+        print(f"[matte] only {written}/{limit} frames — skipping the cut-out",
+              flush=True)
+        out.unlink(missing_ok=True)
+        return None
     if not written or not out.exists() or out.stat().st_size == 0:
         out.unlink(missing_ok=True)
         return None
