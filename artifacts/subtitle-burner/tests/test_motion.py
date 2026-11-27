@@ -1,5 +1,6 @@
 """Animations from a description: the scene format, its renderer and the route."""
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -682,7 +683,7 @@ def test_an_explicit_list_fills_the_shapes_slots(app_mod, staged_orbit, monkeypa
     """The ask: the logos take the places the square, triangle and circle
     were in. Three refs, three items, evenly spaced."""
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     info = app_mod._make_remotion_orbit(
         "head orbit", {"canvas": "9x16"}, 5.0,
         ["chase logo", "barclays logo", "hsbc logo"])
@@ -696,7 +697,7 @@ def test_the_list_length_is_the_count(app_mod, staged_orbit, monkeypatch):
     """Not three-no-matter-what: _remotion_stage_photos was never passed a
     number, so both call sites left want at its default."""
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     for refs in (["a", "b"], ["a", "b", "c", "d", "e"]):
         info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, list(refs))
         items = info["device"]["spec"]["props"]["items"]
@@ -716,7 +717,7 @@ def test_what_was_found_is_placed_and_the_rest_is_named(app_mod, tmp_path,
     monkeypatch.setattr(app_mod, "_find_asset_path", lambda a: pics[0])
     monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     info = app_mod._make_remotion_orbit(
         "head orbit", {}, 5.0, ["chase logo", "xyzzy logo", "qwop logo"])
     assert len(info["device"]["spec"]["props"]["items"]) == 1
@@ -729,7 +730,7 @@ def test_what_was_found_is_placed_and_the_rest_is_named(app_mod, tmp_path,
 
 def test_naming_exactly_one_thing_is_allowed(app_mod, staged_orbit, monkeypatch):
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["chase logo"])
     assert len(info["device"]["spec"]["props"]["items"]) == 1
 
@@ -754,7 +755,7 @@ def test_your_own_upload_reaches_the_ring(app_mod, tmp_path, monkeypatch):
                         lambda: pytest.fail("went looking for an id in stock"))
     monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, [real])
     items = info["device"]["spec"]["props"]["items"]
     assert not info["photo_misses"]
@@ -781,7 +782,7 @@ def test_a_brand_mark_is_never_invented(app_mod, tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "gemini_image",
                         lambda *a, **k: pytest.fail("invented a brand mark"))
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     info = app_mod._make_remotion_orbit(
         "head orbit", {}, 5.0, ["chase logo", "a bank that does not exist"])
     assert len(info["device"]["spec"]["props"]["items"]) == 1
@@ -798,7 +799,7 @@ def test_a_wide_logo_is_not_cropped_square(app_mod, staged_orbit, monkeypatch):
     lost its own sides. A transparent PNG then needs a plate or it vanishes
     into a dark frame."""
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+                        lambda comp, props, out, **_k: out.write_bytes(b"x" * 400))
     marks = app_mod._make_remotion_orbit(
         "head orbit with these bank logos", {}, 5.0, ["chase logo", "hsbc logo"])
     for it in marks["device"]["spec"]["props"]["items"]:
@@ -893,10 +894,207 @@ def test_an_ordinary_photo_orbit_is_byte_identical(app_mod, tmp_path, monkeypatc
     monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
     renders = []
     monkeypatch.setattr(app_mod, "_render_remotion_webm",
-                        lambda comp, props, out: (renders.append(props),
-                                                  out.write_bytes(b"x" * 400)))
+                        lambda comp, props, out, **_k: (renders.append(props),
+                                                      out.write_bytes(b"x" * 400)))
     a = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["bali", "rome", "oslo"])
     n["i"] = 0
     b = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["bali", "rome", "oslo"])
     assert a["asset_id"] == b["asset_id"], "the cache key moved"
     assert len(renders) == 1, "rendered the same ring twice"
+
+
+# --- moving items in the ring --------------------------------------------
+# A clip is cut down by ffmpeg BEFORE the browser sees it: trimmed or looped
+# to the ring's length, scaled to ~2.5x the 140px tile, silenced. The
+# component just draws it. That keeps the decode cheap and means looping
+# needs no per-frame logic.
+
+def _tiny_clip(path, seconds=1.0, color="red", size="64x64"):
+    import subprocess as sp
+    r = sp.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                "-i", f"color=c={color}:s={size}:d={seconds}:r=30",
+                "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-shortest", str(path)], capture_output=True)
+    return path if r.returncode == 0 and path.exists() else None
+
+
+@pytest.fixture
+def clip_assets(app_mod, tmp_path, monkeypatch):
+    """Two real one-second clips and a still, resolvable by name."""
+    if not FFMPEG:
+        pytest.skip("ffmpeg not on PATH")
+    files = {}
+    for name, col in (("alpha", "red"), ("beta", "blue")):
+        p = _tiny_clip(tmp_path / f"{name}.mp4", 1.0, col)
+        if p is None:
+            pytest.skip("could not build a test clip")
+        files[name] = p
+    files["still"] = _orbit_pics(tmp_path, 1)[0]
+    monkeypatch.setattr(app_mod, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path / "remo")
+    monkeypatch.setattr(app_mod, "_resolve_photo_source",
+                        lambda q: ((q, "") if q in files else (None, "no such thing")))
+    monkeypatch.setattr(app_mod, "_find_asset_path", lambda aid: files.get(aid))
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda c, pr, o, **_k: o.write_bytes(b"x" * 400))
+    return files
+
+
+def test_a_clip_becomes_a_moving_item_and_a_still_does_not(app_mod, clip_assets):
+    """The staging function used to stamp kind:"image" on everything, so an
+    mp4 reached <Img> and drew nothing -- an empty slot still taking up a
+    place in the ring, with no error anywhere."""
+    items, misses = app_mod._remotion_stage_photos(
+        ["alpha", "still", "beta"], want=3, floor=1, generate=False, seconds=2.0)
+    assert not misses
+    assert [it["kind"] for it in items] == ["video", "image", "video"]
+    assert [it["phase"] for it in items] == [0.0, 120.0, 240.0]
+
+
+def test_without_a_length_everything_is_still(app_mod, clip_assets):
+    """seconds=None is every caller but the ring (the screenshot-tour look),
+    and they must keep getting stills."""
+    items, _ = app_mod._remotion_stage_photos(
+        ["alpha", "beta"], want=2, floor=1, generate=False)
+    assert [it["kind"] for it in items] == ["image", "image"]
+
+
+def test_the_clip_is_cut_down_before_the_browser_sees_it(app_mod, clip_assets,
+                                                         tmp_path):
+    """The cost fix. One tile is 140px; decoding a full-size phone clip for
+    it is the whole problem. Also the loop: a 1s clip in a 4s ring has to
+    keep moving, not freeze on its last frame.
+
+    Deliberately a 1280x720 source -- a small one would satisfy the width
+    assertion with the scaling removed, and prove nothing.
+    """
+    big = _tiny_clip(tmp_path / "big.mp4", 1.0, "red", size="1280x720")
+    if big is None:
+        pytest.skip("could not build a test clip")
+    out = app_mod._remotion_prepare_clip(big, 4.0)
+    assert out is not None and out.exists()
+    assert out.stat().st_size < big.stat().st_size * 1.2
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip())
+    assert dur == pytest.approx(4.0, abs=0.3), "a 1s clip did not fill a 4s ring"
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_type,width,height", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True).stdout
+    assert "audio" not in probe, "the ring is a silent overlay"
+    w = int([l for l in probe.strip().splitlines() if l.startswith("video")][0].split(",")[1])
+    assert w <= app_mod.ORBIT_CLIP_PX, f"handed the browser a {w}px wide clip"
+    # Same request twice re-uses the prepared file rather than re-encoding.
+    again = app_mod._remotion_prepare_clip(big, 4.0)
+    assert again == out
+
+
+def test_a_long_clip_is_trimmed_to_the_ring(app_mod, tmp_path, monkeypatch):
+    if not FFMPEG:
+        pytest.skip("ffmpeg not on PATH")
+    monkeypatch.setattr(app_mod, "CACHE_DIR", tmp_path / "cache")
+    long_clip = _tiny_clip(tmp_path / "long.mp4", 8.0, "green")
+    if long_clip is None:
+        pytest.skip("could not build a test clip")
+    out = app_mod._remotion_prepare_clip(long_clip, 3.0)
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip())
+    assert dur == pytest.approx(3.0, abs=0.3), "an 8s clip ran past the ring"
+
+
+def test_only_so_many_moving_items_per_ring(app_mod, tmp_path, monkeypatch):
+    """One co-editor turn must not be able to queue a render that outruns
+    its own wall clock. Capped, and the cap is SAID -- not applied quietly."""
+    if not FFMPEG:
+        pytest.skip("ffmpeg not on PATH")
+    files = {}
+    for i in range(4):
+        p = _tiny_clip(tmp_path / f"c{i}.mp4", 0.5, "red")
+        if p is None:
+            pytest.skip("could not build a test clip")
+        files[f"c{i}"] = p
+    monkeypatch.setattr(app_mod, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path / "remo")
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", lambda q: (q, ""))
+    monkeypatch.setattr(app_mod, "_find_asset_path", lambda aid: files.get(aid))
+    items, misses = app_mod._remotion_stage_photos(
+        list(files), want=4, floor=1, generate=False, seconds=2.0, max_clips=2)
+    assert sum(1 for it in items if it["kind"] == "video") == 2
+    assert any("moving items per ring" in m for m in misses), "the cap was silent"
+
+
+def test_a_video_ring_gets_a_longer_render_budget(app_mod, clip_assets, monkeypatch):
+    """The two timeouts have to move together: a 240s subprocess kill under
+    a 180s frame budget means a slow render dies with no usable error."""
+    seen = {}
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda c, pr, o, **k: (seen.update(k, items=pr["items"]),
+                                               o.write_bytes(b"x" * 400)))
+    app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["alpha", "beta"])
+    assert seen["slow"] is True, "a ring of clips rendered on the stills budget"
+    seen.clear()
+    app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["still", "still2"])
+    assert not seen.get("slow"), "a ring of stills asked for the slow budget"
+
+
+def test_the_render_flags_follow_the_budget(app_mod, monkeypatch, tmp_path):
+    cmds = []
+
+    class _R:
+        returncode = 0
+        stderr = stdout = ""
+
+    def fake_run(cmd, **kw):
+        cmds.append((cmd, kw.get("timeout")))
+        pathlib_out = [c for c in cmd if str(c).endswith(".webm")][0]
+        __import__("pathlib").Path(pathlib_out).write_bytes(b"y" * 400)
+        return _R()
+
+    monkeypatch.setattr(app_mod, "_remotion_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(app_mod.shutil, "which", lambda n: "/usr/bin/pnpm")
+    monkeypatch.setattr(app_mod.subprocess, "run", fake_run)
+    app_mod._render_remotion_webm("OrbitCarousel", {"a": 1}, tmp_path / "s.webm")
+    app_mod._render_remotion_webm("OrbitCarousel", {"a": 2}, tmp_path / "v.webm",
+                                  slow=True)
+    (still_cmd, still_wall), (slow_cmd, slow_wall) = cmds
+    assert "--timeout=180000" in still_cmd and still_wall == 240
+    assert "--timeout=600000" in slow_cmd and slow_wall == 900
+    # The frame budget must never exceed the wall clock that kills it.
+    for cmd, wall in cmds:
+        frame_ms = int([c for c in cmd if c.startswith("--timeout=")][0].split("=")[1])
+        assert frame_ms / 1000 <= wall, "the subprocess dies before the frame budget"
+
+
+def test_clips_are_offered_separately_from_stills(app_mod, tmp_path, monkeypatch):
+    """Widening _co_editor_asset_choices would have leaked clips into
+    set_background, add_carousel and motion.py's scene brief, all of which
+    assume a still. The ring gets its own list."""
+    if not FFMPEG:
+        pytest.skip("ffmpeg not on PATH")
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "_asset_meta_path",
+                        lambda a: tmp_path / f"{a}.meta.json")
+    _orbit_pics(tmp_path, 1)[0].replace(tmp_path / "aaa.png")
+    if _tiny_clip(tmp_path / "bbb.mp4", 0.5) is None:
+        pytest.skip("could not build a test clip")
+    (tmp_path / "ccc.webm").write_bytes(b"x" * 64)
+    (tmp_path / "ccc.meta.json").write_text(
+        '{"filename": "Animation: orbit", "source": "device"}', encoding="utf-8")
+
+    stills = {a["asset_id"] for a in app_mod._co_editor_asset_choices()}
+    clips = {a["asset_id"] for a in app_mod._co_editor_clip_choices()}
+    assert "aaa" in stills and "bbb" not in stills, "a clip leaked into the stills"
+    assert "bbb" in clips and "aaa" not in clips
+    # Rings this app rendered itself are not the user's footage.
+    assert "ccc" not in clips, "offered one of our own animations back"
+    assert all(c.get("kind") for c in app_mod._co_editor_clip_choices())
+
+
+def test_the_model_is_told_clips_are_ring_only(app_mod):
+    prompt = app_mod._effects_lookbook_prompt()
+    assert "your_clips_for_the_ring" in prompt
+    assert "set_background" in prompt, "nothing stops a clip being used as a backdrop"

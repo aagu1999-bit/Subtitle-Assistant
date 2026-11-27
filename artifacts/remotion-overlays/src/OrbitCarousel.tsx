@@ -1,5 +1,13 @@
 import React from "react";
-import { AbsoluteFill, Img, interpolate, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
+import {
+  AbsoluteFill,
+  Img,
+  OffthreadVideo,
+  interpolate,
+  staticFile,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
 
 export type OrbitItem =
   | { id: string; phase: number; kind: "shape"; shape: "square" | "triangle" | "circle"; bg: string }
@@ -12,6 +20,14 @@ export type OrbitItem =
       // a logo, a wordmark -- has to be "contain" or it loses its own edges,
       // and then it needs a plate, because a transparent PNG on a dark frame
       // is an invisible item taking up a slot.
+      fit?: "cover" | "contain";
+      plate?: string;
+    }
+  | {
+      id: string;
+      phase: number;
+      kind: "video";
+      src: string;
       fit?: "cover" | "contain";
       plate?: string;
     };
@@ -34,7 +50,14 @@ export const DEFAULT_ORBIT_PROPS: OrbitProps = {
   ],
 };
 
-function steppedAngle(t: number, move: number, hold: number, by = 120) {
+// `by` is one slot, so each step lands every item exactly where the next
+// one was. It was hardcoded to 120 degrees, which is one slot only at three
+// items -- at six it is two slots (still landing on occupied positions, just
+// skipping one), and at two, four or five the ring drifted to positions
+// nothing had ever occupied, losing the deliberate snap. Counts other than
+// three only became askable recently, which is why this went unnoticed.
+// 360/3 is still 120, so every ring rendered before this is unchanged.
+function steppedAngle(t: number, move: number, hold: number, by: number) {
   const cycle = move + hold;
   const n = Math.floor(t / cycle);
   const into = t - n * cycle;
@@ -53,21 +76,31 @@ function srcOf(src: string) {
 
 function Item({ item, scale, opacity }: { item: OrbitItem; scale: number; opacity: number }) {
   const size = 140 * scale;
-  if (item.kind === "image") {
+  if (item.kind === "image" || item.kind === "video") {
     const fit = item.fit ?? "cover";
     const shadow = `0 ${12 * scale}px ${28 * scale}px rgba(0,0,0,.35)`;
-    const img = (
-      <Img
-        src={srcOf(item.src)}
-        style={{
-          width: fit === "contain" ? size * 0.78 : size,
-          height: fit === "contain" ? size * 0.78 : size,
-          objectFit: fit,
-          borderRadius: fit === "contain" ? 0 : 18,
-          opacity,
-          boxShadow: fit === "contain" ? undefined : shadow,
-        }}
-      />
+    const box: React.CSSProperties = {
+      width: fit === "contain" ? size * 0.78 : size,
+      height: fit === "contain" ? size * 0.78 : size,
+      objectFit: fit,
+      borderRadius: fit === "contain" ? 0 : 18,
+      opacity,
+      boxShadow: fit === "contain" ? undefined : shadow,
+    };
+    // OffthreadVideo, not a <video> tag or @remotion/media: it pulls frames
+    // with ffmpeg OUTSIDE the browser. The render already runs at
+    // concurrency 1 on software GL under a Replit memory cap, and the one
+    // other headless-Chrome job in this repo carries a comment about Replit
+    // killing the tab over /dev/shm. Keeping the decode out of the tab is
+    // the difference between this working there and not.
+    //
+    // `muted` is belt and braces -- the file written into public/ has no
+    // audio track at all -- but an unmuted item would put an audio stream
+    // into what the timeline consumes as a silent alpha overlay.
+    const img = item.kind === "video" ? (
+      <OffthreadVideo src={srcOf(item.src)} muted style={box} />
+    ) : (
+      <Img src={srcOf(item.src)} style={box} />
     );
     if (!item.plate) return img;
     return (
@@ -106,11 +139,12 @@ export const OrbitCarousel: React.FC<OrbitProps> = (props) => {
   const move = props.move ?? DEFAULT_ORBIT_PROPS.move;
   const items = (props.items && props.items.length ? props.items : DEFAULT_ORBIT_PROPS.items);
   const t = frame / fps;
+  const step = steppedAngle(t, move, hold, 360 / Math.max(1, items.length));
   const cx = width / 2, cy = height * 0.52;
   const rx = width * 0.32, ry = height * 0.18;
 
   const placed = items.map((it) => {
-    const a = ((it.phase + steppedAngle(t, move, hold)) * Math.PI) / 180;
+    const a = ((it.phase + step) * Math.PI) / 180;
     const front = (Math.cos(a) + 1) / 2;
     const depth = 0.45;
     return {

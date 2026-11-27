@@ -20546,7 +20546,11 @@ def _effects_lookbook_prompt() -> str:
         "or a subject to search for. The LIST LENGTH is the count: three "
         "entries for \"three logos\". Pass their own ids when they say \"my\" / "
         "\"these\" / name a file; a real brand mark is never generated, so an "
-        "entry that cannot be found is reported, not invented."
+        "entry that cannot be found is reported, not invented. "
+        "An id from your_clips_for_the_ring puts a moving clip or GIF in a "
+        "slot; it is cut to the ring's length and silenced. At most 3 moving "
+        "items. Those ids work in head orbit ONLY -- never in set_background "
+        "or add_carousel, which need a still."
     )
 
 
@@ -20840,6 +20844,90 @@ def _remotion_copy_public(src: Path) -> str:
     return name
 
 
+# One orbiting tile is 140px at the front and less at the back, inside a
+# 1080-wide composition. Decoding a 4K phone clip for that is the whole
+# cost problem, so the clip is cut down to size BEFORE the browser ever
+# sees it -- in ffmpeg, where this app is already strong, rather than with
+# React props the renderer has to honour frame by frame.
+ORBIT_CLIP_PX = 360          # ~2.5x the tile, so it still looks sharp
+ORBIT_CLIP_MAX_S = 12.0      # the ring's own ceiling
+
+
+def _remotion_prepare_clip(src: Path, seconds: float) -> Path | None:
+    """A small, silent, exactly-as-long-as-the-ring copy of a clip.
+
+    Trimmed, looped to fill if it is short, scaled down and stripped of
+    audio. Returns None when the source has no video stream to use.
+
+    Doing it here means the browser decodes a few hundred KB instead of a
+    few hundred MB, the loop needs no component logic, and the result is
+    content-addressed so an unchanged request re-uses it.
+    """
+    seconds = max(0.3, min(ORBIT_CLIP_MAX_S, float(seconds)))
+    try:
+        st = src.stat()
+    except OSError:
+        return None
+    key = hashlib.md5(
+        f"{src}|{st.st_mtime_ns}|{st.st_size}|{seconds:.2f}|{ORBIT_CLIP_PX}".encode()
+    ).hexdigest()[:16]
+    out = CACHE_DIR / f"orbit_clip_{key}.mp4"
+    if out.exists() and out.stat().st_size > 200:
+        return out
+    tmp = CACHE_DIR / f".orbit_clip_{key}.{os.getpid()}.part.mp4"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # A 2s clip fills a 5s ring instead of freezing on its last frame for
+    # three seconds. The loop count is COUNTED, never -1: an unbounded
+    # input plus any failure of `-t` to apply writes until the disk is
+    # full, and nothing downstream would notice. Found exactly that way --
+    # a test that deleted `-t` to prove it left an ffmpeg running that
+    # reached 19MB before it was spotted.
+    src_dur = float(_media_duration(src) or 0.0)
+    if src_dur <= 0.05:
+        loops = 0
+    else:
+        loops = max(0, min(600, math.ceil(seconds / src_dur) - 1))
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-stream_loop", str(loops), "-i", str(src),
+        "-t", f"{seconds:.3f}",
+        "-an",
+        # force_divisible_by=2 or libx264 refuses the odd side: 1280x720
+        # scales to 360x203 and the encode dies, which is most real
+        # footage. The 64px test clips never hit it.
+        "-vf", (f"scale={ORBIT_CLIP_PX}:{ORBIT_CLIP_PX}:"
+                f"force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2,"
+                f"setsar=1,fps=30"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "26",
+        "-preset", "veryfast", "-movflags", "+faststart",
+        str(tmp),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (subprocess.SubprocessError, OSError) as e:
+        ai_logger.info(f"[remotion] clip prep failed for {src.name}: {e}")
+        _safe_unlink(tmp)
+        return None
+    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 200:
+        ai_logger.info(
+            f"[remotion] clip prep failed for {src.name}: "
+            f"{(r.stderr or '')[-200:]}")
+        _safe_unlink(tmp)
+        return None
+    # Into place only once it is whole. A run killed mid-encode used to
+    # leave a truncated file under the real name, and the `exists() and
+    # size > 200` check above would hand that same broken file to the
+    # browser for ever after.
+    try:
+        os.replace(tmp, out)
+    except OSError as e:
+        ai_logger.info(f"[remotion] clip prep could not be stored: {e}")
+        _safe_unlink(tmp)
+        return None
+    return out
+
+
 def _remotion_generate_photo(query: str, slot: int) -> Path | None:
     if not _gemini_image_ready():
         return None
@@ -20856,7 +20944,9 @@ def _remotion_generate_photo(query: str, slot: int) -> Path | None:
 def _remotion_stage_photos(queries: list[str], want: int = 3, *,
                            floor: int = 2, generate: bool = True,
                            fit: str | None = None,
-                           plate: str | None = None) -> tuple[list[dict], list[str]]:
+                           plate: str | None = None,
+                           seconds: float | None = None,
+                           max_clips: int = 3) -> tuple[list[dict], list[str]]:
     """(items, misses) for the ring. Never returns shapes.
 
     `floor` is how few is still a result. Two, for a subject we went looking
@@ -20867,6 +20957,10 @@ def _remotion_stage_photos(queries: list[str], want: int = 3, *,
     See _ORBIT_MARK_WORDS: a generated brand mark is a confident fake, and
     orbiting three of them is worse than orbiting two real ones and saying
     the third was not found.
+
+    `seconds` turns on moving items: a video or a GIF is cut down to that
+    length by _remotion_prepare_clip and becomes a "video" item. Without it
+    every item is a still, which is what every caller but the ring wants.
     """
     items: list[dict] = []
     misses: list[str] = []
@@ -20874,11 +20968,30 @@ def _remotion_stage_photos(queries: list[str], want: int = 3, *,
     want = max(1, min(6, int(want)))
     floor = max(1, min(floor, want))
 
+    clips = {"n": 0}
+
     def add(src: Path | None) -> bool:
         if src is None or not Path(src).exists() or str(src) in seen:
             return False
-        seen.add(str(src))
-        it = {"id": f"p{len(items)}", "phase": 0, "kind": "image",
+        src = Path(src)
+        kind = "image"
+        # A GIF goes down the video path too: Remotion renders frame by
+        # frame from a PNG screenshot, so an animated GIF in an <Img> is a
+        # still of its first frame. @remotion/gif is not installed, and one
+        # ffmpeg call is cheaper than a new dependency.
+        if seconds and _asset_kind(src.suffix) in ("video", "gif"):
+            if clips["n"] >= max_clips:
+                misses.append(f"{src.name} (only {max_clips} moving items per ring)")
+                return False
+            prepared = _remotion_prepare_clip(src, seconds)
+            if prepared is None:
+                return False
+            seen.add(str(src))
+            clips["n"] += 1
+            src, kind = prepared, "video"
+        else:
+            seen.add(str(src))
+        it = {"id": f"p{len(items)}", "phase": 0, "kind": kind,
               "src": _remotion_copy_public(Path(src))}
         # contain, never cover, for a designed mark: the ring draws into a
         # square, and a wide logo cropped to fill it loses its own edges.
@@ -20996,7 +21109,8 @@ def _make_hyperframes_look(rec: dict, description: str, timeline: dict | None,
                        "spec": {"props": props, "file": rec["file"]}}}
 
 
-def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None:
+def _render_remotion_webm(composition: str, props: dict, out_path: Path,
+                          *, slow: bool = False) -> None:
     if not _remotion_ready():
         raise RuntimeError("Remotion is not installed in this workspace")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -21011,9 +21125,14 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path) -> None
         "src/index.ts", composition, str(out_path),
         f"--props={props_file}",
         "--codec=vp8", "--image-format=png", "--concurrency=1", "--gl=swangle",
-        "--timeout=180000",
+        # Remotion's per-frame delayRender ceiling, then our own wall clock.
+        # These two have to move together: a 240s subprocess kill with a
+        # 180s frame budget means a slow render dies with no usable error.
+        f"--timeout={600000 if slow else 180000}",
     ]
-    r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True, timeout=240)
+    wall = 900 if slow else 240
+    r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True,
+                       timeout=wall)
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
         raw = (r.stderr or r.stdout or "remotion render failed")
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith("at ")]
@@ -21075,13 +21194,13 @@ def _make_remotion_orbit(description: str, timeline: dict | None,
     if refs:
         items, misses = _remotion_stage_photos(
             refs, want=len(refs), floor=1, generate=False,
-            fit=fit, plate=plate)
+            fit=fit, plate=plate, seconds=dur)
     else:
         queries, want = _orbit_photo_queries(description)
         if queries:
             items, misses = _remotion_stage_photos(
                 queries, want=want, generate=not marks,
-                fit=fit, plate=plate)
+                fit=fit, plate=plate, seconds=dur)
         else:
             items = [
                 {"id": "sq", "phase": 0, "kind": "shape", "shape": "square", "bg": "#FFD60A"},
@@ -21092,7 +21211,12 @@ def _make_remotion_orbit(description: str, timeline: dict | None,
     key = hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_orbit_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
-        _render_remotion_webm("OrbitCarousel", props, src)
+        # Decoding even a trimmed clip per frame costs more than drawing a
+        # PNG, and the render is pinned to one frame at a time on software
+        # GL. The default ceiling is sized for stills.
+        moving = any(it.get("kind") == "video" for it in items)
+        _render_remotion_webm("OrbitCarousel", props, src,
+                              slow=moving)
     asset_id = hashlib.md5(src.name.encode()).hexdigest()
     dest = ASSET_DIR / f"{asset_id}.webm"
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
@@ -24981,6 +25105,48 @@ def _co_editor_asset_choices(limit: int = 12) -> list:
     return out
 
 
+def _co_editor_clip_choices(limit: int = 8) -> list:
+    """Recent uploaded CLIPS the model may put in the ring, newest first.
+
+    Deliberately a separate list rather than widening
+    _co_editor_asset_choices. That one feeds three consumers -- the
+    co-editor prompt, motion.py's scene brief and the near-miss repair in
+    _resolve_photo_source -- and all three assume a still. Putting a clip
+    in there would offer someone a thirty-second video as a background.
+
+    GIFs belong here, not with the stills: the ring animates them, and an
+    <Img> cannot.
+    """
+    out = []
+    want = ASSET_EXT_VIDEO | ASSET_EXT_GIF
+    try:
+        files = [p for p in ASSET_DIR.glob("*")
+                 if p.is_file() and not p.name.endswith(".meta.json")
+                 and p.suffix.lower().lstrip(".") in want]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[:limit]:
+            meta = {}
+            try:
+                mp = _asset_meta_path(p.stem)
+                if mp.exists():
+                    meta = json.loads(mp.read_text(encoding="utf-8")) or {}
+            except Exception:
+                meta = {}
+            # Animations this app rendered itself are not someone's footage;
+            # offering them back as ring items is a loop nobody asked for.
+            if str(meta.get("source") or "") == "device":
+                continue
+            out.append({
+                "asset_id": p.stem,
+                "name": str(meta.get("filename") or meta.get("keyword") or p.name),
+                "kind": _asset_kind(p.suffix) or "video",
+                "seconds": round(float(meta.get("duration") or 0.0), 1) or None,
+            })
+    except OSError:
+        return []
+    return out
+
+
 def _save_generated_asset(path: Path, label: str) -> str:
     """Move a freshly made picture into the asset library and return its id.
 
@@ -25930,6 +26096,10 @@ def co_editor():
         # impossible, because this list was never shown and the ids are 32-hex
         # strings nobody types. Naming them here is what makes that advice true.
         "your_photos": _co_editor_asset_choices(),
+        # Separate key, because these are only good for the ring. The
+        # prompt line below says so; set_background and add_carousel still
+        # see stills only.
+        "your_clips_for_the_ring": _co_editor_clip_choices(),
         "stock_photos_available": _broll_any_photo_provider(),
     }
 
