@@ -15537,7 +15537,8 @@ def _matte_work_size(W: int, H: int) -> tuple[int, int]:
 
 def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                     dur: float | None = None,
-                    start: float = 0.0) -> Path | None:
+                    start: float = 0.0,
+                    spans: list | None = None) -> Path | None:
     """A greyscale matte video for the person in *src*. Cached.
 
     White where the subject is, black where the background is, which is what
@@ -15558,8 +15559,10 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
         return None
     try:
         st = Path(src).stat()
+        span_key = ";".join(f"{a:.2f}-{b:.2f}" for a, b in (spans or []))
         key = hashlib.md5(
-            f"{src}|{st.st_mtime_ns}|{st.st_size}|{W}x{H}|{fps}|{start}|{dur}".encode()
+            f"{src}|{st.st_mtime_ns}|{st.st_size}|{W}x{H}|{fps}|{start}|{dur}"
+            f"|{span_key}".encode()
         ).hexdigest()[:16]
     except OSError:
         return None
@@ -15604,6 +15607,26 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
             cap.release()
             return None
     limit = int(dur * fps) if dur and dur > 0 else 0
+    # Only some frames need the model. A behind-overlay that is on screen for
+    # two seconds of a ninety-second edit needed sixty frames cut out, and
+    # this was running the segmenter on all 2,670 -- then hitting the
+    # twenty-second deadline, writing short, and being thrown away by the
+    # `written < limit - 2` guard below. The effect did not look wrong on a
+    # long video; it never rendered at all.
+    #
+    # Frames outside a span are opaque white: alphamerge then yields the
+    # original frame, and laying that back over itself is the no-op the
+    # overlay graph already relies on. Same full-length matte, same
+    # alignment, a fraction of the work.
+    want: list[tuple[float, float]] = []
+    for sp in (spans or []):
+        try:
+            a, b = float(sp[0]), float(sp[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b > a:
+            want.append((a, b))
+    want.sort()
     # The mask is scaled back up to the frame the crop expects. Running the
     # model on a 4K phone frame is what made one 2s split hold the whole render.
     work_w, work_h = _matte_work_size(W, H)
@@ -15620,13 +15643,18 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
         _render_procs[span[0]] = proc
     seg = None
     written = 0
+    skipped = 0
+    opaque = None
     try:
         # Inside the try: constructing this is exactly where a mediapipe that
         # dropped the API blows up, and a matte that cannot be made must cost
         # the background, never the whole render.
         seg = mp.solutions.selfie_segmentation.SelfieSegmentation(
             model_selection=0)
-        deadline = time.time() + 20
+        # The budget covers the segmenter, but every frame still has to be
+        # walked past to stay in step. Give the walk its own small allowance
+        # so a long clip with a short span is not killed by its own length.
+        deadline = time.time() + 20 + (min(limit, 5400) / 240.0 if want else 0)
         while True:
             if time.time() > deadline:
                 print(f"[matte] gave up after {written} frames — the cut-out"
@@ -15634,11 +15662,21 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                 break
             # cap.read() on a phone file can block forever. A read that does
             # not return is the cut-out failing, not a reason to wait.
+            # Is this frame inside a span that actually needs cutting out?
+            # Outside one, the frame is walked past with grab() -- which
+            # decodes without handing a numpy array back -- and an opaque
+            # block is written instead of running the segmenter.
+            f_t = float(start) + (written / float(fps or 30))
+            needed = (not want) or any(a - 0.05 <= f_t <= b + 0.05
+                                       for a, b in want)
             holder: dict = {}
 
-            def _grab(holder=holder):
+            def _grab(holder=holder, needed=needed):
                 try:
-                    holder["pair"] = cap.read()
+                    if needed:
+                        holder["pair"] = cap.read()
+                    else:
+                        holder["pair"] = (bool(cap.grab()), None)
                 except Exception as exc:
                     holder["err"] = exc
 
@@ -15656,6 +15694,14 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                 break
             if limit and written >= limit:
                 break
+            if not needed:
+                # Opaque: alphamerge gives back the untouched frame here.
+                if opaque is None:
+                    opaque = np.full((work_h, work_w), 255, dtype="uint8").tobytes()
+                proc.stdin.write(opaque)
+                written += 1
+                skipped += 1
+                continue
             frame = cv2.resize(frame, (work_w, work_h))
             res = seg.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             if res is None or res.segmentation_mask is None:
@@ -15687,7 +15733,12 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
     if not written or not out.exists() or out.stat().st_size == 0:
         out.unlink(missing_ok=True)
         return None
-    print(f"[matte] {written} frames -> {out.name}", flush=True)
+    if skipped:
+        print(f"[matte] {written} frames -> {out.name} "
+              f"({written - skipped} cut out, {skipped} left opaque)",
+              flush=True)
+    else:
+        print(f"[matte] {written} frames -> {out.name}", flush=True)
     return out
 
 
@@ -16646,7 +16697,23 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         fg_label = None
 
         if behind:
-            matte = _tl_matte_video(base, W, H, fps, base_dur or None)
+            # Only the stretches a behind-overlay actually covers need the
+            # person cut out. Matting the whole video meant a 90s edit asked
+            # for 2,670 segmented frames, blew the deadline, wrote short and
+            # was discarded -- so "behind me" rendered on nothing longer
+            # than a few seconds.
+            spans = []
+            for b_ov, _bp, _bk in behind:
+                try:
+                    b_start = max(0.0, float(b_ov.get("start", 0)))
+                    b_in = max(0.0, float(b_ov.get("in", 0)))
+                    b_out = float(b_ov.get("out", b_in + 4))
+                except (TypeError, ValueError):
+                    continue
+                b_len = max(0.2, min(60.0, b_out - b_in))
+                spans.append((b_start, b_start + b_len))
+            matte = _tl_matte_video(base, W, H, fps, base_dur or None,
+                                    spans=spans or None)
             if not matte:
                 # No cut-out means no "behind": drawing those pictures over
                 # the top instead would be worse than leaving them out, so
@@ -16844,7 +16911,18 @@ def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
             st = max(0.0, length - fade_out)
             prep += f",fade=t=out:st={st:.3f}:d={fade_out:.3f}:alpha=1"
     # Delay the overlay so it lands at `start` on the timeline.
-    prep += f",tpad=start_duration={start:.3f}"
+    #
+    # setpts relabels timestamps; tpad GENERATES start*fps real frames of
+    # padding at the overlay's size, and `enable=` below then throws every
+    # one of them away. The timing was being done twice and only one of the
+    # two cost anything. Measured on the real pass -- 14 overlays with Ken
+    # Burns over a 90s base -- at the bottom of this file's bench notes.
+    #
+    # This has to stay AFTER the fades: they are written against the clip's
+    # own 0..length clock, so shifting first would move the fade out of the
+    # window. eof_action/repeatlast on the overlay below cover the fact that
+    # the stream now has no frames before `start`.
+    prep += f",setpts=PTS+{start:.3f}/TB"
     prep += f"[ov{n}]"
     filt.append(prep)
     # `length` is this clip's time on screen, which is what a slide-out is
@@ -16855,6 +16933,10 @@ def _tl_composite_overlay_step(ov: dict, path: Path, kind: str, n: int,
         duration=length, carousel=bool(ov.get("carousel_id")))
     filt.append(
         f"{cur}[ov{n}]overlay=x='{x_expr}':y='{y_expr}':"
+        # The overlay stream starts at `start` now rather than at 0, so say
+        # what to do when it has not begun and after it ends instead of
+        # leaning on framesync's defaults.
+        f"eof_action=pass:repeatlast=0:"
         f"enable='between(t,{start:.3f},{start + length:.3f})'[bg{n}]"
     )
     cur = f"[bg{n}]"
@@ -17911,8 +17993,15 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
     def _stage(label: str, pct: int) -> None:
         if review:
             label = "review · " + label
-        # The heartbeat would otherwise keep writing the last interview
-        # piece's name over every later stage.
+        # Close the books on the stage that just ended. Three fixes in a row
+        # have gone at "why is this render slow" by adding more status text,
+        # and none of them recorded how long anything took -- so a render
+        # that sat for 52 minutes still could not say which pass ate it.
+        prev = clock.get("label")
+        if prev and prev != "starting":
+            spent = time.time() - clock.get("t0", time.time())
+            stage_times.append((prev, round(spent, 1)))
+            print(f"[timeline] {prev} took {spent:.1f}s", flush=True)
         clock["label"] = label
         clock["t0"] = time.time()
         clock["tick"] = clock["t0"]
@@ -17927,12 +18016,18 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
     # counts seconds, and a piece that produces nothing is killed.
     clock = {"label": "starting", "t0": time.time(), "tick": time.time(),
              "stop": False, "armed": False}
+    stage_times: list[tuple[str, float]] = []
+    render_t0 = time.time()
     jobs[job_id]["_piece_clock"] = clock
 
     def _beat():
         while not clock["stop"]:
             time.sleep(2)
             if clock["stop"] or job_id not in jobs:
+                return
+            # Belt and braces: a tick already past the stop check must not
+            # reopen a job that has finished.
+            if str(jobs[job_id].get("status") or "") in ("done", "error"):
                 return
             now = time.time()
             jobs[job_id]["render_beat"] = now
@@ -18028,6 +18123,12 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             jobs[job_id]["status"] = label
             jobs[job_id]["progress"] = lo
             jobs[job_id]["render_beat"] = time.time()
+            prev_lbl = clock.get("label")
+            if prev_lbl and prev_lbl != "starting":
+                spent = time.time() - clock.get("t0", time.time())
+                stage_times.append((prev_lbl, round(spent, 1)))
+                if spent >= 5:
+                    print(f"[timeline] {prev_lbl} took {spent:.1f}s", flush=True)
             clock["label"] = label
             clock["t0"] = time.time()
             clock["tick"] = clock["t0"]
@@ -18406,6 +18507,12 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         _assert_mp4_has_video(output_path, "Timeline Render")
         output_path.touch()
 
+        # The heartbeat writes status every 2s until it is told to stop,
+        # and it was told in `finally` -- AFTER this line. A tick landing
+        # in that window put a stage name and a climbing second count back
+        # over "done", so a finished render looked parked forever, which
+        # is indistinguishable from the hang it exists to report.
+        clock["stop"] = True
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["output"] = output_path.name
@@ -18416,12 +18523,31 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             _run_job_qa(job_id, output_path, W=W, H=H, fps=fps, duration=_total_dur,
                         ass_text=qa_ass, overlays=tracks["overlay"])
     except Exception as e:
+        clock["stop"] = True
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
     finally:
         clock["stop"] = True
+        last = clock.get("label")
+        if last and last != "starting":
+            stage_times.append((last, round(time.time() - clock.get("t0", time.time()), 1)))
+        total = time.time() - render_t0
+        if stage_times:
+            worst = sorted(stage_times, key=lambda x: -x[1])[:5]
+            print(f"[timeline] render took {total:.1f}s — slowest: "
+                  + ", ".join(f"{n} {t:.0f}s" for n, t in worst), flush=True)
+            if job_id in jobs:
+                jobs[job_id]["stage_times"] = stage_times
+                jobs[job_id]["render_seconds"] = round(total, 1)
+                jobs[job_id]["slowest_stages"] = [
+                    {"stage": n, "seconds": t} for n, t in worst
+                ]
+                try:
+                    _db_save_job(job_id)
+                except Exception:
+                    pass
         jobs.get(job_id, {}).pop("_piece_clock", None)
         _tl_enc_local.args = None
         _tl_progress_local.span = None
