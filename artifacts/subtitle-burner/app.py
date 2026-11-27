@@ -5151,6 +5151,14 @@ def _run_ffmpeg_encode(
                         last_pct = pct
                         jobs[job_id]["progress"] = pct
                         jobs[job_id]["render_beat"] = time.time()
+                        # The heartbeat kills a piece that never produces a
+                        # frame. A moving encode must keep this fresh.
+                        try:
+                            clock_tick = jobs[job_id].get("_piece_clock")
+                            if isinstance(clock_tick, dict):
+                                clock_tick["tick"] = time.time()
+                        except Exception:
+                            pass
                         note = getattr(_tl_progress_local, "note", None)
                         if note and duration_hint:
                             jobs[job_id]["status"] = (
@@ -15606,6 +15614,9 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
          "-pix_fmt", "gray", str(out)],
         stdin=subprocess.PIPE)
+    span = getattr(_tl_progress_local, "span", None)
+    if span:
+        _render_procs[span[0]] = proc
     seg = None
     written = 0
     try:
@@ -15620,7 +15631,26 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                 print(f"[matte] gave up after {written} frames — the cut-out"
                       " was holding the render", flush=True)
                 break
-            got, frame = cap.read()
+            # cap.read() on a phone file can block forever. A read that does
+            # not return is the cut-out failing, not a reason to wait.
+            holder: dict = {}
+
+            def _grab(holder=holder):
+                try:
+                    holder["pair"] = cap.read()
+                except Exception as exc:
+                    holder["err"] = exc
+
+            reader = threading.Thread(target=_grab, daemon=True)
+            reader.start()
+            reader.join(8)
+            if reader.is_alive():
+                print("[matte] frame read did not return — skipping the cut-out",
+                      flush=True)
+                break
+            if holder.get("err") or "pair" not in holder:
+                break
+            got, frame = holder["pair"]
             if not got:
                 break
             if limit and written >= limit:
@@ -17884,6 +17914,30 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         jobs[job_id]["progress"] = pct
         _db_save_job(job_id)
 
+    # The piece encode can sit inside ffmpeg or the cut-out and never touch
+    # the percent. This clock is a different thread, so the status still
+    # counts seconds, and a piece that produces nothing is killed.
+    clock = {"label": "starting", "t0": time.time(), "tick": time.time(), "stop": False}
+    jobs[job_id]["_piece_clock"] = clock
+
+    def _beat():
+        while not clock["stop"]:
+            time.sleep(2)
+            if clock["stop"] or job_id not in jobs:
+                return
+            now = time.time()
+            elapsed = int(now - clock["t0"])
+            jobs[job_id]["render_beat"] = now
+            jobs[job_id]["status"] = f"{clock['label']} · {elapsed}s"
+            if now - clock["tick"] > 45:
+                print(f"[timeline] piece produced nothing for 45s ({clock['label']})",
+                      flush=True)
+                _kill_render_proc(job_id)
+                clock["tick"] = now
+
+    heartbeat = threading.Thread(target=_beat, daemon=True)
+    heartbeat.start()
+
     try:
         tl = _normalize_timeline(timeline)
         W, H = TIMELINE_CANVASES[tl["canvas"]]
@@ -17950,29 +18004,51 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             jobs[job_id]["status"] = label
             jobs[job_id]["progress"] = lo
             jobs[job_id]["render_beat"] = time.time()
+            clock["label"] = label
+            clock["t0"] = time.time()
+            clock["tick"] = clock["t0"]
             _db_save_job(job_id)
             _tl_progress_local.span = (job_id, lo, max(lo + 1, hi), piece_s, label)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
             sub_dur = spec["sub_ke"] - spec["sub_ks"]
-            if spec["kind"] == "speakers":
-                dur = _tl_split_speakers_segment(
-                    spec["src"], spec["sub_ks"], sub_dur, spec["boxes"], spec["layout"],
-                    W, H, fps, seg_path, color=spec["color"],
-                    panel_bgs=spec["panels"], ratio=spec["ratio"], crop_opts=spec["crops"])
-                cache_stats["split"] += 1
-            elif spec["kind"] == "split":
-                dur = _tl_split_segment(spec["src"], spec["sub_ks"], spec["split_src"],
-                                        spec["split_in"], sub_dur, spec["layout"],
-                                        W, H, fps, seg_path, color=spec["color"],
-                                        placement=spec["placement"],
-                                        panel_bgs=spec["panels"], ratio=spec["ratio"])
-                cache_stats["split"] += 1
-            else:
-                dur = _tl_normalize_segment(spec["src"], spec["sub_ks"], spec["sub_ke"],
-                                            W, H, fps, fit, bg, seg_path,
-                                            ken=spec["ken"], color=spec["color"],
-                                            punch=spec["punch"], speed=spec["speed"],
-                                            smooth=spec["smooth"], stats=cache_stats)
+            def _plain_piece():
+                return _tl_normalize_segment(
+                    spec["src"], spec["sub_ks"], spec["sub_ke"],
+                    W, H, fps, fit, bg, seg_path,
+                    ken=None, color=spec["color"], punch=None,
+                    speed=spec["speed"], smooth=False, stats=cache_stats)
+
+            try:
+                if spec["kind"] == "speakers":
+                    dur = _tl_split_speakers_segment(
+                        spec["src"], spec["sub_ks"], sub_dur, spec["boxes"], spec["layout"],
+                        W, H, fps, seg_path, color=spec["color"],
+                        panel_bgs=spec["panels"], ratio=spec["ratio"], crop_opts=spec["crops"])
+                    cache_stats["split"] += 1
+                elif spec["kind"] == "split":
+                    dur = _tl_split_segment(spec["src"], spec["sub_ks"], spec["split_src"],
+                                            spec["split_in"], sub_dur, spec["layout"],
+                                            W, H, fps, seg_path, color=spec["color"],
+                                            placement=spec["placement"],
+                                            panel_bgs=spec["panels"], ratio=spec["ratio"])
+                    cache_stats["split"] += 1
+                else:
+                    dur = _tl_normalize_segment(spec["src"], spec["sub_ks"], spec["sub_ke"],
+                                                W, H, fps, fit, bg, seg_path,
+                                                ken=spec["ken"], color=spec["color"],
+                                                punch=spec["punch"], speed=spec["speed"],
+                                                smooth=spec["smooth"], stats=cache_stats)
+            except Exception as piece_err:
+                if spec["kind"] not in ("speakers", "split"):
+                    raise
+                # The split, or the photo behind one half, did not finish.
+                # Keep the interview frame for this window and move on.
+                print(f"[timeline] split piece skipped ({piece_err})", flush=True)
+                clock["label"] = label + " · split skipped, keeping the shot"
+                clock["tick"] = time.time()
+                if seg_path.exists():
+                    _safe_unlink(seg_path)
+                dur = _plain_piece()
             time_map.add(spec["t0"], spec["t1"], spec["speed"])
             segments.append((seg_path, dur))
             seg_meta.append(spec["meta"])
@@ -18313,6 +18389,8 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         jobs[job_id]["completed_at"] = time.time()
         _db_save_job(job_id)
     finally:
+        clock["stop"] = True
+        jobs.get(job_id, {}).pop("_piece_clock", None)
         _tl_enc_local.args = None
         _tl_progress_local.span = None
         _tl_progress_local.note = None
