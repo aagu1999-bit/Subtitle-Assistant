@@ -5157,6 +5157,7 @@ def _run_ffmpeg_encode(
                             clock_tick = jobs[job_id].get("_piece_clock")
                             if isinstance(clock_tick, dict):
                                 clock_tick["tick"] = time.time()
+                                clock_tick["video_s"] = ms / 1000.0
                         except Exception:
                             pass
                         note = getattr(_tl_progress_local, "note", None)
@@ -17915,6 +17916,7 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         clock["label"] = label
         clock["t0"] = time.time()
         clock["tick"] = clock["t0"]
+        clock["video_s"] = None
         clock["armed"] = False
         jobs[job_id]["status"] = label
         jobs[job_id]["progress"] = pct
@@ -17933,9 +17935,24 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             if clock["stop"] or job_id not in jobs:
                 return
             now = time.time()
-            elapsed = int(now - clock["t0"])
             jobs[job_id]["render_beat"] = now
-            jobs[job_id]["status"] = f"{clock['label']} · {elapsed}s"
+            quiet = now - clock["tick"]
+            drawn = clock.get("video_s")
+            # The bare seconds only mean this loop is awake. A frame clock
+            # means the video is actually being written. If that clock stops,
+            # say so instead of looking healthy.
+            if drawn is not None and quiet < 20:
+                jobs[job_id]["status"] = (
+                    f"{clock['label']} · {drawn:.0f}s of video drawn"
+                )
+            elif quiet >= 20:
+                jobs[job_id]["status"] = (
+                    f"{clock['label']} · no new frame for {int(quiet)}s"
+                )
+            else:
+                jobs[job_id]["status"] = (
+                    f"{clock['label']} · waiting {int(now - clock['t0'])}s"
+                )
             if clock.get("armed") and now - clock["tick"] > 45:
                 print(f"[timeline] piece produced nothing for 45s ({clock['label']})",
                       flush=True)
@@ -18227,10 +18244,17 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
 
         # ---- Pass 3: overlays / B-roll / PiP ----
         if tracks["overlay"]:
-            _stage("compositing overlays", 70)
+            _stage("drawing overlays", 70)
             comp = UPLOAD_DIR / f"{job_id}_tlovl.mp4"
             work.append(comp)
-            _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
+            ov_dur = float(_total_dur or 0) or None
+            _tl_progress_local.span = (job_id, 70, 84, ov_dur, "drawing overlays")
+            clock["label"] = "drawing overlays"
+            clock["armed"] = False
+            try:
+                _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
+            finally:
+                _tl_progress_local.span = None
             base = comp
 
         # ---- Pass 3b: auto whoosh/click SFX synced to overlay / effect starts ----
@@ -18336,7 +18360,7 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             ass_path = UPLOAD_DIR / f"{job_id}_tltext.ass"
             ass_path.write_text(ass_text, encoding="utf-8")
             work.append(ass_path)
-            burn_subtitles(base, ass_path, output_path)
+            burn_subtitles(base, ass_path, output_path, job_id=job_id)
             _assert_mp4_has_video(output_path, "Caption burn")
         else:
             # Nothing to burn — just finalize (stream copy is enough).
