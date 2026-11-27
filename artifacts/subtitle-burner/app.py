@@ -15483,6 +15483,10 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
 # render_timeline_job so the finished job can say so instead of the layer
 # just being absent.
 _tl_background_skipped: list = []
+# Same idea for the overlay pass. It hangs rather than fails, so when the
+# watchdog cuts it short the export still finishes and the job says which
+# layer was lost and why.
+_tl_overlay_skipped: list = []
 
 MATTE_DIR = CACHE_DIR / "mattes"
 
@@ -15533,6 +15537,29 @@ def _matte_work_size(W: int, H: int) -> tuple[int, int]:
         return W - W % 2, H - H % 2
     scale = 640 / long_side
     return max(2, int(W * scale) // 2 * 2), max(2, int(H * scale) // 2 * 2)
+
+
+def _matte_tick(span, written: int) -> None:
+    """Tell the render heartbeat the cut-out is still producing frames.
+
+    The heartbeat only sees ffmpeg's `out_time_ms`, and the matte writes to a
+    pipe instead -- so a cut-out that is working perfectly looks silent. With
+    the overlay stage's watchdog armed, silent means killed.
+    """
+    if not span:
+        return
+    try:
+        job = jobs.get(span[0])
+        if not job:
+            return
+        clk = job.get("_piece_clock")
+        if isinstance(clk, dict):
+            clk["tick"] = time.time()
+        job["render_beat"] = time.time()
+        if written % 30 == 0:
+            job["status"] = f"{span[4]} · cutting the person out ({written} frames)"
+    except Exception:                                 # noqa: BLE001
+        pass
 
 
 def _tl_matte_video(src: Path, W: int, H: int, fps: int,
@@ -15701,6 +15728,7 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                 proc.stdin.write(opaque)
                 written += 1
                 skipped += 1
+                _matte_tick(span, written)
                 continue
             frame = cv2.resize(frame, (work_w, work_h))
             res = seg.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -15712,6 +15740,7 @@ def _tl_matte_video(src: Path, W: int, H: int, fps: int,
                 mask = cv2.resize(mask, (work_w, work_h))
             proc.stdin.write((mask * 255).astype("uint8").tobytes())
             written += 1
+            _matte_tick(span, written)
     except Exception as exc:
         print(f"[matte] failed after {written} frames: {exc}", flush=True)
     finally:
@@ -16769,6 +16798,18 @@ def _tl_composite_overlays(base: Path, overlay_clips: list,
         return inputs, filt, cur
 
     fps = max(15, min(60, int(fps or 30)))
+    # Name what is going into the graph. When this pass stalls there is
+    # nothing in the log to say which overlay did it, and "drawing overlays"
+    # covers fourteen inputs.
+    try:
+        print("[overlay] compositing %d overlay(s) over %.1fs: %s" % (
+            len(resolved), base_dur or 0.0,
+            ", ".join(
+                f"{k}@{float(o.get('start', 0) or 0):.1f}s"
+                f"{'(behind)' if o.get('behind') else ''}:{Path(pth).name[:24]}"
+                for o, pth, k in resolved[:20])), flush=True)
+    except Exception:                                 # noqa: BLE001
+        pass
     try:
         inputs, filt, cur = _build_graph(resolved)
         _tl_run(
@@ -18344,6 +18385,7 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             tracks["text"] = [_tl_remap_clip(t, time_map, out_is_end=True) for t in tracks["text"]]
 
         # ---- Pass 3: overlays / B-roll / PiP ----
+        _tl_overlay_skipped.clear()
         if tracks["overlay"]:
             _stage("drawing overlays", 70)
             comp = UPLOAD_DIR / f"{job_id}_tlovl.mp4"
@@ -18351,12 +18393,29 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             ov_dur = float(_total_dur or 0) or None
             _tl_progress_local.span = (job_id, 70, 84, ov_dur, "drawing overlays")
             clock["label"] = "drawing overlays"
-            clock["armed"] = False
+            # ARMED. This stage had the watchdog switched off, and it is the
+            # stage that hangs: a render was seen sitting on "no new frame
+            # for 191s" at exactly 70% with nothing able to stop it. The
+            # matte now reports its own frames (see _matte_tick), and the
+            # encode reports out_time_ms, so silence here really does mean
+            # stuck rather than busy.
+            clock["tick"] = time.time()
+            clock["armed"] = True
             try:
                 _tl_composite_overlays(base, tracks["overlay"], W, H, comp, fps=fps)
+            except Exception as ovl_err:
+                # An overlay pass that cannot finish must not take the whole
+                # export with it. The picture, the cuts, the grade and the
+                # captions are all already made; losing them to a B-roll
+                # graph is the wrong trade, and waiting forever is worse.
+                print(f"[timeline] overlays skipped: {ovl_err}", flush=True)
+                _tl_overlay_skipped.append(str(ovl_err)[:300])
+                comp = None
             finally:
+                clock["armed"] = False
                 _tl_progress_local.span = None
-            base = comp
+            if comp is not None:
+                base = comp
 
         # ---- Pass 3b: auto whoosh/click SFX synced to overlay / effect starts ----
         sfx_on = tl.get("sfx_overlays", True) is not False
@@ -18512,6 +18571,10 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         # in that window put a stage name and a climbing second count back
         # over "done", so a finished render looked parked forever, which
         # is indistinguishable from the hang it exists to report.
+        if _tl_overlay_skipped:
+            jobs[job_id]["overlay_note"] = (
+                f"{len(tracks['overlay'])} overlay(s) were skipped: "
+                + _tl_overlay_skipped[-1])
         clock["stop"] = True
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
