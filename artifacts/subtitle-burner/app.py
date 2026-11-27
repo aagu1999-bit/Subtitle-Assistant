@@ -17910,6 +17910,12 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
     def _stage(label: str, pct: int) -> None:
         if review:
             label = "review · " + label
+        # The heartbeat would otherwise keep writing the last interview
+        # piece's name over every later stage.
+        clock["label"] = label
+        clock["t0"] = time.time()
+        clock["tick"] = clock["t0"]
+        clock["armed"] = False
         jobs[job_id]["status"] = label
         jobs[job_id]["progress"] = pct
         _db_save_job(job_id)
@@ -17917,7 +17923,8 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
     # The piece encode can sit inside ffmpeg or the cut-out and never touch
     # the percent. This clock is a different thread, so the status still
     # counts seconds, and a piece that produces nothing is killed.
-    clock = {"label": "starting", "t0": time.time(), "tick": time.time(), "stop": False}
+    clock = {"label": "starting", "t0": time.time(), "tick": time.time(),
+             "stop": False, "armed": False}
     jobs[job_id]["_piece_clock"] = clock
 
     def _beat():
@@ -17929,7 +17936,7 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             elapsed = int(now - clock["t0"])
             jobs[job_id]["render_beat"] = now
             jobs[job_id]["status"] = f"{clock['label']} · {elapsed}s"
-            if now - clock["tick"] > 45:
+            if clock.get("armed") and now - clock["tick"] > 45:
                 print(f"[timeline] piece produced nothing for 45s ({clock['label']})",
                       flush=True)
                 _kill_render_proc(job_id)
@@ -18007,6 +18014,7 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             clock["label"] = label
             clock["t0"] = time.time()
             clock["tick"] = clock["t0"]
+            clock["armed"] = True
             _db_save_job(job_id)
             _tl_progress_local.span = (job_id, lo, max(lo + 1, hi), piece_s, label)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
