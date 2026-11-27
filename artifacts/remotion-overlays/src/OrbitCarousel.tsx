@@ -3,7 +3,18 @@ import { AbsoluteFill, Img, interpolate, staticFile, useCurrentFrame, useVideoCo
 
 export type OrbitItem =
   | { id: string; phase: number; kind: "shape"; shape: "square" | "triangle" | "circle"; bg: string }
-  | { id: string; phase: number; kind: "image"; src: string };
+  | {
+      id: string;
+      phase: number;
+      kind: "image";
+      src: string;
+      // "cover" (the default) fills the square and crops. A designed mark --
+      // a logo, a wordmark -- has to be "contain" or it loses its own edges,
+      // and then it needs a plate, because a transparent PNG on a dark frame
+      // is an invisible item taking up a slot.
+      fit?: "cover" | "contain";
+      plate?: string;
+    };
 
 export type OrbitProps = {
   duration: number;
@@ -43,14 +54,32 @@ function srcOf(src: string) {
 function Item({ item, scale, opacity }: { item: OrbitItem; scale: number; opacity: number }) {
   const size = 140 * scale;
   if (item.kind === "image") {
-    return (
+    const fit = item.fit ?? "cover";
+    const shadow = `0 ${12 * scale}px ${28 * scale}px rgba(0,0,0,.35)`;
+    const img = (
       <Img
         src={srcOf(item.src)}
         style={{
-          width: size, height: size, objectFit: "cover", borderRadius: 18, opacity,
-          boxShadow: `0 ${12 * scale}px ${28 * scale}px rgba(0,0,0,.35)`,
+          width: fit === "contain" ? size * 0.78 : size,
+          height: fit === "contain" ? size * 0.78 : size,
+          objectFit: fit,
+          borderRadius: fit === "contain" ? 0 : 18,
+          opacity,
+          boxShadow: fit === "contain" ? undefined : shadow,
         }}
       />
+    );
+    if (!item.plate) return img;
+    return (
+      <div
+        style={{
+          width: size, height: size, borderRadius: 18, opacity,
+          background: item.plate, boxShadow: shadow,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+      >
+        {img}
+      </div>
     );
   }
   const common: React.CSSProperties = {
