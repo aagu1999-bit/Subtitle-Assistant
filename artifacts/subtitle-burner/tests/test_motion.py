@@ -310,8 +310,9 @@ def test_rotating_carousel_requests_are_sent_to_remotion(app_mod):
     assert app_mod._wants_remotion_orbit("trade places around an oval")
     assert not app_mod._wants_remotion_orbit("a YouTube subscribe button")
     assert app_mod._orbit_hold("the front one rests 0.3 seconds") == 0.3
-    assert app_mod._orbit_photo_queries("rotating carousel of three photos of bali beaches")
-    assert not app_mod._orbit_photo_queries("rotating square triangle circle")
+    assert app_mod._orbit_photo_queries(
+        "rotating carousel of three photos of bali beaches")[0] == ["bali beaches"]
+    assert app_mod._orbit_photo_queries("rotating square triangle circle")[0] == []
     assert app_mod._wants_remotion_orbit("replace the shapes with three photos of beaches in bali")
 
 
@@ -324,8 +325,9 @@ def test_a_planned_beat_does_not_invent_a_motion_scene(app_mod, monkeypatch):
 def test_make_animation_uses_remotion_for_an_orbit(app_mod, monkeypatch):
     seen = {}
 
-    def fake(desc, tl, dur):
+    def fake(desc, tl, dur, photos=None):
         seen["desc"] = desc
+        seen["photos"] = photos
         return {"asset_id": "r1", "duration": 5, "box": {"x": 0, "y": 0.06, "w": 0.9, "h": 0.2},
                 "device": {"kind": "animation", "engine": "remotion"}}
 
@@ -336,7 +338,7 @@ def test_make_animation_uses_remotion_for_an_orbit(app_mod, monkeypatch):
 
 
 def test_remotion_render_route_places_an_overlay(app_mod, temp_db, monkeypatch):
-    monkeypatch.setattr(app_mod, "_make_remotion_orbit", lambda desc, tl, dur: {
+    monkeypatch.setattr(app_mod, "_make_remotion_orbit", lambda desc, tl, dur, photos=None: {
         "asset_id": "r1", "kind": "video", "duration": 5.0,
         "box": {"x": 0.04, "y": 0.06, "w": 0.92, "h": 0.2, "px_w": 100, "px_h": 40},
         "device": {"kind": "animation", "engine": "remotion", "description": desc},
@@ -366,7 +368,8 @@ def test_photo_orbit_does_not_silently_become_shapes(app_mod, tmp_path, monkeypa
 
     monkeypatch.setattr(app_mod, "gemini_image", gen)
     monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
-    items = app_mod._remotion_stage_photos(["bali beach"], want=3)
+    items, misses = app_mod._remotion_stage_photos(["bali beach"], want=3)
+    assert not misses
     assert [it["kind"] for it in items] == ["image", "image", "image"]
     assert {it["src"] for it in items}  # copied into public/
     # Asking for photos must not fall back to the square/triangle/circle.
@@ -518,7 +521,7 @@ def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
         lambda p: pytest.fail("slash looks must not ask Gemini"))
     monkeypatch.setattr(
         app_mod, "_make_animation",
-        lambda desc, tl, dur: {
+        lambda desc, tl, dur, photos=None: {
             "asset_id": "e1", "duration": 2.5,
             "box": {"x": 0, "y": 0, "w": 1, "h": 1},
             "behind": True, "device": {"kind": "animation"},
@@ -580,3 +583,320 @@ def test_bits_backgrounds_sit_behind(app_mod):
         "device": {}, "behind": True,
     }, 0)
     assert clip["behind"] is True
+
+
+# --- the ring takes your pictures, in the shapes' places ------------------
+# "head orbit with 3 bank logos at the 7 second mark" used to return a yellow
+# square, a cyan triangle and a pink circle. Four separate things stood in
+# the way, and each one has a test here.
+
+def _orbit_pics(tmp_path, n=3):
+    """n distinct little JPEGs, as if they were uploaded logo files."""
+    from PIL import Image
+    out = []
+    for i, c in enumerate([(20, 80, 180), (200, 140, 40), (40, 160, 90),
+                           (160, 40, 160), (90, 90, 90), (10, 10, 10)][:n]):
+        p = tmp_path / f"logo{i}.png"
+        Image.new("RGB", (40, 24), c).save(p)   # wide, like a real wordmark
+        out.append(p)
+    return out
+
+
+@pytest.fixture
+def staged_orbit(app_mod, tmp_path, monkeypatch):
+    """Resolve each ref to its own file; never search, never generate."""
+    pics = _orbit_pics(tmp_path, 6)
+    byref = {}
+
+    def resolve(ref):
+        if ref not in byref:
+            if len(byref) >= len(pics):
+                return None, "nothing left"
+            byref[ref] = pics[len(byref)]
+        return f"id-{ref}", ""
+
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", resolve)
+    monkeypatch.setattr(app_mod, "_find_asset_path",
+                        lambda aid: byref.get(str(aid)[3:]))
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "gemini_image",
+                        lambda *a, **k: pytest.fail("generated a picture"))
+    return byref
+
+
+def test_the_word_logos_opens_the_picture_door(app_mod):
+    """The gate was photo/image/picture/pic only, so "3 bank logos" missed it
+    and the orbit answered with shapes -- which reads as being ignored."""
+    for ask in ("head orbit with 3 bank logos",
+                "orbit the barclays logo and the chase logo",
+                "rotating carousel of album covers",
+                "orbit these icons"):
+        assert app_mod._orbit_photo_queries(ask)[0], ask
+    # Still shapes when no picture is asked for at all.
+    assert app_mod._orbit_photo_queries("head orbit")[0] == []
+
+
+def test_the_count_is_read_not_deleted(app_mod):
+    """The subject strip removed "three" and "3", and then three queries were
+    built regardless -- so five came out as three with no complaint."""
+    assert app_mod._orbit_item_count("head orbit five logos") == 5
+    assert app_mod._orbit_item_count("orbit 6 photos of bali") == 6
+    assert app_mod._orbit_item_count("orbit two brand marks") == 2
+    assert app_mod._orbit_photo_queries("head orbit four logos")[1] == 4
+
+
+def test_a_duration_is_not_mistaken_for_a_count(app_mod):
+    """"at 7 seconds" rides along in the same description, and the number is
+    on the LEFT of the picture word, where a count would be. Reading it as
+    one asked for seven logos."""
+    assert app_mod._orbit_item_count("at 7 seconds, orbit bank logos") == 3
+    assert app_mod._orbit_item_count("orbit for 5 seconds") == 3
+    assert app_mod._orbit_item_count("orbit 4 sec of logos") == 3
+    # The real count still reads, through the same sentence shape.
+    assert app_mod._orbit_item_count(
+        "head orbit with 3 bank logos at the 7 second mark") == 3
+    assert app_mod._orbit_item_count("at 7 seconds, orbit 3 bank logos") == 3
+
+
+def test_the_word_mark_does_not_ask_for_pictures(app_mod):
+    """"at the 7 second mark" is the commonest way to say WHEN. Counting
+    "mark" as a picture word turned every timed request into a picture ring,
+    and dressed a plain photo orbit in a white logo plate."""
+    assert app_mod._orbit_photo_queries("head orbit at the 7 second mark")[0] == []
+    assert not app_mod._orbit_wants_marks("put it at the 7 second mark")
+    # "brand" and "logo" still carry the real case.
+    assert app_mod._orbit_wants_marks("orbit our brand logos")
+
+
+def test_the_subject_is_not_the_whole_sentence(app_mod):
+    """It used to search for "bank logos sunset" and "bank logos wide" --
+    photo-shoot words that find the wrong thing confidently -- and the
+    subject itself still carried the word "orbit"."""
+    qs, _ = app_mod._orbit_photo_queries(
+        "head orbit with 3 bank logos at the 7 second mark")
+    assert qs == ["bank"]
+    assert not any("sunset" in q or "wide" in q for q in qs)
+
+
+def test_an_explicit_list_fills_the_shapes_slots(app_mod, staged_orbit, monkeypatch):
+    """The ask: the logos take the places the square, triangle and circle
+    were in. Three refs, three items, evenly spaced."""
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    info = app_mod._make_remotion_orbit(
+        "head orbit", {"canvas": "9x16"}, 5.0,
+        ["chase logo", "barclays logo", "hsbc logo"])
+    items = info["device"]["spec"]["props"]["items"]
+    assert [it["kind"] for it in items] == ["image"] * 3, "shapes came back"
+    assert [it["phase"] for it in items] == [0.0, 120.0, 240.0]
+    assert len({it["src"] for it in items}) == 3, "the same picture three times"
+
+
+def test_the_list_length_is_the_count(app_mod, staged_orbit, monkeypatch):
+    """Not three-no-matter-what: _remotion_stage_photos was never passed a
+    number, so both call sites left want at its default."""
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    for refs in (["a", "b"], ["a", "b", "c", "d", "e"]):
+        info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, list(refs))
+        items = info["device"]["spec"]["props"]["items"]
+        assert len(items) == len(refs), f"{len(refs)} asked, {len(items)} placed"
+        assert items[0]["phase"] == 0.0
+        assert round(items[1]["phase"]) == round(360 / len(refs))
+
+
+def test_what_was_found_is_placed_and_the_rest_is_named(app_mod, tmp_path,
+                                                        monkeypatch):
+    """The floor was a hard two. Name three logos, have one land, and the
+    whole ring used to be refused -- so one bad spelling cost the other two.
+    Place what resolved and say which did not."""
+    pics = _orbit_pics(tmp_path, 1)
+    monkeypatch.setattr(app_mod, "_resolve_photo_source",
+                        lambda q: (("aid", "") if "chase" in q else (None, "not found")))
+    monkeypatch.setattr(app_mod, "_find_asset_path", lambda a: pics[0])
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    info = app_mod._make_remotion_orbit(
+        "head orbit", {}, 5.0, ["chase logo", "xyzzy logo", "qwop logo"])
+    assert len(info["device"]["spec"]["props"]["items"]) == 1
+    assert len(info["photo_misses"]) == 2
+    # A subject we went LOOKING for still needs two: one lonely stock photo
+    # is a miss wearing the answer's clothes.
+    with pytest.raises(RuntimeError):
+        app_mod._remotion_stage_photos(["bali"], want=3, generate=False)
+
+
+def test_naming_exactly_one_thing_is_allowed(app_mod, staged_orbit, monkeypatch):
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["chase logo"])
+    assert len(info["device"]["spec"]["props"]["items"]) == 1
+
+
+def test_your_own_upload_reaches_the_ring(app_mod, tmp_path, monkeypatch):
+    """The items came from a regex over the prose, so an asset id could never
+    get in -- while the failure message said "upload pictures".
+
+    Asserted on the whole route from the op down, because the gap was never
+    in the resolver (it always took ids) but in nothing handing it one.
+    """
+    pics = _orbit_pics(tmp_path, 1)
+    real = "091eff0cee0645717898686e868a4e13"
+    (tmp_path / f"{real}.png").write_bytes(pics[0].read_bytes())
+    monkeypatch.setattr(app_mod, "ASSET_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "_asset_meta_path",
+                        lambda a: tmp_path / f"{a}.meta.json")
+    monkeypatch.setattr(app_mod, "_find_asset_path",
+                        lambda aid: (tmp_path / f"{aid}.png")
+                        if (tmp_path / f"{aid}.png").exists() else None)
+    monkeypatch.setattr(app_mod, "_broll_any_photo_provider",
+                        lambda: pytest.fail("went looking for an id in stock"))
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    info = app_mod._make_remotion_orbit("head orbit", {}, 5.0, [real])
+    items = info["device"]["spec"]["props"]["items"]
+    assert not info["photo_misses"]
+    assert [it["kind"] for it in items] == ["image"], "your own file never arrived"
+
+
+def test_a_brand_mark_is_never_invented(app_mod, tmp_path, monkeypatch):
+    """Gemini asked for a real logo returns a confident fake. Two real marks
+    and a named miss beats three plausible forgeries going out as finished."""
+    pics = _orbit_pics(tmp_path, 1)
+    got = {"n": 0}
+
+    def resolve(ref):
+        if "chase" in ref:
+            got["n"] += 1
+            return "aid", ""
+        return None, "no provider configured"
+
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", resolve)
+    monkeypatch.setattr(app_mod, "_find_asset_path", lambda a: pics[0])
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    # Generation has to be POSSIBLE, or "it did not generate" proves nothing.
+    monkeypatch.setattr(app_mod, "_gemini_image_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "gemini_image",
+                        lambda *a, **k: pytest.fail("invented a brand mark"))
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    info = app_mod._make_remotion_orbit(
+        "head orbit", {}, 5.0, ["chase logo", "a bank that does not exist"])
+    assert len(info["device"]["spec"]["props"]["items"]) == 1
+    assert info["photo_misses"], "the slot was dropped without saying so"
+    assert "does not exist" in " ".join(info["photo_misses"])
+    # A plain photo request still generates -- that is the right fallback
+    # there, and this change must not take it away.
+    assert app_mod._orbit_wants_marks("orbit three bank logos")
+    assert not app_mod._orbit_wants_marks("orbit three photos of bali")
+
+
+def test_a_wide_logo_is_not_cropped_square(app_mod, staged_orbit, monkeypatch):
+    """The ring draws into a 140px square at objectFit cover, so a wordmark
+    lost its own sides. A transparent PNG then needs a plate or it vanishes
+    into a dark frame."""
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: out.write_bytes(b"x" * 400))
+    marks = app_mod._make_remotion_orbit(
+        "head orbit with these bank logos", {}, 5.0, ["chase logo", "hsbc logo"])
+    for it in marks["device"]["spec"]["props"]["items"]:
+        assert it["fit"] == "contain"
+        assert it["plate"]
+    # A photograph is still cover: it is meant to fill the circle.
+    photos = app_mod._make_remotion_orbit(
+        "head orbit with photos of bali", {}, 5.0, ["bali beach", "bali temple"])
+    for it in photos["device"]["spec"]["props"]["items"]:
+        assert "fit" not in it and "plate" not in it
+
+
+def test_named_pictures_never_degrade_to_shapes(app_mod, monkeypatch):
+    """The existing rule for a prose request -- "photo carousels must not
+    silently become shapes or a slideshow" -- has to cover the explicit list
+    too, which is the strongest form of the same ask.
+
+    Also asserts it gives up ONCE. Both guards on this path re-raise, so a
+    missing one does not change the answer; what it changes is the ring being
+    staged and rendered a second time on the way to the same error.
+    """
+    tries = {"n": 0}
+
+    def boom(*a, **k):
+        tries["n"] += 1
+        raise RuntimeError("no pics")
+
+    monkeypatch.setattr(app_mod, "_remotion_stage_photos", boom)
+    monkeypatch.setattr(app_mod, "_design_animation",
+                        lambda *a: pytest.fail("fell through to motion.py"))
+    with pytest.raises(RuntimeError, match="no pics"):
+        app_mod._make_animation("head orbit", {"canvas": "9x16"}, 5.0,
+                                photos=["chase logo"])
+    assert tries["n"] == 1, f"staged the ring {tries['n']}x for one failure"
+
+
+def test_the_op_carries_the_pictures_and_the_second(app_mod, temp_db, monkeypatch):
+    """End of the chain: add_animation -> _make_animation -> the orbit, with
+    the start the user named surviving onto the clip."""
+    seen = {}
+
+    def fake(desc, tl, dur, photos=None):
+        seen["photos"] = photos
+        return {"asset_id": "r1", "kind": "video", "duration": 5.0,
+                "box": {"x": 0.04, "y": 0.06, "w": 0.92, "h": 0.2,
+                        "px_w": 100, "px_h": 40},
+                "behind": True, "photo_misses": ["hsbc logo (not found)"],
+                "device": {"kind": "animation", "engine": "remotion"}}
+
+    monkeypatch.setattr(app_mod, "_make_remotion_orbit", fake)
+    out, note = app_mod._resolve_add_animation(
+        {"op": "add_animation", "description": "head orbit",
+         "photos": ["chase logo", "barclays logo"], "start": 7.0,
+         "duration": 5.0}, {"canvas": "9x16"})
+    assert seen["photos"] == ["chase logo", "barclays logo"]
+    assert out["clip"]["start"] == 7.0, "the 7 second mark was lost"
+    assert out["clip"]["behind"] is True
+    assert "hsbc" in note, "a dropped logo has to be said out loud"
+
+
+def test_the_model_is_told_the_ring_takes_pictures(app_mod):
+    """A capability nothing is told about is a capability nobody reaches --
+    the failure mode this repo keeps hitting."""
+    prompt = app_mod._effects_lookbook_prompt()
+    assert "head orbit" in prompt and "photos" in prompt
+    assert "asset id" in prompt.lower()
+    # In the SAME example, or it does not teach the pairing: add_animation
+    # already appears without photos, and add_carousel has photos without
+    # add_animation.
+    paired = [e for e in app_mod.CO_EDITOR_OP_EXAMPLES
+              if '"add_animation"' in e and '"photos"' in e]
+    assert paired, "no example shows add_animation carrying photos"
+    assert "head orbit" in " ".join(paired)
+    # photos is a field on an existing op, not a new op, so the registry's
+    # three-way parity (prompt / allowed / client branch) must still hold.
+    assert "add_animation" in app_mod._co_editor_op_names()
+
+
+def test_an_ordinary_photo_orbit_is_byte_identical(app_mod, tmp_path, monkeypatch):
+    """The regression guard for every orbit that works today: same request,
+    same props, so the cached render is reused rather than redone."""
+    pics = _orbit_pics(tmp_path, 3)
+    n = {"i": 0}
+    monkeypatch.setattr(app_mod, "_resolve_photo_source", lambda q: ("aid", ""))
+
+    def found(_aid):
+        p = pics[n["i"] % 3]
+        n["i"] += 1
+        return p
+
+    monkeypatch.setattr(app_mod, "_find_asset_path", found)
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", tmp_path)
+    renders = []
+    monkeypatch.setattr(app_mod, "_render_remotion_webm",
+                        lambda comp, props, out: (renders.append(props),
+                                                  out.write_bytes(b"x" * 400)))
+    a = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["bali", "rome", "oslo"])
+    n["i"] = 0
+    b = app_mod._make_remotion_orbit("head orbit", {}, 5.0, ["bali", "rome", "oslo"])
+    assert a["asset_id"] == b["asset_id"], "the cache key moved"
+    assert len(renders) == 1, "rendered the same ring twice"

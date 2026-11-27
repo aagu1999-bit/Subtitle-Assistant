@@ -20095,7 +20095,8 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 
 def _make_animation(description: str, timeline: dict | None,
-                    duration: float | None = None, freehand: bool = True) -> dict:
+                    duration: float | None = None, freehand: bool = True,
+                    photos: list | None = None) -> dict:
     engine, rec = _match_named_look(description)
     if engine == "remotion" and rec:
         try:
@@ -20111,15 +20112,21 @@ def _make_animation(description: str, timeline: dict | None,
         if rec.get("engine") == "effect":
             raise ValueError("lean in is a punch zoom on the speaker, not an overlay")
         try:
-            return _make_effects_look(rec, description, timeline, duration)
+            return _make_effects_look(rec, description, timeline, duration, photos)
         except Exception as e:
             ai_logger.info(f"[effects] {rec['id']} failed, falling back: {e}")
-    if _wants_remotion_orbit(description):
+            # Named pictures are not a stylistic preference to be dropped on
+            # the way to a generic animation.
+            if photos:
+                raise
+    if photos or _wants_remotion_orbit(description):
         try:
-            return _make_remotion_orbit(description, timeline, duration)
+            return _make_remotion_orbit(description, timeline, duration, photos)
         except Exception as e:
             # Photo carousels must not silently become shapes or a slideshow.
-            if _orbit_photo_queries(description):
+            # An explicit list is the strongest form of that ask, so it gets
+            # the same protection as a prose one.
+            if photos or _orbit_photo_queries(description)[0]:
                 raise
             ai_logger.info(f"[remotion] falling back to motion.py: {e}")
     if not freehand:
@@ -20532,7 +20539,14 @@ def _effects_lookbook_prompt() -> str:
         "Do not invent a freehand copy. lean in is add_effect punch_zoom, not add_animation. "
         "The others are add_animation with the phrase in the description; "
         "backdrop word / spotlight / huge strike / todo list / head orbit sit BEHIND the speaker "
-        '("behind": true). Quoted words go on screen.'
+        '("behind": true). Quoted words go on screen. '
+        "head orbit takes \"photos\": a list of the things that go round, one "
+        "entry per orbiting item, in place of its default shapes. Each entry is "
+        "either an asset id from the photos context (their own uploaded file) "
+        "or a subject to search for. The LIST LENGTH is the count: three "
+        "entries for \"three logos\". Pass their own ids when they say \"my\" / "
+        "\"these\" / name a file; a real brand mark is never generated, so an "
+        "entry that cannot be found is reported, not invented."
     )
 
 
@@ -20642,11 +20656,12 @@ def _effects_motion_spec(rec: dict, description: str, duration: float | None) ->
 
 
 def _make_effects_look(rec: dict, description: str, timeline: dict | None,
-                       duration: float | None) -> dict:
+                       duration: float | None,
+                       photos: list | None = None) -> dict:
     """Render a wired look-book overlay (motion.py or Remotion orbit)."""
     tl = timeline or {}
     if rec.get("engine") == "remotion_orbit":
-        out = _make_remotion_orbit(description, timeline, duration)
+        out = _make_remotion_orbit(description, timeline, duration, photos)
         out["behind"] = True
         return out
     spec = motion.normalize(_effects_motion_spec(rec, description, duration))
@@ -20689,7 +20704,7 @@ def _remotion_look_props(rec: dict, description: str) -> dict:
         items: list[dict] = []
         if queries:
             try:
-                staged = _remotion_stage_photos(queries, want=3)
+                staged, _ = _remotion_stage_photos(queries, want=3)
                 items = [{"id": it["id"], "src": it["src"]}
                          for it in staged if it.get("kind") == "image" and it.get("src")]
             except Exception as e:
@@ -20704,7 +20719,7 @@ def _wants_remotion_orbit(description: str) -> bool:
         return True
     # "replace the shapes with photos of Bali" has no orbit verb, but it is
     # still the carousel they already asked for.
-    photos = bool(_orbit_photo_queries(description))
+    photos = bool(_orbit_photo_queries(description)[0])
     swap = any(w in d for w in ("replace", "instead", "swap", "use photos", "with photos"))
     return photos and swap
 
@@ -20738,15 +20753,81 @@ def _shot_queries(description: str) -> list[str]:
     return [subject, f"{subject} ui", f"{subject} screen"]
 
 
-def _orbit_photo_queries(description: str) -> list[str]:
-    if not re.search(r"\b(photos?|images?|pictures?|pics?)\b", description or "", re.I):
-        return []
+# What counts as "put real pictures in the ring". The old list was photo /
+# image / picture / pic only, so "3 bank logos" missed it and the orbit fell
+# back to a yellow square, a cyan triangle and a pink circle -- which reads
+# as the feature ignoring you, not as a default.
+# "marks?" is deliberately NOT here: "at the 7 second mark" would read as a
+# picture word, which made the TIME the count and put a plain photo ring on a
+# white logo plate. "logo" and "brand" cover the real cases.
+_ORBIT_PICTURE_WORDS = (
+    r"photos?|images?|pictures?|pics?|logos?|brands?|icons?|"
+    r"covers?|posters?|thumbnails?|screenshots?|headshots?|albums?|avatars?"
+)
+# A brand mark is the one case where generating a lookalike is worse than
+# admitting the miss: an invented Chase logo is a blue blob with misspelt
+# lettering, and it would go out looking deliberate.
+_ORBIT_MARK_WORDS = r"logos?|brands?|icons?|wordmarks?"
+_ORBIT_COUNT_WORDS = {"one": 1, "two": 2, "three": 3,
+                      "four": 4, "five": 5, "six": 6}
+
+
+def _orbit_wants_marks(description: str) -> bool:
+    return bool(re.search(rf"\b(?:{_ORBIT_MARK_WORDS})\b",
+                          description or "", re.I))
+
+
+def _orbit_item_count(description: str, default: int = 3) -> int:
+    """How many things the user asked to see going round.
+
+    Read BEFORE the subject strip below, which deletes the number: that is
+    why "five logos" used to come out as three, silently.
+
+    The number has to be the one attached to the THINGS. "at the 7 second
+    mark" lands in this same description, and taking the first number in the
+    string read that as a request for seven (clamped to six) logos. So the
+    count only counts when a picture word follows it within a few words.
+    """
+    m = re.search(
+        r"\b(\d{1,2}|one|two|three|four|five|six)\s+"
+        r"(?!(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b)"
+        r"(?:[a-z'\u2019-]+\s+){0,3}?"
+        rf"(?:{_ORBIT_PICTURE_WORDS})\b",
+        description or "", re.I)
+    if not m:
+        return default
+    raw = m.group(1).lower()
+    n = _ORBIT_COUNT_WORDS.get(raw)
+    if n is None:
+        try:
+            n = int(raw)
+        except ValueError:
+            return default
+    return max(1, min(6, n))
+
+
+def _orbit_photo_queries(description: str) -> tuple[list[str], int]:
+    """(subjects to find, how many to show) for an orbit asked for in prose.
+
+    Returns ([], n) when the description is not asking for pictures at all,
+    so the caller keeps the default shapes.
+    """
+    want = _orbit_item_count(description)
+    if not re.search(rf"\b(?:{_ORBIT_PICTURE_WORDS})\b", description or "", re.I):
+        return [], want
     subject = re.sub(
-        r"\b(a|an|the|mini|rotating|orbiting|carousel|photos?|images?|pictures?|"
-        r"of|above|speakers?|heads?|seconds?|for|and|with|three|3)\b",
+        rf"\b(a|an|the|mini|rotating|orbiting|orbits?|carousel|turntable|"
+        rf"{_ORBIT_PICTURE_WORDS}|"
+        r"of|above|around|behind|speakers?|heads?|seconds?|secs?|marks?|"
+        r"for|and|with|at|in|on|my|me|us|these|those|this|that|"
+        r"put|show|see|let|replace|instead|swap|use|"
+        r"one|two|three|four|five|six|\d{1,2})\b",
         " ", description or "", flags=re.I)
     subject = " ".join(subject.split())[:80] or "photo"
-    return [subject, f"{subject} sunset", f"{subject} wide"]
+    # No " sunset" / " wide" any more. Those are photo-shoot words: they
+    # turned one subject into three searches, and for a logo they asked for
+    # "bank logos sunset", which finds the wrong thing confidently.
+    return [subject], want
 
 
 def _remotion_copy_public(src: Path) -> str:
@@ -20772,39 +20853,67 @@ def _remotion_generate_photo(query: str, slot: int) -> Path | None:
         return None
 
 
-def _remotion_stage_photos(queries: list[str], want: int = 3) -> list[dict]:
-    """Stock first, then generated stills. Never returns shapes."""
-    items = []
+def _remotion_stage_photos(queries: list[str], want: int = 3, *,
+                           floor: int = 2, generate: bool = True,
+                           fit: str | None = None,
+                           plate: str | None = None) -> tuple[list[dict], list[str]]:
+    """(items, misses) for the ring. Never returns shapes.
+
+    `floor` is how few is still a result. Two, for a subject we went looking
+    for -- one lonely photo is a miss dressed up as an answer. But one, when
+    the caller named exactly one thing: that is a choice, not a shortfall.
+
+    `generate` off means a slot we cannot fill is REPORTED, not invented.
+    See _ORBIT_MARK_WORDS: a generated brand mark is a confident fake, and
+    orbiting three of them is worse than orbiting two real ones and saying
+    the third was not found.
+    """
+    items: list[dict] = []
+    misses: list[str] = []
     seen: set[str] = set()
-    want = max(2, min(6, int(want)))
+    want = max(1, min(6, int(want)))
+    floor = max(1, min(floor, want))
 
     def add(src: Path | None) -> bool:
         if src is None or not Path(src).exists() or str(src) in seen:
             return False
         seen.add(str(src))
-        items.append({"id": f"p{len(items)}", "phase": 0, "kind": "image",
-                      "src": _remotion_copy_public(Path(src))})
+        it = {"id": f"p{len(items)}", "phase": 0, "kind": "image",
+              "src": _remotion_copy_public(Path(src))}
+        # contain, never cover, for a designed mark: the ring draws into a
+        # square, and a wide logo cropped to fill it loses its own edges.
+        if fit:
+            it["fit"] = fit
+        if plate:
+            it["plate"] = plate
+        items.append(it)
         return True
 
     for q in queries[:6]:
         if len(items) >= want:
             break
         aid, why = _resolve_photo_source(q)
-        if not add(_find_asset_path(aid) if aid else None):
-            ai_logger.info(f"[remotion] stock miss {q!r}: {why}")
-            add(_remotion_generate_photo(q, len(items)))
-    while len(items) < want:
+        if add(_find_asset_path(aid) if aid else None):
+            continue
+        ai_logger.info(f"[remotion] stock miss {q!r}: {why}")
+        if generate and add(_remotion_generate_photo(q, len(items))):
+            continue
+        misses.append(f"{q} ({why})" if why else str(q))
+    # Top up only when we were given fewer subjects than slots AND inventing
+    # one is allowed. An explicit list is never padded out.
+    while generate and len(items) < want and len(queries) <= 1:
         q = queries[0] if queries else "photograph"
         if not add(_remotion_generate_photo(q, len(items))):
             break
-    if len(items) < 2:
+    if len(items) < floor:
+        detail = ("; ".join(misses))[:300] or "nothing came back"
         raise RuntimeError(
-            "couldn't get photos for this carousel (stock search and image "
-            "generation both came up empty). Name a subject or upload pictures.")
+            f"couldn't get pictures for this ring: {detail}. "
+            f"Upload them and name them, or name a subject to search for.")
     n = len(items)
     for i, it in enumerate(items):
         it["phase"] = round(360 * i / n, 1)
-    return items
+    return items, misses
 
 
 def _remotion_overlay_box(canvas: str, place: str = "top") -> dict:
@@ -20944,19 +21053,41 @@ def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
 
 
 def _make_remotion_orbit(description: str, timeline: dict | None,
-                         duration: float | None) -> dict:
-    """Orbiting carousel via Remotion. Shapes by default; photos when asked."""
+                         duration: float | None,
+                         photos: list | None = None) -> dict:
+    """Orbiting carousel via Remotion. Shapes by default; pictures when asked.
+
+    `photos` is the explicit list: each entry is an asset id you already own
+    or a subject to go and find, exactly as `add_carousel` takes it. It wins
+    over anything read out of the prose, and its LENGTH is the number of
+    things that go round -- which is how "3 of them" finally arrives.
+    """
     dur = max(0.8, min(12.0, float(duration))) if duration else 5.0
     hold = _orbit_hold(description)
-    queries = _orbit_photo_queries(description)
-    if queries:
-        items = _remotion_stage_photos(queries)
+    marks = _orbit_wants_marks(description)
+    # A mark sits in the square uncropped, on a plate, or a transparent PNG
+    # disappears into a dark frame.
+    fit = "contain" if marks else None
+    plate = "#FFFFFF" if marks else None
+    refs = [t for t in ((str(x) if x is not None else "").strip()
+                        for x in (photos or [])) if t][:6]
+    misses: list[str] = []
+    if refs:
+        items, misses = _remotion_stage_photos(
+            refs, want=len(refs), floor=1, generate=False,
+            fit=fit, plate=plate)
     else:
-        items = [
-            {"id": "sq", "phase": 0, "kind": "shape", "shape": "square", "bg": "#FFD60A"},
-            {"id": "tri", "phase": 120, "kind": "shape", "shape": "triangle", "bg": "#00E5FF"},
-            {"id": "ci", "phase": 240, "kind": "shape", "shape": "circle", "bg": "#FF3B6B"},
-        ]
+        queries, want = _orbit_photo_queries(description)
+        if queries:
+            items, misses = _remotion_stage_photos(
+                queries, want=want, generate=not marks,
+                fit=fit, plate=plate)
+        else:
+            items = [
+                {"id": "sq", "phase": 0, "kind": "shape", "shape": "square", "bg": "#FFD60A"},
+                {"id": "tri", "phase": 120, "kind": "shape", "shape": "triangle", "bg": "#00E5FF"},
+                {"id": "ci", "phase": 240, "kind": "shape", "shape": "circle", "bg": "#FF3B6B"},
+            ]
     props = {"duration": dur, "hold": hold, "move": 1.0, "items": items}
     key = hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_orbit_{key}.webm"
@@ -20976,6 +21107,9 @@ def _make_remotion_orbit(description: str, timeline: dict | None,
     box = _remotion_overlay_box(tl.get("canvas") or "9x16")
     return {"asset_id": asset_id, "kind": "video", "cached": False, "duration": round(dur, 3),
             "box": box,
+            # Named out loud rather than quietly dropped: a ring that came
+            # back with two of the three things asked for has to say so.
+            "photo_misses": misses,
             "device": {"kind": "animation", "engine": "remotion",
                        "composition": "OrbitCarousel", "description": description,
                        "spec": {"props": props}}}
@@ -21011,8 +21145,10 @@ def remotion_render():
         start = float(data.get("start") or 0)
     except (TypeError, ValueError):
         dur, start = 5.0, 0.0
+    photos = data.get("photos") or data.get("asset_ids")
+    photos = [x for x in photos if x] if isinstance(photos, list) else None
     try:
-        info = _make_remotion_orbit(desc, tl, dur)
+        info = _make_remotion_orbit(desc, tl, dur, photos)
     except (RuntimeError, OSError, ValueError) as e:
         return jsonify({"error": str(e)[:300]}), 500
     return jsonify({**info, "clip": _device_overlay_clip(info, start)})
@@ -24796,6 +24932,7 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "make_image", "description": "a pier in Jersey City at dusk", "style": "photo", "start": 3.0, "duration": 4, "behind": true}',
     '{"op": "add_device", "kind": "venn", "labels": ["Skill", "Demand", "Money"], "start": 8.0, "duration": 3.4}',
     '{"op": "add_animation", "description": "a YouTube subscribe button; a mouse pointer glides in, hovers, clicks it and it turns grey with a ringing bell", "start": 20.0, "duration": 3.5}',
+    '{"op": "add_animation", "description": "head orbit", "photos": ["a1b2c3d4e5f60718293a4b5c6d7e8f90", "chase bank logo", "barclays logo"], "start": 7.0, "duration": 5.0}',
     '{"op": "set_sound", "track": "overlay", "index": 0, "sound": "pop"}',
     '{"op": "set_sound", "default": "soft_pop"}',
     '{"op": "add_speed", "start": 12.0, "duration": 2.0, "speed": 2.0}',
@@ -25108,10 +25245,17 @@ def _resolve_add_device(op: dict, timeline: dict) -> tuple[dict | None, str]:
 
 
 def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
-    """Design, render and place an animation described in words."""
+    """Design, render and place an animation described in words.
+
+    `photos` names the things that go round, in the slots the default shapes
+    occupy -- each entry an asset id you already own or a subject to find,
+    the same contract `add_carousel` uses.
+    """
     desc = str(op.get("description") or "").strip()[:600]
     if not desc:
         return None, "the animation had no description"
+    photos = op.get("photos") or op.get("asset_ids") or op.get("items")
+    photos = [x for x in photos if x] if isinstance(photos, list) else None
     try:
         start = max(0.0, float(op.get("start", 0)))
         dur = op.get("duration")
@@ -25125,15 +25269,19 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
               "intensity": "high"}
         return _resolve_add_effect(fx)
     try:
-        info = _make_animation(desc, timeline, dur)
+        info = _make_animation(desc, timeline, dur, photos=photos)
     except (RuntimeError, OSError, ValueError) as e:
-        return None, f"the animation could not be made ({str(e)[:120]})"
+        return None, f"the animation could not be made ({str(e)[:160]})"
     clip = _device_overlay_clip(info, start)
     if op.get("behind") or info.get("behind"):
         clip["behind"] = True
     if op.get("sound") in SFX_LIBRARY or op.get("sound") == "none":
         clip["sfx"] = op["sound"]
-    return {"op": "add_animation", "clip": clip}, ""
+    note = ""
+    if info.get("photo_misses"):
+        note = ("placed without " +
+                ", ".join(str(m) for m in info["photo_misses"])[:200])
+    return {"op": "add_animation", "clip": clip}, note
 
 
 def _resolve_punch_aim(op: dict, main: list, effects: list) -> dict | None:
