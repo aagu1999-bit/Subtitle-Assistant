@@ -4697,6 +4697,18 @@ _tl_enc_local = threading.local()
 # (job_id, progress_lo, progress_hi, duration_s, status_note) for the piece
 # currently being encoded. Unset for every other ffmpeg call.
 _tl_progress_local = threading.local()
+# The ffmpeg process for the render currently in flight, so a dead one at
+# 15% can be replaced instead of blocking every later attempt.
+_render_procs: dict[str, subprocess.Popen] = {}
+
+
+def _kill_render_proc(job_id: str) -> None:
+    proc = _render_procs.pop(job_id, None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 _SEGMENT_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "18"]
 _REVIEW_ENC = ["-c:v", "libx264", "-preset", "superfast", "-crf", "22"]
 
@@ -5101,6 +5113,8 @@ def _run_ffmpeg_encode(
             ffmpeg_logger.error(f"{what} spawn failed: {e}")
             return False
 
+    if job_id:
+        _render_procs[job_id] = proc
     last_pct = int(progress_lo) if progress_lo is not None else 0
     last_db = 0.0
     stderr_tail: list[str] = []
@@ -5136,6 +5150,7 @@ def _run_ffmpeg_encode(
                     if pct > last_pct and job_id in jobs:
                         last_pct = pct
                         jobs[job_id]["progress"] = pct
+                        jobs[job_id]["render_beat"] = time.time()
                         note = getattr(_tl_progress_local, "note", None)
                         if note and duration_hint:
                             jobs[job_id]["status"] = (
@@ -5153,6 +5168,8 @@ def _run_ffmpeg_encode(
                     break
         proc.wait()
     finally:
+        if job_id and _render_procs.get(job_id) is proc:
+            _render_procs.pop(job_id, None)
         err_thread.join(timeout=5)
         if proc.poll() is None:
             try:
@@ -14245,6 +14262,22 @@ def _has_audio_stream(path: Path) -> bool:
         return False
 
 
+_tl_media_dur_cache: dict[str, float] = {}
+
+
+def _tl_media_dur(path) -> float:
+    """How long the file actually is, so a piece can't be asked to start past it."""
+    key = str(path)
+    if key in _tl_media_dur_cache:
+        return _tl_media_dur_cache[key]
+    try:
+        dur = float(_media_duration(path) or 0)
+    except Exception:
+        dur = 0.0
+    _tl_media_dur_cache[key] = dur
+    return dur
+
+
 def _media_duration(path: Path) -> float:
     """Best-effort container duration in seconds (0.0 on failure)."""
     try:
@@ -14853,7 +14886,10 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
         _tl_run(cmd, "Still cutaway")
     else:
         has_audio = _has_audio_stream(src)
-        cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+        # -t on the input, not only the output. A piece whose start is past
+        # the pictures in the file otherwise sits forever: audio is padded
+        # with a bare apad and no frame ever arrives to end it.
+        cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-t", f"{dur:.6f}", "-i", str(src)]
         if not has_audio:
             cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                     "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
@@ -14863,7 +14899,7 @@ def _tl_normalize_segment(src: Path, t_in: float, t_out: float,
             af = _tl_declick_af(dur)
             if retimed:
                 af = _tl_atempo_chain(speed) + "," + af
-            cmd += ["-af", af + ",apad"]
+            cmd += ["-af", af + f",apad=whole_dur={dur:.3f}"]
         if not has_audio:
             cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
         cmd += [str(out_path)]
@@ -15267,7 +15303,7 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
         f"[{panel_out[0]}][{panel_out[1]}]{stack}=inputs=2{post},format=yuv420p[v]")
     fc = ";".join(parts)
 
-    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src)]
+    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-t", f"{dur:.6f}", "-i", str(src)]
     if not has_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
@@ -15283,7 +15319,7 @@ def _tl_split_speakers_segment(src: Path, t_in: float, dur: float,
             *_active_video_enc(), "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if has_audio:
-        cmd += ["-af", _tl_declick_af(dur) + ",apad"]
+        cmd += ["-af", _tl_declick_af(dur) + f",apad=whole_dur={dur:.3f}"]
     cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Speaker split-screen")
     return dur
@@ -15402,14 +15438,14 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
     parts.append(f"{order}{stack}=inputs=2{post},format=yuv420p[v]")
     fc = ";".join(parts)
     cmd = [FFMPEG, "-y",
-           "-ss", f"{inA:.3f}", "-i", str(srcA)]
+           "-ss", f"{inA:.3f}", "-t", f"{dur:.6f}", "-i", str(srcA)]
     if is_still:
         # Loop the still for the full segment — seeking into a photo is a no-op.
         cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.6f}", "-i", str(srcB)]
     elif is_gif:
         cmd += ["-ignore_loop", "0", "-stream_loop", "-1", "-i", str(srcB)]
     else:
-        cmd += ["-ss", f"{inB:.3f}", "-i", str(srcB)]
+        cmd += ["-ss", f"{inB:.3f}", "-t", f"{dur:.6f}", "-i", str(srcB)]
     if not hasA:
         cmd += ["-f", "lavfi", "-t", f"{dur:.6f}",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
@@ -15424,7 +15460,7 @@ def _tl_split_segment(srcA: Path, inA: float, srcB: Path, inB: float,
             *_active_video_enc(), "-c:a", "aac", "-b:a", "192k",
             "-ar", "44100", "-ac", "2"]
     if hasA:
-        cmd += ["-af", _tl_declick_af(dur) + ",apad"]
+        cmd += ["-af", _tl_declick_af(dur) + f",apad=whole_dur={dur:.3f}"]
     cmd += ["-shortest", str(out_path)]
     _tl_run(cmd, "Split-screen")
     return dur
@@ -17840,6 +17876,18 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
         cache_stats = {"hits": 0, "misses": 0, "split": 0}
         nplan = max(1, len(plan))
         for seg_counter, spec in enumerate(plan):
+            media_dur = _tl_media_dur(spec["src"])
+            past_note = ""
+            if media_dur > 0.4 and spec["sub_ke"] > media_dur - 0.02:
+                # This piece asks for pictures the file does not have. Other
+                # videos finish because every piece lands on real frames.
+                # Pull this one back onto the last frames instead of waiting.
+                if spec["sub_ks"] >= media_dur - 0.08:
+                    past_note = " · started past the end of the file"
+                else:
+                    past_note = " · trimmed to the end of the file"
+                spec["sub_ke"] = max(0.12, media_dur - 0.02)
+                spec["sub_ks"] = min(spec["sub_ks"], max(0.0, spec["sub_ke"] - 0.2))
             piece_s = max(0.1, float(spec["sub_ke"]) - float(spec["sub_ks"]))
             if spec.get("kind") in ("speakers", "split"):
                 piece_kind = "split"
@@ -17848,13 +17896,14 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
             else:
                 piece_kind = "interview"
             label = (f"main picture {seg_counter + 1}/{nplan} · {piece_kind}"
-                     f" · overlays come after this")
+                     f"{past_note} · overlays come after this")
             if review:
                 label = "review · " + label
             lo = 10 + int(25 * seg_counter / nplan)
             hi = 10 + int(25 * (seg_counter + 1) / nplan)
             jobs[job_id]["status"] = label
             jobs[job_id]["progress"] = lo
+            jobs[job_id]["render_beat"] = time.time()
             _db_save_job(job_id)
             _tl_progress_local.span = (job_id, lo, max(lo + 1, hi), piece_s, label)
             seg_path = UPLOAD_DIR / f"{job_id}_tlseg{seg_counter:03d}.mp4"
@@ -18799,10 +18848,18 @@ def timeline_render():
         return jsonify({"error": "Add at least one clip to the main track first."}), 400
     st = str(jobs[job_id].get("status") or "")
     prog = int(jobs[job_id].get("progress") or 0)
-    if st not in ("", "timeline_edit", "done", "error") and prog < 100:
+    running = st not in ("", "timeline_edit", "done", "error") and prog < 100
+    beat = float(jobs[job_id].get("render_beat") or 0)
+    # A living encode updates render_beat. One that died on a piece leaves
+    # the status at 15% forever, and the next click used to be refused, so
+    # this project could never be rendered again while others still could.
+    alive = bool(beat) and (time.time() - beat) < 90
+    if running and alive:
         return jsonify({
             "error": "A render is already running on this project. Let it finish before starting another — a second one keeps the machine busy and slows both.",
         }), 409
+    if running:
+        _kill_render_proc(job_id)
     review = bool(data.get("review"))
 
     style = data.get("style") or timeline.get("style") or jobs[job_id].get("style") or {}
