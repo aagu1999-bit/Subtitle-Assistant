@@ -1,9 +1,13 @@
+import { TOKENS } from "../../tokens";
 import React from "react";
 import { AbsoluteFill, useCurrentFrame, useVideoConfig } from "remotion";
 
-export const GOLD = "#FFD60A";
-export const MINT = "#00FF88";
-export const CYAN = "#00E5FF";
+// From ../../tokens, the one place the brand is declared on this side.
+// These were literals, so a project that set a pink highlight got pink
+// devices and gold Bits in the same video.
+export const GOLD = TOKENS.brandColor;
+export const MINT = "#00FF88";      // decorative, not settable
+export const CYAN = TOKENS.accentColor;
 export const FONT = "Inter, Anton, system-ui, sans-serif";
 
 export const BitsStage: React.FC<{

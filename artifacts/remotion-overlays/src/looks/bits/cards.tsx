@@ -1,6 +1,6 @@
 import React from "react";
 import { Easing, interpolate } from "remotion";
-import { BitsStage, GOLD, MINT, useClock, type BitsCardProps, type BitsCountProps } from "./shared";
+import { BitsStage, CYAN, GOLD, MINT, useClock, type BitsCardProps, type BitsCountProps } from "./shared";
 
 const Card: React.FC<{
   width?: number; height?: number; children: React.ReactNode;
@@ -27,7 +27,7 @@ export const ProfileCardLook: React.FC<BitsCardProps> = ({ text = "ALEX CHEN" })
         <Card>
           <div style={{
             width: 120, height: 120, borderRadius: 60, margin: "12px auto 20px",
-            background: `conic-gradient(from ${frame * 4}deg, ${GOLD}, ${MINT}, #00E5FF, ${GOLD})`,
+            background: `conic-gradient(from ${frame * 4}deg, ${GOLD}, ${MINT}, ${CYAN}, ${GOLD})`,
             padding: 4,
           }}>
             <div style={{

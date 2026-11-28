@@ -1,3 +1,4 @@
+import { TOKENS } from "../tokens";
 import {loadFont} from '@remotion/google-fonts/Inter';
 import React from 'react';
 import {
@@ -138,7 +139,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 							d={linePath}
 							fill="none"
 							pathLength={1}
-							stroke="#FFD60A"
+							stroke={TOKENS.brandColor}
 							strokeDasharray="1 1"
 							strokeDashoffset={interpolate(frame, [14, 58], [1, 0], {
 								easing: Easing.bezier(0, 0, 0.58, 1),
@@ -152,7 +153,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 						<Interactive.G
 							name="Data points"
 							fill="#ffffff"
-							stroke="#FFD60A"
+							stroke={TOKENS.brandColor}
 							strokeWidth={8}
 						>
 							{points.map(({label, x, y}, index) => (
@@ -221,7 +222,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 						<Interactive.Div
 							name="Latest value"
 							style={{
-								backgroundColor: '#FFD60A',
+								backgroundColor: TOKENS.brandColor,
 								borderRadius: 12,
 								color: '#ffffff',
 								fontSize: 44,

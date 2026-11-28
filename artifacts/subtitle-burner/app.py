@@ -40,6 +40,7 @@ import keyframes
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_guard  # noqa: E402
 import devices  # noqa: E402
+import tokens  # noqa: E402
 import edit_engine  # noqa: E402
 import motion  # noqa: E402
 import retelling  # noqa: E402
@@ -20123,18 +20124,15 @@ def broll_color_match():
 # ---- Graphics devices (UI mockups + mental-model diagrams) ----
 
 def _device_look(timeline: dict | None, data: dict | None = None) -> tuple[list, str | None]:
-    """Palette + font for devices: explicit request > timeline style doc > captions."""
-    data = data or {}
-    tl = timeline or {}
-    doc = (tl.get("style_doc") or {}).get("devices") or {}
-    pal = data.get("palette") or doc.get("palette")
-    if not pal:
-        st = tl.get("style") or {}
-        pal = [st.get("highlight_color") or st.get("highlight") or "#FFD60A",
-               st.get("accent_color") or st.get("accent") or "#00E5FF"]
-    pal = [str(c) for c in pal if isinstance(c, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", c)]
-    font = data.get("font") or doc.get("font") or (tl.get("style") or {}).get("font_name")
-    return pal or list(devices.DEFAULT_PALETTE), font
+    """Palette + font for devices: explicit request > timeline style doc > captions.
+
+    This precedence was the only place in the app that got the look right, and
+    it had four call sites -- none of them Remotion or Hyperframes. It now
+    lives in tokens.resolve so every engine can reach the same answer, and
+    this stays as the (list, font) shape devices.py and motion.py already take.
+    """
+    t = tokens.resolve(timeline, data)
+    return tokens.palette(t), t["font"]["display"]
 
 
 def _render_device_asset(kind: str, labels: list, duration: float, canvas: str,
@@ -20300,7 +20298,8 @@ def _review_animation(spec: dict, description: str, brief: str) -> dict:
     return motion.fit_to_content(_resolve_motion_images(fixed))
 
 
-def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 30) -> dict:
+def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 30,
+                         fell_back_from: dict | None = None) -> dict:
     W, H = TIMELINE_CANVASES.get(canvas, TIMELINE_CANVASES["9x16"])
     box = motion.box_for(spec, W, H)
     path, cached = motion.render_cached(spec, (box["px_w"], box["px_h"]), fps, CACHE_DIR,
@@ -20314,32 +20313,51 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
             shutil.copyfile(path, dest)
     _write_asset_meta(asset_id, filename=f"Animation: {description[:48]}",
                       source="device", device_kind="animation", alpha=True)
+    # `engine` was absent here and present on every real engine's output, so
+    # "which renderer drew this?" was answerable only by noticing an absence.
+    # Say it, and when this was not the first choice, say what was and why --
+    # otherwise a GlassSurface that never ran looks like a successful render
+    # of something else.
+    device = {"kind": "animation", "engine": "motion",
+              "description": description, "spec": spec}
+    if fell_back_from:
+        device["fell_back_from"] = fell_back_from
     return {"asset_id": asset_id, "kind": "video", "cached": cached,
             "duration": round(float(spec["duration"]), 3), "box": box,
-            "device": {"kind": "animation", "description": description, "spec": spec}}
+            "device": device}
 
 
 def _make_animation(description: str, timeline: dict | None,
                     duration: float | None = None, freehand: bool = True,
                     photos: list | None = None) -> dict:
     engine, rec = _match_named_look(description)
+    # Why the named look did not render, carried down to whatever does. A
+    # downgrade of something the user asked for by name is a warning, not an
+    # info line nobody reads.
+    missed: dict | None = None
+
+    def _missed(eng: str, e: Exception) -> None:
+        nonlocal missed
+        missed = {"engine": eng, "id": rec["id"], "why": str(e)[:200]}
+        ai_logger.warning(f"[{eng}] {rec['id']} did not render, falling back: {e}")
+
     if engine == "remotion" and rec:
         try:
             return _make_remotion_look(rec, description, timeline, duration)
         except Exception as e:
-            ai_logger.info(f"[remotion] {rec['id']} failed, falling back: {e}")
+            _missed("remotion", e)
     if engine == "hyperframes" and rec:
         try:
             return _make_hyperframes_look(rec, description, timeline, duration)
         except Exception as e:
-            ai_logger.info(f"[hyperframes] {rec['id']} failed, falling back: {e}")
+            _missed("hyperframes", e)
     if engine == "effects" and rec:
         if rec.get("engine") == "effect":
             raise ValueError("lean in is a punch zoom on the speaker, not an overlay")
         try:
             return _make_effects_look(rec, description, timeline, duration, photos)
         except Exception as e:
-            ai_logger.info(f"[effects] {rec['id']} failed, falling back: {e}")
+            _missed("effects", e)
             # Named pictures are not a stylistic preference to be dropped on
             # the way to a generic animation.
             if photos:
@@ -20353,13 +20371,14 @@ def _make_animation(description: str, timeline: dict | None,
             # the same protection as a prose one.
             if photos or _orbit_photo_queries(description)[0]:
                 raise
-            ai_logger.info(f"[remotion] falling back to motion.py: {e}")
+            missed = {"engine": "remotion", "id": "OrbitCarousel", "why": str(e)[:200]}
+            ai_logger.warning(f"[remotion] orbit did not render, falling back to motion.py: {e}")
     if not freehand:
         raise RuntimeError("no wired look for this beat")
     spec = _design_animation(description, timeline, duration)
     tl = timeline or {}
     return _render_motion_asset(spec, description, tl.get("canvas") or "9x16",
-                                int(tl.get("fps") or 30))
+                                int(tl.get("fps") or 30), fell_back_from=missed)
 
 
 REMOTION_DIR = Path(__file__).resolve().parent.parent / "remotion-overlays"
@@ -20909,23 +20928,37 @@ def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
     return (m.group(1) if m else default)[:48]
 
 
-def _remotion_look_props(rec: dict, description: str) -> dict:
+def _remotion_look_props(rec: dict, description: str,
+                         timeline: dict | None = None) -> dict:
+    """Props for a named Remotion or Hyperframes look.
+
+    Both engines come through here, so this is the one function that decides
+    what colour they draw in -- and it used to answer "#FFD60A" three times
+    over, as a literal. That matched the default, so it looked right; change
+    highlight_color in the editor and devices.py followed it while these two
+    carried on in yellow.
+
+    `look` is the resolved token set flattened into props. React and the HTML
+    engine cannot import tokens.py, so this is how they read it.
+    """
     kind = rec.get("props")
+    look = tokens.as_props(tokens.resolve(timeline))
+    brand = look["brandColor"]
     if kind == "text":
         default = "ALEX CHEN" if rec["id"] == "ProfileCard" else "WATCH THIS"
-        return {"text": _quoted_look_text(description, default), "color": "#FFD60A"}
+        return {"text": _quoted_look_text(description, default), "color": brand, **look}
     if kind == "count":
         m = re.search(r"(\d[\d,]*)", description or "")
         n = int(m.group(1).replace(",", "")) if m else 10000
-        return {"to": min(max(n, 0), 99_999_999), "color": "#FFD60A"}
+        return {"to": min(max(n, 0), 99_999_999), "color": brand, **look}
     if kind == "words":
         raw = _quoted_look_text(description, "START, GROW, WIN")
         words = [w.strip()[:24] for w in re.split(r"[,/|]", raw) if w.strip()][:6]
-        return {"words": words or ["START", "GROW", "WIN"], "color": "#FFD60A"}
+        return {"words": words or ["START", "GROW", "WIN"], "color": brand, **look}
     if kind == "cards":
         raw = _quoted_look_text(description, "One, Two, Three")
         labels = [w.strip()[:20] for w in re.split(r"[,/|]", raw) if w.strip()][:4]
-        return {"labels": labels or ["One", "Two", "Three"]}
+        return {"labels": labels or ["One", "Two", "Three"], **look}
     if kind == "shots":
         default = "looks like this" if rec["id"] == "LooksLikeThis" else "screenshot tour"
         caption = _quoted_look_text(description, default)
@@ -20938,8 +20971,10 @@ def _remotion_look_props(rec: dict, description: str) -> dict:
                          for it in staged if it.get("kind") == "image" and it.get("src")]
             except Exception as e:
                 ai_logger.info(f"[remotion] screenshot photos skipped: {e}")
-        return {"caption": caption, "items": items}
-    return {}
+        return {"caption": caption, "items": items, **look}
+    # A look with no content props still gets the brand: the two caption looks
+    # drew in Tailwind's default blue because nothing ever handed them one.
+    return dict(look)
 
 
 def _wants_remotion_orbit(description: str) -> bool:
@@ -20953,8 +20988,68 @@ def _wants_remotion_orbit(description: str) -> bool:
     return photos and swap
 
 
+_REMOTION_OK: dict = {}       # memoised once it is genuinely ready
+
+
+def _remotion_browser() -> Path | None:
+    """The Chrome headless shell Remotion renders in, if it is really here.
+
+    Checking for the directory is not enough. A browser fetch that dies
+    partway leaves node_modules/.remotion/chrome-headless-shell holding
+    nothing but a download.lock -- which is exactly the state this repo was
+    in -- so the executable itself has to be found and sized.
+    """
+    env = (os.environ.get("REMOTION_BROWSER_EXECUTABLE") or "").strip()
+    if env:
+        p = Path(env)
+        return p if p.is_file() else None
+    root = REMOTION_DIR / "node_modules" / ".remotion" / "chrome-headless-shell"
+    if not root.is_dir():
+        return None
+    for cand in root.rglob("chrome-headless-shell*"):
+        try:
+            if cand.is_file() and cand.stat().st_size > 1_000_000:
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _remotion_status() -> dict:
+    """What Remotion needs in order to render here, and what is missing.
+
+    The old check asked two questions -- is src/index.ts there, is pnpm on
+    PATH -- and both are true in a checkout that has never been installed.
+    So the app believed Remotion was available, tried, failed, and
+    _make_animation walked that failure down to motion.py's freehand
+    designer at log level info. Every one of the 42 Remotion recipes could
+    have been answering with a Pillow improvisation and nothing said so.
+
+    node_modules is gitignored and the browser is a 176MB separate fetch, so
+    those are the two that actually go missing.
+    """
+    if _REMOTION_OK.get("ok"):
+        return dict(_REMOTION_OK)        # it cannot un-install mid-process
+    missing = []
+    if not (REMOTION_DIR / "src" / "index.ts").is_file():
+        missing.append("the remotion-overlays project")
+    if shutil.which("pnpm") is None:
+        missing.append("pnpm on PATH")
+    if not (REMOTION_DIR / "node_modules" / ".bin" / "remotion").exists():
+        missing.append("node_modules (run: pnpm install)")
+    browser = _remotion_browser()
+    if browser is None:
+        missing.append("the Chrome headless shell "
+                       "(run: cd artifacts/remotion-overlays && pnpm exec remotion browser ensure)")
+    out = {"ok": not missing, "missing": missing,
+           "browser": str(browser) if browser else None}
+    if out["ok"]:
+        _REMOTION_OK.update(out)         # re-checked until it passes once
+    return out
+
+
 def _remotion_ready() -> bool:
-    return (REMOTION_DIR / "src" / "index.ts").is_file() and shutil.which("pnpm") is not None
+    return _remotion_status()["ok"]
 
 
 def _orbit_hold(description: str) -> float:
@@ -21310,7 +21405,9 @@ def _make_hyperframes_look(rec: dict, description: str, timeline: dict | None,
                            duration: float | None) -> dict:
     """Render a Hyperframes HTML composition onto the overlay track."""
     dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
-    props = _remotion_look_props(rec, description) if rec.get("props") else {}
+    # The tokens go through even for a look with no content props: that is how
+    # the HTML engine stops drawing in a colour nobody chose.
+    props = _remotion_look_props(rec, description, timeline)
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"hyperframes_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
@@ -21336,8 +21433,15 @@ def _make_hyperframes_look(rec: dict, description: str, timeline: dict | None,
 
 def _render_remotion_webm(composition: str, props: dict, out_path: Path,
                           *, slow: bool = False) -> None:
+    # Through _remotion_ready, not _remotion_status: that is the seam callers
+    # and tests stub. The status is only consulted to say WHICH piece is
+    # missing -- "not installed in this workspace" was the same sentence
+    # whether it was node_modules, the browser or pnpm, so every diagnosis
+    # started from scratch.
     if not _remotion_ready():
-        raise RuntimeError("Remotion is not installed in this workspace")
+        missing = _remotion_status()["missing"]
+        raise RuntimeError("Remotion cannot render here -- missing: "
+                           + ("; ".join(missing) if missing else "unknown"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     props_file = CACHE_DIR / f"remotion_props_{hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]}.json"
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -21369,7 +21473,7 @@ def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
                         duration: float | None) -> dict:
     """Render a named official Element or Bits-style look onto the overlay track."""
     dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
-    props = _remotion_look_props(rec, description)
+    props = _remotion_look_props(rec, description, timeline)
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
@@ -25907,6 +26011,19 @@ def _co_editor_looks_catalog() -> dict:
          "items": []},
     ]
     by_id = {g["id"]: g for g in groups}
+    # An engine that cannot render here says so in the picker, where the look
+    # is chosen, rather than quietly answering with a motion.py improvisation.
+    # The hint is already rendered, so this needs no change in the client.
+    _rst = _remotion_status()
+    if not _rst["ok"]:
+        by_id["remotion"]["hint"] += (" NOT AVAILABLE on this server — missing "
+                                      + "; ".join(_rst["missing"])
+                                      + ". Picking one falls back to a drawn animation.")
+    by_id["remotion"]["reachable"] = bool(_rst["ok"])
+    by_id["hyperframes"]["reachable"] = bool(_hyperframes_ready())
+    if not by_id["hyperframes"]["reachable"]:
+        by_id["hyperframes"]["hint"] += (" NOT AVAILABLE on this server. "
+                                         "Picking one falls back to a drawn animation.")
     for entry in _library_look_entries():
         rec = entry["rec"]
         gid = {"effects": "effects", "hyperframes": "hyperframes",
