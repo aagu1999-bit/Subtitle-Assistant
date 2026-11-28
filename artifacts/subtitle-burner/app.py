@@ -20462,7 +20462,8 @@ def _render_motion_asset(spec: dict, description: str, canvas: str, fps: int = 3
 
 def _make_animation(description: str, timeline: dict | None,
                     duration: float | None = None, freehand: bool = True,
-                    photos: list | None = None) -> dict:
+                    photos: list | None = None,
+                    content: dict | None = None) -> dict:
     engine, rec = _match_named_look(description)
     # Why the named look did not render, carried down to whatever does. A
     # downgrade of something the user asked for by name is a warning, not an
@@ -20476,12 +20477,12 @@ def _make_animation(description: str, timeline: dict | None,
 
     if engine == "remotion" and rec:
         try:
-            return _make_remotion_look(rec, description, timeline, duration)
+            return _make_remotion_look(rec, description, timeline, duration, content)
         except Exception as e:
             _missed("remotion", e)
     if engine == "hyperframes" and rec:
         try:
-            return _make_hyperframes_look(rec, description, timeline, duration)
+            return _make_hyperframes_look(rec, description, timeline, duration, content)
         except Exception as e:
             _missed("hyperframes", e)
     if engine == "effects" and rec:
@@ -20584,7 +20585,19 @@ REMOTION_RECIPES = (
      "dur": 3.0, "place": "full", "props": "text"},
     {"id": "ProfileCard",
      "words": ("profile card",),
-     "dur": 4.0, "place": "full", "props": "text"},
+     "dur": 4.0, "place": "full", "props": "text",
+     # The first look to declare what it actually needs. It used to get one
+     # string and fake the rest: the avatar was the name's first letter, the
+     # handle was the first word lowercased, and the follower numbers were
+     # hardcoded "124k views / 8.2k likes" -- invented statistics, on screen,
+     # in a video someone publishes.
+     "fields": {
+         "name":   {"type": "text", "max": 40},
+         "handle": {"type": "text", "max": 30},
+         "views":  {"type": "text", "max": 12},
+         "likes":  {"type": "text", "max": 12},
+         "avatar": {"type": "picture"},
+     }},
     {"id": "SpotlightCard",
      "words": ("spotlight card",),
      "dur": 4.0, "place": "full", "props": "text"},
@@ -21061,8 +21074,103 @@ def _quoted_look_text(description: str, default: str = "WATCH THIS") -> str:
     return (m.group(1) if m else default)[:48]
 
 
+def _look_fields_prompt() -> str:
+    """The looks that take named content, and what each one takes.
+
+    Generated from the recipes so it cannot drift from what the gate will
+    actually accept -- a prompt advertising a field the validator drops is
+    worse than no prompt at all.
+    """
+    lines = []
+    for rec in list(REMOTION_RECIPES) + list(HYPERFRAMES_RECIPES):
+        fields = rec.get("fields") or {}
+        if not fields:
+            continue
+        bits = []
+        for name, spec in fields.items():
+            kind = spec.get("type", "text")
+            bits.append(name + ("(picture)" if kind == "picture" else
+                                "(true/false)" if kind == "flag" else
+                                "(number)" if kind == "number" else ""))
+        lines.append(f"  {rec['id']}: {', '.join(bits)}")
+    if not lines:
+        return ""
+    return (
+        "\nLOOKS THAT TAKE NAMED CONTENT. Send it as \"content\" on add_animation,\n"
+        "beside \"description\". Fill only what the user actually told you.\n"
+        "NEVER invent a number, a handle or a statistic to fill a field -- leave it\n"
+        "out and the look does not draw it at all. A picture field takes one of\n"
+        "their asset ids or a subject to go and find, never a web address.\n"
+        + "\n".join(lines))
+
+
+def _look_content(rec: dict, content) -> dict:
+    """The named content a look asked for, taken from model output safely.
+
+    Until now the whole channel from the model to a look was
+    _quoted_look_text: one regex, the first quoted phrase, capped at 48
+    characters. So "a profile card for 'Monita Kai', she runs a studio in
+    Lagos, 400k revenue, @monitakai" reached the component as
+    {"text": "Monita Kai"} and everything else was discarded -- which is why
+    the component had to invent an avatar, a handle and its statistics.
+
+    A recipe now declares `fields`, and this is the gate. It is a gate and
+    not a merge on purpose: these values come from a language model and end
+    up rendered into a video the user publishes.
+
+      - a key the recipe did not declare is dropped, not passed through
+      - text is stripped and cut to the recipe's own limit
+      - a picture is resolved through our own staging, so what reaches the
+        component is a file we fetched; a raw URL from model output is never
+        handed to <Img src=...>
+    """
+    fields = rec.get("fields") or {}
+    if not fields or not isinstance(content, dict):
+        return {}
+    out: dict = {}
+    pictures: list[tuple[str, str]] = []
+    for key, raw in content.items():
+        spec = fields.get(key)
+        if spec is None or raw is None:
+            continue                      # undeclared: not ours to forward
+        kind = spec.get("type", "text")
+        if kind == "text":
+            val = " ".join(str(raw).split())[: int(spec.get("max", 80))]
+            if val:
+                out[key] = val
+        elif kind == "flag":
+            out[key] = bool(raw)
+        elif kind == "number":
+            try:
+                n = float(raw)
+            except (TypeError, ValueError):
+                continue
+            lo, hi = spec.get("min", 0), spec.get("max", 99_999_999)
+            out[key] = int(max(lo, min(hi, n)))
+        elif kind == "picture":
+            q = " ".join(str(raw).split())[:80]
+            if q:
+                pictures.append((key, q))
+    if pictures:
+        # Through the same staging the ring uses: an asset id we already hold,
+        # or a subject we go and fetch. `generate` is off -- a picture nobody
+        # has is reported missing rather than invented, the same rule the
+        # orbit's brand marks follow.
+        try:
+            items, _misses = _remotion_stage_photos(
+                [q for _, q in pictures], want=len(pictures), floor=1,
+                generate=False)
+            for (key, _q), item in zip(pictures, items):
+                if item.get("src"):
+                    out[key] = item["src"]
+        except Exception as e:
+            ai_logger.info(f"[look] picture fields skipped: {e}")
+    return out
+
+
 def _remotion_look_props(rec: dict, description: str,
-                         timeline: dict | None = None) -> dict:
+                         timeline: dict | None = None,
+                         content: dict | None = None) -> dict:
     """Props for a named Remotion or Hyperframes look.
 
     Both engines come through here, so this is the one function that decides
@@ -21077,21 +21185,24 @@ def _remotion_look_props(rec: dict, description: str,
     kind = rec.get("props")
     look = tokens.as_props(tokens.resolve(timeline))
     brand = look["brandColor"]
+    # Declared content wins over anything guessed from the prose. A recipe
+    # with no `fields` gets {} here, so every branch below is unchanged.
+    named = _look_content(rec, content)
     if kind == "text":
         default = "ALEX CHEN" if rec["id"] == "ProfileCard" else "WATCH THIS"
-        return {"text": _quoted_look_text(description, default), "color": brand, **look}
+        return {"text": _quoted_look_text(description, default), "color": brand, **look, **named}
     if kind == "count":
         m = re.search(r"(\d[\d,]*)", description or "")
         n = int(m.group(1).replace(",", "")) if m else 10000
-        return {"to": min(max(n, 0), 99_999_999), "color": brand, **look}
+        return {"to": min(max(n, 0), 99_999_999), "color": brand, **look, **named}
     if kind == "words":
         raw = _quoted_look_text(description, "START, GROW, WIN")
         words = [w.strip()[:24] for w in re.split(r"[,/|]", raw) if w.strip()][:6]
-        return {"words": words or ["START", "GROW", "WIN"], "color": brand, **look}
+        return {"words": words or ["START", "GROW", "WIN"], "color": brand, **look, **named}
     if kind == "cards":
         raw = _quoted_look_text(description, "One, Two, Three")
         labels = [w.strip()[:20] for w in re.split(r"[,/|]", raw) if w.strip()][:4]
-        return {"labels": labels or ["One", "Two", "Three"], **look}
+        return {"labels": labels or ["One", "Two", "Three"], **look, **named}
     if kind == "shots":
         default = "looks like this" if rec["id"] == "LooksLikeThis" else "screenshot tour"
         caption = _quoted_look_text(description, default)
@@ -21104,10 +21215,10 @@ def _remotion_look_props(rec: dict, description: str,
                          for it in staged if it.get("kind") == "image" and it.get("src")]
             except Exception as e:
                 ai_logger.info(f"[remotion] screenshot photos skipped: {e}")
-        return {"caption": caption, "items": items, **look}
+        return {"caption": caption, "items": items, **look, **named}
     # A look with no content props still gets the brand: the two caption looks
     # drew in Tailwind's default blue because nothing ever handed them one.
-    return dict(look)
+    return {**look, **named}
 
 
 def _wants_remotion_orbit(description: str) -> bool:
@@ -21535,12 +21646,12 @@ def _render_hyperframes_webm(composition_file: str, props: dict, out_path: Path)
 
 
 def _make_hyperframes_look(rec: dict, description: str, timeline: dict | None,
-                           duration: float | None) -> dict:
+                           duration: float | None, content: dict | None = None) -> dict:
     """Render a Hyperframes HTML composition onto the overlay track."""
     dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
     # The tokens go through even for a look with no content props: that is how
     # the HTML engine stops drawing in a colour nobody chose.
-    props = _remotion_look_props(rec, description, timeline)
+    props = _remotion_look_props(rec, description, timeline, content)
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"hyperframes_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
@@ -21603,10 +21714,10 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path,
 
 
 def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
-                        duration: float | None) -> dict:
+                        duration: float | None, content: dict | None = None) -> dict:
     """Render a named official Element or Bits-style look onto the overlay track."""
     dur = max(0.8, min(12.0, float(duration))) if duration else rec["dur"]
-    props = _remotion_look_props(rec, description, timeline)
+    props = _remotion_look_props(rec, description, timeline, content)
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
@@ -25562,6 +25673,7 @@ CO_EDITOR_OP_EXAMPLES = [
     '{"op": "add_device", "kind": "venn", "labels": ["Skill", "Demand", "Money"], "start": 8.0, "duration": 3.4}',
     '{"op": "add_animation", "description": "a YouTube subscribe button; a mouse pointer glides in, hovers, clicks it and it turns grey with a ringing bell", "start": 20.0, "duration": 3.5}',
     '{"op": "add_animation", "description": "head orbit", "photos": ["a1b2c3d4e5f60718293a4b5c6d7e8f90", "chase bank logo", "barclays logo"], "start": 7.0, "duration": 5.0}',
+    '{"op": "add_animation", "description": "a profile card", "content": {"name": "Monita Kai", "handle": "@monitakai", "views": "412k"}, "start": 12.0, "duration": 4.0}',
     '{"op": "set_sound", "track": "overlay", "index": 0, "sound": "pop"}',
     '{"op": "set_sound", "default": "soft_pop"}',
     '{"op": "add_speed", "start": 12.0, "duration": 2.0, "speed": 2.0}',
@@ -25927,6 +26039,9 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
         return None, "the animation had no description"
     photos = op.get("photos") or op.get("asset_ids") or op.get("items")
     photos = [x for x in photos if x] if isinstance(photos, list) else None
+    # Named content for looks that declare fields. Same shape as `photos`:
+    # an extra key on the op, validated by the look that receives it.
+    content = op.get("content") if isinstance(op.get("content"), dict) else None
     try:
         start = max(0.0, float(op.get("start", 0)))
         dur = op.get("duration")
@@ -25940,7 +26055,7 @@ def _resolve_add_animation(op: dict, timeline: dict) -> tuple[dict | None, str]:
               "intensity": "high"}
         return _resolve_add_effect(fx)
     try:
-        info = _make_animation(desc, timeline, dur, photos=photos)
+        info = _make_animation(desc, timeline, dur, photos=photos, content=content)
     except (RuntimeError, OSError, ValueError) as e:
         return None, f"the animation could not be made ({str(e)[:160]})"
     clip = _device_overlay_clip(info, start)
@@ -26676,9 +26791,14 @@ edited since, so treat an old report as a hint and not a fact.
   it is relevant and leave it alone. Never invent an op for one.
 - Do not re-raise a finding the user has already declined earlier in this chat."""
 
-    _op_examples = ",\n".join(
-        "    " + ex for ex in CO_EDITOR_OP_EXAMPLES
-    ).replace("{", "{{").replace("}", "}}")
+    # No brace doubling. system_prompt below is an f-string, and f-string
+    # escaping applies to the LITERAL template, never to an interpolated
+    # value -- so this doubling survived into the prompt and every op example
+    # the model is told to copy reached it as malformed JSON:
+    #     {{"op": "add_animation", "description": ...}}
+    # It still produced valid ops, which is why it went unnoticed, but the
+    # one place we show the exact output format was showing the wrong one.
+    _op_examples = ",\n".join("    " + ex for ex in CO_EDITOR_OP_EXAMPLES)
 
     # What was said before. Its own instructions tell it three times to ask a
     # clarifying question -- "ask 1-2 clarifying questions if needed", "if
@@ -26776,6 +26896,7 @@ HARD LIMITS (say no in message, ops: [])
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
 {_behind_rules}
+{_look_fields_prompt()}
 {_qa_rules}
 
 Return ONLY JSON:

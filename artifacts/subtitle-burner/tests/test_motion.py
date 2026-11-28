@@ -429,7 +429,7 @@ def test_wired_remotion_looks_match_their_phrases(app_mod):
 def test_make_animation_uses_remotion_for_a_wired_look(app_mod, monkeypatch):
     seen = {}
 
-    def fake(rec, desc, tl, dur):
+    def fake(rec, desc, tl, dur, content=None):
         seen["id"] = rec["id"]
         return {"asset_id": "r1", "duration": 4, "box": {"x": 0, "y": 0, "w": 1, "h": 1},
                 "device": {"kind": "animation", "engine": "remotion", "composition": rec["id"]}}
@@ -522,7 +522,7 @@ def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
         lambda p: pytest.fail("slash looks must not ask Gemini"))
     monkeypatch.setattr(
         app_mod, "_make_animation",
-        lambda desc, tl, dur, photos=None: {
+        lambda desc, tl, dur, photos=None, content=None: {
             "asset_id": "e1", "duration": 2.5,
             "box": {"x": 0, "y": 0, "w": 1, "h": 1},
             "behind": True, "device": {"kind": "animation"},
@@ -557,7 +557,7 @@ def test_slash_looks_bypass_gemini(app_mod, temp_db, monkeypatch):
 def test_make_animation_uses_hyperframes_for_slam_captions(app_mod, monkeypatch):
     seen = {}
 
-    def fake(rec, desc, tl, dur):
+    def fake(rec, desc, tl, dur, content=None):
         seen["id"] = rec["id"]
         return {"asset_id": "h1", "duration": 8, "box": {"x": 0, "y": 0.34, "w": 1, "h": 0.32},
                 "device": {"kind": "animation", "engine": "hyperframes", "composition": rec["id"]}}
