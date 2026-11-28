@@ -687,6 +687,56 @@ def test_the_coeditor_reads_the_whole_transcript_in_output_time(app_mod, temp_db
     assert "Never ask the user to describe" in p
 
 
+def test_the_coeditor_is_told_what_was_wrong_with_the_last_render(app_mod, temp_db, monkeypatch):
+    """The checks ran on every export and were drawn in the Export tab, but
+    nothing passed them to the model, so the only component able to act on
+    "the caption is on his face" was the only one never told.
+
+    /timeline/render renders under the same job_id the client posts here, so
+    jobs[job_id]["qa"] is that render's own report.
+    """
+    seen = {}
+
+    def fake(prompt):
+        seen["prompt"] = prompt
+        return {"ops": [], "message": "noted"}
+
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", fake)
+    monkeypatch.setitem(app_mod.jobs, "jobQA", {"qa": {
+        "status": "warn", "ran_at": time.time(),
+        "checks": [
+            {"id": "resolution", "status": "pass", "detail": "1080x1920"},
+            {"id": "caption_safe", "status": "warn",
+             "detail": "1 caption sits under the vertical feed UI",
+             "items": [{"start": 7.25, "text": "down low"}]},
+            {"id": "loudness", "status": "warn", "detail": "-20.5 LUFS, quieter than target"},
+        ],
+        "vision": {"engine": "model+local", "issues": [
+            {"t": 3.5, "severity": "warn", "problem": "Venn covers a face"}]}}})
+
+    tl = _coeditor_timeline()
+    app_mod.app.test_client().post("/co-editor", json={
+        "job_id": "jobQA", "prompt": "the caption looks wrong", "timeline": tl})
+    p = seen["prompt"]
+    # the quoted key with its colon, not the bare phrase: a renamed key such
+    # as "_last_render_quality" still contains the phrase, and an earlier
+    # version of this assertion passed while the data sat under the wrong name
+    assert '"last_render_quality":' in p, "the verdict never reaches the model"
+    assert "under the vertical feed UI" in p
+    assert "Venn covers a face" in p
+    assert "set_behind" in p[p.index("last_render_quality"):], "no remedy offered"
+    # the rules that stop it inventing an op for a defect it cannot fix
+    assert "NOT yours to fix" in p and "loudness" in p
+    assert "render_age_seconds" in p, "it cannot tell a stale report from a fresh one"
+
+    # No job_id (or a job that never rendered) must look exactly as before.
+    seen.clear()
+    app_mod.app.test_client().post("/co-editor", json={
+        "prompt": "the caption looks wrong", "timeline": tl})
+    assert '"last_render_quality":' not in seen["prompt"]
+    assert "NOT yours to fix" not in seen["prompt"], "rules spent with nothing to explain"
+
+
 def test_coeditor_replies_reach_the_chat_as_plain_text(app_mod):
     raw = ("## Graphics\n* **App mockups:**\n    * `chat_bubbles`: a text thread\n"
            "- **Kinetic text**\n\n\n\nDone.")

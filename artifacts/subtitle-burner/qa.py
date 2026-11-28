@@ -338,8 +338,31 @@ def local_vision(frames: list[dict], boxes: list[dict], W: int, H: int,
     return {"engine": "local", "issues": issues, "frames": len(frames)}
 
 
+def _merge_issues(a: list, b: list) -> list:
+    """Union of two issue lists, near-duplicates collapsed."""
+    out, seen = [], set()
+    for it in list(a or []) + list(b or []):
+        key = (round(float(it.get("t") or 0), 1),
+               str(it.get("problem") or "")[:40].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return sorted(out, key=lambda i: float(i.get("t") or 0))
+
+
 def run_vision(frames: list[dict], llm_vision=None, **local_kwargs) -> dict:
-    """Gemini over the keyframes when available, otherwise the local check."""
+    """The model over the keyframes AND the local geometry check, merged.
+
+    These two see different things and neither subsumes the other. The
+    local pass is handed the exact caption and graphic boxes, so it knows
+    for certain when one lands on a face; the model only ever sees pixels,
+    but it is the only thing that can call text unreadable or a crop bad.
+
+    The model path used to `return` on success, so whenever a key was
+    configured `local_kwargs` -- including the graphics boxes computed for
+    exactly this purpose -- was built and then dropped on the floor.
+    """
     if llm_vision and frames:
         try:
             images = [(f["t"], Path(f["path"]).read_bytes()) for f in frames]
@@ -354,10 +377,18 @@ def run_vision(frames: list[dict], llm_vision=None, **local_kwargs) -> dict:
                 except (TypeError, ValueError):
                     t = 0.0
                 issues.append({"t": t, "severity": sev, "problem": str(it["problem"])[:200]})
-            return {"engine": "gemini", "issues": issues, "frames": len(frames)}
+            engine = "model"
+            try:
+                loc = local_vision(frames, **local_kwargs)
+                if loc.get("issues"):
+                    issues = _merge_issues(issues, loc["issues"])
+                engine = "model+local"
+            except Exception:
+                pass          # the model's findings still stand on their own
+            return {"engine": engine, "issues": issues, "frames": len(frames)}
         except Exception as e:  # fall through to the local check, but say so
             out = local_vision(frames, **local_kwargs)
-            out["note"] = f"Gemini unavailable ({str(e)[:120]}); used the local face check."
+            out["note"] = f"The vision model was unavailable ({str(e)[:120]}); used the local face check."
             return out
     return local_vision(frames, **local_kwargs)
 

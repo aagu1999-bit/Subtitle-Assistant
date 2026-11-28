@@ -552,7 +552,7 @@ def _db_init() -> None:
             existing_cols = {
                 row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
             }
-            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe", "timeline"):
+            for col in ("style", "audio", "emoji_rules", "audio_cache_key", "burn_cache_key", "filename", "compile_recipe", "timeline", "qa"):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
             # What the model proposed and what actually shipped. A table rather
@@ -605,13 +605,26 @@ def _db_save_job(job_id: str) -> None:
     emoji_rules_json = json.dumps(job.get("emoji_rules")) if job.get("emoji_rules") is not None else None
     compile_recipe_json = json.dumps(job.get("compile_recipe")) if job.get("compile_recipe") is not None else None
     timeline_json = json.dumps(job.get("timeline")) if job.get("timeline") is not None else None
+    # The quality report used to evaporate: _db_save_job is called straight
+    # after _run_job_qa writes it, and there was no column to put it in, so
+    # reopening a job showed "status: none" for a render that had been checked.
+    # In-flight states are not worth a row -- they can only be lies after a
+    # restart, since the thread that would finish them is gone.
+    qa_rep = job.get("qa")
+    if not isinstance(qa_rep, dict) or qa_rep.get("status") in ("running", None):
+        qa_json = None
+    else:
+        try:
+            qa_json = json.dumps(qa_rep)
+        except (TypeError, ValueError):
+            qa_json = None
     with _db_lock:
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO jobs
-                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename, compile_recipe, timeline)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, status, progress, output, error, words, style, audio, emoji_rules, created_at, completed_at, audio_cache_key, burn_cache_key, filename, compile_recipe, timeline, qa)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -630,6 +643,7 @@ def _db_save_job(job_id: str) -> None:
                     job.get("filename"),
                     compile_recipe_json,
                     timeline_json,
+                    qa_json,
                 ),
             )
             conn.commit()
@@ -831,6 +845,12 @@ def _load_jobs_from_db() -> None:
                 timeline = json.loads(row["timeline"])
         except (IndexError, KeyError, json.JSONDecodeError, TypeError):
             timeline = None
+        qa_rep = None
+        try:
+            if row["qa"]:
+                qa_rep = json.loads(row["qa"])
+        except (IndexError, KeyError, json.JSONDecodeError, TypeError):
+            qa_rep = None
         cache_key = None
         burn_key = None
         filename = None
@@ -879,6 +899,10 @@ def _load_jobs_from_db() -> None:
             "completed_at": row["completed_at"],
             "compile_recipe": compile_recipe,
             "timeline": timeline,
+            # The checks ran on a file that is still on disk, so the verdict
+            # is still true. The keyframes it names may have been swept, which
+            # the report viewer already tolerates.
+            "qa": qa_rep,
             # is_timeline isn't its own column — a job is a timeline editor
             # project iff it carries a timeline doc. Derive it on load so the
             # editor list + cleanup exemption survive a server restart.
@@ -6587,13 +6611,111 @@ def _run_job_qa(job_id: str, output_path: Path, *, W: int | None = None, H: int 
     return job["qa"]
 
 
+def _vision_llm_available() -> bool:
+    """Whether the frames can be shown to a model at all.
+
+    This used to read GEMINI_API_KEY alone, while _gemini_vision_json has
+    dispatched to Claude since the provider flip. So on an Anthropic-only
+    deploy the vision pass never ran -- the richest half of the report was
+    missing, and nothing said so. Ask the provider that will actually serve
+    the call whether it has a key.
+    """
+    key = "ANTHROPIC_API_KEY" if _active_llm_provider() == "claude" else "GEMINI_API_KEY"
+    return bool((os.environ.get(key) or "").strip())
+
+
 def _run_job_vision(job_id: str) -> dict:
     st = _QA_STATE.get(job_id)
     if not st:
         raise RuntimeError("Run QA on this export first.")
-    llm = _gemini_vision_json if os.environ.get("GEMINI_API_KEY") else None
+    llm = _gemini_vision_json if _vision_llm_available() else None
     return qa.run_vision(st["frames"], llm, boxes=st["boxes"], W=st["W"], H=st["H"],
                          graphics=st["graphics"])
+
+
+# Checks the model can act on with ops it already has, and the remedy for each.
+# Anything not in here is reported to the user but must not produce an op: a
+# model handed a loudness warning it cannot fix will invent one.
+_QA_ACTIONABLE = {
+    "caption_safe": "set_caption_style with a smaller position_y lifts the caption off the feed UI",
+    "caption_frame": "set_caption_style (smaller size, or position_y) brings the caption back on screen",
+    "vision": "set_behind puts the overlay behind the speaker; or move/retime it",
+}
+
+
+def _qa_ass_text(job_id: str, *, is_timeline: bool = False) -> str | None:
+    """The burned subtitle script for a finished job, re-read from disk.
+
+    Both render paths hand `ass_text` to the checks, but "Re-check" never did,
+    and without it `caption_frame` is not emitted at all while `caption_safe`
+    returns `skip`. So a caption running off the frame -- a hard **fail** on
+    the first render -- silently disappeared the moment you pressed Re-check,
+    which is the worst possible direction for that bug.
+
+    Nothing new has to be stored: both paths write the script to a path
+    derived from the job id.
+    """
+    names = [f"{job_id}_tltext.ass", f"{job_id}.ass"]
+    if not is_timeline:              # a classic burn writes the bare name
+        names.reverse()
+    for name in names:
+        try:
+            path = UPLOAD_DIR / name
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return None
+
+
+def _qa_for_prompt(job_id: str, *, max_findings: int = 8) -> dict | None:
+    """The last render's quality report, trimmed to what the model can act on.
+
+    These eleven checks already run on every export and are already drawn in
+    the Studio Export tab. What never happened is the last step: handing them
+    to the model that places the graphics. So the local vision pass emits
+    literally "<Label> covers a face -- try Behind me or move it" -- a remedy
+    that maps exactly onto the existing set_behind op -- and the one component
+    able to act on it was the only one never told.
+
+    Only findings survive. `pass` and `skip` carry no instruction, and a clean
+    report is worth one line rather than fifty, so the model does not
+    re-litigate a render that was fine.
+    """
+    rep = (jobs.get(job_id) or {}).get("qa") or {}
+    status = rep.get("status")
+    if status not in ("pass", "warn", "fail"):
+        return None          # running, error, or never rendered: say nothing
+
+    found = []
+    for c in rep.get("checks") or []:
+        if c.get("status") not in ("warn", "fail"):
+            continue
+        item = {"check": c.get("id"), "severity": c.get("status"),
+                "detail": str(c.get("detail") or "")[:240]}
+        at = [round(float(b["start"]), 2) for b in (c.get("items") or [])[:4]
+              if isinstance(b, dict) and b.get("start") is not None]
+        if at:
+            item["at_seconds"] = at
+        if c.get("id") in _QA_ACTIONABLE:
+            item["you_can_fix_this"] = _QA_ACTIONABLE[c["id"]]
+        found.append(item)
+    for iss in ((rep.get("vision") or {}).get("issues") or []):
+        if not isinstance(iss, dict):
+            continue
+        found.append({"check": "vision", "severity": iss.get("severity") or "warn",
+                      "at_seconds": [round(float(iss.get("t") or 0), 2)],
+                      "detail": str(iss.get("problem") or "")[:240],
+                      "you_can_fix_this": _QA_ACTIONABLE["vision"]})
+
+    out = {"status": status, "findings": found[:max_findings]}
+    if len(found) > max_findings:
+        out["more_findings"] = len(found) - max_findings
+    try:    # how stale it is: the user may have edited since this render
+        out["render_age_seconds"] = round(time.time() - float(rep["ran_at"]))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return out
 
 
 # ---- Background workers ----
@@ -19707,11 +19829,16 @@ def qa_run(job_id: str):
         return jsonify({"error": "This job has no finished export yet."}), 400
     if data.get("checks", True) or job_id not in _QA_STATE:
         tl = job.get("timeline") if job.get("is_timeline") else None
-        kw = {}
+        # The caption checks need the script that was burned, and this path
+        # never supplied it -- see _qa_ass_text. `duration` stays absent on
+        # purpose: the expected length comes out of building the main track,
+        # and a guessed one would invent a drift warning rather than drop a
+        # real one.
+        kw = {"ass_text": _qa_ass_text(job_id, is_timeline=bool(tl))}
         if tl:
             ntl = _normalize_timeline(tl)
             W, H = TIMELINE_CANVASES[ntl["canvas"]]
-            kw = {"W": W, "H": H, "fps": ntl["fps"], "overlays": ntl["tracks"]["overlay"]}
+            kw.update(W=W, H=H, fps=ntl["fps"], overlays=ntl["tracks"]["overlay"])
         _run_job_qa(job_id, out, **kw)
     if data.get("vision"):
         try:
@@ -26082,6 +26209,7 @@ def co_editor():
     prompt = (data.get("prompt") or "").strip()
     timeline = data.get("timeline") or {}
     client_ctx = data.get("context") or {}
+    job_id = str(data.get("job_id") or "")
     if _co_editor_capability_question(prompt):
         return jsonify({"ops": [], "message": _co_editor_capability_message()})
     slash = _slash_co_editor_turn(prompt, timeline, client_ctx)
@@ -26211,6 +26339,29 @@ def co_editor():
         "stock_photos_available": _broll_any_photo_provider(),
     }
 
+    # What was wrong with the last render of THIS project. /timeline/render
+    # renders under the same job_id the client posts here, so jobs[job_id]["qa"]
+    # is that render's report. It was computed on every export, drawn in the
+    # Studio Export tab, and never shown to the model -- so the only component
+    # that could act on "the caption is on his face" was the only one not told.
+    _qa_seen = _qa_for_prompt(job_id) if job_id else None
+    _qa_rules = ""
+    if _qa_seen:
+        summary["last_render_quality"] = _qa_seen
+        # Only when there is something to explain. An unconditional block
+        # would spend tokens on every turn describing a key that is not there.
+        _qa_rules = """
+last_render_quality is what the automated checks found in the LAST render of this
+project. render_age_seconds says how old that render is, and the user may have
+edited since, so treat an old report as a hint and not a fact.
+- A finding with you_can_fix_this names the op that fixes it. Act on it when the
+  user asks about that problem, or alongside what they asked for when it is the
+  same clip -- and say in message what you changed and why.
+- Every other finding (loudness, peak, dead_air, black_frames, resolution, fps,
+  duration) is NOT yours to fix. There is no op for it. Mention it in message if
+  it is relevant and leave it alone. Never invent an op for one.
+- Do not re-raise a finding the user has already declined earlier in this chat."""
+
     _op_examples = ",\n".join(
         "    " + ex for ex in CO_EDITOR_OP_EXAMPLES
     ).replace("{", "{{").replace("}", "}}")
@@ -26310,6 +26461,7 @@ HARD LIMITS (say no in message, ops: [])
 {_transcript_block}
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
+{_qa_rules}
 
 Return ONLY JSON:
 {{
