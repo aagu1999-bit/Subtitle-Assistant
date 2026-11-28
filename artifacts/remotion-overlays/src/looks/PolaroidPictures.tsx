@@ -1,12 +1,13 @@
+import { type Tokens } from "../tokens";
 import { PolaroidPictures } from "./polaroid-pictures.element";
 import React from "react";
 import { useVideoConfig } from "remotion";
 import { LookFrame } from "./LookFrame";
 
-export const PolaroidPicturesLook: React.FC = () => {
+export const PolaroidPicturesLook: React.FC<Partial<Tokens>> = (tokens) => {
   const { durationInFrames } = useVideoConfig();
   return (
-    <LookFrame scale={0.7}>
+    <LookFrame tokens={tokens} scale={0.7}>
       <PolaroidPictures
         durationInFrames={durationInFrames}
         name="Polaroid Pictures"

@@ -1,12 +1,13 @@
+import { type Tokens } from "../tokens";
 import { LineChart } from "./line-chart.element";
 import React from "react";
 import { useVideoConfig } from "remotion";
 import { LookFrame } from "./LookFrame";
 
-export const LineChartLook: React.FC = () => {
+export const LineChartLook: React.FC<Partial<Tokens>> = (tokens) => {
   const { durationInFrames } = useVideoConfig();
   return (
-    <LookFrame scale={0.92}>
+    <LookFrame tokens={tokens} scale={0.92}>
       <LineChart
         durationInFrames={durationInFrames}
         name="Line Chart"

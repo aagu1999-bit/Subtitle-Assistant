@@ -130,7 +130,7 @@ const Bar: React.FC<{
 						<Interactive.Div
 							name="Bar"
 							style={{
-								backgroundColor: highlighted ? TOKENS.brandColor : '#334155',
+								backgroundColor: highlighted ? `var(--brand, ${TOKENS.brandColor})` : '#334155',
 								borderRadius: '12px 12px 0 0',
 								height: '100%',
 								width: '100%',

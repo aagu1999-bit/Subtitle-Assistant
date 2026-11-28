@@ -15,7 +15,11 @@ loadFont('normal', {
 	weights: ['800'],
 });
 
-const NumberCounterInner: React.FC<InteractiveTransformProps> = ({style}) => {
+// brandColor is optional so Studio previews unchanged; at render time
+// _remotion_look_props supplies the project's own, resolved from tokens.py.
+const NumberCounterInner: React.FC<
+	InteractiveTransformProps & {readonly brandColor?: string}
+> = ({style, brandColor}) => {
 	const frame = useCurrentFrame();
 	const {durationInFrames} = useVideoConfig();
 
@@ -40,7 +44,7 @@ const NumberCounterInner: React.FC<InteractiveTransformProps> = ({style}) => {
 				fontFamily: 'Inter',
 				fontSize: 150,
 				fontWeight: 800,
-				color: TOKENS.brandColor,
+				color: `var(--brand, ${TOKENS.brandColor})`,
 				fontVariantNumeric: 'tabular-nums',
 				letterSpacing: '-0.03em',
 				lineHeight: 1,

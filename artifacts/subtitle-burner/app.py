@@ -5312,8 +5312,35 @@ GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-imag
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
+def _speech_gaps(words: list, *, min_gap: float = 0.45, limit: int = 14) -> list[dict]:
+    """Where the speaking stops, straight out of the word timings.
+
+    No ffmpeg and no silencedetect: Whisper already knows when each word
+    ends and the next begins, so the pauses are sitting in data the prompt
+    is built from. The pause pass computes these for its own purposes and
+    the result never reached the model that places graphics -- so it could
+    not land a card in a gap, because it did not know the gap was there.
+
+    Longest first, because a prompt has room for a dozen and the long ones
+    are the ones worth landing something in.
+    """
+    gaps = []
+    for i in range(len(words or []) - 1):
+        try:
+            end = float(words[i].get("end", 0))
+            nxt = float(words[i + 1].get("start", end))
+        except (TypeError, ValueError):
+            continue
+        if nxt - end >= min_gap:
+            gaps.append({"start": round(end, 2), "seconds": round(nxt - end, 2)})
+    gaps.sort(key=lambda g: -g["seconds"])
+    return sorted(gaps[:limit], key=lambda g: g["start"])
+
+
 def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220,
-                               max_seconds_per_chunk: float = 6.0) -> str:
+                               max_seconds_per_chunk: float = 6.0,
+                               cuts: list | None = None,
+                               mark_pauses: bool = True) -> str:
     """Group word-timestamp records into readable [mm:ss] lines.
 
     Breaks at natural pauses (>0.7s gap), when a chunk reaches
@@ -5336,7 +5363,27 @@ def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220,
     """
     if not words:
         return ""
-    chunks: list[str] = []
+    # Marker lines, keyed by the time they belong after. They go on their own
+    # lines rather than inline so a model asked for "the exact words the
+    # graphic belongs over" does not fold one into a quote -- and _quote_tokens
+    # strips these two shapes back out if it does, because measured, one
+    # marker is enough to push a quote under the snapping score floor.
+    marks: list[tuple[float, str]] = []
+    if mark_pauses:
+        marks += [(g["start"], f"    ~~ {g['seconds']:.1f}s pause ~~")
+                  for g in _speech_gaps(words)]
+    for c in (cuts or [])[:20]:
+        try:
+            marks.append((float(c), f"    >|< cut at {float(c):.1f}s"))
+        except (TypeError, ValueError):
+            continue
+    marks.sort(key=lambda m: m[0])
+
+    # (start_time, line) so markers can be interleaved by time at the end.
+    # Flushing them as chunks are emitted put a cut that falls in a silent
+    # gap AFTER the chunk that follows the gap, which reads as the wrong
+    # side of the pause.
+    rows: list[tuple[float, str]] = []
     current_words: list[str] = []
     current_start = float(words[0].get("start", 0))
 
@@ -5356,13 +5403,24 @@ def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220,
         ran_for = end - current_start
         if (len(text_so_far) >= max_chars_per_chunk or next_gap > 0.7
                 or ran_for >= max_seconds_per_chunk) and text_so_far:
-            chunks.append(f"{_ts(current_start)} {text_so_far}")
+            rows.append((current_start, f"{_ts(current_start)} {text_so_far}"))
             current_words = []
             if i + 1 < len(words):
                 current_start = float(words[i + 1].get("start", end))
     if current_words:
-        chunks.append(f"{_ts(current_start)} {' '.join(current_words).strip()}")
-    return "\n".join(chunks)
+        rows.append((current_start, f"{_ts(current_start)} {' '.join(current_words).strip()}"))
+    # Speech first when a marker shares a chunk's start, so a line is never
+    # separated from the timestamp that introduces it.
+    merged = sorted(rows + [(t, line) for t, line in marks],
+                    key=lambda r: (r[0], 0 if r[1].startswith("[") else 1))
+    out = "\n".join(line for _, line in merged)
+    if marks:
+        # The legend rides with the markers rather than living in a prompt,
+        # so all eleven callers get it and none of them changes. A transcript
+        # with nothing to mark is byte-identical to what it was before.
+        out = ("(~~ is silence, nobody is speaking. >|< is a shot change. Land a move or a "
+               "graphic ON a cut or inside a pause, never across one.)\n" + out)
+    return out
 
 
 _FORMAT_RUBRICS = {
@@ -5406,10 +5464,24 @@ _FORMAT_RUBRICS = {
 
 
 _QUOTE_STRIP = re.compile(r"[^a-z0-9']+")
+# The pause and cut markers _format_transcript_for_llm writes into the
+# transcript. Neither shape occurs in speech, so removing them from a quote
+# can only ever remove a marker.
+_MARKER_SPAN = re.compile(r"~~[^~]*~~|>\|<[^\n]*")
 
 
 def _quote_tokens(text: str) -> list[str]:
-    return [t for t in _QUOTE_STRIP.sub(" ", (text or "").lower()).split() if t]
+    """Words of a quote, with any transcript marker taken back out.
+
+    The model is shown "~~ 1.7s pause ~~" and ">|< cut at 2.6s" lines, and
+    sometimes folds one into the quote it answers with. Measured, that costs
+    more than it looks: "~~ 1.7s pause ~~ you also need demand" tokenises to
+    seven tokens of which four match, which is 0.571 -- under the 0.6 floor,
+    so the suggestion silently stops being snapped and falls back to the
+    model's guess. Exactly the failure the markers were added to prevent.
+    """
+    text = _MARKER_SPAN.sub(" ", text or "")
+    return [t for t in _QUOTE_STRIP.sub(" ", text.lower()).split() if t]
 
 
 def _snap_suggestions_to_quotes(raw: list, words: list, *,
@@ -6748,6 +6820,11 @@ def transcribe_job(job_id: str, video_path: Path, pre_clean: bool = False):
         jobs[job_id]["progress"] = 100
         jobs[job_id]["error"] = None
         _db_save_job(job_id)
+        # Where the cuts are, worked out once, off every later request. The
+        # plan's own constraint was that none of these wires may make the
+        # tool slower, and a whole-file decode inside a co-editor turn would.
+        threading.Thread(target=_warm_shot_cuts, args=(job_id,), daemon=True,
+                         name=f"cuts-{job_id[:8]}").start()
         if not proxy_started_early:
             threading.Thread(
                 target=build_edit_proxy, args=(job_id, video_path), daemon=True
@@ -9757,7 +9834,10 @@ def suggest_effects():
     try:
         result = _gemini_generate_clip_suggestions(
             _build_effect_suggestion_prompt(
-                _format_transcript_for_llm(words), total, max_effects
+                # Single source, so the transcript and the cuts share a
+                # time base and no mapping is needed.
+                _format_transcript_for_llm(words, cuts=_job_shot_cuts(job_id)),
+                total, max_effects
             )
         )
         suggestions += (result.get("effects") or [])
@@ -25295,6 +25375,35 @@ def ai_edit_seed():
     })
 
 
+def _job_shot_cuts(job_id: str) -> list:
+    """Cached scene-change times for a source job, in that video's own time.
+
+    _detect_shots_ffmpeg decodes the whole file -- around 20 seconds of
+    ffmpeg for a 30 second clip -- so this is never computed inside an
+    interactive turn. It is warmed once after transcription and cached on
+    the job; a caller that asks before the warm finishes gets nothing and
+    simply goes without, which is what used to happen every time.
+    """
+    return list((jobs.get(job_id) or {}).get("shot_cuts") or [])
+
+
+def _warm_shot_cuts(job_id: str) -> None:
+    """Compute the cuts once, off the request, and remember them."""
+    job = jobs.get(job_id)
+    if job is None or job.get("shot_cuts") is not None:
+        return
+    try:
+        video_path = find_video_path(job_id)
+        if not video_path:
+            return
+        cuts = _detect_shots_ffmpeg(video_path)
+        if jobs.get(job_id) is not None:
+            jobs[job_id]["shot_cuts"] = cuts
+            ai_logger.info(f"[{job_id}] cached {len(cuts)} shot cuts for the prompt")
+    except Exception as e:      # a missing cut list is a smaller problem
+        ai_logger.info(f"[{job_id}] shot-cut warm skipped: {e}")
+
+
 @app.route("/detect-shots", methods=["POST"])
 def detect_shots():
     data = request.get_json(force=True) or {}
@@ -25323,6 +25432,10 @@ def detect_shots():
     if t_out is None:
         words = jobs[job_id].get("words") or []
         t_out = float(words[-1].get("end", 0) or 0) if words else _ffprobe_duration(video_path)
+    # The button already paid for a whole-file decode. Keeping the answer
+    # means the prompt gets the cuts for free even if the warm never ran.
+    if data.get("in") is None and data.get("out") is None and jobs.get(job_id) is not None:
+        jobs[job_id]["shot_cuts"] = list(times)
     bounds = [t_in] + [t for t in times if t_in < t < t_out] + [t_out]
     shots = []
     for i in range(len(bounds) - 1):
@@ -25902,6 +26015,7 @@ def _co_editor_transcript(timeline: dict) -> str:
     except Exception:
         return ""
     out_words = []
+    out_cuts: list[float] = []
     for p in layout["pieces"]:
         words = (jobs.get(p.get("source_job_id")) or {}).get("words") or []
         for w in words:
@@ -25914,7 +26028,18 @@ def _co_editor_transcript(timeline: dict) -> str:
             t = p["render_start"] + max(0.0, ws - p["src_in"])
             out_words.append({"word": w.get("word", ""), "start": t,
                               "end": t + max(0.0, we - ws)})
-    text = _format_transcript_for_llm(out_words)
+        # The cuts in the SOURCE video, through the same transform as the
+        # words. Cuts outside the piece are dropped rather than clamped: a
+        # cut that was trimmed away is not a cut in this edit.
+        for c in _job_shot_cuts(p.get("source_job_id")):
+            if p["src_in"] <= c < p["src_out"]:
+                out_cuts.append(round(p["render_start"] + (c - p["src_in"]), 2))
+        # And where one piece is joined to the next IS a cut, whatever the
+        # footage did -- the most important one in the whole edit, and the
+        # only one no scene detector could ever find.
+        if p["render_start"] > 0.01:
+            out_cuts.append(round(p["render_start"], 2))
+    text = _format_transcript_for_llm(out_words, cuts=sorted(set(out_cuts)))
     if len(text) > CO_EDITOR_TRANSCRIPT_CHARS:
         text = text[:CO_EDITOR_TRANSCRIPT_CHARS].rsplit("\n", 1)[0] + "\n[... transcript continues]"
     return text

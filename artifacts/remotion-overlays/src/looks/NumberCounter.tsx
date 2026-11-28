@@ -1,12 +1,13 @@
+import { type Tokens } from "../tokens";
 import { NumberCounter } from "./number-counter.element";
 import React from "react";
 import { useVideoConfig } from "remotion";
 import { LookFrame } from "./LookFrame";
 
-export const NumberCounterLook: React.FC = () => {
+export const NumberCounterLook: React.FC<Partial<Tokens>> = (tokens) => {
   const { durationInFrames } = useVideoConfig();
   return (
-    <LookFrame>
+    <LookFrame tokens={tokens}>
       <NumberCounter
         durationInFrames={durationInFrames}
         name="Number Counter"

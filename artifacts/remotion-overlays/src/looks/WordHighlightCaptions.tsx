@@ -1,12 +1,13 @@
+import { type Tokens } from "../tokens";
 import { WordHighlightCaptions } from "./word-highlight-captions.element";
 import React from "react";
 import { useVideoConfig } from "remotion";
 import { LookFrame } from "./LookFrame";
 
-export const WordHighlightCaptionsLook: React.FC = () => {
+export const WordHighlightCaptionsLook: React.FC<Partial<Tokens>> = (tokens) => {
   const { durationInFrames } = useVideoConfig();
   return (
-    <LookFrame align="lower">
+    <LookFrame tokens={tokens} align="lower">
     <WordHighlightCaptions
       captions={[{
         text: "Captions",
