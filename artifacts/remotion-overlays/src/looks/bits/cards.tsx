@@ -1,5 +1,5 @@
 import React from "react";
-import { Easing, interpolate } from "remotion";
+import { Easing, Img, interpolate } from "remotion";
 import { BitsStage, CYAN, GOLD, MINT, useClock, type BitsCardProps, type BitsCountProps } from "./shared";
 
 const Card: React.FC<{
@@ -16,7 +16,17 @@ const Card: React.FC<{
   }}>{children}</div>
 );
 
-export const ProfileCardLook: React.FC<BitsCardProps> = ({ text = "ALEX CHEN" }) => {
+// Nothing here is invented any more. The avatar, the handle and the numbers
+// are drawn only when they were given; the follower counts used to be the
+// literals "124k views" and "8.2k likes", rendered as if they were this
+// person's real figures in a video they publish.
+export const ProfileCardLook: React.FC<BitsCardProps> = ({
+  text = "ALEX CHEN", name, handle, views, likes, avatar,
+}) => {
+  const who = name || text;
+  const stats: Array<[string, string]> = [];
+  if (views) stats.push([views, "views"]);
+  if (likes) stats.push([likes, "likes"]);
   const { frame, fps } = useClock();
   const p = interpolate(frame, [0, fps * 0.5], [0, 1], {
     extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.out(Easing.cubic),
@@ -30,22 +40,35 @@ export const ProfileCardLook: React.FC<BitsCardProps> = ({ text = "ALEX CHEN" })
             background: `conic-gradient(from ${frame * 4}deg, ${GOLD}, ${MINT}, ${CYAN}, ${GOLD})`,
             padding: 4,
           }}>
-            <div style={{
-              width: "100%", height: "100%", borderRadius: 56, background: "#111",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 44, fontWeight: 800, color: GOLD,
-            }}>{text.slice(0, 1)}</div>
+            {avatar ? (
+              <Img
+                src={avatar}
+                style={{ width: "100%", height: "100%", borderRadius: 56, objectFit: "cover" }}
+              />
+            ) : (
+              <div style={{
+                width: "100%", height: "100%", borderRadius: 56, background: "#111",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 44, fontWeight: 800, color: GOLD,
+              }}>{who.slice(0, 1)}</div>
+            )}
           </div>
-          <div style={{ textAlign: "center", fontSize: 36, fontWeight: 800 }}>{text}</div>
-          <div style={{ textAlign: "center", opacity: 0.7, marginTop: 6 }}>@{(text.split(" ")[0] || "studio").toLowerCase()}</div>
-          <div style={{ display: "flex", justifyContent: "space-around", marginTop: "auto", paddingTop: 20 }}>
-            {[["124k", "views"], ["8.2k", "likes"]].map(([n, l]) => (
-              <div key={l} style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 28, fontWeight: 800, color: GOLD }}>{n}</div>
-                <div style={{ opacity: 0.6, fontSize: 16 }}>{l}</div>
-              </div>
-            ))}
-          </div>
+          <div style={{ textAlign: "center", fontSize: 36, fontWeight: 800 }}>{who}</div>
+          {handle ? (
+            <div style={{ textAlign: "center", opacity: 0.7, marginTop: 6 }}>
+              {handle.startsWith("@") ? handle : "@" + handle}
+            </div>
+          ) : null}
+          {stats.length ? (
+            <div style={{ display: "flex", justifyContent: "space-around", marginTop: "auto", paddingTop: 20 }}>
+              {stats.map(([n, l]) => (
+                <div key={l} style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: GOLD }}>{n}</div>
+                  <div style={{ opacity: 0.6, fontSize: 16 }}>{l}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </Card>
       </div>
     </BitsStage>

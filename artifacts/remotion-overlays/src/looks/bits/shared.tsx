@@ -57,4 +57,15 @@ export const GoldTitle: React.FC<{
 export type BitsTextProps = { text?: string; color?: string; duration?: number };
 export type BitsCountProps = { to?: number; color?: string; duration?: number };
 export type BitsWordsProps = { words?: string[]; color?: string; duration?: number };
-export type BitsCardProps = { labels?: string[]; text?: string; duration?: number };
+export type BitsCardProps = {
+  labels?: string[];
+  text?: string;
+  duration?: number;
+  /** Named content, when the recipe declares `fields` and the model fills them.
+   *  Anything absent is simply not drawn -- never substituted. */
+  name?: string;
+  handle?: string;
+  views?: string;
+  likes?: string;
+  avatar?: string;
+};
