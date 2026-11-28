@@ -443,7 +443,7 @@ def test_make_animation_uses_remotion_for_a_wired_look(app_mod, monkeypatch):
 def test_split_text_passes_quoted_words(app_mod, monkeypatch, tmp_path):
     seen = {}
 
-    def fake(comp, props, out):
+    def fake(comp, props, out, slow=False):
         seen["comp"] = comp
         seen["props"] = props
         out.write_bytes(b"webm" + b"\0" * 400)

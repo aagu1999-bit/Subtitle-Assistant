@@ -119,3 +119,16 @@ def test_asking_for_one_reaches_it_with_the_content(app_mod):
 
 def test_the_model_is_told_this_look_takes_content(app_mod):
     assert "XFollowCard: name, handle, bio" in app_mod._look_fields_prompt()
+
+
+def test_the_card_is_given_a_budget_it_can_finish_in(app_mod):
+    """Measured: 500s for 150 frames at 1080x1920 on software GL, against a
+    240s default wall. It rendered perfectly from the CLI and every test
+    passed -- because no test renders -- so this would have timed out on
+    every real use and fallen back to motion.py silently.
+    """
+    rec = next(r for r in app_mod.REMOTION_RECIPES if r["id"] == "XFollowCard")
+    assert rec.get("slow") is True, "it would time out on every real render"
+    src = code(BURNER / "app.py")
+    assert "slow=bool(rec.get(\"slow\"))" in src, \
+        "_make_remotion_look ignores the recipe's budget"

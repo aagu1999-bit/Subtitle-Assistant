@@ -20615,6 +20615,8 @@ REMOTION_RECIPES = (
      "words": ("x follow card", "twitter card", "x profile card",
                "follow card", "x card"),
      "dur": 5.0, "place": "full",
+     # 500s for 150 frames, measured. The default 240s wall is not enough.
+     "slow": True,
      "fields": {
          "name":     {"type": "text", "max": 40},
          "handle":   {"type": "text", "max": 30},
@@ -21770,7 +21772,13 @@ def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
-        _render_remotion_webm(rec["id"], {**props, "duration": dur}, src)
+        # Some looks cannot finish inside the default budget. Measured here:
+        # XFollowCard is 500s for 150 frames at 1080x1920 on software GL,
+        # against a 240s wall -- so it would have timed out on EVERY real
+        # use and fallen back to motion.py, while rendering perfectly from
+        # the CLI and passing every test, because no test renders.
+        _render_remotion_webm(rec["id"], {**props, "duration": dur}, src,
+                              slow=bool(rec.get("slow")))
     asset_id = hashlib.md5(src.name.encode()).hexdigest()
     dest = ASSET_DIR / f"{asset_id}.webm"
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
