@@ -139,7 +139,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 							d={linePath}
 							fill="none"
 							pathLength={1}
-							stroke={TOKENS.brandColor}
+							stroke={`var(--brand, ${TOKENS.brandColor})`}
 							strokeDasharray="1 1"
 							strokeDashoffset={interpolate(frame, [14, 58], [1, 0], {
 								easing: Easing.bezier(0, 0, 0.58, 1),
@@ -153,7 +153,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 						<Interactive.G
 							name="Data points"
 							fill="#ffffff"
-							stroke={TOKENS.brandColor}
+							stroke={`var(--brand, ${TOKENS.brandColor})`}
 							strokeWidth={8}
 						>
 							{points.map(({label, x, y}, index) => (
@@ -222,7 +222,7 @@ const LineChartInner: React.FC<InteractiveTransformProps> = ({style}) => {
 						<Interactive.Div
 							name="Latest value"
 							style={{
-								backgroundColor: TOKENS.brandColor,
+								backgroundColor: `var(--brand, ${TOKENS.brandColor})`,
 								borderRadius: 12,
 								color: '#ffffff',
 								fontSize: 44,

@@ -199,3 +199,50 @@ def test_retelling_can_rebuild_its_tokens_after_import():
     import retelling
     assert retelling._default_tokens() == retelling.DEFAULT_TOKENS
     assert callable(retelling.tokens), "the public API changed shape"
+
+
+# ---- the project's colour reaching the fixed-demo Remotion looks -------------
+
+LOOK_WRAPPERS = ("NumberCounter", "LineChart", "NameLowerThird", "VerticalBarChart",
+                 "WordHighlightCaptions", "PoppingWordCaptions",
+                 "YoutubeCommentHighlight", "YoutubeSubscribeNudge",
+                 "PolaroidPictures", "OnScreenMessages")
+
+
+def test_every_look_wrapper_accepts_the_project_look():
+    """These were `React.FC` with no props at all, so the token props the app
+    sends arrived at a component that discarded them. One place to change the
+    brand is not the same as the brand reaching a project."""
+    for name in LOOK_WRAPPERS:
+        src = (REMOTION / "src" / "looks" / f"{name}.tsx").read_text(encoding="utf-8")
+        assert f"{name}Look: React.FC<Partial<Tokens>>" in src, f"{name} still takes no props"
+        assert "<LookFrame tokens={tokens}" in src, f"{name} accepts them and drops them"
+
+
+def test_the_frame_publishes_the_look_as_custom_properties():
+    """Custom properties rather than prop drilling: several of these Elements
+    use the brand inside a nested subcomponent -- the bar in VerticalBarChart,
+    the active word in the caption looks -- where a prop would have to be
+    threaded through every layer."""
+    src = (REMOTION / "src" / "looks" / "LookFrame.tsx").read_text(encoding="utf-8")
+    for var, prop in (("--brand", "brandColor"), ("--accent", "accentColor"),
+                      ("--ink", "inkColor"), ("--surface", "surfaceColor"),
+                      ("--display-font", "displayFont")):
+        assert f'["{var}" as string]: t.{prop}' in src, f"{var} is not published"
+    assert 'background: "transparent"' in src, "the overlay stopped being transparent"
+
+
+def test_the_elements_read_the_cascade_and_still_preview_alone():
+    """`var(--brand, <default>)` so a composition opened in Studio with no
+    props looks right, and a render with props follows the project."""
+    import re as _re
+    used = 0
+    for f in sorted((REMOTION / "src" / "looks").glob("*.element.tsx")):
+        src = f.read_text(encoding="utf-8")
+        for hit in _re.findall(r"var\(--brand,\s*\$\{([^}]+)\}\)", src):
+            assert hit == "TOKENS.brandColor", f"{f.name}: fallback is {hit}, not the document"
+            used += 1
+        # no element may still reach for the raw token with no cascade
+        bare = _re.findall(r"(?<!\$\{)TOKENS\.brandColor(?!\})", src)
+        assert not bare, f"{f.name}: {len(bare)} use(s) bypass the cascade"
+    assert used >= 6, f"only {used} brand uses go through the cascade"

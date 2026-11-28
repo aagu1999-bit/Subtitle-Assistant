@@ -1,12 +1,13 @@
+import { type Tokens } from "../tokens";
 import { PoppingWordCaptions } from "./popping-word-captions.element";
 import React from "react";
 import { useVideoConfig } from "remotion";
 import { LookFrame } from "./LookFrame";
 
-export const PoppingWordCaptionsLook: React.FC = () => {
+export const PoppingWordCaptionsLook: React.FC<Partial<Tokens>> = (tokens) => {
   const { durationInFrames } = useVideoConfig();
   return (
-    <LookFrame align="lower">
+    <LookFrame tokens={tokens} align="lower">
     <PoppingWordCaptions
       captions={[{
         text: "Captions",

@@ -57,7 +57,7 @@ const NameLowerThirdInner: React.FC<InteractiveTransformProps> = ({style}) => {
 					boxSizing: 'border-box',
 					padding: '0 24px',
 					overflow: 'hidden',
-					backgroundColor: TOKENS.brandColor,
+					backgroundColor: `var(--brand, ${TOKENS.brandColor})`,
 					color: '#0F0F0F',
 					fontSize: 34,
 					fontWeight: 700,

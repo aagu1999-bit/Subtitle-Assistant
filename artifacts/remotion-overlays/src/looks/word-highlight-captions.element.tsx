@@ -25,7 +25,7 @@ const fontWeight = '700';
 const textColor = '#ffffff';
 // Was Tailwind's default blue -- a colour this brand never chose,
 // in the two looks most likely to be on screen the longest.
-const highlightColor = TOKENS.brandColor;
+const highlightColor = `var(--brand, ${TOKENS.brandColor})`;
 const defaultCombineTokensWithinMilliseconds = 800;
 const defaultWidth = 682;
 
