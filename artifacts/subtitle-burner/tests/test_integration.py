@@ -470,3 +470,26 @@ def test_apply_cuts_from_the_picked_story_when_the_model_beats_are_empty(app_mod
     body = applied.get_json()
     assert [b["role"] for b in body["spine"]["beats"]] == ["situation", "turn", "consequence"]
     assert "beats must list" not in (body.get("error") or "")
+
+
+@needs_ffmpeg
+def test_ai_edit_places_effects_on_the_words_they_quoted(app_mod, talk_job, monkeypatch):
+    """The other snap call site. /ai-edit-seed places effects AND graphics,
+    and it is the path that actually builds a reel, so it needs its own
+    proof — /suggest-effects passing says nothing about this one.
+    """
+    monkeypatch.setattr(app_mod, "_ensure_effects_span_timeline", lambda fx, *a, **k: fx)
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", lambda p: {
+        "effects": [{"type": "punch_zoom", "start_time": 12.4, "end_time": 13.6,
+                     "intensity": "med", "quote": "texted me at midnight"}]})
+    c = app_mod.app.test_client()
+    r = c.post("/ai-edit-seed", json={"source_job_id": talk_job,
+                                      "style_pack": "default", "intensity": "med",
+                                      "apply_cuts": False}).get_json()
+    fx = (r.get("timeline") or {}).get("tracks", {}).get("effects") or []
+    assert fx, f"no effect placed: {str(r)[:200]}"
+    words = app_mod.jobs[talk_job]["words"]
+    truth = next(w["start"] for w in words if w["word"].strip().lower().startswith("texted"))
+    assert fx[0]["start"] == pytest.approx(truth, abs=0.25), (
+        f"effect at {fx[0]['start']}s but \"texted\" is said at {truth}s — "
+        "it kept the model's guess")

@@ -5287,12 +5287,27 @@ GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-imag
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
-def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220) -> str:
+def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220,
+                               max_seconds_per_chunk: float = 6.0) -> str:
     """Group word-timestamp records into readable [mm:ss] lines.
 
-    Breaks at natural pauses (>0.7s gap) or when a chunk reaches
-    ``max_chars_per_chunk``. The LLM uses these timestamps to choose clip
+    Breaks at natural pauses (>0.7s gap), when a chunk reaches
+    ``max_chars_per_chunk``, or when it has run for
+    ``max_seconds_per_chunk``. The LLM uses these timestamps to choose clip
     boundaries that fall on sentence-ish edges.
+
+    Only the FIRST word of a chunk carries a timestamp, so a long chunk
+    leaves every word after it unanchored and the model has to guess how
+    far in they are. The time cap bounds that error, which is what lets
+    _snap_suggestions_to_quotes trust the guess enough to choose between
+    repeated phrases.
+
+    Six seconds, not three: the whole point of the pause-based break is
+    that chunks land on sentence-ish edges, and a tight cap chops mid
+    sentence, which is what these timestamps are read for when choosing
+    clip boundaries. Six leaves ordinary speech alone and only splits a
+    run-on. It is paired with _snap_suggestions_to_quotes' max_shift, so a
+    guess anywhere inside its own chunk is still trusted.
     """
     if not words:
         return ""
@@ -5313,7 +5328,9 @@ def _format_transcript_for_llm(words: list, max_chars_per_chunk: int = 220) -> s
             if i + 1 < len(words) else 999.0
         )
         text_so_far = " ".join(current_words).strip()
-        if (len(text_so_far) >= max_chars_per_chunk or next_gap > 0.7) and text_so_far:
+        ran_for = end - current_start
+        if (len(text_so_far) >= max_chars_per_chunk or next_gap > 0.7
+                or ran_for >= max_seconds_per_chunk) and text_so_far:
             chunks.append(f"{_ts(current_start)} {text_so_far}")
             current_words = []
             if i + 1 < len(words):
@@ -5361,6 +5378,84 @@ _FORMAT_RUBRICS = {
         "the relevant rubric. State your detected type in the reason field."
     ),
 }
+
+
+_QUOTE_STRIP = re.compile(r"[^a-z0-9']+")
+
+
+def _quote_tokens(text: str) -> list[str]:
+    return [t for t in _QUOTE_STRIP.sub(" ", (text or "").lower()).split() if t]
+
+
+def _snap_suggestions_to_quotes(raw: list, words: list, *,
+                                max_shift: float = 6.0,
+                                min_score: float = 0.6) -> tuple[list, int]:
+    """Move each suggestion onto the words it says it belongs over.
+
+    Five prompts ask the model for "the exact words the graphic belongs
+    over" and it answers, but placement used its GUESSED start_time and
+    kept the quote as decoration. The guess can only be as good as the
+    transcript it was given, and that transcript is [mm:ss] -- whole
+    seconds, one marker per chunk. Whisper knows every word to about 30ms.
+    This joins the two: the model says WHICH words, the word list says WHEN.
+
+    The span keeps its duration and simply slides. A match further than
+    `max_shift` from the guess is ignored, because a short quote can repeat
+    and the guess is the only thing that says which occurrence was meant.
+    It matches _format_transcript_for_llm's chunk cap on purpose: a guess
+    anywhere within its own chunk is trusted, one from another chunk is not.
+    Returns (suggestions, how_many_moved).
+    """
+    toks = []
+    for w in words or []:
+        for t in _quote_tokens(str(w.get("word", ""))):
+            try:
+                toks.append((t, float(w.get("start", 0)), float(w.get("end", 0))))
+            except (TypeError, ValueError):
+                continue
+    if not toks:
+        return list(raw or []), 0
+
+    out, moved = [], 0
+    for item in raw or []:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        q = _quote_tokens(str(item.get("quote") or ""))
+        try:
+            guess = float(item.get("start_time"))
+            end = float(item.get("end_time"))
+        except (TypeError, ValueError):
+            out.append(item)
+            continue
+        if not q or len(toks) < len(q):
+            out.append(item)
+            continue
+
+        best, best_key = None, None
+        for i in range(len(toks) - len(q) + 1):
+            hits = sum(1 for k in range(len(q)) if toks[i + k][0] == q[k])
+            score = hits / len(q)
+            if score < min_score:
+                continue
+            at = toks[i][1]
+            # Among equally good matches take the one nearest the guess: a
+            # short quote ("wellness") can occur several times, and the
+            # model's rough time is the only hint which was meant.
+            key = (-score, abs(at - guess))
+            if best_key is None or key < best_key:
+                best, best_key = at, key
+
+        if best is None or abs(best - guess) > max_shift:
+            out.append(item)
+            continue
+        item = dict(item)
+        item["start_time"] = round(best, 3)
+        item["end_time"] = round(best + max(0.1, end - guess), 3)
+        item["snapped_from"] = round(guess, 3)
+        out.append(item)
+        moved += 1
+    return out, moved
 
 
 def _build_clip_suggestion_prompt(transcript: str, format_type: str,
@@ -9546,6 +9641,9 @@ def suggest_effects():
     except RuntimeError as exc:
         gemini_error = str(exc)
 
+    suggestions, _snapped = _snap_suggestions_to_quotes(suggestions, words)
+    if _snapped:
+        ai_logger.info("[snap] moved %d effect(s) onto their quoted words", _snapped)
     cleaned = _sanitize_effect_suggestions(suggestions, total)[:max_effects]
     cleaned = _ensure_effects_span_timeline(cleaned, 0.0, total, words, max_effects)
     # Aim each push at the speaker rather than the centre of the frame, when
@@ -24882,9 +24980,19 @@ def ai_edit_seed():
                 devices=device_budget or None,
             )
         )
-        effects = _sanitize_effect_suggestions(result.get("effects") or [], total)
-        graphics = _sanitize_graphic_suggestions(
-            result.get("graphics") or [], total, device_budget)
+        # Snap BEFORE sanitising, so every existing clamp, floor and
+        # overlap rule still runs -- on the corrected times rather than on
+        # the model's guess.
+        raw_fx, fx_moved = _snap_suggestions_to_quotes(
+            result.get("effects") or [], win_words)
+        raw_gfx, gfx_moved = _snap_suggestions_to_quotes(
+            result.get("graphics") or [], win_words)
+        if fx_moved or gfx_moved:
+            ai_logger.info(
+                "[snap] moved %d effect(s) and %d graphic(s) onto their quoted words",
+                fx_moved, gfx_moved)
+        effects = _sanitize_effect_suggestions(raw_fx, total)
+        graphics = _sanitize_graphic_suggestions(raw_gfx, total, device_budget)
         # Long edits from Gemini tend to front-load all the energy into the
         # first minute — backfill quiet late stretches with light accents so
         # the back half of the video isn't dead.

@@ -8280,3 +8280,136 @@ def test_uploading_several_interviews_ticks_their_boxes(app_mod):
     assert "boxes.forEach((b) => { b.checked = true; });" not in fn
     # The list is drawn by the jobs poller, so a single attempt races it.
     assert "setTimeout(tick" in fn, "one attempt races the jobs poller"
+
+
+# --- placement lands on the words the model named ------------------------
+# Five prompts ask for "the exact words the graphic belongs over". The model
+# answers. Placement used its GUESSED start_time anyway and kept the quote
+# as decoration, so timing was only ever as good as a [mm:ss] transcript --
+# whole seconds, one marker per chunk. Whisper knows every word to ~30ms.
+
+def _snap_words(text, step=0.42, hold=0.38):
+    return [{"word": w, "start": round(i * step, 3), "end": round(i * step + hold, 3)}
+            for i, w in enumerate(text.split())]
+
+
+_SNAP_LINE = ("it is Anthony with Central Group Events back at the "
+              "Summer Social and EO Run Club Wellness Festival")
+
+
+def test_a_graphic_lands_on_the_words_it_quoted(app_mod):
+    words = _snap_words(_SNAP_LINE)
+    truth = words[_SNAP_LINE.split().index("Summer")]["start"]
+    out, moved = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "Summer Social", "start_time": 5.0, "end_time": 7.0}], words)
+    assert moved == 1
+    assert out[0]["start_time"] == pytest.approx(truth, abs=0.01), \
+        "placed on the model's guess instead of its own quoted words"
+    assert out[0]["snapped_from"] == 5.0, "the original guess is not recorded"
+
+
+def test_the_span_keeps_its_length_when_it_slides(app_mod):
+    words = _snap_words(_SNAP_LINE)
+    out, _ = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "Summer Social", "start_time": 5.0, "end_time": 7.4}], words)
+    assert out[0]["end_time"] - out[0]["start_time"] == pytest.approx(2.4, abs=0.01), \
+        "sliding the start changed how long the graphic is on screen"
+
+
+def test_a_quote_the_model_got_slightly_wrong_still_snaps(app_mod):
+    """ASR and the model disagree about small words all the time. Requiring
+    a verbatim match would mean the feature almost never fires."""
+    words = _snap_words(_SNAP_LINE)
+    truth = words[_SNAP_LINE.split().index("Summer")]["start"]
+    # Genuinely not verbatim: "event" is nowhere in the line, so this only
+    # matches because partial scoring is allowed.
+    out, moved = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "Summer Social event", "start_time": 5.0, "end_time": 7.0}], words)
+    assert moved == 1 and out[0]["start_time"] == pytest.approx(truth, abs=0.01)
+
+
+def test_nothing_moves_without_a_quote_or_a_match(app_mod):
+    """It must never invent a position. No quote, or a quote that is not in
+    the transcript, means the model's own time stands."""
+    words = _snap_words(_SNAP_LINE)
+    for item in ({"start_time": 5.0, "end_time": 7.0},
+                 {"quote": "completely absent phrase", "start_time": 5.0, "end_time": 7.0}):
+        out, moved = app_mod._snap_suggestions_to_quotes([dict(item)], words)
+        assert moved == 0
+        assert out[0]["start_time"] == 5.0
+        assert "snapped_from" not in out[0]
+
+
+def test_a_repeated_phrase_picks_the_occurrence_nearest_the_guess(app_mod):
+    """"wellness" can occur five times. The quote says WHICH WORDS, the
+    guess is the only thing that says WHICH ONE -- so both are needed."""
+    words = _snap_words("wellness is the goal and wellness is the future", step=0.5, hold=0.45)
+    first, second = words[0]["start"], words[5]["start"]
+    early, _ = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "wellness", "start_time": first + 0.3, "end_time": first + 1.3}], words)
+    late, _ = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "wellness", "start_time": second + 0.2, "end_time": second + 1.2}], words)
+    assert early[0]["start_time"] == pytest.approx(first, abs=0.01)
+    assert late[0]["start_time"] == pytest.approx(second, abs=0.01), \
+        "both guesses collapsed onto the same occurrence"
+
+
+def test_a_wild_match_is_refused(app_mod):
+    """If the guess is nowhere near the quote, trusting the match would
+    teleport the graphic across the video. Leave it where the model put it."""
+    words = _snap_words(_SNAP_LINE)
+    out, moved = app_mod._snap_suggestions_to_quotes(
+        [{"quote": "Summer Social", "start_time": 45.0, "end_time": 47.0}], words)
+    assert moved == 0 and out[0]["start_time"] == 45.0
+
+
+def test_the_route_places_the_effect_on_the_quoted_words(app_mod, temp_db, monkeypatch):
+    """End to end through /suggest-effects, not just the helper: the model
+    guesses a time, names the words, and what comes back sits on the words.
+
+    Also proves the order. Snapping happens BEFORE sanitising, so the
+    duration floors and overlap rules still run -- on the corrected time.
+    """
+    words = _snap_words(_SNAP_LINE)
+    truth = words[_SNAP_LINE.split().index("Summer")]["start"]
+    jid = "snapjob"
+    monkeypatch.setitem(app_mod.jobs, jid, {
+        "status": "done", "words": words, "style": {}, "emoji_rules": {},
+        "output": None, "duration": words[-1]["end"],
+    })
+    monkeypatch.setattr(app_mod, "_overlap_split_suggestions", lambda *a, **k: [])
+    monkeypatch.setattr(app_mod, "_ensure_effects_span_timeline",
+                        lambda fx, *a, **k: fx)
+    monkeypatch.setattr(app_mod, "_gemini_generate_clip_suggestions", lambda p: {
+        "effects": [{"type": "punch_zoom", "start_time": 5.0, "end_time": 6.2,
+                     "intensity": "med", "quote": "Summer Social"}]})
+    r = app_mod.app.test_client().post("/suggest-effects",
+                                       json={"job_id": jid}).get_json()
+    fx = (r or {}).get("effects") or (r or {}).get("suggestions") or []
+    assert fx, f"no effect came back: {r}"
+    assert fx[0]["start_time"] == pytest.approx(truth, abs=0.05), \
+        "the effect kept the model's guess instead of its quoted words"
+    # Sanitising still ran: punch_zoom has a duration floor.
+    assert fx[0]["end_time"] > fx[0]["start_time"]
+
+
+def test_the_transcript_marks_time_often_enough_to_aim_with(app_mod):
+    """Only the first word of a chunk carries a timestamp. A 220-char chunk
+    can run 10s, leaving every later word unanchored -- and the snap needs
+    the guess within its shift window to choose between repeats."""
+    # Continuous speech: no pause over 0.7s and well under 220 chars, so
+    # without the time cap this whole 18s stretch is ONE line carrying one
+    # timestamp, and every word after the first is unanchored.
+    words = _snap_words(" ".join(f"w{i}" for i in range(40)), step=0.45, hold=0.4)
+    lines = [ln for ln in app_mod._format_transcript_for_llm(words).splitlines() if ln.strip()]
+    assert len(lines) >= 3, f"only {len(lines)} timestamp(s) for an 18s transcript"
+    secs = []
+    for ln in lines:
+        mm, ss = ln[1:6].split(":")
+        secs.append(int(mm) * 60 + int(ss))
+    gaps = [b - a for a, b in zip(secs, secs[1:])]
+    assert gaps, "a single chunk leaves the whole transcript unanchored"
+    assert max(gaps) <= 7, f"a {max(gaps)}s stretch with nothing to aim at"
+    # And the cap must not be so tight it chops ordinary speech: these
+    # timestamps are also what the model reads to pick sentence-ish cuts.
+    assert len(lines) <= 5, f"{len(lines)} chunks for 18s is mid-sentence chopping"
