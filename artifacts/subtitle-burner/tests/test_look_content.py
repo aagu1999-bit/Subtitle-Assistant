@@ -197,3 +197,47 @@ def test_the_op_examples_are_valid_json(app_mod, temp_db, monkeypatch):
     for ex in app_mod.CO_EDITOR_OP_EXAMPLES:
         _json.loads(ex)              # the source must be valid JSON
         assert ex in p, f"an example did not survive into the prompt: {ex[:60]}"
+
+
+# ---- a bug in our own call is not an engine being unavailable ---------------
+
+def test_a_signature_mismatch_is_recorded_as_a_bug_not_as_unavailable(app_mod, monkeypatch, caplog):
+    """_make_animation catches Exception around every engine call, so a
+    TypeError from our own signature drift became the same silent walk down
+    to motion.py as a missing Chrome -- which is how the content change in
+    #66 broke three stubs at once and sent me looking in the wrong place.
+
+    It still falls back: the person keeps their video. What changed is that
+    the data says which of the two it was.
+    """
+    import logging
+    monkeypatch.setattr(app_mod, "_match_named_look",
+                        lambda d: ("remotion", {"id": "GlassSurface", "dur": 3.0, "place": "full"}))
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a, **k: {"duration": 1.0})
+    monkeypatch.setattr(app_mod, "_render_motion_asset",
+                        lambda spec, desc, canvas, fps=30, fell_back_from=None: {
+                            "asset_id": "m", "kind": "video", "cached": False,
+                            "duration": 1.0, "box": {},
+                            "device": {"engine": "motion", "fell_back_from": fell_back_from}})
+
+    # an engine that genuinely cannot run
+    monkeypatch.setattr(app_mod, "_make_remotion_look",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no browser")))
+    out = app_mod._make_animation("a glass surface", {"canvas": "9x16"})
+    assert out["device"]["fell_back_from"]["kind"] == "unavailable"
+
+    # a bug in our own call, which must not read the same
+    def wrong_signature(rec, desc, tl):          # one argument short
+        return {}
+    monkeypatch.setattr(app_mod, "_make_remotion_look", wrong_signature)
+    with caplog.at_level(logging.ERROR):
+        out = app_mod._make_animation("a glass surface", {"canvas": "9x16"})
+    fb = out["device"]["fell_back_from"]
+    assert fb["kind"] == "bug", "a signature mismatch still reads as 'engine unavailable'"
+    assert "TypeError" in fb["why"]
+    # and it is loud, with a traceback, not a one-line warning
+    assert any(r.levelno >= logging.ERROR and "BUG" in r.message for r in caplog.records), \
+        "a bug in our own code was logged no louder than a missing browser"
+    assert any(r.exc_info for r in caplog.records), "logged without a traceback"
+    # the person still gets their video
+    assert out["device"]["engine"] == "motion"

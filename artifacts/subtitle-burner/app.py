@@ -20470,10 +20470,34 @@ def _make_animation(description: str, timeline: dict | None,
     # info line nobody reads.
     missed: dict | None = None
 
+    # A TypeError, AttributeError or NameError here is never "the engine is
+    # unavailable" -- it is a bug in our own call. Both used to arrive as the
+    # same warning and the same silent walk down to motion.py, which is how a
+    # signature mismatch in this very function went unnoticed until three
+    # test stubs failed at once and sent me looking in the wrong place.
+    #
+    # It still falls back, deliberately: the person gets their video either
+    # way, and losing one overlay beats a 500. What changes is that a bug is
+    # logged with its traceback and labelled as a bug in the data, so it
+    # cannot hide behind an "engine unavailable" that reads as expected.
+    _BUG = (TypeError, AttributeError, NameError)
+
     def _missed(eng: str, e: Exception) -> None:
         nonlocal missed
-        missed = {"engine": eng, "id": rec["id"], "why": str(e)[:200]}
-        ai_logger.warning(f"[{eng}] {rec['id']} did not render, falling back: {e}")
+        is_bug = isinstance(e, _BUG)
+        # The type belongs in `why`: "no browser" and "takes 3 positional
+        # arguments but 5 were given" read very differently once one of them
+        # has TypeError in front of it.
+        missed = {"engine": eng, "id": rec["id"],
+                  "why": f"{type(e).__name__}: {str(e)[:200]}",
+                  "kind": "bug" if is_bug else "unavailable"}
+        if is_bug:
+            ai_logger.exception(
+                f"[{eng}] {rec['id']} fell back because of a BUG in our own "
+                f"call, not because the engine was unavailable: "
+                f"{type(e).__name__}: {e}")
+        else:
+            ai_logger.warning(f"[{eng}] {rec['id']} did not render, falling back: {e}")
 
     if engine == "remotion" and rec:
         try:
@@ -20505,7 +20529,9 @@ def _make_animation(description: str, timeline: dict | None,
             # the same protection as a prose one.
             if photos or _orbit_photo_queries(description)[0]:
                 raise
-            missed = {"engine": "remotion", "id": "OrbitCarousel", "why": str(e)[:200]}
+            missed = {"engine": "remotion", "id": "OrbitCarousel",
+                      "why": f"{type(e).__name__}: {str(e)[:200]}",
+                      "kind": "bug" if isinstance(e, _BUG) else "unavailable"}
             ai_logger.warning(f"[remotion] orbit did not render, falling back to motion.py: {e}")
     if not freehand:
         raise RuntimeError("no wired look for this beat")
@@ -20583,6 +20609,25 @@ REMOTION_RECIPES = (
     {"id": "ShinyText",
      "words": ("shiny text", "shine text"),
      "dur": 3.0, "place": "full", "props": "text"},
+    # remocn, vendored. The first look whose content slots match what a
+    # person actually says about themselves -- see src/vendor/remocn.
+    {"id": "XFollowCard",
+     "words": ("x follow card", "twitter card", "x profile card",
+               "follow card", "x card"),
+     "dur": 5.0, "place": "full",
+     # 500s for 150 frames, measured. The default 240s wall is not enough.
+     "slow": True,
+     "fields": {
+         "name":     {"type": "text", "max": 40},
+         "handle":   {"type": "text", "max": 30},
+         "bio":      {"type": "text", "max": 160},
+         "location": {"type": "text", "max": 40},
+         "website":  {"type": "text", "max": 40},
+         "joined":   {"type": "text", "max": 24},
+         "verified": {"type": "flag"},
+         "avatarUrl": {"type": "picture"},
+         "coverUrl":  {"type": "picture"},
+     }},
     {"id": "ProfileCard",
      "words": ("profile card",),
      "dur": 4.0, "place": "full", "props": "text",
@@ -21703,6 +21748,12 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path,
         # 180s frame budget means a slow render dies with no usable error.
         f"--timeout={600000 if slow else 180000}",
     ]
+    # _remotion_status accepts REMOTION_BROWSER_EXECUTABLE as proof a browser
+    # exists, so the render has to actually use it -- otherwise the check says
+    # ready and Remotion goes looking in node_modules for one that is not there.
+    _browser = (os.environ.get("REMOTION_BROWSER_EXECUTABLE") or "").strip()
+    if _browser:
+        cmd.append(f"--browser-executable={_browser}")
     wall = 900 if slow else 240
     r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True,
                        timeout=wall)
@@ -21721,7 +21772,13 @@ def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
     key = hashlib.md5(json.dumps({"c": rec["id"], "p": props, "d": dur}, sort_keys=True).encode()).hexdigest()[:16]
     src = CACHE_DIR / f"remotion_{rec['id']}_{key}.webm"
     if not (src.exists() and src.stat().st_size > 200):
-        _render_remotion_webm(rec["id"], {**props, "duration": dur}, src)
+        # Some looks cannot finish inside the default budget. Measured here:
+        # XFollowCard is 500s for 150 frames at 1080x1920 on software GL,
+        # against a 240s wall -- so it would have timed out on EVERY real
+        # use and fallen back to motion.py, while rendering perfectly from
+        # the CLI and passing every test, because no test renders.
+        _render_remotion_webm(rec["id"], {**props, "duration": dur}, src,
+                              slow=bool(rec.get("slow")))
     asset_id = hashlib.md5(src.name.encode()).hexdigest()
     dest = ASSET_DIR / f"{asset_id}.webm"
     ASSET_DIR.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ import { PolaroidPicturesLook } from "./looks/PolaroidPictures";
 import { OnScreenMessagesLook } from "./looks/OnScreenMessages";
 import { SplitTextLook } from "./looks/SplitText";
 import * as Bits from "./looks/bits";
+import { XFollowCardLook } from "./looks/XFollowCard";
 
 type DurProps = { duration?: number };
 
@@ -48,6 +49,10 @@ export const RemotionRoot: React.FC = () => (
         durationInFrames: Math.max(24, Math.round((props.duration || 5) * 30)),
       })}
     />
+    {/* remocn, vendored. 13 real content props -- the first look here that
+        does not have to invent what it was not told. */}
+    <Composition id="XFollowCard" component={XFollowCardLook} durationInFrames={150}
+      defaultProps={{ duration: 5 }} {...NINE_BY_SIXTEEN} />
     <Composition id="NumberCounter" component={NumberCounterLook} durationInFrames={90}
       defaultProps={{ duration: 3 }} {...NINE_BY_SIXTEEN} />
     <Composition id="VerticalBarChart" component={VerticalBarChartLook} durationInFrames={120}
