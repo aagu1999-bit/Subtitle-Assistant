@@ -20470,10 +20470,34 @@ def _make_animation(description: str, timeline: dict | None,
     # info line nobody reads.
     missed: dict | None = None
 
+    # A TypeError, AttributeError or NameError here is never "the engine is
+    # unavailable" -- it is a bug in our own call. Both used to arrive as the
+    # same warning and the same silent walk down to motion.py, which is how a
+    # signature mismatch in this very function went unnoticed until three
+    # test stubs failed at once and sent me looking in the wrong place.
+    #
+    # It still falls back, deliberately: the person gets their video either
+    # way, and losing one overlay beats a 500. What changes is that a bug is
+    # logged with its traceback and labelled as a bug in the data, so it
+    # cannot hide behind an "engine unavailable" that reads as expected.
+    _BUG = (TypeError, AttributeError, NameError)
+
     def _missed(eng: str, e: Exception) -> None:
         nonlocal missed
-        missed = {"engine": eng, "id": rec["id"], "why": str(e)[:200]}
-        ai_logger.warning(f"[{eng}] {rec['id']} did not render, falling back: {e}")
+        is_bug = isinstance(e, _BUG)
+        # The type belongs in `why`: "no browser" and "takes 3 positional
+        # arguments but 5 were given" read very differently once one of them
+        # has TypeError in front of it.
+        missed = {"engine": eng, "id": rec["id"],
+                  "why": f"{type(e).__name__}: {str(e)[:200]}",
+                  "kind": "bug" if is_bug else "unavailable"}
+        if is_bug:
+            ai_logger.exception(
+                f"[{eng}] {rec['id']} fell back because of a BUG in our own "
+                f"call, not because the engine was unavailable: "
+                f"{type(e).__name__}: {e}")
+        else:
+            ai_logger.warning(f"[{eng}] {rec['id']} did not render, falling back: {e}")
 
     if engine == "remotion" and rec:
         try:
@@ -20505,7 +20529,9 @@ def _make_animation(description: str, timeline: dict | None,
             # the same protection as a prose one.
             if photos or _orbit_photo_queries(description)[0]:
                 raise
-            missed = {"engine": "remotion", "id": "OrbitCarousel", "why": str(e)[:200]}
+            missed = {"engine": "remotion", "id": "OrbitCarousel",
+                      "why": f"{type(e).__name__}: {str(e)[:200]}",
+                      "kind": "bug" if isinstance(e, _BUG) else "unavailable"}
             ai_logger.warning(f"[remotion] orbit did not render, falling back to motion.py: {e}")
     if not freehand:
         raise RuntimeError("no wired look for this beat")
