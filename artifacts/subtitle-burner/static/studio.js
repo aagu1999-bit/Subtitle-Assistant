@@ -523,6 +523,8 @@
     $("devicePickerPhrase").textContent = `“${p.text.slice(0, 80)}” at ${fmt(p.start)}`;
     $("devicePickerStatus").textContent = "Reading the phrase…";
     $("devicePickerBehind").checked = false;
+    // The picker is rebuilt each time it opens, so re-apply the gate.
+    if (typeof window.applyBehindAvailability === "function") window.applyBehindAvailability();
     hideToolbar();
     try {
       await loadCatalog();

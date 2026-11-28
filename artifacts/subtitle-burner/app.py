@@ -1784,6 +1784,35 @@ def _mediapipe_solutions_api(attr: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _behind_me_status() -> dict:
+    """Whether "put it behind me" can work here, in words a person can use.
+
+    _segment_deps_available already returns an exact reason and is called in
+    seven places server-side -- none of which ever reach the person looking at
+    the screen. They get "Cut-out unavailable on this server", which names an
+    internal technique, blames something they cannot see, and offers no action.
+
+    `detail` keeps the engineering sentence for the logs and for whoever has
+    to fix the deploy. `message` is the one the UI shows.
+    """
+    ok, why = _segment_deps_available()
+    if ok:
+        return {"ok": True, "message": "", "detail": "", "fixable_by_user": False}
+    return {
+        "ok": False,
+        "detail": why,
+        # No jargon, no blame, and it says what happens to the export -- the
+        # render drops the background and keeps everything else, which is
+        # what _tl_composite_background actually does.
+        "message": ("Placing things behind you is switched off on this server, so a "
+                    "background would cover you instead of sitting behind you. "
+                    "Nothing you did caused this and there is nothing to fix at your "
+                    "end. You can still render: the background is left out and the "
+                    "rest of your edit is unaffected."),
+        "fixable_by_user": False,
+    }
+
+
 def _segment_deps_available() -> tuple[bool, str]:
     """Return (ok, msg) for the person-matte path.
 
@@ -9764,6 +9793,18 @@ window.addEventListener("error", function (e) {{
 </body></html>""", mimetype="text/html")
 
 
+@app.route("/can/behind-me")
+def can_behind_me():
+    """Can this server put a picture behind the speaker?
+
+    Asked up front so the control is not offered when it cannot work, the
+    same way the slash picker marks an unreachable engine. Until now the only
+    way to find out was to try, fail, and read a sentence that did not say
+    why.
+    """
+    return jsonify(_behind_me_status())
+
+
 @app.route("/segment-preview/<job_id>.png")
 def segment_preview(job_id: str):
     """The person matte for one frame, as a PNG.
@@ -9774,9 +9815,12 @@ def segment_preview(job_id: str):
     """
     if job_id not in jobs:
         return jsonify({"error": "Unknown job"}), 404
-    ok, msg = _segment_deps_available()
-    if not ok:
-        return jsonify({"error": f"Segmentation unavailable — {msg}"}), 400
+    st = _behind_me_status()
+    if not st["ok"]:
+        # Both: `message` for the person, `detail` for whoever fixes the box.
+        return jsonify({"error": f"Segmentation unavailable — {st['detail']}",
+                        "message": st["message"], "reason": "unavailable",
+                        "detail": st["detail"]}), 400
     video_path = find_video_path(job_id)
     if not video_path:
         return jsonify({"error": "Source video is no longer on disk."}), 404
@@ -18802,9 +18846,18 @@ def render_timeline_job(job_id: str, timeline: dict, review: bool = False) -> No
                 base = bgd
             elif _tl_background_skipped:
                 # The export still happens. The background is the thing that
-                # did not, and the user is told which.
-                jobs[job_id]["background_note"] = (
-                    "The background was skipped: " + _tl_background_skipped[-1])
+                # did not -- and this key went to the client inside /status
+                # all along with nothing reading it, so the background just
+                # silently was not there. Carry the engineering reason AND a
+                # sentence the person can use.
+                why = _tl_background_skipped[-1]
+                jobs[job_id]["background_note"] = "The background was skipped: " + why
+                st = _behind_me_status()
+                jobs[job_id]["background_note_plain"] = (
+                    st["message"] if not st["ok"] else
+                    "Your background was left out of this render because the "
+                    "person could not be separated from the footage here. "
+                    "Everything else in your edit is in the file.")
 
         # ---- Persistent logo / watermark (whole-video overlay) ----
         if tl.get("logo"):
@@ -25981,8 +26034,11 @@ def _co_editor_capability_message() -> str:
         "• Sounds (pop, click, whoosh) on graphics; photos stay silent unless you add one\n\n"
         "Pictures\n"
         "• Generate images, stock or your photos as backgrounds or carousels\n"
-        "• Put anything behind you (you stay in front)\n"
-        "• iMessage threads with the exact words you give\n\n"
+        + ("• Put anything behind you (you stay in front)\n"
+           if _behind_me_status()["ok"]
+           else "• Putting things behind you is switched off on this server "
+                "just now — graphics still go in front\n")
+        + "• iMessage threads with the exact words you give\n\n"
         "Also\n"
         "• Titles, overlay layout, music ducking, canvas, clip styles, polish cut\n"
         "• Story shape (hook, body, closer) as concrete timeline edits\n\n"
@@ -26586,6 +26642,22 @@ def co_editor():
     # is that render's report. It was computed on every export, drawn in the
     # Studio Export tab, and never shown to the model -- so the only component
     # that could act on "the caption is on his face" was the only one not told.
+    # The model has been told all along that it can put things behind the
+    # speaker. On a server where the person cannot be cut out that is a
+    # promise nothing can keep: the render drops the background and the user
+    # gets a video without the thing they asked for. Say so here, where the
+    # decision is made, rather than after the export.
+    _behind = _behind_me_status()
+    _behind_rules = "" if _behind["ok"] else (
+        "\n\nBEHIND THE SPEAKER IS UNAVAILABLE ON THIS SERVER RIGHT NOW.\n"
+        "- Never set \"behind\": true and never emit set_behind. The render drops\n"
+        "  a background it cannot place, so the user would get a file missing the\n"
+        "  thing they asked for.\n"
+        "- If they ask for something behind them, say plainly that it is switched\n"
+        "  off on this server, that it is not their fault, and offer the overlay in\n"
+        "  FRONT instead, or a different look. Do not apologise at length.\n"
+        "- Everything else works normally.")
+
     _qa_seen = _qa_for_prompt(job_id) if job_id else None
     _qa_rules = ""
     if _qa_seen:
@@ -26703,6 +26775,7 @@ HARD LIMITS (say no in message, ops: [])
 {_transcript_block}
 Current timeline + selection:
 {json.dumps(summary, indent=2)}
+{_behind_rules}
 {_qa_rules}
 
 Return ONLY JSON:
