@@ -2507,14 +2507,38 @@ def test_a_render_with_no_segmentation_still_finishes(app_mod, tmp_path,
     assert "solutions" in app_mod._tl_background_skipped[-1]
 
 
-def test_the_preview_does_not_promise_a_cutout_the_render_cannot_do():
+def test_the_preview_does_not_promise_a_cutout_the_render_cannot_do(app_mod):
     """The fallback used to say "The render still cuts you out properly",
     which is false when the server cannot segment at all -- and that
-    sentence is what sent someone to click Render and hit the failure."""
+    sentence is what sent someone to click Render and hit the failure.
+
+    This used to pin the literal replacement, "The render will skip it".
+    The rule it was really defending is that EVERY message about a failed
+    background says what the export will do, so that is what it checks now:
+    the wording is free to improve, the promise is not.
+    """
+    import re as _re
+    import unittest.mock as _mock
     js = (BURNER / "static" / "timeline.js").read_text(encoding="utf-8")
     assert "The render still cuts you out properly" not in js
-    assert "The render will skip it" in js, (
-        "say what the render will actually do")
+
+    def _says_what_happens(msg: str) -> bool:
+        return "render" in msg.lower()
+
+    # the server's own sentence, which the browser prefers
+    with _mock.patch.object(app_mod, "_segment_deps_available",
+                            lambda: (False, "mediapipe has no solutions")):
+        assert _says_what_happens(app_mod._behind_me_status()["message"])
+
+    # and every branch of the browser's fallback
+    fn = js[js.index("function backgroundFailureMessage"):]
+    fn = fn[:fn.index("\n  }")]
+    returns = _re.findall(r'return "(.*?)";', fn.replace('"\n           + "', ""), _re.S)
+    assert len(returns) >= 3, f"expected a sentence per cause, found {len(returns)}"
+    for msg in returns:
+        if "body.message" in msg:
+            continue
+        assert _says_what_happens(msg), f"does not say what the render will do: {msg!r}"
 
 
 # --- Backgrounds you can switch in and out ------------------------------

@@ -4589,11 +4589,23 @@
       setBackgroundNote(note);
     };
     fetch(url).then((res) => {
-      if (!res.ok) throw new Error("matte " + res.status);
+      if (!res.ok) {
+        // The server works out exactly why and says so in the body. This
+        // used to `throw new Error("matte " + res.status)` one line before
+        // that reason could be read, so three unrelated causes -- the
+        // feature being switched off, the clip being gone, and a one-off
+        // server error -- all printed the same sentence, and none of them
+        // said what to do about it.
+        return res.json().catch(() => ({})).then((body) => {
+          unmask(backgroundFailureMessage(res.status, body));
+          return null;
+        });
+      }
       const cov = parseFloat(res.headers.get("X-Subject-Coverage") || "0");
       if (!(cov > 0.005)) {
-        unmask("No person found in this frame, so the cut-out is off — "
-             + "you are shown over the picture instead.");
+        unmask("Nobody was found in this frame, so you are shown over the "
+             + "picture here instead of in front of it. Try moving the "
+             + "playhead to a frame where you are clearly visible.");
         return null;
       }
       return res.blob();
@@ -4608,14 +4620,33 @@
       _bgMatteUrl = obj;
       setBackgroundNote("");
     }).catch(() => {
-      // Do NOT promise the render will manage it. When the server cannot
-      // segment at all -- a mediapipe without solutions, say -- the render
-      // cannot either, and that sentence is what sent someone to click
-      // Render and hit the failure.
-      unmask("Cut-out unavailable on this server, so the background cannot "
-           + "be placed behind you. The render will skip it and keep the "
-           + "rest of your edit.");
+      // Reaching this now means the request itself failed -- offline, or the
+      // server did not answer. That is temporary and worth retrying, which
+      // is the opposite of the feature being switched off. Both used to
+      // print the same sentence.
+      unmask("Could not check the preview just now — the server did not "
+           + "answer. This is usually temporary; try again in a moment.");
     });
+  }
+
+  // What to say when /segment-preview refuses. Each cause gets its own
+  // sentence, because "unavailable on this server" was being shown for all
+  // of them and told nobody anything they could act on.
+  function backgroundFailureMessage(status, body) {
+    if (body && body.message) return body.message;   // the server's own words
+    if (status === 404) {
+      return "The original clip for this project is no longer on the server, "
+           + "so nothing can be placed behind you. Re-upload the clip if you "
+           + "want a background; otherwise your render goes ahead without it.";
+    }
+    if (status >= 500) {
+      return "Something went wrong working out the preview for this frame. "
+           + "Try a different moment in the clip, or render anyway — if it "
+           + "fails there too, the background is left out and the rest of "
+           + "your edit is unaffected.";
+    }
+    return "The background cannot be placed behind you for this frame. Your "
+         + "render will go ahead without it and keep everything else.";
   }
 
   // One line under the preview when the draft cutout cannot be made.
@@ -6461,7 +6492,44 @@
   function propColor(key, label, val) {
     return `<div class="tl-prop-row"><label>${label}</label><input type="color" data-key="${key}" value="${val}"></div>`;
   }
+  // Asked once, so "behind me" is not offered on a server that cannot do it.
+  // Until now the only way to find out was to tick the box, render, and get a
+  // file without the thing you asked for.
+  let _behindMe = { ok: true, message: "" };
+  function behindMeAvailability() { return _behindMe; }
+  window.behindMeAvailability = behindMeAvailability;
+  fetch("/can/behind-me")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (!j || j.ok) return;
+      _behindMe = j;
+      applyBehindAvailability();
+    })
+    .catch(() => {});   // unknown is treated as available: never block on a blip
+
+  function applyBehindAvailability() {
+    if (_behindMe.ok) return;
+    const box = $("devicePickerBehind");
+    if (box) {
+      box.checked = false;
+      box.disabled = true;
+      const label = box.closest("label");
+      if (label && !label.dataset.behindOff) {
+        label.dataset.behindOff = "1";
+        label.style.opacity = "0.55";
+        label.title = _behindMe.message || "";
+        label.append(" — unavailable on this server");
+      }
+    }
+  }
+  window.applyBehindAvailability = applyBehindAvailability;
+
   function propCheck(key, label, val) {
+    if (key === "behind" && !_behindMe.ok) {
+      return `<div class="tl-prop-row" title="${(_behindMe.message || "").replace(/"/g, "&quot;")}">`
+           + `<label class="tl-prop-inline" style="opacity:.55"><input type="checkbox" data-key="${key}" disabled> `
+           + `${label} — unavailable on this server</label></div>`;
+    }
     return `<div class="tl-prop-row"><label class="tl-prop-inline"><input type="checkbox" data-key="${key}" ${val ? "checked" : ""}> ${label}</label></div>`;
   }
   // A picture behind the person in ONE half of a split.
@@ -8194,9 +8262,15 @@
               resolve(s);
               return;
             }
+            // The render drops the background when the person cannot be cut
+            // out, and said so in a job key nothing ever read -- so it just
+            // was not in the file and nobody was told. Say it where the
+            // "Done" message goes, because that is where someone is looking.
+            const bgMissing = s.background_note_plain || s.background_note;
             setRenderStatus(s.review
               ? "Review ready — smaller copy for watching. Render is the full-size file."
               : "Done ✓ — use ⬇ Download when you want the file");
+            if (bgMissing) setBackgroundNote(bgMissing);
             if (typeof window.studioOnRenderDone === "function") window.studioOnRenderDone(watchId, s);
             const v = $("tlPreviewVideo");
             if (v) {
