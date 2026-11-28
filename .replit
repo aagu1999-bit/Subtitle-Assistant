@@ -15,7 +15,31 @@ deploymentTarget = "gce"
 run = ["sh", "-c", "cd artifacts/subtitle-burner && gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:${PORT:-8081} app:app"]
 
 [deployment.postBuild]
-args = ["pnpm", "store", "prune"]
+# Remotion needs two things this step never provided, so the 42 Remotion
+# recipes have been falling through to motion.py's freehand designer on the
+# deploy -- silently, because _make_animation catches every exception.
+#
+#   1. node_modules. Gitignored, and the only thing that installed it was
+#      scripts/post-merge.sh, which runs on an agent merge and not on a
+#      deployment build.
+#   2. The Chrome headless shell Remotion renders in (~176MB, fetched from
+#      remotion.media into node_modules/.remotion). NOTHING in this repo has
+#      ever fetched it. Doing it here means the first render does not pay for
+#      it, and does not fail if egress to remotion.media is closed at runtime.
+#
+# `store prune` stays last: pruning before the install would make the install
+# re-download everything.
+#
+# Deliberately NOT in scripts/post-merge.sh: [postMerge] has timeoutMs = 20000
+# and a 176MB download would blow it, which would kill the app restart at the
+# end of that script.
+#
+# The browser fetch is non-fatal on purpose. The install must succeed -- a
+# lockfile mismatch should stop the deploy -- but a hiccup reaching
+# remotion.media must not, or a CDN blip takes the whole app down to buy a
+# cache warm-up. Without it the first render tries the fetch itself, which is
+# exactly today's behaviour.
+args = ["sh", "-c", "pnpm install --frozen-lockfile && (cd artifacts/remotion-overlays && pnpm exec remotion browser ensure || echo 'WARN: could not pre-fetch the Remotion browser; the first render will retry') && pnpm store prune"]
 env = { "CI" = "true" }
 
 [workflows]
