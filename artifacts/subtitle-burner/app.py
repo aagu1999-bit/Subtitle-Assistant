@@ -20609,6 +20609,23 @@ REMOTION_RECIPES = (
     {"id": "ShinyText",
      "words": ("shiny text", "shine text"),
      "dur": 3.0, "place": "full", "props": "text"},
+    # remocn, vendored. The first look whose content slots match what a
+    # person actually says about themselves -- see src/vendor/remocn.
+    {"id": "XFollowCard",
+     "words": ("x follow card", "twitter card", "x profile card",
+               "follow card", "x card"),
+     "dur": 5.0, "place": "full",
+     "fields": {
+         "name":     {"type": "text", "max": 40},
+         "handle":   {"type": "text", "max": 30},
+         "bio":      {"type": "text", "max": 160},
+         "location": {"type": "text", "max": 40},
+         "website":  {"type": "text", "max": 40},
+         "joined":   {"type": "text", "max": 24},
+         "verified": {"type": "flag"},
+         "avatarUrl": {"type": "picture"},
+         "coverUrl":  {"type": "picture"},
+     }},
     {"id": "ProfileCard",
      "words": ("profile card",),
      "dur": 4.0, "place": "full", "props": "text",
