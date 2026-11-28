@@ -1,10 +1,11 @@
+import { TOKENS } from "../tokens";
 import React from "react";
 import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
 
 /** Bits-style split title, driven by time instead of scroll/hover. */
 export const SplitTextLook: React.FC<{ text?: string; color?: string }> = ({
   text = "WATCH THIS",
-  color = "#FFD60A",
+  color = TOKENS.brandColor,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();

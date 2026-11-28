@@ -1,3 +1,4 @@
+import { TOKENS } from "../tokens";
 import type {Caption, TikTokPage, TikTokToken} from '@remotion/captions';
 import {createTikTokStyleCaptions} from '@remotion/captions';
 import {loadFont} from '@remotion/google-fonts/Montserrat';
@@ -24,7 +25,9 @@ type PoppingWordCaptionsProps = InteractiveTransformProps &
 const desiredFontSize = 80;
 const fontWeight = '700';
 const textColor = '#ffffff';
-const highlightColor = '#2563eb';
+// Was Tailwind's default blue -- a colour this brand never chose,
+// in the two looks most likely to be on screen the longest.
+const highlightColor = TOKENS.brandColor;
 const activeWordScale = 1.03;
 const defaultCombineTokensWithinMilliseconds = 800;
 const defaultWidth = 682;

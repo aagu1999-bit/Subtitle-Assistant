@@ -1,3 +1,4 @@
+import { TOKENS } from "../tokens";
 import {loadFont} from '@remotion/google-fonts/Inter';
 import React from 'react';
 import {
@@ -39,7 +40,7 @@ const NumberCounterInner: React.FC<InteractiveTransformProps> = ({style}) => {
 				fontFamily: 'Inter',
 				fontSize: 150,
 				fontWeight: 800,
-				color: '#FFD60A',
+				color: TOKENS.brandColor,
 				fontVariantNumeric: 'tabular-nums',
 				letterSpacing: '-0.03em',
 				lineHeight: 1,

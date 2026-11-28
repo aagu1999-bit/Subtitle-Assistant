@@ -12,6 +12,10 @@ from __future__ import annotations
 import math
 import re
 
+# Aliased: this module already has a public `tokens()` function, which would
+# shadow the module name from its def onwards.
+import tokens as design_tokens
+
 # The six pacing packs. They are not a choice anymore. Callers that still
 # send one of these ids are resolved to the single default look elsewhere.
 DELETED_STYLE_PACKS = ("pulse", "clarity", "magazine", "film", "velocity", "always")
@@ -85,22 +89,33 @@ _NUMBER_RE = re.compile(
 )
 _ICON_RE = re.compile(r"[a-z0-9_]+")
 
-DEFAULT_TOKENS = {
-    "id": "default",
-    "colors": {
-        "ink": "#F8FAFC",
-        "accent": "#FFD60A",
-        "card": "#0F1220",
-        "card_ink": "#F8FAFC",
-        "stroke": "#F8FAFC",
-    },
-    "font": {"ui": "DM Sans", "display": "Anton"},
-    "radius": 18,
-    "stroke": 2,
-    "card": {"pad": 28, "max_w": 0.86},
-    "motion": list(MOTIONS),
-    "templates": list(TEMPLATES),
-}
+# The colours, fonts and geometry come from tokens.py now. This was the
+# best-shaped set in the repo and nothing else read it, while edit_engine
+# carried a corner radius of 28 against the 18 here -- two cards in one video
+# with different corners. The retelling-only keys (which motions and templates
+# exist) stay here, because they are not part of the brand.
+def _default_tokens() -> dict:
+    t = design_tokens.tokens()
+    c = t["colors"]
+    return {
+        "id": t["id"],
+        "colors": {
+            "ink": c["ink"],
+            "accent": c["brand"],      # the mark the eye goes to
+            "card": c["surface"],
+            "card_ink": c["ink"],
+            "stroke": c["ink"],
+        },
+        "font": dict(t["font"]),
+        "radius": t["radius"],
+        "stroke": t["stroke"],
+        "card": dict(t["card"]),
+        "motion": list(MOTIONS),
+        "templates": list(TEMPLATES),
+    }
+
+
+DEFAULT_TOKENS = _default_tokens()
 
 
 def tokens() -> dict:

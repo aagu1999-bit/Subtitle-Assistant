@@ -1,5 +1,11 @@
 <!doctype html>
-<html lang="en">
+<!-- brandColor is declared so the one highlight in this composition comes
+     from the project, not from a literal. The default matches tokens.py,
+     which is the authority; app.py sends the resolved value as a render
+     variable, so a pink highlight finally reaches this engine too. -->
+<html lang="en" data-composition-variables='[
+  {"id":"brandColor","type":"color","label":"Brand","default":"#FFD60A"}
+]'>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080" />
@@ -138,6 +144,16 @@
         var container = document.getElementById("kt-container");
         var tl = gsap.timeline({ paused: true });
 
+        var HF_VARS =
+          (window.__hyperframes && window.__hyperframes.getVariables)
+            ? window.__hyperframes.getVariables()
+            : {};
+        // No literal fallback: the declared default above is already
+        // merged in by getVariables, and if the runtime is missing the
+        // keyword simply keeps the body colour rather than quietly
+        // claiming a brand colour nobody supplied.
+        var BRAND = HF_VARS.brandColor;
+
         WORDS.forEach(function (w, wi) {
           var el = document.createElement("div");
           el.className = "kt-word";
@@ -145,7 +161,7 @@
           el.textContent = w.text.toUpperCase();
           el.style.fontSize =
             fitFontSize(w.text.toUpperCase(), 220, "400", "'Anton', sans-serif", 1720) + "px";
-          if (KEYWORDS.has(wi)) el.style.color = "#FFD60A";
+          if (KEYWORDS.has(wi) && BRAND) el.style.color = BRAND;
           container.appendChild(el);
 
           gsap.set(el, { yPercent: -50 });

@@ -1,3 +1,4 @@
+import { TOKENS } from "./tokens";
 import React from "react";
 import {
   AbsoluteFill,
@@ -44,8 +45,8 @@ export const DEFAULT_ORBIT_PROPS: OrbitProps = {
   hold: 0.3,
   move: 1,
   items: [
-    { id: "sq", phase: 0, kind: "shape", shape: "square", bg: "#FFD60A" },
-    { id: "tri", phase: 120, kind: "shape", shape: "triangle", bg: "#00E5FF" },
+    { id: "sq", phase: 0, kind: "shape", shape: "square", bg: TOKENS.brandColor },
+    { id: "tri", phase: 120, kind: "shape", shape: "triangle", bg: TOKENS.accentColor },
     { id: "ci", phase: 240, kind: "shape", shape: "circle", bg: "#FF3B6B" },
   ],
 };

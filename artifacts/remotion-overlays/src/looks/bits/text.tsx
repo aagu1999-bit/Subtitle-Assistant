@@ -1,7 +1,7 @@
 import React from "react";
 import { Easing, interpolate, random } from "remotion";
 import {
-  BitsStage, GOLD, GoldTitle, useClock,
+  BitsStage, CYAN, GOLD, GoldTitle, MINT, useClock,
   type BitsCountProps, type BitsTextProps, type BitsWordsProps,
 } from "./shared";
 
@@ -75,7 +75,7 @@ export const GradientTextLook: React.FC<BitsTextProps> = ({
   return (
     <BitsStage>
       <GoldTitle style={{
-        backgroundImage: `linear-gradient(90deg, ${color}, #00FF88, #00E5FF, ${color})`,
+        backgroundImage: `linear-gradient(90deg, ${color}, ${MINT}, ${CYAN}, ${color})`,
         backgroundSize: "220% 100%",
         backgroundPosition: `${pos - 20}% 50%`,
         WebkitBackgroundClip: "text",
@@ -100,7 +100,7 @@ export const GlitchTextLook: React.FC<BitsTextProps> = ({
         <GoldTitle color="#FF3B6B" style={{
           position: "absolute", left: jx - 4, top: jy, opacity: hit ? 0.85 : 0, mixBlendMode: "screen",
         }}>{text}</GoldTitle>
-        <GoldTitle color="#00E5FF" style={{
+        <GoldTitle color={CYAN} style={{
           position: "absolute", left: -jx + 4, top: -jy, opacity: hit ? 0.85 : 0, mixBlendMode: "screen",
         }}>{text}</GoldTitle>
         <GoldTitle color={color}>{text}</GoldTitle>

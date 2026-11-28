@@ -1,3 +1,4 @@
+import { TOKENS } from "./tokens";
 import React from "react";
 import { Composition } from "remotion";
 import { DEFAULT_ORBIT_PROPS, OrbitCarousel, type OrbitProps } from "./OrbitCarousel";
@@ -27,8 +28,10 @@ const NINE_BY_SIXTEEN = {
   calculateMetadata: durationMeta,
 };
 
-const TITLE = { text: "WATCH THIS", color: "#FFD60A", duration: 3 };
-const WORDS = { words: ["START", "GROW", "WIN"], color: "#FFD60A", duration: 4 };
+// Studio defaults only -- at render time the colour arrives as a prop
+// from _remotion_look_props, which resolves it per project.
+const TITLE = { text: "WATCH THIS", color: TOKENS.brandColor, duration: 3 };
+const WORDS = { words: ["START", "GROW", "WIN"], color: TOKENS.brandColor, duration: 4 };
 const CARDS = { labels: ["One", "Two", "Three"], duration: 4 };
 
 export const RemotionRoot: React.FC = () => (
@@ -70,7 +73,7 @@ export const RemotionRoot: React.FC = () => (
 
     <Composition id="BlurText" component={Bits.BlurTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
     <Composition id="CountUp" component={Bits.CountUpLook} durationInFrames={90} {...NINE_BY_SIXTEEN}
-      defaultProps={{ to: 10000, color: "#FFD60A", duration: 3 }} />
+      defaultProps={{ to: 10000, color: TOKENS.brandColor, duration: 3 }} />
     <Composition id="TextType" component={Bits.TextTypeLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
     <Composition id="GradientText" component={Bits.GradientTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
     <Composition id="GlitchText" component={Bits.GlitchTextLook} durationInFrames={90} {...NINE_BY_SIXTEEN} defaultProps={TITLE} />
@@ -94,7 +97,7 @@ export const RemotionRoot: React.FC = () => (
     <Composition id="HoloCard" component={Bits.HoloCardLook} durationInFrames={120} {...NINE_BY_SIXTEEN}
       defaultProps={{ text: "HOLO", duration: 4 }} />
     <Composition id="BitsCounter" component={Bits.BitsCounterLook} durationInFrames={90} {...NINE_BY_SIXTEEN}
-      defaultProps={{ to: 10000, color: "#FFD60A", duration: 3 }} />
+      defaultProps={{ to: 10000, color: TOKENS.brandColor, duration: 3 }} />
 
     <Composition id="Aurora" component={Bits.AuroraLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />
     <Composition id="SoftAurora" component={Bits.SoftAuroraLook} durationInFrames={150} {...NINE_BY_SIXTEEN} defaultProps={{ duration: 5 }} />

@@ -714,3 +714,153 @@ def test_the_anthropic_dependency_is_declared_in_both_files(app_mod):
     pyp = (burner.parent.parent / "pyproject.toml").read_text(encoding="utf-8")
     assert "anthropic>=" in req, "requirements.txt does not declare anthropic"
     assert "anthropic>=" in pyp, "pyproject.toml does not declare anthropic"
+
+
+# ---- is the engine the app claims to use actually here? -----------------------
+
+@pytest.fixture
+def remotion_tree(app_mod, tmp_path, monkeypatch):
+    """A fake remotion-overlays with every piece present, so each test can
+    take exactly one piece away."""
+    root = tmp_path / "remotion-overlays"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "index.ts").write_text("x", encoding="utf-8")
+    (root / "node_modules" / ".bin").mkdir(parents=True)
+    (root / "node_modules" / ".bin" / "remotion").write_text("#!/bin/sh", encoding="utf-8")
+    shell = (root / "node_modules" / ".remotion" / "chrome-headless-shell"
+             / "linux64" / "chrome-headless-shell-linux64")
+    shell.mkdir(parents=True)
+    (shell / "chrome-headless-shell").write_bytes(b"\0" * 2_000_000)
+    monkeypatch.setattr(app_mod, "REMOTION_DIR", root)
+    monkeypatch.setattr(app_mod.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.delenv("REMOTION_BROWSER_EXECUTABLE", raising=False)
+    app_mod._REMOTION_OK.clear()
+    yield root
+    app_mod._REMOTION_OK.clear()
+
+
+def test_a_half_finished_browser_fetch_does_not_count_as_installed(app_mod, remotion_tree):
+    """The directory is not the binary.
+
+    `remotion browser ensure` dying partway leaves
+    node_modules/.remotion/chrome-headless-shell holding nothing but a
+    download.lock -- the exact state this repo was found in -- so a check for
+    the folder would report Remotion ready and then fail at render time.
+    """
+    assert app_mod._remotion_status()["ok"] is True
+    app_mod._REMOTION_OK.clear()
+
+    shell = remotion_tree / "node_modules" / ".remotion" / "chrome-headless-shell"
+    shutil.rmtree(shell)
+    shell.mkdir(parents=True)
+    (shell / "download.lock").write_text("", encoding="utf-8")
+
+    st = app_mod._remotion_status()
+    assert st["ok"] is False and st["browser"] is None
+    assert any("Chrome headless shell" in m for m in st["missing"])
+
+    # Two more shapes the same half-finished fetch leaves behind, and both
+    # match the name we glob for:
+    #   the extracted directory, which is not an executable at all ...
+    app_mod._REMOTION_OK.clear()
+    (shell / "chrome-headless-shell-linux64").mkdir()
+    assert app_mod._remotion_status()["ok"] is False, "a directory passed as the browser"
+    #   ... and a download that stopped early.
+    app_mod._REMOTION_OK.clear()
+    stub = shell / "chrome-headless-shell-linux64" / "chrome-headless-shell"
+    stub.write_bytes(b"\0" * 4096)
+    assert app_mod._remotion_status()["ok"] is False, "a truncated download passed"
+    # Only the whole thing counts.
+    app_mod._REMOTION_OK.clear()
+    stub.write_bytes(b"\0" * 2_000_000)
+    assert app_mod._remotion_status()["ok"] is True
+
+
+def test_a_checkout_that_was_never_installed_is_not_ready(app_mod, remotion_tree):
+    """src/index.ts + pnpm on PATH are both true before `pnpm install`, which
+    is why the old check passed on a deploy that could not render."""
+    shutil.rmtree(remotion_tree / "node_modules")
+    app_mod._REMOTION_OK.clear()
+    st = app_mod._remotion_status()
+    assert st["ok"] is False
+    assert any("node_modules" in m for m in st["missing"])
+    assert any("pnpm install" in m for m in st["missing"]), "the fix is not named"
+    assert app_mod._remotion_ready() is False
+
+
+def test_a_browser_supplied_by_the_environment_counts(app_mod, remotion_tree, tmp_path):
+    """So a system Chrome, or one Replit already holds, can be pointed at."""
+    shutil.rmtree(remotion_tree / "node_modules" / ".remotion")
+    app_mod._REMOTION_OK.clear()
+    assert app_mod._remotion_status()["ok"] is False
+    mine = tmp_path / "my-chrome"
+    mine.write_bytes(b"\0" * 10)
+    app_mod._REMOTION_OK.clear()
+    import os as _os
+    _os.environ["REMOTION_BROWSER_EXECUTABLE"] = str(mine)
+    try:
+        st = app_mod._remotion_status()
+        assert st["ok"] is True and st["browser"] == str(mine)
+    finally:
+        _os.environ.pop("REMOTION_BROWSER_EXECUTABLE", None)
+        app_mod._REMOTION_OK.clear()
+
+
+def test_the_render_error_names_the_missing_piece(app_mod, remotion_tree, tmp_path):
+    """"Remotion is not installed in this workspace" sent every diagnosis back
+    to square one: it was the same sentence whether node_modules, the browser
+    or pnpm was the problem."""
+    shutil.rmtree(remotion_tree / "node_modules")
+    app_mod._REMOTION_OK.clear()
+    with pytest.raises(RuntimeError) as e:
+        app_mod._render_remotion_webm("NumberCounter", {}, tmp_path / "o.webm")
+    assert "node_modules" in str(e.value) and "pnpm install" in str(e.value)
+
+
+def test_the_picker_says_which_engines_cannot_render_here(app_mod, remotion_tree):
+    """Said where the look is chosen, not in a log line at info level."""
+    cat = app_mod._co_editor_looks_catalog()
+    rem = [g for g in cat["groups"] if g["id"] == "remotion"][0]
+    assert rem["reachable"] is True and "NOT AVAILABLE" not in rem["hint"]
+
+    shutil.rmtree(remotion_tree / "node_modules")
+    app_mod._REMOTION_OK.clear()
+    rem = [g for g in app_mod._co_editor_looks_catalog()["groups"]
+           if g["id"] == "remotion"][0]
+    assert rem["reachable"] is False
+    assert "NOT AVAILABLE" in rem["hint"] and "node_modules" in rem["hint"]
+    assert "falls back" in rem["hint"], "it does not say what happens instead"
+
+
+def test_a_drawn_animation_admits_which_renderer_drew_it(app_mod, monkeypatch):
+    """`engine` was on every real engine's output and absent here, so "which
+    renderer drew this?" was answerable only by noticing an absence -- and a
+    GlassSurface that never ran looked like a successful render of something
+    else."""
+    seen = {}
+
+    def fake_render(spec, description, canvas, fps=30, fell_back_from=None):
+        seen["fell_back_from"] = fell_back_from
+        return {"asset_id": "a", "kind": "video", "cached": False, "duration": 1.0,
+                "box": {}, "device": {"kind": "animation", "engine": "motion",
+                                      "spec": spec, "fell_back_from": fell_back_from}}
+
+    monkeypatch.setattr(app_mod, "_render_motion_asset", fake_render)
+    monkeypatch.setattr(app_mod, "_design_animation", lambda *a, **k: {"duration": 1.0})
+    monkeypatch.setattr(app_mod, "_match_named_look",
+                        lambda d: ("remotion", {"id": "GlassSurface", "dur": 3.0, "place": "full"}))
+    monkeypatch.setattr(app_mod, "_make_remotion_look",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no browser")))
+
+    out = app_mod._make_animation("a glass surface card", {"canvas": "9x16", "fps": 30})
+    assert out["device"]["engine"] == "motion"
+    fb = out["device"]["fell_back_from"]
+    assert fb["engine"] == "remotion" and fb["id"] == "GlassSurface"
+    assert "no browser" in fb["why"], "the reason was dropped"
+
+
+def test_the_real_motion_renderer_stamps_its_own_name(app_mod):
+    """The fake above proves the wiring; this proves the real function."""
+    src = inspect.getsource(app_mod._render_motion_asset)
+    assert '"engine": "motion"' in src
+    assert "fell_back_from" in src

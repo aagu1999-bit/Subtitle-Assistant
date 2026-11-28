@@ -1,3 +1,4 @@
+import { TOKENS } from "../tokens";
 import {loadFont} from '@remotion/google-fonts/Inter';
 import React from 'react';
 import {
@@ -56,7 +57,7 @@ const NameLowerThirdInner: React.FC<InteractiveTransformProps> = ({style}) => {
 					boxSizing: 'border-box',
 					padding: '0 24px',
 					overflow: 'hidden',
-					backgroundColor: '#FFD60A',
+					backgroundColor: TOKENS.brandColor,
 					color: '#0F0F0F',
 					fontSize: 34,
 					fontWeight: 700,

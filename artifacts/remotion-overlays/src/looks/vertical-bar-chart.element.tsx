@@ -1,3 +1,4 @@
+import { TOKENS } from "../tokens";
 import {loadFont} from '@remotion/google-fonts/Inter';
 import React from 'react';
 import {
@@ -129,7 +130,7 @@ const Bar: React.FC<{
 						<Interactive.Div
 							name="Bar"
 							style={{
-								backgroundColor: highlighted ? '#FFD60A' : '#334155',
+								backgroundColor: highlighted ? TOKENS.brandColor : '#334155',
 								borderRadius: '12px 12px 0 0',
 								height: '100%',
 								width: '100%',

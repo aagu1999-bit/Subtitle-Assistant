@@ -22,6 +22,8 @@ import math
 import re
 from dataclasses import dataclass, field
 
+import tokens
+
 ROLES = ("hook", "data", "list", "comparison", "story", "thesis", "body")
 VISUAL_TYPES = ("mechanism", "transform", "before_after", "quote", "none")
 
@@ -788,8 +790,10 @@ def style_from_pack(pack: dict, intensity: str = "med") -> dict:
     """The look half: nothing here says where anything goes."""
     st = dict(pack.get("style") or {})
     density = DENSITY.get((intensity or "med").lower(), 1.0)
-    accent = st.get("highlight") or st.get("highlight_color") or "#FFD60A"
-    second = st.get("accent") or st.get("accent_color") or "#00E5FF"
+    # The pack's own highlight, over the brand defaults. `accent`/`second`
+    # used to be computed here and were only ever used to build the palette
+    # below, so they went with it.
+    _look = tokens.resolve({"style": st})
     return {
         "version": 1,
         "pack": pack.get("label") or "",
@@ -800,9 +804,13 @@ def style_from_pack(pack: dict, intensity: str = "med") -> dict:
                  "clean_zoom": "low"},
         "density": {"devices": round(density, 2), "broll": round(density, 2)},
         "devices": {
-            "palette": [accent, second, "#FFFFFF", "#0F1220"],
-            "font": st.get("font") or st.get("font_name") or "DM Sans",
-            "corner": 28,
+            # tokens.resolve puts the pack's own highlight over the brand
+            # defaults, so this stops being a fourth opinion about the look.
+            # `corner` said 28 here and `radius` said 18 in retelling, which
+            # is visible: two cards in one video with different corners.
+            "palette": tokens.palette(_look),
+            "font": _look["font"]["display"],
+            "corner": _look["radius"],
             "per_minute": ((pack.get("graphics_budget") or {}).get("per_minute")),
             "allow": list((pack.get("graphics_budget") or {}).get("allow") or []),
         },

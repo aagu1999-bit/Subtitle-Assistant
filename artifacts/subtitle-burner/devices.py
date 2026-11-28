@@ -21,6 +21,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+import tokens
+
 DEVICE_VERSION = 3
 FONTS_DIR = Path(__file__).resolve().parent / "fonts"
 
@@ -97,7 +99,10 @@ CATALOG = {
 # Interface mockups only read as real apps in a neutral UI face, whatever
 # display font the style pack uses for captions.
 UI_FONT = "DM Sans"
-DEFAULT_PALETTE = ["#FFD60A", "#00E5FF", "#FFFFFF", "#0F1220"]
+# Read from tokens.py, which is the one place the brand is declared. This
+# list agreed with it by coincidence, not by construction, so a change to
+# the brand reached devices and left Remotion behind.
+DEFAULT_PALETTE = tokens.palette()
 
 
 # ---- small helpers ---------------------------------------------------------
