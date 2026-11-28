@@ -1004,8 +1004,12 @@ h2 { font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 700; ma
   touch-action: pan-y;
 }
 .co-editor-looks-thumb {
-  width: 28px;
-  height: 48px;
+  /* 44x78, up from 28x48. The rows now carry a real still of the
+     composition rather than a drawn sketch, and at 28px wide a still of a
+     caption look was a smudge -- too small for the preview to tell you
+     anything about what you were picking. */
+  width: 44px;
+  height: 78px;
   border-radius: 5px;
   background: #0e1118;
   flex: none;

@@ -21764,6 +21764,49 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path,
         raise RuntimeError(err or "remotion render failed")
 
 
+def _render_remotion_still(composition: str, props: dict, out_path: Path,
+                           *, frame: int = 0, wall: int = 150) -> None:
+    """One PNG frame of a composition.
+
+    Same shape as _render_remotion_webm -- deliberately, because the two have
+    to agree about how Remotion is invoked here (the software GL, the single
+    worker, the browser the status check accepted). What differs is the cost:
+    measured on the slowest composition in the catalogue, XFollowCard, a still
+    is 4s against 500s for its 150-frame render. That ratio is the whole reason
+    the picker can afford to show the truth.
+    """
+    if not _remotion_ready():
+        missing = _remotion_status()["missing"]
+        raise RuntimeError("Remotion cannot render here -- missing: "
+                           + ("; ".join(missing) if missing else "unknown"))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    props_file = CACHE_DIR / ("remotion_still_props_"
+                              + hashlib.md5(json.dumps(props, sort_keys=True).encode()).hexdigest()[:16]
+                              + ".json")
+    props_file.write_text(json.dumps(props), encoding="utf-8")
+    pnpm = shutil.which("pnpm")
+    if not pnpm:
+        raise RuntimeError("pnpm is not on PATH")
+    cmd = [
+        pnpm, "exec", "remotion", "still",
+        "src/index.ts", composition, str(out_path),
+        f"--props={props_file}",
+        f"--frame={max(0, int(frame))}",
+        "--concurrency=1", "--gl=swangle", "--timeout=180000",
+    ]
+    _browser = (os.environ.get("REMOTION_BROWSER_EXECUTABLE") or "").strip()
+    if _browser:
+        cmd.append(f"--browser-executable={_browser}")
+    r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True,
+                       timeout=wall)
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 200:
+        raw = (r.stderr or r.stdout or "remotion still failed")
+        lines = [ln.strip() for ln in raw.splitlines()
+                 if ln.strip() and not ln.strip().startswith("at ")]
+        err = (lines[-1] if lines else raw.strip())[-240:]
+        raise RuntimeError(err or "remotion still failed")
+
 def _make_remotion_look(rec: dict, description: str, timeline: dict | None,
                         duration: float | None, content: dict | None = None) -> dict:
     """Render a named official Element or Bits-style look onto the overlay track."""
@@ -26490,6 +26533,128 @@ def _slash_co_editor_turn(prompt: str, timeline: dict, client_ctx: dict) -> dict
     return {"ops": [op], "message": msg}
 
 
+# ---- real poster stills ------------------------------------------------------
+#
+# What the picker used to show was _look_poster_image: a 168x300 PNG drawn with
+# PIL.ImageDraw from a _poster_kind category. A category is not a composition,
+# so the drawing could never resemble the render -- XFollowCard previewed as
+# the generic "card" rectangle, which is what prompted this.
+#
+# A still of the slowest composition in the catalogue costs 4s once the bundle
+# is warm (measured; the first invocation pays ~30s to build the bundle, and
+# Remotion's bundle cache then survives across processes). So the honest
+# preview is affordable -- but only off the request path. 43 looks x 4s is
+# three minutes, which is a warm step, not something a picker row may wait for.
+#
+# Hence: the route serves a real still if one has been warmed, and otherwise
+# serves exactly the sketch it served before. Nothing regresses for the engines
+# that have no Remotion composition at all (devices, motion, hyperframes).
+
+POSTER_DIR = Path(__file__).resolve().parent / ".look-posters"
+
+# The served thumbnail. The picker draws it at 44x78 (style.css,
+# .co-editor-looks-thumb), so 3x that is sharp on a phone and still a few KB.
+# 9:16 to match every composition -- 132/234 and 1080/1920 are both 0.5625, so
+# the downscale never crops.
+POSTER_W, POSTER_H = 132, 234
+
+
+def _look_still_path(engine: str, rec: dict) -> Path:
+    """Where a warmed still for this look lives."""
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", f"{engine}-{rec.get('id')}")[:80] or "look"
+    return POSTER_DIR / f"{safe}.still.png"
+
+
+def _look_still_frames(rec: dict) -> list[int]:
+    """Frames to try, best first.
+
+    Every composition is 30fps and takes its length from a `duration` prop
+    (Root.tsx: durationInFrames = duration * 30). 60% through clears the
+    entrance -- and for the two caption looks, lands mid-phrase rather than on
+    the gap between words.
+
+    More than one, because the WebGL looks do not always paint. Lightning
+    measured fully transparent at frames 20, 40 and 100 and fully opaque at 5,
+    60 and 119 -- a paint race on single-frame capture, not a strobe. Trying a
+    few frames turns that from a blank poster into a correct one.
+    """
+    dur = float(rec.get("dur") or 4.0)
+    last = max(2, int(dur * 30) - 1)
+    seen, out = set(), []
+    for frac in (0.6, 0.45, 0.75, 0.3, 0.9):
+        f = max(1, min(last, int(dur * 30 * frac)))
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _still_has_ink(im) -> bool:
+    """True if the still actually drew something.
+
+    An overlay is mostly transparent by design, so "has ink" is about the alpha
+    channel having any opaque pixel at all -- not about how much.
+    """
+    if im.mode != "RGBA":
+        return True
+    alpha = im.getchannel("A")
+    return (alpha.getextrema() or (0, 0))[1] > 8
+
+
+def _warm_look_poster(rec: dict, *, force: bool = False) -> str:
+    """Render one look's still. Returns 'ok', 'cached', or 'failed: <reason>'.
+
+    Only Remotion looks have a composition to render. Everything else keeps the
+    sketch, which is why this returns a status string rather than raising: the
+    warm step reports per look and carries on.
+    """
+    out = _look_still_path("remotion", rec)
+    if not force and out.exists() and out.stat().st_size > 32:
+        return "cached"
+    try:
+        from PIL import Image
+        props = _remotion_look_props(rec, "", None, None)
+        props["duration"] = float(rec.get("dur") or 4.0)
+        full = CACHE_DIR / f"poster_full_{rec['id']}.png"
+        im = None
+        for frame in _look_still_frames(rec):
+            _render_remotion_still(rec["id"], props, full, frame=frame)
+            cand = Image.open(full)
+            cand.load()
+            if _still_has_ink(cand):
+                im = cand
+                break
+        if im is None:
+            return "failed: rendered nothing at any frame"
+        # Kept RGBA on purpose. These are overlays -- SplitText is 0.6% opaque
+        # -- and the picker's thumb already has its own backdrop behind the
+        # img, so letting it show through is what the look will do over video.
+        # Flattening to RGB turned the 99% transparent area into a solid block.
+        im = im.convert("RGBA")
+        im.thumbnail((POSTER_W, POSTER_H), Image.LANCZOS)
+        out.parent.mkdir(exist_ok=True)
+        im.save(out, "PNG", optimize=True)
+        full.unlink(missing_ok=True)
+        return "ok"
+    except Exception as exc:  # noqa: BLE001 - reported per look, never fatal
+        return f"failed: {str(exc)[:160]}"
+
+
+def _warm_look_posters(ids: list[str] | None = None, *,
+                       force: bool = False) -> dict:
+    """Warm every Remotion look's still. The build-time entry point.
+
+    Not called from a request. See warm_posters.py.
+    """
+    want = {str(i) for i in (ids or [])}
+    report: dict[str, str] = {}
+    for rec in REMOTION_RECIPES:
+        if want and str(rec.get("id")) not in want:
+            continue
+        report[str(rec.get("id"))] = _warm_look_poster(rec, force=force)
+    return report
+
+
 def _poster_kind(engine: str, rec: dict) -> str:
     rid = str(rec.get("id") or "").lower()
     phrase = str((rec.get("words") or [""])[0]).lower()
@@ -26612,8 +26777,21 @@ def _look_poster_image(engine: str, rec: dict):
 
 
 def _look_poster_png(engine: str, rec: dict) -> bytes:
+    """The picker's thumbnail: a warmed still of the real composition if there
+    is one, else the drawn sketch.
+
+    The still is never rendered here. It costs ~4s, and a picker opening 43
+    rows cannot pay that -- _warm_look_posters does it ahead of time. A look
+    with no warmed still is therefore not an error; it is the old behaviour.
+    """
     import io
-    cache = Path(__file__).resolve().parent / ".look-posters"
+    still = _look_still_path(engine, rec)
+    try:
+        if still.exists() and still.stat().st_size > 32:
+            return still.read_bytes()
+    except OSError:
+        pass
+    cache = POSTER_DIR
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", f"{engine}-{rec.get('id')}")[:80] or "look"
     path = cache / f"{safe}.png"
     try:
