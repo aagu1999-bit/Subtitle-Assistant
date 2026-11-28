@@ -21746,6 +21746,12 @@ def _render_remotion_webm(composition: str, props: dict, out_path: Path,
         # 180s frame budget means a slow render dies with no usable error.
         f"--timeout={600000 if slow else 180000}",
     ]
+    # _remotion_status accepts REMOTION_BROWSER_EXECUTABLE as proof a browser
+    # exists, so the render has to actually use it -- otherwise the check says
+    # ready and Remotion goes looking in node_modules for one that is not there.
+    _browser = (os.environ.get("REMOTION_BROWSER_EXECUTABLE") or "").strip()
+    if _browser:
+        cmd.append(f"--browser-executable={_browser}")
     wall = 900 if slow else 240
     r = subprocess.run(cmd, cwd=str(REMOTION_DIR), capture_output=True, text=True,
                        timeout=wall)

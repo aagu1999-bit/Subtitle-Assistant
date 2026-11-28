@@ -177,3 +177,37 @@ def test_the_detect_shots_button_leaves_its_answer_behind(app_mod, temp_db, monk
         assert app_mod._job_shot_cuts(jid) == []
     finally:
         app_mod.jobs.pop(jid, None)
+
+
+def test_transcription_actually_schedules_the_warm(app_mod, monkeypatch, tmp_path):
+    """Found by cutting the call site and running the whole suite: deleting
+    the thread that warms the cut cache failed NOTHING. Every other test
+    here hands `shot_cuts` to the job directly, so they all kept passing
+    while the only thing that ever populates it was gone -- and `cuts` would
+    have been silently empty on every real video.
+    """
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), daemon=None, name=None):
+            started.append(getattr(target, "__name__", str(target)))
+
+        def start(self):
+            pass
+
+    jid = "warm" + uuid.uuid4().hex[:6]
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"\0" * 64)
+    app_mod.jobs[jid] = {"status": "queued"}
+    monkeypatch.setattr(app_mod, "transcribe",
+                        lambda *a, **k: [{"word": "hi", "start": 0.0, "end": 0.4}])
+    monkeypatch.setattr(app_mod, "_db_save_job", lambda *a, **k: None)
+    monkeypatch.setattr(app_mod, "_probe_media_streams", lambda p: {})
+    monkeypatch.setattr(app_mod.threading, "Thread", FakeThread)
+    try:
+        app_mod.transcribe_job(jid, src)
+        assert "_warm_shot_cuts" in started, (
+            "nothing warms the shot-cut cache, so _job_shot_cuts is always "
+            f"empty on a real video. threads started: {started}")
+    finally:
+        app_mod.jobs.pop(jid, None)
